@@ -17,7 +17,12 @@ kind: PromptKind,
 /**
  * The gateway's wording for the question.
  */
-label: string, } | { "type": "done" } | { "type": "error", 
+label: string, 
+/**
+ * Anything the gateway says alongside the question, such as why the
+ * last attempt was refused. Left out when there is nothing.
+ */
+message?: string, } | { "type": "done" } | { "type": "error", 
 /**
  * For the app to act on.
  */

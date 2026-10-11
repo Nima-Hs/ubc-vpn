@@ -38,6 +38,11 @@ pub enum CliMessage {
         kind: PromptKind,
         /// The gateway's wording for the question.
         label: String,
+        /// Anything the gateway says alongside the question, such as why the
+        /// last attempt was refused. Left out when there is nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        message: Option<String>,
     },
     /// Login succeeded and the service accepted the connect request. Always
     /// the last line. Connection progress follows on the channel.
@@ -73,8 +78,9 @@ pub enum AppMessage {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum LoginErrorCode {
-    /// The gateway rejected the credentials. The client stops at once and
-    /// never retries, so no further MFA request is sent.
+    /// The gateway rejected the username, the password or the one-time code.
+    /// It does not say which: it simply shows the form again. The client stops
+    /// at once and never retries, so no further MFA request is sent.
     WrongPassword,
     /// The gateway's certificate matched none of the policy's pins.
     PinMismatch,
@@ -101,12 +107,23 @@ mod tests {
             id: 1,
             kind: PromptKind::Password,
             label: "Password".to_string(),
+            message: None,
         };
         assert_eq!(
             encode(&prompt).unwrap(),
             "{\"type\":\"prompt\",\"id\":1,\"kind\":\"password\",\"label\":\"Password\"}\n"
         );
         assert_eq!(encode(&CliMessage::Done).unwrap(), "{\"type\":\"done\"}\n");
+
+        let with_message = CliMessage::Prompt {
+            id: 2,
+            kind: PromptKind::Code,
+            label: "Code".to_string(),
+            message: Some("Enter the code from your authenticator.".to_string()),
+        };
+        let line = encode(&with_message).unwrap();
+        assert!(line.contains(r#""message":"Enter the code from your authenticator.""#));
+        assert_eq!(decode::<CliMessage>(&line).unwrap(), with_message);
     }
 
     #[test]

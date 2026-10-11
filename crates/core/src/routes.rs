@@ -100,8 +100,12 @@ impl Ipv4Net {
         self.prefix_len <= other.prefix_len && self.contains_addr(other.addr)
     }
 
-    /// Whether this network overlaps a range in [`RESERVED`].
-    fn is_reserved(&self) -> bool {
+    /// Whether this network overlaps a range that is never a real
+    /// destination: "this network", loopback, link-local, multicast, and the
+    /// reserved block that includes broadcast.
+    ///
+    /// Routes and gateway addresses are both checked against this one list.
+    pub fn is_reserved(&self) -> bool {
         RESERVED.iter().any(|&(addr, prefix_len)| {
             let reserved = Ipv4Net { addr, prefix_len };
             reserved.contains(self) || self.contains(&reserved)

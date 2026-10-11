@@ -5,14 +5,28 @@ import type { Secret } from "./Secret";
 /**
  * What the service needs to open a tunnel.
  *
- * The gateway and its certificate pins are deliberately absent: the service
- * takes those from its own policy file and from nowhere else.
+ * The gateway's name and its certificate pins are deliberately absent: the
+ * service takes those from its own policy file and from nowhere else. The
+ * one thing a client does supply is which of the gateway's addresses issued
+ * the cookie, and that is an untrusted hint; see
+ * [`ConnectParams::gateway_addr`].
  */
 export type ConnectParams = { 
 /**
  * The session cookie the gateway issued at login.
  */
 cookie: Secret, 
+/**
+ * Which of the gateway's addresses issued the cookie. A gateway behind a
+ * load balancer has several, and the cookie is only good at this one.
+ *
+ * This comes from an unprivileged client, so the service treats it as a
+ * hint about where to connect and nothing more: it refuses addresses that
+ * cannot be a gateway (see [`is_plausible_gateway_addr`]), and whatever
+ * answers there must still present a key that matches a pin in the
+ * service's own policy before anything is sent to it.
+ */
+gateway_addr: string, 
 /**
  * The subnets and DNS domains to send through the tunnel.
  */

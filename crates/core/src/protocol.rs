@@ -23,17 +23,18 @@
 //! when the versions match.
 
 use std::fmt;
+use std::net::Ipv4Addr;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::redact::Secret;
-use crate::routes::RouteSet;
+use crate::routes::{Ipv4Net, RouteSet};
 use crate::state::ConnState;
 
 /// Bumped whenever the wire format changes in a way an older peer could not
 /// understand. A client and a service with different versions refuse to talk.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The longest line either side accepts, newline included. The service drops a
 /// connection that sends more.
@@ -119,16 +120,45 @@ pub enum RequestBody {
 
 /// What the service needs to open a tunnel.
 ///
-/// The gateway and its certificate pins are deliberately absent: the service
-/// takes those from its own policy file and from nowhere else.
+/// The gateway's name and its certificate pins are deliberately absent: the
+/// service takes those from its own policy file and from nowhere else. The
+/// one thing a client does supply is which of the gateway's addresses issued
+/// the cookie, and that is an untrusted hint; see
+/// [`ConnectParams::gateway_addr`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct ConnectParams {
     /// The session cookie the gateway issued at login.
     pub cookie: Secret,
+    /// Which of the gateway's addresses issued the cookie. A gateway behind a
+    /// load balancer has several, and the cookie is only good at this one.
+    ///
+    /// This comes from an unprivileged client, so the service treats it as a
+    /// hint about where to connect and nothing more: it refuses addresses that
+    /// cannot be a gateway (see [`is_plausible_gateway_addr`]), and whatever
+    /// answers there must still present a key that matches a pin in the
+    /// service's own policy before anything is sent to it.
+    #[cfg_attr(test, ts(type = "string"))]
+    pub gateway_addr: Ipv4Addr,
     /// The subnets and DNS domains to send through the tunnel.
     pub routes: RouteSet,
+}
+
+/// Whether an address could be a VPN gateway at all.
+///
+/// The service calls this on [`ConnectParams::gateway_addr`] before it opens
+/// any connection. It refuses the same reserved ranges that routes may not
+/// touch ("this network", loopback, link-local, multicast, and the reserved
+/// block that includes broadcast), so a client cannot aim the privileged
+/// service at the machine's loopback or at a whole network segment.
+///
+/// It does not make an address trusted: the certificate pin does that. And it
+/// cannot know this machine's own addresses, so the service must also refuse
+/// its own interface addresses and the tunnel's address, and must add the
+/// route to the gateway only after the pin has matched.
+pub fn is_plausible_gateway_addr(addr: Ipv4Addr) -> bool {
+    Ipv4Net::new(addr, 32).is_ok_and(|host| !host.is_reserved())
 }
 
 /// Anything the service sends after the handshake.
@@ -214,6 +244,8 @@ pub enum ErrorCode {
     PinMismatch,
     /// The session is no longer valid. The user must log in again.
     LoginNeeded,
+    /// The gateway could not be reached over the network.
+    GatewayUnreachable,
     /// The VPN engine could not open or keep the tunnel.
     EngineFailed,
     /// Routes or DNS could not be confirmed, so everything was removed.
@@ -330,6 +362,7 @@ mod tests {
             id: 7,
             body: RequestBody::Connect(ConnectParams {
                 cookie: Secret::new("s3cr3t-cookie"),
+                gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
                 routes: RouteSet {
                     subnets: vec!["142.103.0.0/16".parse::<Ipv4Net>().unwrap()],
                     dns_domains: vec!["ece.ubc.ca".to_string()],
@@ -340,11 +373,14 @@ mod tests {
 
     #[test]
     fn request_wire_format_is_stable() {
+        // If the snapshot below has to change, so does this number: an older
+        // peer could no longer read the message.
+        assert_eq!(PROTOCOL_VERSION, 2);
         let line = encode(&connect()).unwrap();
         assert_eq!(
             line,
             concat!(
-                r#"{"id":7,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","#,
+                r#"{"id":7,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","gateway_addr":"192.0.2.1","#,
                 r#""routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]}}}}"#,
                 "\n"
             )
@@ -385,13 +421,13 @@ mod tests {
     }
 
     // Security rule: the service accepts exactly the expected fields. A request
-    // must not be able to smuggle in a gateway or a pin.
+    // must not be able to smuggle in a gateway name or a pin.
     #[test]
     fn requests_with_unknown_fields_are_refused() {
         let smuggled = [
             r#"{"id":1,"body":{"method":"status"},"gateway":"evil.example"}"#,
-            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","routes":{"subnets":[]},"gateway":"evil.example"}}}"#,
-            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","routes":{"subnets":[],"pins":[]}}}}"#,
+            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","gateway_addr":"192.0.2.1","routes":{"subnets":[]},"gateway":"evil.example"}}}"#,
+            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","gateway_addr":"192.0.2.1","routes":{"subnets":[],"pins":[]}}}}"#,
             r#"{"protocol_version":1,"client":"app","client_version":"0.1.0","owner":"me"}"#,
         ];
         assert!(decode::<Request>(smuggled[0]).is_err());
@@ -403,7 +439,7 @@ mod tests {
         // alone would not reach.
         let beside_method = [
             r#"{"id":1,"body":{"method":"status","gateway":"evil.example"}}"#,
-            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","routes":{"subnets":[]}},"pins":["x"]}}"#,
+            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","gateway_addr":"192.0.2.1","routes":{"subnets":[]}},"pins":["x"]}}"#,
         ];
         for line in beside_method {
             assert!(decode::<Request>(line).is_err(), "{line} must be refused");
@@ -425,6 +461,7 @@ mod tests {
             id: 1,
             body: RequestBody::Connect(ConnectParams {
                 cookie: Secret::new("x".repeat(MAX_LINE_BYTES)),
+                gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
                 routes: RouteSet::default(),
             }),
         };
@@ -442,7 +479,7 @@ mod tests {
         // own error message.
         let broken = [
             r#"{"id":"s3cr3t-cookie","body":{"method":"status"}}"#,
-            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"x","routes":"s3cr3t-cookie"}}}"#,
+            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"x","gateway_addr":"192.0.2.1","routes":"s3cr3t-cookie"}}}"#,
             r#"{"id":1,"body":{"method":"s3cr3t-cookie"}}"#,
             r#"{"id":1,"body":{"method":"status"},"s3cr3t-cookie":1}"#,
         ];
@@ -491,6 +528,49 @@ mod tests {
         assert!(decode::<Hello>(future).is_err());
         assert_eq!(peek_protocol_version(future).unwrap(), 2);
         assert!(peek_protocol_version(r#"{"client":"app"}"#).is_err());
+    }
+
+    // Security rule: the service must not be aimed at itself, at a network
+    // segment, or at a non-address. Weakening the check, or removing any
+    // range from the reserved list in routes.rs, makes
+    // this test fail.
+    #[test]
+    fn implausible_gateway_addresses_are_refused() {
+        for bad in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "127.0.0.1",
+            "169.254.1.1",
+            "224.0.0.1",
+            "239.255.255.255",
+            "240.0.0.1",
+            "255.255.255.255",
+        ] {
+            let addr: Ipv4Addr = bad.parse().unwrap();
+            assert!(!is_plausible_gateway_addr(addr), "{bad} must be refused");
+        }
+        for good in [
+            "142.103.1.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "1.1.1.1",
+            "223.255.255.254",
+        ] {
+            let addr: Ipv4Addr = good.parse().unwrap();
+            assert!(is_plausible_gateway_addr(addr), "{good} must be accepted");
+        }
+    }
+
+    #[test]
+    fn a_connect_request_needs_a_well_formed_gateway_address() {
+        let without = r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","routes":{"subnets":[]}}}}"#;
+        assert!(decode::<Request>(without).is_err());
+        for bad in ["myvpn.ubc.ca", "::1", "1.2.3", "1.2.3.4:443", ""] {
+            let line = format!(
+                r#"{{"id":1,"body":{{"method":"connect","params":{{"cookie":"c","gateway_addr":"{bad}","routes":{{"subnets":[]}}}}}}}}"#
+            );
+            assert!(decode::<Request>(&line).is_err(), "{bad:?} must be refused");
+        }
     }
 
     #[test]

@@ -60,7 +60,7 @@ flowchart LR
 
 ## Security model
 
-- **The service trusts only its own policy file.** The gateway address and the certificate pins live in a file only an admin can write. No message from the GUI or CLI can change where the tunnel goes.
+- **The service trusts only its own policy file.** The gateway's name and the certificate pins live in a file only an admin can write, and no message from the GUI or CLI can change them. A client may say which of the gateway's addresses issued its session, but the service sends nothing to that address until it presents a key matching a pin in the policy.
 - **The password never reaches privileged code.** It goes from the user to the command-line client through standard input or the OS keyring, and from there only to the pinned gateway. It is never written to disk, a log, or a command line.
 - **Several certificate pins are allowed.** The policy holds a list, so a planned certificate change on UBC's side does not lock users out. Pins are full-length hashes of the gateway's public key.
 - **Checks fail closed.** An answer of "could not tell" counts as failure.
@@ -211,10 +211,10 @@ This works the same way on all three OSes, and does not depend on which account 
 The app never handles the cookie, and never talks to the gateway. It runs the CLI and relays prompts:
 
 1. The app starts `ubc-vpn connect --json`.
-2. The CLI takes the username from settings and the password from the keyring when they are saved, and asks for whatever is missing. A saved password is tried once: if the gateway rejects it, the CLI deletes it from the keyring and reports `wrong_password`, so it is never sent twice. After a successful login the CLI saves the password when the settings ask for that.
-3. Each question is one JSON line on the CLI's standard output: `{"type":"prompt","id":1,"kind":"password","label":"Password"}`. `kind` is `username`, `password`, `code` or `text`.
+2. The CLI takes the username from settings and the password from the keyring when they are saved, and asks for whatever is missing. A saved password is never sent twice in a row after a refusal. If the gateway rejects an attempt that used it, the CLI reports `wrong_password` and remembers that the saved password is in doubt; the next attempt asks the user to type the password. The gateway does not say which answer was wrong, so the saved password is deleted at once only when no one-time code was entered in that attempt. When a code was entered it is kept until the next attempt settles it: a typed password that then succeeds replaces it. After a successful login the CLI saves the password when the settings ask for that.
+3. Each question is one JSON line on the CLI's standard output: `{"type":"prompt","id":1,"kind":"password","label":"Password"}`. `kind` is `username`, `password`, `code` or `text`. A prompt may also carry a `message` with whatever the gateway says alongside the question.
 4. The app answers on the CLI's standard input: `{"type":"answer","id":1,"value":"..."}`, or `{"type":"cancel"}` to stop.
-5. When the gateway accepts the login, the CLI sends the service a `connect` request carrying the cookie, the chosen subnets and the chosen DNS domains, over the channel.
+5. When the gateway accepts the login, the CLI sends the service a `connect` request carrying the cookie, the address of the gateway that issued it, the chosen subnets and the chosen DNS domains, over the channel. The service uses that address only as a hint about where to connect: it refuses addresses that cannot be a gateway, and whatever answers must still match a pin in its own policy before the cookie is sent.
 6. The CLI ends with one final line and exits: `{"type":"done"}`, or `{"type":"error","code":"wrong_password","message":"..."}`. Error codes include `wrong_password`, `pin_mismatch`, `cancelled`, `gateway_unreachable`, `route_refused` and `service_unavailable`.
 
 From then on the app learns the connection state from the events the service pushes on the app's own channel connection. `ubc-vpn login` does steps 2 to 4 only and reports whether the credentials work, without connecting.
