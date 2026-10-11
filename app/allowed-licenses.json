@@ -1,0 +1,8 @@
+{
+  "about": "Licences a package shipped inside the app may have. All are permissive and allow redistribution. Adding a licence here needs the owner's approval; see .claude/rules/dependencies.md. Checked by scripts/check-licenses.mjs.",
+  "allowed": ["0BSD", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "OFL-1.1"],
+  "shippedDevDependencies": {
+    "about": "Listed under devDependencies because a packaged app must not also install them, but shipped all the same.",
+    "packages": ["electron"]
+  }
+}

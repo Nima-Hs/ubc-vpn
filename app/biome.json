@@ -1,0 +1,57 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!src/shared/protocol",
+      "!out",
+      "!out-demo",
+      "!test-results",
+      "!pnpm-lock.yaml"
+    ]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 4,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "json": {
+    "formatter": {
+      "indentWidth": 2
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
+  "linter": {
+    "rules": {
+      "correctness": {
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error"
+      },
+      "suspicious": {
+        "noConsole": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error",
+        "useImportType": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["scripts/**"],
+      "linter": { "rules": { "suspicious": { "noConsole": "off" } } }
+    }
+  ],
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}

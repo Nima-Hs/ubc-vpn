@@ -1,0 +1,138 @@
+// DEMO ONLY. An in-memory stand-in for the service, so the interface can be
+// designed and shown in every state with no backend. It is imported only
+// behind `__DEMO__`, which is `false` in every build except `--mode demo`,
+// and `scripts/check-production-build.mjs` fails if any of it is emitted.
+
+import type { LinkState } from "@shared/api";
+import type { ErrorCode } from "@shared/protocol/ErrorCode";
+import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
+import { LinkStore, type ServiceLink } from "../link";
+
+// 198.51.100.0/24 and 203.0.113.0/24 are reserved for documentation, and
+// `.example` never resolves: none of this is a real network.
+const TUNNEL: TunnelInfo = {
+    interface: "utun4",
+    address: "198.51.100.42",
+    subnets: ["203.0.113.0/24", "198.51.100.0/24"],
+    dns_domains: ["campus.example", "lab.campus.example"],
+};
+
+const CROWDED_TUNNEL: TunnelInfo = {
+    interface: "a-tunnel-device-with-an-unusually-long-name-0",
+    address: "198.51.100.254",
+    subnets: Array.from({ length: 256 }, (_, i) => `203.0.113.${i}/32`),
+    dns_domains: [
+        "an-extremely-long-department-name-that-does-not-break.research.campus.example",
+        ...Array.from({ length: 40 }, (_, i) => `lab-${i + 1}.campus.example`),
+    ],
+};
+
+const FAILURES: Record<ErrorCode, string> = {
+    not_owner: "only the owner may do this",
+    not_claimed: "the service has no owner yet",
+    protocol_mismatch: "the app speaks protocol 2 and the service speaks protocol 3",
+    bad_request: "unknown method",
+    route_refused: "198.51.100.0/4 is wider than /8",
+    pin_mismatch: "the gateway's key matches no pin in the policy",
+    login_needed: "the session cookie was rejected",
+    gateway_unreachable: "timed out connecting to the gateway",
+    engine_failed: "the tunnel device could not be created",
+    verification_failed: "the route to 203.0.113.0/24 could not be confirmed",
+    busy: "another connect or disconnect is in progress",
+    policy_invalid: "policy.json could not be read",
+    internal:
+        "an unexpectedly long message from the service that goes on for a while, to show how the interface holds text it did not write and cannot shorten",
+};
+
+const SCENARIOS: Record<string, LinkState> = {
+    starting: { link: "starting" },
+    disconnected: { link: "ready", conn: { state: "disconnected" } },
+    connecting: { link: "ready", conn: { state: "connecting" } },
+    connected: { link: "ready", conn: { state: "connected", tunnel: TUNNEL } },
+    "connected-crowded": { link: "ready", conn: { state: "connected", tunnel: CROWDED_TUNNEL } },
+    "connected-empty": {
+        link: "ready",
+        conn: { state: "connected", tunnel: { ...TUNNEL, subnets: [], dns_domains: [] } },
+    },
+    disconnecting: { link: "ready", conn: { state: "disconnecting" } },
+    "login-needed": { link: "ready", conn: { state: "login_needed" } },
+    ...Object.fromEntries(
+        Object.entries(FAILURES).map(([code, message]) => [
+            `failed-${code.replaceAll("_", "-")}`,
+            { link: "ready", conn: { state: "failed", code: code as ErrorCode, message } },
+        ]),
+    ),
+    "service-unavailable": { link: "unavailable", reason: "not_running" },
+    "service-garbled": { link: "unavailable", reason: "protocol_error" },
+    "update-needed": { link: "update_needed", appVersion: "0.1.0", serviceVersion: "0.2.0" },
+    "not-owner": { link: "not_owner" },
+};
+
+export const DEMO_SCENARIOS: readonly string[] = Object.keys(SCENARIOS);
+
+export interface DemoLink extends ServiceLink {
+    /** Jumps straight to a named state. Unknown names are ignored. */
+    setScenario(name: string): void;
+}
+
+export function createDemoLink(stepMs = 1400): DemoLink {
+    const store = new LinkStore();
+    let timer: NodeJS.Timeout | null = null;
+
+    const cancel = () => {
+        if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+        }
+    };
+    const after = (state: LinkState) => {
+        cancel();
+        timer = setTimeout(() => store.set(state), stepMs);
+    };
+    const isBusy = () => {
+        const state = store.get();
+        return (
+            state.link === "ready" &&
+            (state.conn.state === "connecting" || state.conn.state === "disconnecting")
+        );
+    };
+    const busy = {
+        ok: false,
+        error: { kind: "refused", code: "busy", message: FAILURES.busy },
+    } as const;
+
+    store.set(SCENARIOS.disconnected as LinkState);
+
+    return {
+        getState: () => store.get(),
+        subscribe: (listener) => store.subscribe(listener),
+        connect: async () => {
+            if (isBusy()) {
+                return busy;
+            }
+            store.set(SCENARIOS.connecting as LinkState);
+            after(SCENARIOS.connected as LinkState);
+            return { ok: true };
+        },
+        disconnect: async () => {
+            if (isBusy()) {
+                return busy;
+            }
+            store.set(SCENARIOS.disconnecting as LinkState);
+            after(SCENARIOS.disconnected as LinkState);
+            return { ok: true };
+        },
+        retry: () => {
+            store.set(SCENARIOS.starting as LinkState);
+            after(SCENARIOS.disconnected as LinkState);
+        },
+        setScenario: (name) => {
+            const state = SCENARIOS[name];
+            if (state !== undefined) {
+                cancel();
+                store.set(state);
+            }
+        },
+        dispose: cancel,
+    };
+}

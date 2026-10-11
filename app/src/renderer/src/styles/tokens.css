@@ -1,0 +1,159 @@
+/*
+ * Design tokens: the only place a colour, size, radius, shadow or motion
+ * value is written down. Components use the roles; screens use components.
+ *
+ * Two tiers. Primitives name a value and are used only in this file. Roles
+ * name a job and are what everything else refers to. A light theme is a
+ * second set of roles under [data-theme="light"]; no component changes.
+ *
+ * Colours are OKLCH: lightness, chroma, hue. `tests/tokens.test.ts` measures
+ * the contrast of every text and control pair below and fails under WCAG AA.
+ */
+
+:root {
+    /* Ink: the neutrals, tinted towards the accent so greys do not look dead. */
+    --ink-950: oklch(0.165 0.012 262);
+    --ink-900: oklch(0.205 0.014 262);
+    --ink-850: oklch(0.24 0.016 262);
+    --ink-800: oklch(0.28 0.018 262);
+    --ink-750: oklch(0.325 0.02 262);
+    --ink-700: oklch(0.37 0.021 262);
+    --ink-500: oklch(0.56 0.022 262);
+    --ink-400: oklch(0.7 0.02 262);
+    --ink-300: oklch(0.8 0.016 262);
+    --ink-100: oklch(0.955 0.006 262);
+
+    /* Tide: the accent. See the README for why this blue. */
+    --tide-300: oklch(0.85 0.082 236);
+    --tide-400: oklch(0.79 0.12 236);
+    --tide-500: oklch(0.72 0.13 236);
+    --tide-900: oklch(0.3 0.06 240);
+    --tide-950: oklch(0.2 0.045 244);
+
+    /* Status hues, each at least 15 degrees from the accent and each other. */
+    --moss-400: oklch(0.82 0.15 160);
+    --moss-900: oklch(0.29 0.055 160);
+    --amber-400: oklch(0.84 0.13 82);
+    --amber-900: oklch(0.31 0.05 82);
+    --coral-300: oklch(0.8 0.105 22);
+    --coral-400: oklch(0.73 0.16 22);
+    --coral-500: oklch(0.66 0.18 22);
+    --coral-900: oklch(0.29 0.07 22);
+    --coral-950: oklch(0.2 0.05 22);
+}
+
+:root,
+[data-theme="dark"] {
+    color-scheme: dark;
+
+    /* Surfaces, from the window back to the things that sit on it. */
+    --c-bg: var(--ink-950);
+    --c-surface: var(--ink-900);
+    --c-surface-raised: var(--ink-850);
+    --c-overlay: var(--ink-800);
+
+    /* Neutral controls: secondary buttons, fields, hovered rows. */
+    --c-control: var(--ink-800);
+    --c-control-hover: var(--ink-750);
+    --c-control-active: var(--ink-700);
+    --c-quiet-hover: var(--ink-850);
+    --c-quiet-active: var(--ink-800);
+
+    /* Lines. `field-border` outlines an input, so it must reach 3:1. */
+    --c-border: var(--ink-800);
+    --c-border-strong: var(--ink-700);
+    --c-field-border: var(--ink-500);
+
+    /* Text. */
+    --c-text: var(--ink-100);
+    --c-text-secondary: var(--ink-300);
+    --c-text-tertiary: var(--ink-400);
+
+    /* The accent: the one filled action in a view, and the focus ring. */
+    --c-accent: var(--tide-400);
+    --c-accent-hover: var(--tide-300);
+    --c-accent-active: var(--tide-500);
+    --c-on-accent: var(--tide-950);
+    --c-accent-subtle: var(--tide-900);
+    --c-focus: var(--tide-300);
+
+    /* Status. Each has a strong form for marks and a subtle one for fills. */
+    --c-positive: var(--moss-400);
+    --c-positive-subtle: var(--moss-900);
+    --c-attention: var(--amber-400);
+    --c-attention-subtle: var(--amber-900);
+    --c-danger: var(--coral-400);
+    --c-danger-hover: var(--coral-300);
+    --c-danger-active: var(--coral-500);
+    --c-on-danger: var(--coral-950);
+    --c-danger-subtle: var(--coral-900);
+}
+
+:root {
+    /* Type. Both families are bundled; nothing falls back to an OS font
+       except while the files load. */
+    --f-ui: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+    --f-data: "Geist Mono Variable", ui-monospace, monospace;
+
+    /* A short scale: each step is a size, a line height and a weight. */
+    --type-caption-size: 0.75rem;
+    --type-caption-line: 1rem;
+    --type-label-size: 0.8125rem;
+    --type-label-line: 1.125rem;
+    --type-body-size: 0.875rem;
+    --type-body-line: 1.3125rem;
+    --type-title-size: 1rem;
+    --type-title-line: 1.375rem;
+    --type-display-size: 1.875rem;
+    --type-display-line: 2.125rem;
+    --type-display-tracking: -0.022em;
+    --weight-regular: 400;
+    --weight-medium: 500;
+    --weight-strong: 600;
+
+    /* Space: every gap and padding is a multiple of this. */
+    --space-unit: 0.25rem;
+
+    /* Radii. A surface's radius is its child's radius plus the gap between. */
+    --r-sm: 0.375rem;
+    --r-md: 0.625rem;
+    --r-lg: 0.875rem;
+    --r-xl: 1.25rem;
+    --r-full: 999px;
+
+    /* Control heights. */
+    --size-control-sm: 2rem;
+    --size-control-md: 2.5rem;
+    --size-control-lg: 3rem;
+
+    /* Elevation. A surface gets a lit top edge, never a grey drop shadow. */
+    --e-surface: inset 0 1px 0 0 oklch(1 0 0 / 0.045);
+    --e-control: inset 0 1px 0 0 oklch(1 0 0 / 0.07), 0 1px 2px 0 oklch(0 0 0 / 0.3);
+    --e-accent: inset 0 1px 0 0 oklch(1 0 0 / 0.28), 0 1px 2px 0 oklch(0 0 0 / 0.35);
+    --e-overlay: inset 0 1px 0 0 oklch(1 0 0 / 0.07), 0 8px 24px -4px oklch(0 0 0 / 0.55);
+
+    /* Motion. Quick and decelerating; exits are faster than entrances. */
+    --dur-press: 120ms;
+    --dur-fast: 160ms;
+    --dur-base: 240ms;
+    --dur-slow: 420ms;
+    /* One lap of a spinner, and one pass of the "working" pulse. */
+    --dur-spin: 700ms;
+    --dur-flow: 1100ms;
+    --motion-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --motion-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+    /* How far a control shrinks when pressed, and a popover when it appears. */
+    --motion-press-scale: 0.96;
+    --motion-pop-scale: 0.97;
+    /* How far new content travels as it arrives. */
+    --motion-travel: 0.375rem;
+}
+
+/* Reduced motion keeps colour and opacity changes and drops movement. */
+@media (prefers-reduced-motion: reduce) {
+    :root {
+        --motion-press-scale: 1;
+        --motion-pop-scale: 1;
+        --motion-travel: 0;
+    }
+}
