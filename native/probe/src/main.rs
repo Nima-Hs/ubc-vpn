@@ -165,9 +165,17 @@ extern "C" fn auth_form(_p: *mut c_void, form: *mut AuthForm) -> c_int {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(String::as_str).unwrap_or("");
-    let url = a
-        .get(2)
-        .expect("usage: spike probe|connect <url> [user pass]");
+    const USAGE: &str = "usage: oc-probe probe <url> | oc-probe connect <url> <user> <pass>";
+    let args_ok = match mode {
+        "probe" => a.len() == 3,
+        "connect" => a.len() == 5,
+        _ => false,
+    };
+    if !args_ok {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
+    let url = &a[2];
     if mode == "connect" {
         CREDS
             .set((
@@ -180,7 +188,7 @@ fn main() {
     unsafe {
         println!("init_ssl = {}", openconnect_init_ssl());
         println!("version  = {}", s(openconnect_get_version()));
-        let ua = CString::new("AnyConnect-compatible OpenConnect VPN Agent (spike)").unwrap();
+        let ua = CString::new("AnyConnect-compatible OpenConnect VPN Agent (oc-probe)").unwrap();
         let v = openconnect_vpninfo_new(
             ua.as_ptr(),
             validate,
@@ -236,12 +244,14 @@ fn main() {
                     std::process::Command::new("ip")
                         .args(["addr", "show", "dev", &ifname])
                         .status()
-                } else {
-                    if cfg!(windows) {
-                    std::process::Command::new("netsh").args(["interface", "ipv4", "show", "interfaces"]).status()
+                } else if cfg!(windows) {
+                    // Fails unless an interface with this exact name exists.
+                    std::process::Command::new("netsh")
+                        .args(["interface", "ipv4", "show", "interfaces"])
+                        .arg(format!("interface={ifname}"))
+                        .status()
                 } else {
                     std::process::Command::new("ifconfig").arg(&ifname).status()
-                }
                 };
                 ok &= show.map(|st| st.success()).unwrap_or(false);
             }

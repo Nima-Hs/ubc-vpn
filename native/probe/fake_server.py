@@ -1,4 +1,4 @@
-"""Minimal fake AnyConnect gateway for the spike.
+"""Minimal fake AnyConnect gateway for the probe.
 
 POST /      -> login form
 POST /auth  -> success plus a session cookie
@@ -60,7 +60,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         if self.path.startswith("/auth"):
-            self._xml(SUCCESS, ["webvpn=spike-fake-cookie; Secure; HttpOnly"])
+            self._xml(SUCCESS, ["webvpn=probe-fake-cookie; Secure; HttpOnly"])
         else:
             self._xml(FORM)
 
