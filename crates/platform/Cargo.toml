@@ -1,6 +1,6 @@
 [package]
 name = "ubc-vpn-platform"
-description = "The OS seam for UBC VPN: routes, DNS, tunnel, channel and service setup"
+description = "The OS seam for UBC VPN: routes, DNS, network events, the channel transport and paths"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
