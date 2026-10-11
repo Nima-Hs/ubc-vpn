@@ -13,14 +13,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  # The single required check. It keeps one stable name while the jobs behind
+  # it change, and fails if any of them failed or was skipped.
+  check:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test.result }}" = "success"
 
   deny:
     name: Licences and advisories

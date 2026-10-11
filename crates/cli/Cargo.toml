@@ -1,0 +1,20 @@
+[package]
+name = "ubc-vpn-cli"
+description = "The command-line client for UBC VPN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ubc-vpn"
+path = "src/main.rs"
+
+[dependencies]
+ubc-vpn-core.workspace = true
+ubc-vpn-engine.workspace = true
+ubc-vpn-platform.workspace = true
+
+[lints]
+workspace = true

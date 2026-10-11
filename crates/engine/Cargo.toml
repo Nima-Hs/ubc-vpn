@@ -1,0 +1,19 @@
+[package]
+name = "ubc-vpn-engine"
+description = "Wrapper around libopenconnect for UBC VPN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ubc-vpn-core.workspace = true
+
+# This crate calls a C library, so it cannot inherit the workspace ban on
+# unsafe code. Every unsafe block must carry a SAFETY comment.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
