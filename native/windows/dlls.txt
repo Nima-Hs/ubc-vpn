@@ -1,0 +1,12 @@
+# Every DLL the output must contain, and why. build.sh stops if the DLLs it
+# gathers differ from this list in either direction.
+
+libopenconnect-5.dll  The VPN engine. Built here.
+libgnutls-30.dll      TLS and DTLS for the engine. Built here.
+libnettle-9.dll       Ciphers and hashes for GnuTLS. MSYS2.
+libhogweed-7.dll      Public-key cryptography for GnuTLS, part of Nettle. MSYS2.
+libgmp-10.dll         Big-number arithmetic for libhogweed. MSYS2.
+libxml2-16.dll        Parses the gateway's XML replies. MSYS2.
+libiconv-2.dll        Character-set conversion for libxml2. MSYS2.
+zlib1.dll             Compression for the tunnel and for libxml2. MSYS2.
+libwinpthread-1.dll   Threading layer the MinGW compiler's code relies on. MSYS2.

@@ -1,0 +1,3 @@
+# Paths the probe may touch outside the folder it runs from and outside
+# C:\Windows. One regular expression per line, matched without regard to case.
+# Say above each one why it is harmless.

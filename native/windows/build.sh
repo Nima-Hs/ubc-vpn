@@ -2,43 +2,19 @@
 # Builds libopenconnect for Windows x64 and gathers everything that must ship
 # with it into out/. Run in an MSYS2 UCRT64 shell, after setup.sh. See README.md.
 set -euo pipefail
+. "$(dirname "$0")/common.sh"
+require_ucrt64
 
 VERSION=9.21
 COMMIT=8b702bf2dbaf11302ed98629214b1df5d50a12aa
 REPO=https://gitlab.com/openconnect/openconnect.git
-
-PREFIX=/ucrt64
-PACKAGES=https://repo.msys2.org/mingw/ucrt64
-SOURCES=https://repo.msys2.org/mingw/sources
-# Linked statically into the DLL we build: C runtime start-up code and libgcc.
+# Linked statically into the DLLs we build: C runtime start-up code and libgcc.
 STATIC_RUNTIME="mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-gcc"
 
-die() {
-    echo "error: $*" >&2
-    exit 1
-}
-
-sha256() {
-    sha256sum "$1" | cut -d' ' -f1
-}
-
-[ "${MSYSTEM:-}" = UCRT64 ] || die "run this in an MSYS2 UCRT64 shell"
-
-here=$(cd "$(dirname "$0")" && pwd)
-work=$here/work
-out=$here/out
 rm -rf "$work" "$out"
-mkdir -p "$work/sources" "$out/bin" "$out/licenses/openconnect" "$out/source"
+mkdir -p "$work/sources" "$out/bin" "$out/licenses/openconnect" "$out/licenses/gnutls" "$out/source"
 
-# --- The compiler and libraries must be the ones in packages.lock ------------
-
-# Sets version, pkgfile and pkgsha for an installed package.
-locked() {
-    version=$(pacman -Q "$1" | cut -d' ' -f2) || die "$1 is not installed; run setup.sh"
-    pkgfile=$1-$version-any.pkg.tar.zst
-    pkgsha=$(awk -v f="$pkgfile" '$2 == f { print $1 }' "$here/packages.lock")
-    [ -n "$pkgsha" ] || die "$1 $version is installed but is not the version in packages.lock; run setup.sh"
-}
+# --- The installed packages must be the locked ones --------------------------
 
 # Every installed MinGW package must be a locked one, and the other way round:
 # an extra package could supply a header or a static library unnoticed.
@@ -46,7 +22,31 @@ diff <(pacman -Q | sed -n 's/^\(mingw-w64-ucrt-x86_64-[^ ]*\) \(.*\)$/\1-\2-any.
     <(cut -d' ' -f3 "$here/packages.lock" | sort) ||
     die "the installed MinGW packages (<) are not those in packages.lock (>); run setup.sh"
 
-# --- Source: the tag must still point at the pinned commit -------------------
+# Every build tool in tools.lock must be installed at that version. The rest of
+# MSYS2 (the shell, coreutils, pacman) is whatever the machine has.
+missing=$(comm -23 \
+    <(cut -d' ' -f3 "$here/tools.lock" | sed -E 's/-(x86_64|any)\.pkg\.tar\.zst$//' | sort) \
+    <(pacman -Q | sed 's/ /-/' | sort))
+[ -z "$missing" ] || die "not installed at the version in tools.lock; run setup.sh:"$'\n'"$missing"
+
+# Sets version, pkgfile and pkgsha for an installed MinGW package.
+locked() {
+    version=$(pacman -Q "$1" | cut -d' ' -f2) || die "$1 is not installed; run setup.sh"
+    pkgfile=$1-$version-any.pkg.tar.zst
+    pkgsha=$(locked_sha packages.lock "$pkgfile")
+}
+
+# --- GnuTLS, built from source or reused from an earlier build ---------------
+
+"$here/gnutls.sh"
+gnutls_sha=$(locked_sha sources.lock "$GNUTLS_TARBALL")
+[ "$(sha256 "$gnutls/$GNUTLS_TARBALL")" = "$gnutls_sha" ] ||
+    die "$GNUTLS_TARBALL does not have the SHA-256 in sources.lock"
+cp "$gnutls/$GNUTLS_TARBALL" "$out/source/"
+tar -xf "$gnutls/$GNUTLS_TARBALL" -C "$out/licenses/gnutls" --strip-components=1 \
+    "gnutls-$GNUTLS_VERSION/COPYING" "gnutls-$GNUTLS_VERSION/COPYING.LESSERv2"
+
+# --- OpenConnect: the tag must still point at the pinned commit --------------
 
 git init --quiet --bare "$work/git"
 git -C "$work/git" fetch --quiet --depth 1 "$REPO" "refs/tags/v$VERSION"
@@ -58,7 +58,7 @@ git -C "$work/git" -c core.autocrlf=false archive \
     --prefix="openconnect-$VERSION/" -o "$out/source/$archive" "$COMMIT"
 cp "$here"/patches/*.patch "$out/source/"
 
-# --- Build, from the archive and patches that ship ---------------------------
+# --- Build it, from the archive and patches that ship ------------------------
 
 tar -xzf "$out/source/$archive" -C "$work"
 cd "$work/openconnect-$VERSION"
@@ -66,15 +66,17 @@ for p in "$out"/source/*.patch; do
     patch -p1 <"$p"
 done
 ./autogen.sh
-./configure --with-gnutls --without-lz4 --disable-nls --disable-docs \
+# -ffile-prefix-map keeps this folder's path out of the DLL.
+PKG_CONFIG_PATH=$gnutls/lib/pkgconfig ./configure \
+    --with-gnutls --without-lz4 --disable-nls --disable-docs \
     --without-libproxy --without-stoken --without-libpskc --without-libpcsclite \
-    --with-vpnc-script=vpnc-script-win.js
+    --with-vpnc-script=vpnc-script-win.js \
+    CFLAGS="-O2 -ffile-prefix-map=$(cygpath -m "$work")=."
 make -j"$(nproc)" libopenconnect.la
 cp .libs/libopenconnect-5.dll "$out/bin/"
 cp COPYING.LGPL "$out/licenses/openconnect/"
 
-# licences.txt takes the MinGW headers under ZPL-2.1. That holds only while no
-# header from their LGPL part, the DDK, is compiled in.
+# See the same check in gnutls.sh.
 included=$(find . -name '*.Plo' -exec cat {} +)
 grep -q '/include/windows\.h' <<<"$included" || die "the compiler's dependency files are missing"
 ! grep -q '/ddk/' <<<"$included" || die "a DDK header is compiled in; review the headers entry in licences.txt"
@@ -82,28 +84,20 @@ cd "$here"
 
 # --- Dependencies: follow the import tables, starting from our DLL -----------
 
-system32=$(cygpath -u "$SYSTEMROOT")/System32
-todo=(libopenconnect-5.dll)
-for ((i = 0; i < ${#todo[@]}; i++)); do
-    for name in $(objdump -p "$out/bin/${todo[i]}" | sed -n 's/^\s*DLL Name: //p'); do
-        if [ -e "$out/bin/$name" ]; then
-            continue
-        elif [ -e "$PREFIX/bin/$name" ]; then
-            cp "$PREFIX/bin/$name" "$out/bin/"
-            todo+=("$name")
-        elif [ -e "$system32/$name" ] || [[ ${name,,} == api-ms-win-* ]]; then
-            continue # Part of Windows.
-        else
-            die "$name, needed by ${todo[i]}, is in neither $PREFIX/bin nor $system32"
-        fi
-    done
-done
-
+collect_dlls "$out/bin" libopenconnect-5.dll "$gnutls/bin" "$PREFIX/bin" >"$work/dlls.list"
 declare -A files_of
-for name in "${todo[@]:1}"; do
-    pkg=$(pacman -Qqo "$PREFIX/bin/$name")
-    files_of[$pkg]+="$name "
-done
+gnutls_files=""
+while read -r name dir; do
+    if [ "$dir" = "$gnutls/bin" ]; then
+        gnutls_files+="$name "
+    else
+        files_of[$(pacman -Qqo "$dir/$name")]+="$name "
+    fi
+done <"$work/dlls.list"
+
+# dlls.txt is the list of DLLs we expect, each with the reason it is needed.
+diff <(ls "$out/bin") <(grep -v '^#' "$here/dlls.txt" | awk 'NF { print $1 }' | sort) ||
+    die "the DLLs in the output (<) are not those in dlls.txt (>)"
 
 # --- Per MSYS2 package: licence, licence text and source ---------------------
 
@@ -113,8 +107,7 @@ locked_source() {
     pkgbase=$(sed -n '/^%BASE%$/{n;p}' "/var/lib/pacman/local/$pkg-$version/desc")
     [ -n "$pkgbase" ] || die "cannot tell which source package $pkg was built from"
     srcfile=$pkgbase-$version.src.tar.zst
-    srcsha=$(awk -v f="$srcfile" '$2 == f { print $1 }' "$here/sources.lock")
-    [ -n "$srcsha" ] || die "$srcfile, the source of $pkg, is not in sources.lock"
+    srcsha=$(locked_sha sources.lock "$srcfile")
 }
 
 # Downloads that source package into out/source, and checks it against
@@ -153,6 +146,14 @@ copy_licence_text() {
     [ -n "$(ls -A "$dest")" ] || die "no licence text found for $pkg in $srcfile"
 }
 
+# Prints the licence we use a component under, which licences.txt must name.
+elected_licence() {
+    local licence
+    licence=$(awk -v p="$1" '$1 == p { sub(/^[^ ]+ +/, ""); print }' "$here/licences.txt")
+    [ -n "$licence" ] || die "$1 is not in licences.txt; review its licence before it ships"
+    echo "$licence"
+}
+
 json_files() {
     local sep="" name
     for name in "$@"; do
@@ -169,8 +170,7 @@ gpg --homedir "$work/gnupg" --no-permission-warning --batch --quiet \
 components=""
 for pkg in $(printf '%s\n' "${!files_of[@]}" | sort) $STATIC_RUNTIME; do
     locked "$pkg"
-    licence=$(awk -v p="$pkg" '$1 == p { sub(/^[^ ]+ +/, ""); print }' "$here/licences.txt")
-    [ -n "$licence" ] || die "$pkg is not in licences.txt; review its licence before it ships"
+    licence=$(elected_licence "$pkg")
     declared=$(LC_ALL=C pacman -Qi "$pkg" | sed -n 's/^Licenses *: //p' | sed 's/spdx://g; s/   */, /g')
 
     locked_source
@@ -181,7 +181,7 @@ for pkg in $(printf '%s\n' "${!files_of[@]}" | sort) $STATIC_RUNTIME; do
             "$pkgbase" "$srcfile" "$SOURCES/$srcfile" "$srcsha" "$(json_files ${files_of[$pkg]})")
     else
         # The static runtime's source is recorded but not shipped.
-        detail=$(printf '"source": {"pkgbase": "%s", "shipped": false, "url": "%s", "sha256": "%s"},\n      "linked": "statically, into libopenconnect-5.dll"' \
+        detail=$(printf '"source": {"pkgbase": "%s", "shipped": false, "url": "%s", "sha256": "%s"},\n      "linked": "statically, into the DLLs built from source"' \
             "$pkgbase" "$SOURCES/$srcfile" "$srcsha")
     fi
     copy_licence_text
@@ -191,11 +191,12 @@ for pkg in $(printf '%s\n' "${!files_of[@]}" | sort) $STATIC_RUNTIME; do
 ,
     {
       "name": "$pkg",
+      "origin": "MSYS2 package",
       "version": "$version",
       "licence": "$licence",
       "licence_declared": "$declared",
       "licence_text": "licenses/$pkg/",
-      "package": {"file": "$pkgfile", "url": "$PACKAGES/$pkgfile", "sha256": "$pkgsha"},
+      "package": {"file": "$pkgfile", "url": "$MINGW_PACKAGES/$pkgfile", "sha256": "$pkgsha"},
       $detail
     }
 EOF
@@ -203,19 +204,16 @@ EOF
 done
 
 patches=$(cd "$out" && printf '"%s", ' source/*.patch)
+# shellcheck disable=SC2086 # the file list is split on purpose
 cat >"$out/manifest.json" <<EOF
 {
   "target": "x86_64-w64-mingw32 (MSYS2 UCRT64)",
   "shippable": false,
-  "blockers": [
-    {
-      "issue": "https://github.com/Nima-Hs/ubc-vpn/issues/13",
-      "reason": "The bundled GnuTLS reads its configuration from a path ordinary users can create."
-    }
-  ],
+  "blockers": ["The tests in the Native library (Windows) workflow have not passed on this output."],
   "components": [
     {
       "name": "openconnect",
+      "origin": "built from source",
       "version": "$VERSION",
       "licence": "LGPL-2.1-only",
       "licence_text": "licenses/openconnect/",
@@ -228,12 +226,22 @@ cat >"$out/manifest.json" <<EOF
       },
       "files": [$(json_files libopenconnect-5.dll)
       ]
+    },
+    {
+      "name": "gnutls",
+      "origin": "built from source",
+      "version": "$GNUTLS_VERSION",
+      "licence": "$(elected_licence gnutls)",
+      "licence_text": "licenses/gnutls/",
+      "source": {"file": "source/$GNUTLS_TARBALL", "url": "$GNUTLS_URL", "sha256": "$gnutls_sha"},
+      "files": [$(json_files $gnutls_files)
+      ]
     }$components
   ]
 }
 EOF
 
-# Every package of the build environment, build tools included.
+# Every MSYS2 package of the build environment, build tools included.
 pacman -Q >"$out/build-packages.txt"
 
 echo "Built $out:"

@@ -1,0 +1,9 @@
+# Path-like strings in the shipped DLLs that have been examined and judged
+# harmless. Each rule is "<dll> <regular expression matching the whole string>".
+# Say above each one why it is harmless.
+
+# libxml2's built-in default for its catalogue file. MSYS2 patches libxml2
+# (0031-apply-msvc-relocation.patch) to use "<folder of the DLL>\..\etc\xml\catalog"
+# instead, and a catalogue is only read when a document asks for an external
+# DTD or entity, which OpenConnect's parser options never load.
+libxml2-16.dll file:///ucrt64/etc/xml/catalog

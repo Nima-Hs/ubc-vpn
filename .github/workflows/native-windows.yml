@@ -33,11 +33,19 @@ jobs:
   build:
     name: Build and probe libopenconnect
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The GnuTLS build, which takes most of the time. gnutls.sh reuses it only
+      # while these same files are unchanged. Every test below runs on the
+      # output whether or not the build was reused.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: native/windows/cache/gnutls
+          key: native-windows-gnutls-${{ hashFiles('native/windows/common.sh', 'native/windows/packages.lock', 'native/windows/tools.lock', 'native/windows/sources.lock', 'native/windows/gnutls.sh') }}
 
       - name: Build libopenconnect (MSYS2 UCRT64)
         shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
@@ -47,6 +55,15 @@ jobs:
         run: |
           native/windows/setup.sh
           native/windows/build.sh
+          native/windows/tests/control.sh
+
+      - name: Scan the DLLs for embedded paths
+        continue-on-error: true
+        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        env:
+          MSYSTEM: UCRT64
+          CHERE_INVOKING: "yes"
+        run: native/windows/tests/scan-strings.sh
 
       - name: Check the manifest
         working-directory: native/windows/out
@@ -55,7 +72,7 @@ jobs:
           # Every DLL is listed, and Wintun is not bundled.
           for dll in bin/*.dll; do grep -qF "\"$dll\"" manifest.json; done
           test ! -e bin/wintun.dll
-          # Not safe to ship until issue #13 is fixed. Changing this must be a visible diff.
+          # Nothing is shippable until the tests below have passed.
           python -c "import json; assert json.load(open('manifest.json'))['shippable'] is False"
 
       - name: Build the probe (MSVC target)
@@ -88,7 +105,7 @@ jobs:
           grep -qE '^version  = v9\.21(-|$)' probe.txt
           grep -qx 'RESULT: PASS' probe.txt
 
-      # Wintun is used for this test only. It is not part of the build output.
+      # Wintun is used for the tests only. It is not part of the build output.
       - name: Connect (login, connection and Wintun tunnel device)
         working-directory: native/probe
         run: |
@@ -104,8 +121,17 @@ jobs:
           grep -qE '^version  = v9\.21(-|$)' connect.txt
           grep -qx 'RESULT: PASS' connect.txt
 
+      - name: Planted configuration files are ignored
+        continue-on-error: true
+        run: native/windows/tests/planted-files.sh
+
+      - name: Trace the files the probe opens
+        continue-on-error: true
+        timeout-minutes: 10
+        run: native/windows/tests/trace.sh
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: libopenconnect-windows-x64-unsafe
+          name: libopenconnect-windows-x64-bringup
           path: native/windows/out
           if-no-files-found: error

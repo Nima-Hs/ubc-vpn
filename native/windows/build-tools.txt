@@ -1,8 +1,0 @@
-autoconf
-automake
-curl
-git
-libtool
-make
-patch
-zstd
