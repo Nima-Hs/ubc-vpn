@@ -93,20 +93,27 @@ for pkg in $(printf '%s\n' "${!files_of[@]}" | sort); do
     version=$(pacman -Q "$pkg" | cut -d' ' -f2)
     licence=$(LC_ALL=C pacman -Qi "$pkg" | sed -n 's/^Licenses *: //p' | sed 's/spdx://g; s/   */, /g')
 
-    copied=0
+    # The licence text comes from the package. Some packages install none, and
+    # for those we keep a copy from the upstream release in licenses/.
+    mkdir -p "$out/licenses/$pkg"
     while read -r f; do
         dest=$out/licenses/$pkg/${f#"$PREFIX"/share/licenses/*/}
         mkdir -p "$(dirname "$dest")"
         cp "$f" "$dest"
-        copied=1
     done < <(pacman -Qlq "$pkg" | grep "^$PREFIX/share/licenses/.*[^/]\$" || true)
-    [ "$copied" = 1 ] || missing+=("$pkg")
+    if [ -z "$(ls -A "$out/licenses/$pkg")" ]; then
+        if [ -d "$here/licenses/$pkg" ]; then
+            cp -r "$here/licenses/$pkg/." "$out/licenses/$pkg/"
+        else
+            missing+=("$pkg")
+        fi
+    fi
 
     # shellcheck disable=SC2086 # the file list is split on purpose
     components+=$(printf ',\n    {\n      "name": "%s",\n      "version": "%s",\n      "licence": "%s",\n      "licence_text": "licenses/%s/",\n      "files": [%s\n      ]\n    }' \
         "$pkg" "$version" "$licence" "$pkg" "$(json_files ${files_of[$pkg]})")
 done
-[ ${#missing[@]} -eq 0 ] || die "no licence text installed for: ${missing[*]}"
+[ ${#missing[@]} -eq 0 ] || die "no licence text in the package or in licenses/ for: ${missing[*]}"
 
 patches=$(cd "$out" && printf '"%s", ' source/*.patch)
 cat >"$out/manifest.json" <<EOF

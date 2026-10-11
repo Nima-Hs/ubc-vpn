@@ -33,4 +33,6 @@ pacman -S --needed - < packages.txt
 
 The DLL list is not written down anywhere. `build.sh` reads the import table of `libopenconnect-5.dll`, then of each DLL that leads to, and stops if one is found neither in MSYS2's `/ucrt64/bin` nor in Windows.
 
+Licence texts are copied from the MSYS2 packages. A few packages install none, so `licenses/` here holds the licence files from the matching upstream release (GMP 6.3.0, GnuTLS 3.8.13, libidn2 2.3.8, LZ4 1.10.0, Nettle 4.0, p11-kit 0.26.5), with trailing whitespace trimmed by the repository's checks. `build.sh` stops if a bundled package has a licence text in neither place. Check these files against upstream when one of those packages moves to a new major version.
+
 Wintun, the tunnel driver the library loads at run time, is deliberately not in the output. The workflow downloads it for the connection test only.
