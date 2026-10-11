@@ -1,0 +1,28 @@
+# The licence we use each MSYS2 package under, as an SPDX expression.
+# build.sh stops if a package that ends up in the output is not listed here,
+# so a new dependency has to be reviewed before it can ship.
+
+# Packages whose DLLs are bundled.
+mingw-w64-ucrt-x86_64-brotli           MIT
+mingw-w64-ucrt-x86_64-gettext-runtime  LGPL-2.1-or-later
+mingw-w64-ucrt-x86_64-gmp              LGPL-3.0-or-later
+mingw-w64-ucrt-x86_64-gnutls           LGPL-2.1-or-later
+mingw-w64-ucrt-x86_64-libffi           MIT
+mingw-w64-ucrt-x86_64-libiconv         LGPL-2.1-or-later
+mingw-w64-ucrt-x86_64-libidn2          LGPL-3.0-or-later
+mingw-w64-ucrt-x86_64-libtasn1         LGPL-2.1-or-later
+mingw-w64-ucrt-x86_64-libunistring     LGPL-3.0-or-later
+mingw-w64-ucrt-x86_64-libwinpthread    MIT AND BSD-3-Clause-Clear
+mingw-w64-ucrt-x86_64-libxml2          MIT
+mingw-w64-ucrt-x86_64-nettle           LGPL-3.0-or-later
+mingw-w64-ucrt-x86_64-p11-kit          BSD-3-Clause
+mingw-w64-ucrt-x86_64-zlib             Zlib
+mingw-w64-ucrt-x86_64-zstd             BSD-3-Clause
+
+# The compiler's runtime, linked statically into libopenconnect-5.dll.
+mingw-w64-ucrt-x86_64-crt              ZPL-2.1
+# MSYS2 declares the headers as "ZPL-2.1 AND LGPL-2.1-or-later"; the LGPL part
+# is the DDK headers. build.sh reads the compiler's dependency files and stops
+# if any ddk/ header was compiled in, so ZPL-2.1 alone applies.
+mingw-w64-ucrt-x86_64-headers          ZPL-2.1
+mingw-w64-ucrt-x86_64-gcc              GPL-3.0-or-later WITH GCC-exception-3.1

@@ -1,0 +1,111 @@
+name: Native library (Windows)
+
+on:
+  pull_request:
+    paths:
+      - native/windows/**
+      - native/probe/**
+      - .github/workflows/native-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - native/windows/**
+      - native/probe/**
+      - .github/workflows/native-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  WINTUN_URL: https://www.wintun.net/builds/wintun-0.14.1.zip
+  WINTUN_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+
+jobs:
+  build:
+    name: Build and probe libopenconnect
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build libopenconnect (MSYS2 UCRT64)
+        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        env:
+          MSYSTEM: UCRT64
+          CHERE_INVOKING: "yes"
+        run: |
+          native/windows/setup.sh
+          native/windows/build.sh
+
+      - name: Check the manifest
+        working-directory: native/windows/out
+        run: |
+          python -m json.tool manifest.json
+          # Every DLL is listed, and Wintun is not bundled.
+          for dll in bin/*.dll; do grep -qF "\"$dll\"" manifest.json; done
+          test ! -e bin/wintun.dll
+          # Not safe to ship until issue #13 is fixed. Changing this must be a visible diff.
+          python -c "import json; assert json.load(open('manifest.json'))['shippable'] is False"
+
+      - name: Build the probe (MSVC target)
+        working-directory: native/probe
+        run: |
+          rustup toolchain install
+          rustc -vV | grep '^host: x86_64-pc-windows-msvc$'
+          cargo build --release --locked
+
+      # The probe runs with a PATH of the build output and Windows itself, so
+      # every DLL it loads is one we built or bundled.
+      - name: Probe (certificate, login form and logging callbacks)
+        working-directory: native/probe
+        run: |
+          windows=/c/Windows/System32:/c/Windows
+          ours=$(cd ../windows/out/bin && pwd)
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "//CN=localhost"
+          python fake_server.py cert.pem key.pem 4444 &
+          sleep 3
+          # Control: without the build output there is no libopenconnect to load,
+          # so the probe cannot start and never prints a version.
+          status=0
+          PATH="$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4444 >control.txt 2>&1 || status=$?
+          cat control.txt
+          if [ "$status" = 0 ] || grep -q '^version' control.txt; then
+            echo "the probe loaded a libopenconnect that is not ours"
+            exit 1
+          fi
+          PATH="$ours:$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4444 | tee probe.txt
+          grep -qE '^version  = v9\.21(-|$)' probe.txt
+          grep -qx 'RESULT: PASS' probe.txt
+
+      # Wintun is used for this test only. It is not part of the build output.
+      - name: Connect (login, connection and Wintun tunnel device)
+        working-directory: native/probe
+        run: |
+          windows=/c/Windows/System32:/c/Windows
+          ours=$(cd ../windows/out/bin && pwd)
+          curl -fsSLo wintun.zip "$WINTUN_URL"
+          echo "$WINTUN_SHA256 *wintun.zip" | sha256sum -c -
+          unzip -q wintun.zip
+          cp wintun/bin/amd64/wintun.dll target/release/
+          python fake_server.py cert.pem key.pem 4445 &
+          sleep 3
+          PATH="$ours:$windows" ./target/release/oc-probe.exe connect https://127.0.0.1:4445 testuser testpass | tee connect.txt
+          grep -qE '^version  = v9\.21(-|$)' connect.txt
+          grep -qx 'RESULT: PASS' connect.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libopenconnect-windows-x64-unsafe
+          path: native/windows/out
+          if-no-files-found: error
