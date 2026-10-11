@@ -1,0 +1,120 @@
+name: Native library (macOS)
+
+on:
+  pull_request:
+    paths:
+      - native/macos/**
+      - native/probe/**
+      - .github/workflows/native-macos.yml
+  push:
+    branches: [main]
+    paths:
+      - native/macos/**
+      - native/probe/**
+      - .github/workflows/native-macos.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARTIFACT: libopenconnect-macos-arm64
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+
+jobs:
+  build:
+    name: Build libopenconnect
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only used to generate openconnect's build files; see native/macos/README.md.
+      - name: Install build tools
+        run: brew install autoconf automake libtool pkgconf
+      # GMP, Nettle and GnuTLS take most of the build time and change rarely.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/prefix
+            build/sources
+          key: native-macos-15-arm64-${{ hashFiles('native/macos/versions.env', 'native/macos/build.sh') }}
+      - name: Build
+        run: bash native/macos/build.sh build
+      - name: Bundle and check
+        run: |
+          bash native/macos/bundle.sh build "$ARTIFACT"
+          # A tarball keeps the symbolic link that a plain upload would lose.
+          tar -czf "$ARTIFACT.tar.gz" "$ARTIFACT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.ARTIFACT }}.tar.gz
+          if-no-files-found: error
+
+  # Runs on a different machine and an older macOS than the build, so the
+  # build directory does not exist and nothing can be loaded from it.
+  probe:
+    name: Probe the build
+    needs: build
+    runs-on: macos-14
+    env:
+      APP: ${{ github.workspace }}/moved/app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+      - name: Unpack
+        run: |
+          mkdir -p "$APP"
+          tar -xzf "$ARTIFACT.tar.gz" -C "$APP" --strip-components 1
+          cat "$APP/manifest.json"
+          sw_vers
+          # For the record: which of these Homebrew has on this machine.
+          brew list --versions openconnect gnutls nettle gmp || true
+      - name: Build the probe against it
+        working-directory: native/probe
+        env:
+          PKG_CONFIG_PATH: ${{ env.APP }}/lib/pkgconfig
+          RUSTFLAGS: -C link-arg=-Wl,-rpath,${{ env.APP }}/lib
+        run: |
+          brew install pkgconf
+          rustup toolchain install
+          cargo build --release --locked
+          otool -L target/release/oc-probe
+          otool -L target/release/oc-probe | grep -q '@rpath/libopenconnect.5.dylib'
+      - name: Run the probe
+        working-directory: native/probe
+        run: |
+          # The run must pass, report the version we built, load every one of
+          # our libraries from the unpacked folder, and load nothing from Homebrew.
+          check() {
+            grep -qx 'version  = v9.21' "$1"
+            grep -qx 'RESULT: PASS' "$1"
+            for lib in "$APP"/lib/*.*.dylib; do
+              grep -qF " $lib" "$1"
+            done
+            if grep -E '/opt/homebrew|/usr/local' "$1"; then
+              exit 1
+            fi
+          }
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "/CN=localhost"
+
+          # Callbacks only.
+          python3 fake_server.py cert.pem key.pem 4444 &
+          sleep 3
+          DYLD_PRINT_LIBRARIES=1 target/release/oc-probe probe https://127.0.0.1:4444 2>&1 | tee probe.log
+          check probe.log
+
+          # Login, connect and tunnel device. sudo drops DYLD_ variables, so pass it through env.
+          python3 fake_server.py cert.pem key.pem 4445 &
+          sleep 3
+          sudo env DYLD_PRINT_LIBRARIES=1 target/release/oc-probe connect https://127.0.0.1:4445 testuser testpass 2>&1 | tee connect.log
+          check connect.log
