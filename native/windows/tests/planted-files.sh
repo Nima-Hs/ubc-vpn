@@ -88,6 +88,15 @@ grep -qx 'RESULT: PASS' run.txt || fail "the output's connect did not pass"
 [ ! -e "$marker.loaded" ] || fail "the output loaded the planted PKCS#11 module"
 echo "probe and connect pass; the planted module was not loaded"
 
+echo "--- For the record: does the output obey GNUTLS_SYSTEM_PRIORITY_FILE?"
+# Not a failure either way. The README tells the service to clear the variable;
+# this shows whether that still matters.
+if GNUTLS_SYSTEM_PRIORITY_FILE='C:\etc\gnutls\config' run "$ours" probe; then
+    echo "no: the probe passes with the variable naming the planted configuration"
+else
+    echo "yes: $(grep 'SSL connection failure' run.txt | head -1)"
+fi
+
 echo "--- The control must be broken by it"
 if run "$control" probe; then
     fail "the control still passes, so the planted files are not where a library reads them"

@@ -55,6 +55,8 @@ cat "$tools/results.txt"
 # on a drive or a network share that the probe touched.
 grep -a '"oc-probe.exe"' "$tools/trace.csv" | awk -F'","' '$5 ~ /^([A-Za-z]:|\\\\)/ { print $5 }' | sort -u >"$tools/paths.txt"
 [ -s "$tools/paths.txt" ] || { echo "error: the trace recorded nothing for the probe" >&2; exit 1; }
+# The DLLs it loaded must be there, or the trace is not showing file access.
+grep -q -i -F 'stage\libgnutls-30.dll' "$tools/paths.txt" || { echo "error: the trace does not show the DLLs being loaded" >&2; exit 1; }
 
 stage_win=$(cygpath -w "$stage")
 outside=$(STAGE=$stage_win awk '

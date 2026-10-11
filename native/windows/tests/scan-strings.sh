@@ -12,7 +12,8 @@ pattern='(^|[^A-Za-z0-9])[A-Za-z]:[\\/]|ucrt64|msys64|/etc/|\\etc\\|pkcs11'
 mkdir -p "$work"
 for dll in "$out"/bin/*.dll; do
     # Plain text, then UTF-16, which is how Windows programs often store paths.
-    { strings -a -n 5 "$dll" && strings -a -n 5 -e l "$dll"; } |
+    # Six characters is the shortest path worth finding, such as C:\etc.
+    { strings -a -n 6 "$dll" && strings -a -n 6 -e l "$dll"; } |
         grep -i -E "$pattern" | sort -u | sed "s|^|${dll##*/} |" || true
 done >"$work/string-hits.txt"
 

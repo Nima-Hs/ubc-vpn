@@ -58,7 +58,6 @@ jobs:
           native/windows/tests/control.sh
 
       - name: Scan the DLLs for embedded paths
-        continue-on-error: true
         shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
         env:
           MSYSTEM: UCRT64
@@ -122,16 +121,20 @@ jobs:
           grep -qx 'RESULT: PASS' connect.txt
 
       - name: Planted configuration files are ignored
-        continue-on-error: true
         run: native/windows/tests/planted-files.sh
 
       - name: Trace the files the probe opens
-        continue-on-error: true
         timeout-minutes: 10
         run: native/windows/tests/trace.sh
 
+      # Reached only if every step above passed on this output.
+      - name: Mark the output shippable
+        run: |
+          native/windows/tests/approve.sh
+          python -c "import json; m = json.load(open('native/windows/out/manifest.json')); assert m['shippable'] is True and m['blockers'] == []"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: libopenconnect-windows-x64-bringup
+          name: libopenconnect-windows-x64
           path: native/windows/out
           if-no-files-found: error

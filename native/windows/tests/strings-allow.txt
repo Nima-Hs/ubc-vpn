@@ -2,8 +2,37 @@
 # harmless. Each rule is "<dll> <regular expression matching the whole string>".
 # Say above each one why it is harmless.
 
-# libxml2's built-in default for its catalogue file. MSYS2 patches libxml2
-# (0031-apply-msvc-relocation.patch) to use "<folder of the DLL>\..\etc\xml\catalog"
-# instead, and a catalogue is only read when a document asks for an external
-# DTD or entity, which OpenConnect's parser options never load.
+# Names of error codes and functions, and log messages of the configuration
+# parser, that mention PKCS#11. None is a file name. The PKCS#11 code itself
+# is not built (--without-p11-kit).
+libgnutls-30.dll GNUTLS_E_PKCS11_[A-Z_]+
+libgnutls-30.dll gnutls_pkcs11_[a-z_]+
+libgnutls-30.dll cfg: .*pkcs11 provider.*
+# The "pkcs11:" URL prefix, which GnuTLS recognises so that it can refuse it.
+libgnutls-30.dll pkcs11:
+
+# Not text: pieces of libiconv's character conversion tables that happen to
+# contain a letter, a colon and a slash.
+libiconv-2.dll q!r!x!/!L.*
+libiconv-2.dll R:\\Sg\|p5rL
+
+# OpenConnect's own names for its PKCS#11 options and the URL prefix. Built
+# against a GnuTLS without PKCS#11, it reports that it has no such support.
+libopenconnect-5.dll openconnect_has_pkcs11_support|pkcs11:|(secondary_)?pkcs11_pin
+
+# "C:\Temp\" followed by a byte of code. A real path, and the reason for a rule
+# in the README: openconnect_setup_cmd_pipe() makes a socket file in %TEMP%,
+# then C:\Windows\Temp, then C:\Temp, then the current folder, taking the first
+# that works. The file name is hard to predict and the folder is only a meeting
+# point for the two ends of the library's own socket, but the service should
+# still set TEMP to a folder only administrators can write. The probe does not
+# call that function, and the trace shows no such file.
+libopenconnect-5.dll C:\\Temp\\H
+
+# libxml2's default place for a catalogue file. MSYS2 patches libxml2
+# (0031-apply-msvc-relocation.patch) to use the first form, with %s being the
+# folder of libxml2's own DLL; the second is the unpatched default it replaces.
+# A catalogue is only read when a document asks for an external DTD or entity,
+# which OpenConnect's parser options never load.
+libxml2-16.dll %s\\\.\.\\etc\\xml\\catalog
 libxml2-16.dll file:///ucrt64/etc/xml/catalog
