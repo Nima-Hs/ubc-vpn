@@ -34,7 +34,9 @@ Versions follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)
   | `feat`                  | patch             | minor           | `Added`           |
   | `fix`                   | patch             | patch           | `Fixed`           |
   | `perf`, `refactor`      | patch             | patch           | `Changed`         |
-  | All other types         | patch             | patch           | omitted           |
+  | All other types         | none              | none            | omitted           |
 
-- Releases are tags on `main` named `vX.Y.Z`.
+- If only omitted types were merged since the last release, there is nothing to release.
+- A change users must receive needs a type that releases. A dependency update that fixes a vulnerability is `fix(deps): ...`, not `build(deps): ...`.
+- Releases are tags on `main` named `vX.Y.Z`. A release is prepared as a pull request like any other change, and publishing is started by hand. Nothing pushes to `main` or creates a tag outside that flow.
 - Release automation is not set up yet. It is added before the first release.
