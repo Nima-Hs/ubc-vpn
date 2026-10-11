@@ -1,0 +1,12 @@
+autoconf
+automake
+git
+libtool
+make
+patch
+mingw-w64-ucrt-x86_64-gcc
+mingw-w64-ucrt-x86_64-gnutls
+mingw-w64-ucrt-x86_64-libxml2
+mingw-w64-ucrt-x86_64-lz4
+mingw-w64-ucrt-x86_64-pkgconf
+mingw-w64-ucrt-x86_64-zlib

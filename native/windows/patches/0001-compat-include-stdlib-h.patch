@@ -1,0 +1,10 @@
+Current mingw-w64 headers no longer ship <sec_api/stdlib_s.h>. The types and
+functions compat.c wants from it (errno_t, getenv_s) are declared by <stdlib.h>.
+
+--- a/compat.c
++++ b/compat.c
+@@ -29,3 +29,3 @@
+ #ifdef _WIN32
+-#include <sec_api/stdlib_s.h> /* errno_t, size_t */
++#include <stdlib.h> /* errno_t, size_t */
+ #ifndef HAVE_GETENV_S_DECL
