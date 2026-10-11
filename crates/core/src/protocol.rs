@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::redact::Secret;
-use crate::routes::RouteSet;
+use crate::routes::{Ipv4Net, RouteSet};
 use crate::state::ConnState;
 
 /// Bumped whenever the wire format changes in a way an older peer could not
@@ -120,8 +120,11 @@ pub enum RequestBody {
 
 /// What the service needs to open a tunnel.
 ///
-/// The gateway and its certificate pins are deliberately absent: the service
-/// takes those from its own policy file and from nowhere else.
+/// The gateway's name and its certificate pins are deliberately absent: the
+/// service takes those from its own policy file and from nowhere else. The
+/// one thing a client does supply is which of the gateway's addresses issued
+/// the cookie, and that is an untrusted hint; see
+/// [`ConnectParams::gateway_addr`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -145,18 +148,17 @@ pub struct ConnectParams {
 /// Whether an address could be a VPN gateway at all.
 ///
 /// The service calls this on [`ConnectParams::gateway_addr`] before it opens
-/// any connection. It rules out the unspecified address, loopback, link-local,
-/// multicast and broadcast, so a client cannot aim the privileged service at
-/// the machine itself or at a whole network segment. It does not make an
-/// address trusted: the certificate pin does that.
+/// any connection. It refuses the same reserved ranges that routes may not
+/// touch ("this network", loopback, link-local, multicast, and the reserved
+/// block that includes broadcast), so a client cannot aim the privileged
+/// service at the machine's loopback or at a whole network segment.
+///
+/// It does not make an address trusted: the certificate pin does that. And it
+/// cannot know this machine's own addresses, so the service must also refuse
+/// its own interface addresses and the tunnel's address, and must add the
+/// route to the gateway only after the pin has matched.
 pub fn is_plausible_gateway_addr(addr: Ipv4Addr) -> bool {
-    !(addr.is_unspecified()
-        || addr.is_loopback()
-        || addr.is_link_local()
-        || addr.is_multicast()
-        || addr.is_broadcast()
-        || addr.octets()[0] == 0
-        || addr.octets()[0] >= 240)
+    Ipv4Net::new(addr, 32).is_ok_and(|host| !host.is_reserved())
 }
 
 /// Anything the service sends after the handshake.
@@ -371,6 +373,9 @@ mod tests {
 
     #[test]
     fn request_wire_format_is_stable() {
+        // If the snapshot below has to change, so does this number: an older
+        // peer could no longer read the message.
+        assert_eq!(PROTOCOL_VERSION, 2);
         let line = encode(&connect()).unwrap();
         assert_eq!(
             line,
@@ -416,7 +421,7 @@ mod tests {
     }
 
     // Security rule: the service accepts exactly the expected fields. A request
-    // must not be able to smuggle in a gateway or a pin.
+    // must not be able to smuggle in a gateway name or a pin.
     #[test]
     fn requests_with_unknown_fields_are_refused() {
         let smuggled = [
@@ -526,7 +531,8 @@ mod tests {
     }
 
     // Security rule: the service must not be aimed at itself, at a network
-    // segment, or at a non-address. Removing any clause of the check makes
+    // segment, or at a non-address. Weakening the check, or removing any
+    // range from the reserved list in routes.rs, makes
     // this test fail.
     #[test]
     fn implausible_gateway_addresses_are_refused() {

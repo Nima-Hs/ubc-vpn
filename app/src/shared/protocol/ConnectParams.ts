@@ -5,8 +5,11 @@ import type { Secret } from "./Secret";
 /**
  * What the service needs to open a tunnel.
  *
- * The gateway and its certificate pins are deliberately absent: the service
- * takes those from its own policy file and from nowhere else.
+ * The gateway's name and its certificate pins are deliberately absent: the
+ * service takes those from its own policy file and from nowhere else. The
+ * one thing a client does supply is which of the gateway's addresses issued
+ * the cookie, and that is an untrusted hint; see
+ * [`ConnectParams::gateway_addr`].
  */
 export type ConnectParams = { 
 /**
