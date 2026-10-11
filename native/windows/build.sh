@@ -109,7 +109,7 @@ fetch_source() {
     curl -fsSL -o "$work/sources/$srcfile" "$SOURCES/$srcfile" &&
         curl -fsSL -o "$work/sources/$srcfile.sig" "$SOURCES/$srcfile.sig" ||
         die "cannot download the source of $pkg from $SOURCES/$srcfile"
-    gpg --homedir "$work/gnupg" --batch --quiet --verify \
+    gpg --homedir "$work/gnupg" --no-permission-warning --batch --quiet --verify \
         "$work/sources/$srcfile.sig" "$work/sources/$srcfile" ||
         die "the signature of $srcfile is not from an MSYS2 packager"
     mv "$work/sources/$srcfile" "$out/source/"
@@ -147,8 +147,9 @@ json_files() {
 }
 
 # MSYS2's packager keys, in a keyring of our own: pacman's is not always readable.
-mkdir -m 700 "$work/gnupg"
-gpg --homedir "$work/gnupg" --batch --quiet --import /usr/share/pacman/keyrings/msys2.gpg
+mkdir "$work/gnupg"
+gpg --homedir "$work/gnupg" --no-permission-warning --batch --quiet \
+    --import /usr/share/pacman/keyrings/msys2.gpg
 
 components=""
 for pkg in $(printf '%s\n' "${!files_of[@]}" | sort) $STATIC_RUNTIME; do
