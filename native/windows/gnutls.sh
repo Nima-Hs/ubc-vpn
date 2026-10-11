@@ -29,10 +29,12 @@ SIGNER=5D46CB0F763405A7053556F47A75A648B3F9220C
 curl -fsSL -o "$build/$tarball.sig" "$GNUTLS_URL.sig"
 mkdir "$build/gnupg"
 gpg --homedir "$build/gnupg" --no-permission-warning --batch --quiet --import "$here/keys/gnutls-release.asc"
-gpg --homedir "$build/gnupg" --no-permission-warning --batch --status-fd 1 \
-    --verify "$build/$tarball.sig" "$gnutls/$tarball" 2>/dev/null |
-    grep -q "^\[GNUPG:\] VALIDSIG $SIGNER " ||
-    die "$tarball is not signed by $SIGNER"
+# gpg exits with an error because it cannot check that second signature, so go
+# by what it reports about ours.
+verdict=$(gpg --homedir "$build/gnupg" --no-permission-warning --batch --status-fd 1 \
+    --verify "$build/$tarball.sig" "$gnutls/$tarball" 2>/dev/null || true)
+grep -q "^\[GNUPG:\] VALIDSIG $SIGNER " <<<"$verdict" ||
+    die "$tarball is not signed by $SIGNER:"$'\n'"$verdict"
 
 tar -xf "$gnutls/$tarball" -C "$build"
 cd "$build/gnutls-$GNUTLS_VERSION"
