@@ -1,0 +1,91 @@
+name: Platform (Windows)
+
+# The Windows channel is the boundary between ordinary programs and the
+# admin-level service. Some of its rules can only be tested by an elevated
+# process with a second user to play the stranger, which a developer machine
+# does not have. GitHub's Windows runners run elevated, so those tests run
+# here, and this workflow fails if any of them was skipped.
+
+on:
+  pull_request:
+    paths:
+      - crates/platform/**
+      - crates/core/**
+      - .github/workflows/platform-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/platform/**
+      - crates/core/**
+      - .github/workflows/platform-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  channel:
+    name: channel (${{ matrix.profile }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    env:
+      # Turns every "skipped: needs an elevated process" into a failure.
+      UBC_VPN_REQUIRE_ELEVATED: "1"
+      TEST_USER: ubc-vpn-stranger
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - name: Dev-mode code is free of warnings on Windows
+        if: matrix.profile == 'debug'
+        run: cargo clippy --locked -p ubc-vpn-platform --features dev-mode --all-targets -- -D warnings
+      # The second user exists for this one step. Its random password stays in
+      # this step's memory: it is handed to the tests through their
+      # environment and never written to a file, a log or a command line.
+      - name: Tests, including the elevated ones, with a throwaway second user
+        shell: pwsh
+        run: |
+          $bytes = [byte[]]::new(24)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = 'Aa1!' + [Convert]::ToBase64String($bytes)
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $env:TEST_USER -Password $secure -AccountNeverExpires | Out-Null
+          try {
+            Add-LocalGroupMember -Group Users -Member $env:TEST_USER
+            $env:UBC_VPN_TEST_USER = $env:TEST_USER
+            $env:UBC_VPN_TEST_PASSWORD = $password
+            $profile = if ('${{ matrix.profile }}' -eq 'release') { '--release' } else { $null }
+            cargo test --locked -p ubc-vpn-platform --features dev-mode $profile -- --nocapture |
+              Tee-Object -FilePath test.log
+            if ($LASTEXITCODE -ne 0) { throw 'The tests failed.' }
+          } finally {
+            Remove-LocalUser -Name $env:TEST_USER
+          }
+      # A test that is skipped passes. So prove from the log that each test
+      # needing elevation, a second user or the loopback network really ran.
+      - name: The elevated tests really ran
+        shell: bash
+        run: |
+          for test in suite users dev remote; do
+            if ! grep -q "RAN: $test" test.log; then
+              echo "The elevated test '$test' did not run."
+              exit 1
+            fi
+          done
+          if grep "SKIPPED:" test.log; then
+            echo "A test was skipped."
+            exit 1
+          fi
+      - name: The second user is gone
+        if: always()
+        shell: pwsh
+        run: |
+          if (Get-LocalUser -Name $env:TEST_USER -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $env:TEST_USER
+          }

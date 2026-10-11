@@ -872,8 +872,9 @@ mod tests {
         use unsupported::Native;
 
         let unsupported = Some(Error::Unsupported);
+        #[cfg(not(windows))]
         assert_eq!(Platform::native(Mode::Installed).err(), unsupported);
-        #[cfg(feature = "dev-mode")]
+        #[cfg(all(not(windows), feature = "dev-mode"))]
         assert_eq!(Platform::native(Mode::Dev).err(), unsupported);
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let physical = PhysicalNetwork {
@@ -902,5 +903,40 @@ mod tests {
         assert_eq!(Native.subscribe(&physical).err(), unsupported);
         assert_eq!(Native.listen("ubc-vpn-test").err(), unsupported);
         assert_eq!(Native.connect("ubc-vpn-test").err(), unsupported);
+    }
+
+    // Windows has a real channel and real paths. Everything else there must
+    // still say it is unsupported, and its checks must still fail closed.
+    #[cfg(windows)]
+    #[test]
+    fn windows_implements_the_channel_and_nothing_else_yet() {
+        let unsupported = Some(Error::Unsupported);
+        let gateway = Ipv4Addr::new(192, 0, 2, 1);
+        let physical = PhysicalNetwork {
+            interface: "eth0".to_string(),
+            next_hop: None,
+        };
+        let dns = SplitDns {
+            resolvers: vec![gateway],
+            domains: vec!["ece.example".to_string()],
+        };
+        let modes = [
+            Mode::Installed,
+            #[cfg(feature = "dev-mode")]
+            Mode::Dev,
+        ];
+        for mode in modes {
+            let native = Platform::native(mode).expect("a platform");
+            assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
+            assert_eq!(native.routes.remove_all().err(), unsupported);
+            let routed = native.routes.uses_interface(gateway, "tun0");
+            assert_eq!(routed, Verified::Unknown);
+            assert_eq!(native.dns.clear_split_dns().err(), unsupported);
+            assert_eq!(native.dns.split_dns_matches(&dns), Verified::Unknown);
+            assert_eq!(native.events.subscribe(&physical).err(), unsupported);
+            // Nothing listens on this name, and the transport can tell.
+            let absent = native.transport.connect("ubc-vpn-test-nobody-listens");
+            assert_eq!(absent.err(), Some(Error::NotFound));
+        }
     }
 }
