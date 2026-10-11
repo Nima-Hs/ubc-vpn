@@ -11,12 +11,6 @@ LIBXML2_VERSION=2.15.4
 LIBXML2_SHA256=98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
 LIBXML2_URL=https://download.gnome.org/sources/libxml2/2.15/libxml2-$LIBXML2_VERSION.tar.xz
 
-# Build packages come from this dated snapshot of the Ubuntu archive, so
-# every build installs the same versions. The base image has no CA
-# certificates, so the snapshot is read over http; apt still verifies the
-# archive signatures.
-APT_SNAPSHOT=20261011T000000Z
-
 # The only shared libraries the result may need. All four have the same
 # soname on every supported system.
 ALLOWED_NEEDED="libc.so.6 libm.so.6 libgnutls.so.30 libz.so.1"
@@ -31,11 +25,6 @@ mkdir -p "$1"
 out=$(cd "$1" && pwd)
 work=$(mktemp -d)
 
-cat > /etc/apt/sources.list <<EOF
-deb http://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT jammy main
-deb http://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT jammy-updates main
-deb http://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT jammy-security main
-EOF
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -151,7 +140,6 @@ cat > "$out/manifest.json" <<EOF
     "repository_commit": "$SOURCE_COMMIT",
     "script": "source/build.sh",
     "image": "$BUILD_IMAGE",
-    "apt_snapshot": "$APT_SNAPSHOT",
     "time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "packages": {
 $packages

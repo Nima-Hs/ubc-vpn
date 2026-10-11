@@ -22,7 +22,7 @@ docker run --rm -v "$PWD:/src" -w /src \
   "$image" bash native/linux/build.sh out
 ```
 
-The compiler, the other build tools and the GnuTLS and zlib headers are installed with `apt-get` from a dated snapshot of the Ubuntu archive (`APT_SNAPSHOT` in `build.sh`), so every build gets the same versions. The version of every package in the build container is recorded in `manifest.json`.
+The compiler, the other build tools and the GnuTLS and zlib headers are installed with `apt-get` from the Ubuntu 22.04 archive as it is on the day of the build. They are not yet pinned to exact versions. The version of every package in the build container is recorded in `manifest.json`.
 
 ## Output
 
@@ -93,7 +93,7 @@ The workflow proves this: the probe is laid out this way, runs under `sudo` on a
 
 ## Updating
 
-Change the version and commit (or SHA-256) at the top of `build.sh`, the expected version in the workflow, and the table above. To pick up newer build packages, move `APT_SNAPSHOT` to a later date. If the soname table changes, revisit what is bundled.
+Change the version and commit (or SHA-256) at the top of `build.sh`, the expected version in the workflow, and the table above. If the soname table changes, revisit what is bundled.
 
 `build.sh` passes two `ac_cv_func_*` settings to openconnect's `configure`. They turn off PKCS#11 smart-card support and the external-browser login (which uses HPKE), because neither has a switch of its own. With them on, the library would link p11-kit, nettle, hogweed and gmp directly, and the nettle and hogweed sonames differ between distributions. Removing the two settings brings both features back, along with those links, which then have to be declared as package dependencies or bundled.
 

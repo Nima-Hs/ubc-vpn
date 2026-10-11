@@ -29,19 +29,15 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    # A one-entry matrix, so the image is written once and can also be passed
-    # to the build for the manifest. It is ubuntu:22.04, the oldest supported
-    # system.
-    strategy:
-      matrix:
-        image: ["ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401"]
-    container: ${{ matrix.image }}
+    # ubuntu:22.04, the oldest supported system. BUILD_IMAGE below must name
+    # the same image; it is recorded in the manifest.
+    container: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build libopenconnect
         env:
           SOURCE_COMMIT: ${{ github.sha }}
-          BUILD_IMAGE: ${{ matrix.image }}
+          BUILD_IMAGE: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
         run: bash native/linux/build.sh out
       - name: Pack
         run: tar -C out -czf libopenconnect-linux-x64.tar.gz .
