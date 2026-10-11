@@ -31,17 +31,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          for image in ubuntu:22.04 ubuntu:24.04 debian:12; do
+          for image in ubuntu:26.04 debian:13; do
             echo "== $image"
             docker run --rm "$image" sh -c '
               apt-get update -qq >/dev/null
               apt-get install -y -qq --no-install-recommends libgnutls28-dev libxml2-dev liblz4-dev libp11-kit-dev nettle-dev zlib1g-dev >/dev/null 2>&1
               ldconfig -p | grep -E "libgnutls\.|libxml2|liblz4|libp11-kit|libnettle|libhogweed|libgmp\.|libz\." | grep -v "\.so$" | sort
-              dpkg -S libgnutls.so.30 libxml2.so.2 liblz4.so.1 libp11-kit.so.0 libz.so.1 | grep -v dev
+              dpkg -S libgnutls.so libxml2.so liblz4.so libp11-kit.so libz.so | grep -v dev
               ldd --version | head -n 1'
           done
-          echo "== fedora:latest"
-          docker run --rm fedora:latest sh -c '
+          echo "== fedora:rawhide"
+          docker run --rm fedora:rawhide sh -c '
             cat /etc/fedora-release
             dnf install -y -q gnutls libxml2 lz4-libs p11-kit nettle zlib >/dev/null 2>&1
             ldconfig -p | grep -E "libgnutls\.|libxml2|liblz4|libp11-kit|libnettle|libhogweed|libgmp\.|libz\." | sort
@@ -132,6 +132,11 @@ jobs:
         run: >
           bash native/linux/load-test.sh stage "$EXPECT"
           ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          "apt-get update -qq && apt-get install -y --no-install-recommends libgnutls30 zlib1g"
+      - name: Load on ubuntu:26.04
+        run: >
+          bash native/linux/load-test.sh stage "$EXPECT"
+          ubuntu@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7
           "apt-get update -qq && apt-get install -y --no-install-recommends libgnutls30 zlib1g"
       - name: Load on debian:12
         run: >
