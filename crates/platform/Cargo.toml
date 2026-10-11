@@ -1,11 +1,21 @@
 [package]
 name = "ubc-vpn-platform"
-description = "The OS seam for UBC VPN: routes, DNS, tunnel, channel and service setup"
+description = "The OS seam for UBC VPN: routes, DNS, network events, the channel transport and paths"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[features]
+# The in-memory fake and the shared behaviour suite. Enable it from another
+# crate's dev-dependencies and from the service's dev-mode feature only: a
+# release build must not contain it. This crate's own tests always have it.
+fake = []
+# Dev mode: adds `Mode::Dev` and brings the fake with it, so the service's own
+# dev-mode feature enables this one feature and nothing else. Never enabled in
+# a release build.
+dev-mode = ["fake"]
 
 [dependencies]
 ubc-vpn-core.workspace = true
