@@ -44,8 +44,10 @@ collect "$prefix/lib/libopenconnect.5.dylib"
 
 # Make each library findable next to the others instead of at its build path.
 # Editing a library breaks its signature, and Apple silicon refuses to load
-# unsigned code, so sign again (ad hoc) afterwards.
+# unsigned code, so sign again (ad hoc) afterwards. Debug symbols go too:
+# Nettle builds with them, and they record the build directory.
 for lib in "$out"/lib/*.dylib; do
+    strip -S "$lib"
     install_name_tool -id "@rpath/${lib##*/}" "$lib"
     for dep in $(loads "$lib"); do
         case $dep in
@@ -81,7 +83,8 @@ for lib in "$out"/lib/*.dylib; do
         esac
     done
     if grep -q "$work" "$lib"; then
-        fail "$name contains the build directory: $(strings -a "$lib" | grep "$work" | head -5)"
+        fail "$name contains the build directory:"
+        grep -a -o "[[:print:]]*$work[[:print:]]*" "$lib" | sort -u | head -5 >&2
     fi
     echo "$name: macOS $(minos "$lib")"
     loads "$lib" | sed 's/^/    /'
