@@ -19,6 +19,7 @@ done >"$work/string-hits.txt"
 
 # A rule is "<dll> <regular expression>"; a hit is "<dll> <text>".
 unexplained=$(awk '
+    BEGIN { n = 0 }
     NR == FNR { if ($0 !~ /^#/ && NF) { dll[n] = $1; sub(/^[^ ]+ +/, ""); rule[n++] = $0 }; next }
     {
         text = $0; sub(/^[^ ]+ /, "", text)
