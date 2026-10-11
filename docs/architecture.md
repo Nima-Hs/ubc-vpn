@@ -15,7 +15,7 @@ It is an open-source app with a GUI, installed from a release file, for Windows,
 | Routing | Transparent: once connected, every program reaches the chosen subnets with no per-program setup |
 | GUI | Electron |
 | Privilege | A small installed service holds the admin rights; the GUI and CLI run as the user |
-| Control | Only the user who installed the app may control the service |
+| Control | Only the owner, the first user to open the app after install, may control the service |
 | Channel | Named pipe (Windows) or Unix socket (macOS, Linux), JSON messages |
 | Login | Done by an unprivileged program; the service receives only a session cookie |
 | CLI | A small one: `login`, `connect`, `disconnect`, `status` |
@@ -66,7 +66,7 @@ flowchart LR
 - **Checks fail closed.** An answer of "could not tell" counts as failure.
 - **No blind retries.** A wrong password or a pin mismatch stops at once. Retrying only wastes MFA pushes.
 - **Logs are filtered.** `libopenconnect` prints the session cookie at debug level, so the service redacts its output before storing it.
-- **The channel is local only.** The OS refuses other users before our code runs, and the service re-checks who is calling. The service claims its pipe or socket name exclusively and rejects remote clients.
+- **The channel is local only.** The OS tells the service which user is calling, and the service refuses anyone but the owner. Once an owner exists, the pipe or socket permissions are narrowed to that user as well, so the OS refuses others before our code runs. The service claims its pipe or socket name exclusively and rejects remote clients.
 
 What a rogue program running as the same user could still do: connect, disconnect, and read status. It could not redirect the tunnel or read the password.
 
@@ -149,9 +149,94 @@ packaging/          installer scripts and service definitions, per OS
 docs/               this document and user docs
 ```
 
+## Details agents need
+
+These were settled on 2026-10-11, after the first version of this document, to remove ambiguity before development.
+
+### Supported systems for v0.1.0
+
+- Windows 10 and 11 on x64.
+- macOS 13 or later on Apple silicon.
+- Ubuntu 22.04 or later and Debian 12 or later (`.deb`), and current Fedora (`.rpm`), on x64.
+
+Only IPv4 subnets are routed. IPv6 routes are refused, and the system's IPv6 setup is left untouched.
+
+### Files and where they live
+
+| File | Holds | Written by | Readable by |
+| --- | --- | --- | --- |
+| `policy.json` | Gateway host name, certificate pins, optional route allow-list | The installer; admin only | Every user |
+| `state.json` | The owner | The service; admin only | Admin only |
+| `settings.json` | Username, chosen subnets and DNS domains, preferences | The user | The user |
+
+All three are JSON. The app and the CLI read and write settings through `crates/core`, so they always agree.
+
+| | Policy | State | Settings |
+| --- | --- | --- | --- |
+| Windows | `%ProgramData%\UBC VPN\` | `%ProgramData%\UBC VPN\` | `%APPDATA%\UBC VPN\` |
+| macOS | `/Library/Application Support/UBC VPN/` | `/Library/Application Support/UBC VPN/` | `~/Library/Application Support/UBC VPN/` |
+| Linux | `/etc/ubc-vpn/` | `/var/lib/ubc-vpn/` | `$XDG_CONFIG_HOME/ubc-vpn/`, or `~/.config/ubc-vpn/` |
+
+An update replaces `policy.json` and never touches `state.json` or `settings.json`. Uninstalling removes the policy and the state.
+
+### Which routes the service accepts
+
+The user chooses the subnets, but the service does not apply them blindly. It refuses:
+
+- any route wider than `/8`, which rules out a default route and the usual ways of splitting one in two;
+- any IPv6 route;
+- anything outside the policy's allow-list, when the policy has one.
+
+A refused route fails the connection with a clear reason. Nothing is applied partially.
+
+A chosen subnet may contain the gateway itself; UBC's gateway sits inside a campus range users will want. So that traffic to the gateway never loops into its own tunnel, the service first adds a route for the one address the tunnel is connected to, through the physical network, and keeps it there for the life of the connection. It decides which network is physical when the tunnel is created and never re-derives it from a table that already contains the tunnel.
+
+### Who the owner is
+
+The owner is the only user the service takes commands from.
+
+- **Before anyone has claimed it,** the service accepts one request, `claim`, from any local user, and nothing else. The app and the CLI both send it automatically on first use, so whichever the user runs first makes them the owner.
+- **Once claimed,** the service writes the owner to `state.json`, narrows the pipe or socket permissions to that user, and refuses everyone else.
+- **Changing the owner** needs admin rights: an admin deletes `state.json` or runs the service's reset command.
+- **Updates keep the owner,** because they do not touch `state.json`.
+
+This works the same way on all three OSes, and does not depend on which account typed the admin password during install. The cost is a window between install and first use in which any local user could claim the service.
+
+### How the app drives login
+
+The app never handles the cookie, and never talks to the gateway. It runs the CLI and relays prompts:
+
+1. The app starts `ubc-vpn connect --json`.
+2. The CLI takes the username from settings and the password from the keyring when they are saved, and asks for whatever is missing.
+3. Each question is one JSON line on the CLI's standard output: `{"type":"prompt","id":1,"kind":"password","label":"Password"}`. `kind` is `username`, `password`, `code` or `text`.
+4. The app answers on the CLI's standard input: `{"type":"answer","id":1,"value":"..."}`, or `{"type":"cancel"}` to stop.
+5. When the gateway accepts the login, the CLI sends the service a `connect` request carrying the cookie and the chosen routes, over the channel.
+6. The CLI ends with one final line and exits: `{"type":"done"}`, or `{"type":"error","code":"wrong_password","message":"..."}`. Error codes include `wrong_password`, `pin_mismatch`, `cancelled`, `gateway_unreachable`, `route_refused` and `service_unavailable`.
+
+From then on the app learns the connection state from the events the service pushes on the app's own channel connection. `ubc-vpn login` does steps 2 to 4 only and reports whether the credentials work, without connecting.
+
+The exact message types live in `crates/core` and are the reference; this section describes their shape.
+
+### Wire format
+
+Newline-delimited JSON, one message per line. The service drops a connection that sends a line longer than 64 KiB. TypeScript types are generated from the Rust types with `ts-rs`.
+
+### When the session expires
+
+If the service cannot resume a session, during reconnect or otherwise, it reports "login needed" and stops. The app asks the user to log in again. The service never retries a login by itself.
+
+### DNS on Linux
+
+v0.1.0 supports systemd-resolved only. The `.deb` and `.rpm` declare it as a dependency, since Debian does not install it by default. Where it is not running, connecting fails with a message that says so.
+
+### Licences outside Cargo
+
+`cargo deny` covers Rust crates only. npm packages get their own licence check in CI.
+
+Wintun, the Windows tunnel driver, ships as a prebuilt signed binary under its own licence, which is neither one of the permissive licences on our list nor LGPL. Bundling it needs the owner's explicit approval, recorded in `.claude/rules/dependencies.md`, before the Windows installer is built.
+
 ## Open points
 
-- **Owner at install time.** If a standard user installs with another account's admin password, the installer must still record the person at the keyboard as the owner.
 - **macOS update prompts.** Expected to need one admin prompt like the others; to confirm when the installer is built.
 - **pnpm with `electron-builder`.** Untested together.
 - **Signing.** Revisit before a public release. A signed macOS build needs a setting that keeps the bundled LGPL libraries replaceable.
