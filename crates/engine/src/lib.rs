@@ -126,7 +126,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ubc_vpn_core::login::LoginErrorCode;
-use ubc_vpn_core::protocol::ErrorCode;
+use ubc_vpn_core::protocol::{ErrorCode, is_plausible_gateway_addr};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::Ipv4Net;
 
@@ -338,8 +338,7 @@ impl From<TunnelError> for ErrorCode {
             TunnelError::PinMismatch => Self::PinMismatch,
             TunnelError::LoginNeeded => Self::LoginNeeded,
             TunnelError::BadAddress => Self::BadRequest,
-            // Moves to `ErrorCode::GatewayUnreachable` once core has it.
-            TunnelError::GatewayUnreachable => Self::EngineFailed,
+            TunnelError::GatewayUnreachable => Self::GatewayUnreachable,
             // The service cancels its own connect and normally reports
             // "disconnected" instead of an error.
             TunnelError::Cancelled | TunnelError::Failed => Self::EngineFailed,
@@ -350,20 +349,16 @@ impl From<TunnelError> for ErrorCode {
 /// Checks a gateway address that came from an unprivileged client before
 /// anything connects to it. Every tunnel engine calls this first.
 ///
-/// It refuses addresses no gateway can have: the "this network" block
-/// (`0.0.0.0/8`), loopback, link-local, multicast and broadcast. Such an
-/// address could point the privileged service at a local program. Whatever
-/// passes still has to present a pinned key before the cookie is sent.
+/// It applies [`is_plausible_gateway_addr`], the rule shared with the
+/// service, which refuses "this network", loopback, link-local, multicast and
+/// reserved addresses, broadcast included. Such an address could point the
+/// privileged service at a local program. Whatever passes still has to
+/// present a pinned key before the cookie is sent.
 pub fn check_gateway_addr(addr: Ipv4Addr) -> Result<(), TunnelError> {
-    let bad = addr.octets()[0] == 0
-        || addr.is_loopback()
-        || addr.is_link_local()
-        || addr.is_multicast()
-        || addr.is_broadcast();
-    if bad {
-        Err(TunnelError::BadAddress)
-    } else {
+    if is_plausible_gateway_addr(addr) {
         Ok(())
+    } else {
+        Err(TunnelError::BadAddress)
     }
 }
 

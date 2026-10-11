@@ -364,6 +364,7 @@ fn a_tunnel_refuses_an_address_no_gateway_can_have() {
         [169, 254, 1, 1],
         [224, 0, 0, 1],
         [239, 255, 255, 255],
+        [240, 0, 0, 1],
         [255, 255, 255, 255],
     ] {
         let addr = Ipv4Addr::from(bad);
@@ -421,7 +422,7 @@ fn login_needed_is_distinct_from_a_network_failure() {
     );
     assert_eq!(
         ErrorCode::from(TunnelError::GatewayUnreachable),
-        ErrorCode::EngineFailed
+        ErrorCode::GatewayUnreachable
     );
 
     // The connection drops: the session is still good, so a reconnect works.
