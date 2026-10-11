@@ -187,6 +187,8 @@ The user chooses the subnets, but the service does not apply them blindly. It re
 
 - any route wider than `/8`, which rules out a default route and the usual ways of splitting one in two. This guards against mistakes; it does not cap how much a long list of routes covers in total;
 - any IPv6 route;
+- any route that touches a loopback, link-local, multicast or reserved range;
+- more than 256 subnets or 256 DNS domains;
 - anything outside the policy's allow-list, when the policy has one.
 
 A refused route fails the connection with a clear reason. Nothing is applied partially.

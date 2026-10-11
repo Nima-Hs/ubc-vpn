@@ -8,7 +8,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::routes::Ipv4Net;
+use crate::routes::{Ipv4Net, is_valid_domain};
 
 const PIN_PREFIX: &str = "pin-sha256:";
 /// A SHA-256 hash in base64 is always 44 characters, the last being `=`.
@@ -99,12 +99,7 @@ impl Policy {
     /// Checks the policy is safe to act on. The service calls this before it
     /// accepts any connection.
     pub fn validate(&self) -> Result<(), PolicyError> {
-        let host_ok = !self.gateway.is_empty()
-            && self
-                .gateway
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
-        if !host_ok {
+        if !is_valid_domain(&self.gateway) {
             return Err(PolicyError::BadGateway);
         }
         if self.pins.is_empty() {
@@ -137,6 +132,9 @@ mod tests {
             "",
             "pin-sha256:",
             "pin-sha256:fTzr",
+            // Short and over-long, but still ending in `=` like a real hash.
+            "pin-sha256:fTz=",
+            "pin-sha256:fTzrkd+T2QOdSW5oSF7vp4M6JCp1hHMbYY2Q+IX4x5oAAAA=",
             "pin-sha256:fTzrkd+T2QOdSW5oSF7vp4M6JCp1hHMbYY2Q+IX4x5o",
             "pin-sha256:fTzrkd+T2QOdSW5oSF7vp4M6JCp1hHMbYY2Q+IX4x5oA",
             "pin-sha256:fTzrkd T2QOdSW5oSF7vp4M6JCp1hHMbYY2Q+IX4x5o=",
@@ -168,6 +166,13 @@ mod tests {
             "myvpn.ubc.ca/path",
             "a b",
             "host:443",
+            ".",
+            "..",
+            "a..b",
+            "-oProxyCommand",
+            "localhost",
+            "MyVPN.ubc.ca",
+            "142.103.1.1",
         ] {
             assert_eq!(
                 policy(bad, &[GOOD_PIN]).validate(),

@@ -3,9 +3,9 @@
 //! The app and the command-line client both read and write settings through
 //! this type, so they always agree.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::routes::RouteSet;
+use crate::routes::{Ipv4Net, RouteSet};
 
 /// The contents of `settings.json`. Every field has a default, so a missing or
 /// older file still loads.
@@ -16,10 +16,32 @@ pub struct Settings {
     /// The CWL username, remembered so the user is not asked each time.
     pub username: Option<String>,
     /// The subnets and DNS domains to send through the tunnel.
+    #[serde(deserialize_with = "lenient_routes")]
     pub routes: RouteSet,
     /// Whether to keep the password in the OS keyring. The password itself is
     /// never stored here.
     pub save_password: bool,
+}
+
+/// Reads the routes the way a settings file needs: missing and unknown fields
+/// are fine, so files from older and newer versions both load. On the channel
+/// the same type is strict. An invalid subnet is still an error, because
+/// silently dropping a route the user chose would be worse than refusing.
+fn lenient_routes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RouteSet, D::Error> {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Lenient {
+        subnets: Vec<Ipv4Net>,
+        dns_domains: Vec<String>,
+    }
+    let Lenient {
+        subnets,
+        dns_domains,
+    } = Lenient::deserialize(deserializer)?;
+    Ok(RouteSet {
+        subnets,
+        dns_domains,
+    })
 }
 
 #[cfg(test)]
@@ -49,5 +71,25 @@ mod tests {
     fn unknown_fields_are_ignored() {
         let settings: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(settings, Settings::default());
+    }
+
+    // The same tolerance holds inside `routes`, where the channel is strict.
+    #[test]
+    fn routes_tolerate_unknown_and_missing_fields() {
+        let newer: Settings =
+            serde_json::from_str(r#"{"routes":{"subnets":["10.19.0.0/16"],"future":1}}"#).unwrap();
+        assert_eq!(newer.routes.subnets.len(), 1);
+
+        let partial: Settings =
+            serde_json::from_str(r#"{"routes":{"dns_domains":["ece.ubc.ca"]}}"#).unwrap();
+        assert!(partial.routes.subnets.is_empty());
+        assert_eq!(partial.routes.dns_domains, ["ece.ubc.ca"]);
+    }
+
+    #[test]
+    fn an_invalid_subnet_is_an_error_not_a_silent_drop() {
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"routes":{"subnets":["10.0.0.1/8"]}}"#).is_err()
+        );
     }
 }

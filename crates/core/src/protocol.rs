@@ -8,6 +8,19 @@
 //!
 //! This module is the reference for the wire format. The TypeScript types the
 //! app uses are generated from it.
+//!
+//! # Changing the protocol
+//!
+//! Requests refuse unknown fields and every enum is closed, so an older peer
+//! cannot read a message that uses anything new. Any change to these types,
+//! including adding a variant or a field, must bump [`PROTOCOL_VERSION`]. That
+//! is cheap, because the app and the service are installed together.
+//!
+//! So that a mismatch gives a clear "please update" and not a dropped
+//! connection, the service reads only the version from the first line with
+//! [`peek_protocol_version`], which tolerates fields it does not know. It
+//! always answers with a [`HelloReply`], and parses the [`Hello`] strictly only
+//! when the versions match.
 
 use std::fmt;
 
@@ -85,7 +98,12 @@ pub struct Request {
 
 /// What a client can ask for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+#[serde(
+    tag = "method",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum RequestBody {
     /// Become the owner. Accepted from any local user while no owner exists,
@@ -209,21 +227,59 @@ pub enum ErrorCode {
 }
 
 /// Why a line could not be written or read.
-#[derive(Debug)]
+///
+/// It deliberately does not keep `serde_json`'s own error. That error's text
+/// can quote the input, and the input may hold a cookie or a password, so only
+/// the kind of problem and its position survive. Both `Display` and `Debug` are
+/// therefore safe to log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
     /// The line is longer than [`MAX_LINE_BYTES`].
     TooLong,
     /// The line is not the expected JSON.
-    Json(serde_json::Error),
+    Invalid {
+        /// What kind of problem it was.
+        kind: InvalidKind,
+        /// The column where parsing stopped, counted from 1.
+        column: usize,
+    },
+}
+
+/// What was wrong with a line that is not the expected JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidKind {
+    /// Not JSON at all, or cut short.
+    Syntax,
+    /// Valid JSON of the wrong shape: a wrong type, an unknown field or method,
+    /// or a value that failed validation.
+    Shape,
+}
+
+impl From<serde_json::Error> for FrameError {
+    fn from(e: serde_json::Error) -> Self {
+        let kind = match e.classify() {
+            serde_json::error::Category::Data => InvalidKind::Shape,
+            _ => InvalidKind::Syntax,
+        };
+        Self::Invalid {
+            kind,
+            column: e.column(),
+        }
+    }
 }
 
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLong => write!(f, "line is longer than {MAX_LINE_BYTES} bytes"),
-            // serde_json's message can quote the input, which may hold a
-            // secret, so only the position is reported.
-            Self::Json(e) => write!(f, "invalid message at column {}", e.column()),
+            Self::Invalid {
+                kind: InvalidKind::Syntax,
+                column,
+            } => write!(f, "message is not valid JSON at column {column}"),
+            Self::Invalid {
+                kind: InvalidKind::Shape,
+                column,
+            } => write!(f, "message has an unexpected shape at column {column}"),
         }
     }
 }
@@ -232,7 +288,7 @@ impl std::error::Error for FrameError {}
 
 /// Turns a message into one line, newline included.
 pub fn encode<T: Serialize>(message: &T) -> Result<String, FrameError> {
-    let mut line = serde_json::to_string(message).map_err(FrameError::Json)?;
+    let mut line = serde_json::to_string(message)?;
     line.push('\n');
     if line.len() > MAX_LINE_BYTES {
         return Err(FrameError::TooLong);
@@ -248,7 +304,20 @@ pub fn decode<T: DeserializeOwned>(line: &str) -> Result<T, FrameError> {
     if line.len() > MAX_LINE_BYTES {
         return Err(FrameError::TooLong);
     }
-    serde_json::from_str(line.trim_end_matches(['\r', '\n'])).map_err(FrameError::Json)
+    Ok(serde_json::from_str(line.trim_end_matches(['\r', '\n']))?)
+}
+
+/// Reads only the protocol version from a client's first line.
+///
+/// Unlike [`decode`] of a [`Hello`], this ignores every other field, so the
+/// service can tell a newer or older client "please update" even when it
+/// cannot read the rest of that client's `Hello`.
+pub fn peek_protocol_version(line: &str) -> Result<u32, FrameError> {
+    #[derive(Deserialize)]
+    struct VersionOnly {
+        protocol_version: u32,
+    }
+    Ok(decode::<VersionOnly>(line)?.protocol_version)
 }
 
 #[cfg(test)]
@@ -329,6 +398,16 @@ mod tests {
         assert!(decode::<Request>(smuggled[1]).is_err());
         assert!(decode::<Request>(smuggled[2]).is_err());
         assert!(decode::<Hello>(smuggled[3]).is_err());
+
+        // Beside the method, where a `deny_unknown_fields` on the outer struct
+        // alone would not reach.
+        let beside_method = [
+            r#"{"id":1,"body":{"method":"status","gateway":"evil.example"}}"#,
+            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"c","routes":{"subnets":[]}},"pins":["x"]}}"#,
+        ];
+        for line in beside_method {
+            assert!(decode::<Request>(line).is_err(), "{line} must be refused");
+        }
     }
 
     #[test]
@@ -358,10 +437,60 @@ mod tests {
     fn the_cookie_never_reaches_debug_output_or_errors() {
         assert!(!format!("{:?}", connect()).contains("s3cr3t-cookie"));
 
-        let broken = r#"{"id":1,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","routes":7}}}"#;
-        let error = decode::<Request>(broken).unwrap_err();
-        assert!(!error.to_string().contains("s3cr3t-cookie"));
-        assert!(!format!("{error}").contains("cookie"));
+        // In each of these the secret sits where another type is expected,
+        // which is exactly when serde_json quotes the offending value in its
+        // own error message.
+        let broken = [
+            r#"{"id":"s3cr3t-cookie","body":{"method":"status"}}"#,
+            r#"{"id":1,"body":{"method":"connect","params":{"cookie":"x","routes":"s3cr3t-cookie"}}}"#,
+            r#"{"id":1,"body":{"method":"s3cr3t-cookie"}}"#,
+            r#"{"id":1,"body":{"method":"status"},"s3cr3t-cookie":1}"#,
+        ];
+        for line in broken {
+            let error = decode::<Request>(line).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    FrameError::Invalid {
+                        kind: InvalidKind::Shape,
+                        ..
+                    }
+                ),
+                "{line} should be a shape error, got {error:?}"
+            );
+            for shown in [format!("{error}"), format!("{error:?}")] {
+                assert!(!shown.contains("s3cr3t"), "{shown} reveals the input");
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_and_shape_errors_are_told_apart() {
+        assert!(matches!(
+            decode::<Request>("{not json"),
+            Err(FrameError::Invalid {
+                kind: InvalidKind::Syntax,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode::<Request>(r#"{"id":1}"#),
+            Err(FrameError::Invalid {
+                kind: InvalidKind::Shape,
+                ..
+            })
+        ));
+    }
+
+    // A client from another version must still get a "please update" answer,
+    // so its version is readable even when the rest of its hello is not.
+    #[test]
+    fn the_version_is_readable_from_a_hello_this_version_cannot_parse() {
+        let future =
+            r#"{"protocol_version":2,"client":"tray","client_version":"9.0.0","new":true}"#;
+        assert!(decode::<Hello>(future).is_err());
+        assert_eq!(peek_protocol_version(future).unwrap(), 2);
+        assert!(peek_protocol_version(r#"{"client":"app"}"#).is_err());
     }
 
     #[test]

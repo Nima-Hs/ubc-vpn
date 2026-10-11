@@ -3,8 +3,11 @@
 /**
  * A secret string: a password, an MFA code or a session cookie.
  *
- * It serialises as a plain string, because it has to cross the channel, but
- * its `Debug` output never shows the value, and it has no `Display`. Reading
+ * Its `Debug` output never shows the value, and it has no `Display`. Reading
  * the value takes an explicit call to [`Secret::expose`].
+ *
+ * It does serialise as a plain string, because it has to cross the channel.
+ * So a serialised message is itself secret: never log an encoded line that
+ * may contain one. Log the message's `Debug` form instead.
  */
 export type Secret = string;
