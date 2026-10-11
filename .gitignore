@@ -1,5 +1,5 @@
 # Rust
-/target/
+target/
 **/*.rs.bk
 
 # Secrets, VPN profiles, and logs (debug logs can contain session cookies)

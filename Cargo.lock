@@ -3,5 +3,37 @@
 version = 4
 
 [[package]]
-name = "ubc-vpn"
+name = "ubc-vpn-cli"
 version = "0.1.0"
+dependencies = [
+ "ubc-vpn-core",
+ "ubc-vpn-engine",
+ "ubc-vpn-platform",
+]
+
+[[package]]
+name = "ubc-vpn-core"
+version = "0.1.0"
+
+[[package]]
+name = "ubc-vpn-engine"
+version = "0.1.0"
+dependencies = [
+ "ubc-vpn-core",
+]
+
+[[package]]
+name = "ubc-vpn-platform"
+version = "0.1.0"
+dependencies = [
+ "ubc-vpn-core",
+]
+
+[[package]]
+name = "ubc-vpn-service"
+version = "0.1.0"
+dependencies = [
+ "ubc-vpn-core",
+ "ubc-vpn-engine",
+ "ubc-vpn-platform",
+]

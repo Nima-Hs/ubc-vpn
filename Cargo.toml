@@ -1,10 +1,23 @@
-[package]
-name = "ubc-vpn"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The probe is a standalone test tool with its own lockfile.
+exclude = ["native/probe"]
+
+[workspace.package]
+# The one version number for the whole product. Never edit by hand.
 version = "0.1.0"
 edition = "2024"
-description = "Split-tunnel client for UBC myVPN"
-repository = "https://github.com/Nima-Hs/ubc-vpn"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nima-Hs/ubc-vpn"
 publish = false
 
-[dependencies]
+[workspace.dependencies]
+ubc-vpn-core = { path = "crates/core" }
+ubc-vpn-engine = { path = "crates/engine" }
+ubc-vpn-platform = { path = "crates/platform" }
+
+# Crates that must call C or the OS (engine, platform) set their own lints.
+# Everything else inherits these and cannot contain unsafe code.
+[workspace.lints.rust]
+unsafe_code = "forbid"

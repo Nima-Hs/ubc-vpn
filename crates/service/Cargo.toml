@@ -1,0 +1,16 @@
+[package]
+name = "ubc-vpn-service"
+description = "The privileged background service for UBC VPN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ubc-vpn-core.workspace = true
+ubc-vpn-engine.workspace = true
+ubc-vpn-platform.workspace = true
+
+[lints]
+workspace = true
