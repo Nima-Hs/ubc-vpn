@@ -15,7 +15,7 @@ It is an open-source app with a GUI, installed from a release file, for Windows,
 | Routing | Transparent: once connected, every program reaches the chosen subnets with no per-program setup |
 | GUI | Electron |
 | Privilege | A small installed service holds the admin rights; the GUI and CLI run as the user |
-| Control | Only the user who installed the app may control the service |
+| Control | Only the owner, the first user to open the app after install, may control the service |
 | Channel | Named pipe (Windows) or Unix socket (macOS, Linux), JSON messages |
 | Login | Done by an unprivileged program; the service receives only a session cookie |
 | CLI | A small one: `login`, `connect`, `disconnect`, `status` |
@@ -149,9 +149,63 @@ packaging/          installer scripts and service definitions, per OS
 docs/               this document and user docs
 ```
 
+## Details agents need
+
+These were settled on 2026-10-11, after the first version of this document, to remove ambiguity before development.
+
+### Supported systems for v0.1.0
+
+- Windows 10 and 11 on x64.
+- macOS 13 or later on Apple silicon.
+- Ubuntu 22.04 or later and Debian 12 or later (`.deb`), and current Fedora (`.rpm`), on x64.
+
+Only IPv4 subnets are routed. IPv6 is left untouched.
+
+### Files and where they live
+
+| File | Holds | Location | Writable by |
+| --- | --- | --- | --- |
+| Policy | Gateway address, certificate pins, optional route allow-list, owner | Machine-wide config folder: `%ProgramData%\UBC VPN`, `/Library/Application Support/UBC VPN`, `/etc/ubc-vpn` | Admin only |
+| Settings | Username, chosen subnets and DNS domains, preferences | The user's config folder | The user |
+
+Both are JSON. The installer ships the policy with UBC's gateway address and pins. The app and the CLI read and write settings through `crates/core`, so they always agree.
+
+### Which routes the service accepts
+
+The user chooses the subnets, but the service does not apply them blindly. It refuses:
+
+- a default route (`0.0.0.0/0`);
+- any route that contains the gateway's own address;
+- anything outside the policy's allow-list, when the policy has one.
+
+A refused route fails the connection with a clear reason. Nothing is applied partially.
+
+### Who the owner is
+
+The first local user to open the app after install claims ownership. The service records that user in the policy file, and from then on accepts commands from that user only. Changing the owner needs admin rights. This works the same way on all three OSes, and avoids depending on which account typed the admin password during install.
+
+### How the app drives login
+
+The app starts `ubc-vpn login --json`. The CLI writes each prompt (username, password, MFA) as one JSON line on standard output and reads each answer as one JSON line on standard input. When the gateway returns the session cookie, the CLI hands it to the service over the channel itself. The app never holds the cookie.
+
+### Wire format
+
+Newline-delimited JSON, one message per line, with a size limit enforced by the service. TypeScript types are generated from the Rust types with `ts-rs`.
+
+### When the session expires
+
+If the service cannot resume a session, during reconnect or otherwise, it reports "login needed" and stops. The app asks the user to log in again. The service never retries a login by itself.
+
+### DNS on Linux
+
+v0.1.0 supports systemd-resolved only. Where it is absent, connecting fails with a message that says so.
+
+### Licences outside Cargo
+
+`cargo deny` covers Rust crates only. npm packages get their own licence check in CI, and Wintun's licence is recorded in the notices bundled with the installer.
+
 ## Open points
 
-- **Owner at install time.** If a standard user installs with another account's admin password, the installer must still record the person at the keyboard as the owner.
 - **macOS update prompts.** Expected to need one admin prompt like the others; to confirm when the installer is built.
 - **pnpm with `electron-builder`.** Untested together.
 - **Signing.** Revisit before a public release. A signed macOS build needs a setting that keeps the bundled LGPL libraries replaceable.
