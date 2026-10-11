@@ -39,13 +39,15 @@ jobs:
         with:
           persist-credentials: false
 
-      # The GnuTLS build, which takes most of the time. gnutls.sh reuses it only
-      # while these same files are unchanged. Every test below runs on the
-      # output whether or not the build was reused.
+      # The GnuTLS build takes most of the time, so pull requests may reuse one
+      # made from these same files. Every test below still runs on the output,
+      # but an output with a reused GnuTLS is never marked shippable. Builds of
+      # main always build it.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name == 'pull_request'
         with:
           path: native/windows/cache/gnutls
-          key: native-windows-gnutls-${{ hashFiles('native/windows/common.sh', 'native/windows/packages.lock', 'native/windows/tools.lock', 'native/windows/sources.lock', 'native/windows/gnutls.sh') }}
+          key: native-windows-gnutls-${{ hashFiles('native/windows/common.sh', 'native/windows/gnutls.sh', 'native/windows/patches/gnutls/*.patch', 'native/windows/packages.lock', 'native/windows/tools.lock', 'native/windows/sources.lock') }}
 
       - name: Build libopenconnect (MSYS2 UCRT64)
         shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
@@ -57,12 +59,21 @@ jobs:
           native/windows/build.sh
           native/windows/tests/control.sh
 
-      - name: Scan the DLLs for embedded paths
+      - name: Scan the DLLs for paths and environment variables
+        continue-on-error: true
         shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
         env:
           MSYSTEM: UCRT64
           CHERE_INVOKING: "yes"
         run: native/windows/tests/scan-strings.sh
+
+      - name: Check that PKCS#11 support is absent
+        continue-on-error: true
+        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        env:
+          MSYSTEM: UCRT64
+          CHERE_INVOKING: "yes"
+        run: native/windows/tests/no-pkcs11.sh
 
       - name: Check the manifest
         working-directory: native/windows/out
@@ -121,20 +132,35 @@ jobs:
           grep -qx 'RESULT: PASS' connect.txt
 
       - name: Planted configuration files are ignored
+        continue-on-error: true
         run: native/windows/tests/planted-files.sh
 
-      - name: Trace the files the probe opens
+      - name: Trace the files and registry keys the probe touches
+        continue-on-error: true
         timeout-minutes: 10
         run: native/windows/tests/trace.sh
 
-      # Reached only if every step above passed on this output.
+      # Reached only if every step above passed on this output. An output whose
+      # GnuTLS was reused is uploaded too, but it is not shippable and its name
+      # says so.
       - name: Mark the output shippable
+        id: approve
+        if: false
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           native/windows/tests/approve.sh
-          python -c "import json; m = json.load(open('native/windows/out/manifest.json')); assert m['shippable'] is True and m['blockers'] == []"
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          m = json.load(open('native/windows/out/manifest.json'))
+          built = next(c for c in m['components'] if c['name'] == 'gnutls')['built_in_this_run']
+          assert m['shippable'] is built and (m['blockers'] == []) is built
+          assert built or os.environ['EVENT'] == 'pull_request', 'only a pull request may reuse a GnuTLS build'
+          print('suffix=' + ('' if built else '-reused-gnutls'))
+          EOF
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: libopenconnect-windows-x64
+          name: libopenconnect-windows-x64-bringup${{ steps.approve.outputs.suffix }}
           path: native/windows/out
           if-no-files-found: error

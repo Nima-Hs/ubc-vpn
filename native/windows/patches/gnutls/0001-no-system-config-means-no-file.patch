@@ -1,0 +1,28 @@
+GnuTLS built with an empty --with-system-priority-file still reads a
+configuration file if the GNUTLS_SYSTEM_PRIORITY_FILE environment variable
+names one, and applies its cipher, key exchange and default priority settings.
+Make "no system configuration" mean that no file is read: the variable is not
+consulted and no path is ever looked up.
+
+--- a/lib/priority.c
++++ b/lib/priority.c
+@@ -2382,3 +2382,9 @@
+
++#ifdef DISABLE_SYSTEM_CONFIG
++	/* No configuration file is ever looked for: always take the branch for
++	 * a file that does not exist. */
++	if (1) {
++#else
+ 	if (stat(system_priority_file, &sb) < 0) {
++#endif
+ 		_gnutls_debug_log("cfg: unable to access: %s: %d\n",
+@@ -2463,2 +2469,5 @@
+ {
++#ifndef DISABLE_SYSTEM_CONFIG
++	/* Without a system configuration, do nothing: in particular, do not let
++	 * GNUTLS_SYSTEM_PRIORITY_FILE name a file to read instead. */
+ 	const char *p;
+@@ -2479,2 +2488,3 @@
+ 	}
++#endif
+ }

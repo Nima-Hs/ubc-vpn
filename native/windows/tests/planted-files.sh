@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Plants hostile configuration files in every place MSYS2's stock GnuTLS and
-# p11-kit were seen to read, then checks that the build output ignores them.
+# Plants hostile GnuTLS configuration files where MSYS2's stock GnuTLS was seen
+# to read them, and names them in the environment variable GnuTLS reads, then
+# checks that the build output ignores them.
 #
-# The same files are tried on the stock GnuTLS (work/control, from control.sh),
+# Every case is also tried on the stock GnuTLS (work/control, from control.sh),
 # which must break. Without that, a pass here would prove nothing.
 #
 # Run from Git Bash as an administrator, after the probe has been built, a
@@ -13,7 +14,6 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 probe=$here/../probe
 ours=$here/out/bin
 control=$here/work/control/bin
-marker=$here/work/control/marker.dll
 windows=/c/Windows/System32:/c/Windows
 port=4460
 
@@ -39,11 +39,26 @@ fail() {
     exit 1
 }
 
+# The output must pass both modes; the control must fail to make a connection.
+ours_must_pass() {
+    run "$ours" probe || fail "the output's probe fails $1"
+    grep -qx 'RESULT: PASS' run.txt || fail "the output's probe did not pass $1"
+    run "$ours" connect testuser testpass || fail "the output's connect fails $1"
+    grep -qx 'RESULT: PASS' run.txt || fail "the output's connect did not pass $1"
+    echo "output: probe and connect pass $1"
+}
+control_must_fail() {
+    if run "$control" probe; then
+        fail "the control still passes $1, so this case shows nothing"
+    fi
+    grep -q 'SSL connection failure' run.txt || fail "the control failed $1, but not in the TLS handshake"
+    echo "control: fails $1: $(grep 'SSL connection failure' run.txt | head -1 | sed 's/^ *//')"
+}
+
 # plant <file> <line>...: writes the file, remembering what to remove afterwards.
 created=()
 cleanup() {
     [ ${#created[@]} -eq 0 ] || rm -rf "${created[@]}"
-    rm -f "$marker.loaded"
 }
 trap cleanup EXIT
 plant() {
@@ -58,57 +73,38 @@ plant() {
     echo "planted $file"
 }
 
-echo "--- Before planting: both the output and the control must work"
+# Two hostile configurations. Either stops any TLS handshake by a library that
+# reads it. The first turns off every cipher and key exchange and replaces the
+# default priorities; upstream GnuTLS obeys these even when built without a
+# system configuration file. The second adds the protocol versions, which is
+# what the first version of this test relied on.
+ciphers=(AES-128-GCM AES-256-GCM CHACHA20-POLY1305 AES-128-CCM AES-256-CCM AES-128-CCM-8 AES-256-CCM-8
+    AES-128-CBC AES-256-CBC 3DES-CBC CAMELLIA-128-GCM CAMELLIA-256-GCM CAMELLIA-128-CBC CAMELLIA-256-CBC)
+exchanges=(RSA DHE-RSA ECDHE-RSA ECDHE-ECDSA DHE-DSS PSK DHE-PSK ECDHE-PSK RSA-PSK ANON-DH ANON-ECDH)
+no_ciphers=("[overrides]" "default-priority-string = NONE"
+    "${ciphers[@]/#/tls-disabled-cipher = }" "${exchanges[@]/#/tls-disabled-kx = }")
+no_versions=("${no_ciphers[@]}" "disabled-version = tls1.0" "disabled-version = tls1.1"
+    "disabled-version = tls1.2" "disabled-version = tls1.3")
+
+echo "--- With nothing planted, the output and the control must both work"
 run "$ours" probe || fail "the output does not pass the probe"
 run "$control" probe || fail "the control does not pass the probe, so it cannot show anything"
 
-# A GnuTLS configuration that turns every TLS version off: any handshake by a
-# library that reads it fails.
-hostile=("[overrides]" "disabled-version = tls1.0" "disabled-version = tls1.1"
-    "disabled-version = tls1.2" "disabled-version = tls1.3")
-
-echo "--- A configuration named by the environment: ignored by the output, obeyed by the control"
-plant "$here/work/control/hostile-config" "${hostile[@]}"
-named=$(cygpath -w "$here/work/control/hostile-config")
-GNUTLS_SYSTEM_PRIORITY_FILE=$named run "$ours" probe ||
-    fail "the output obeys GNUTLS_SYSTEM_PRIORITY_FILE"
-if GNUTLS_SYSTEM_PRIORITY_FILE=$named run "$control" probe; then
-    fail "the control ignores GNUTLS_SYSTEM_PRIORITY_FILE, so the check above shows nothing"
-fi
-echo "the output passes; the control fails: $(grep 'SSL connection failure' run.txt | head -1)"
-
-echo "--- Planting where the stock libraries look"
-for file in /d/M/msys64/ucrt64/etc/gnutls/config /c/etc/gnutls/config "$drive/etc/gnutls/config"; do
-    plant "$file" "${hostile[@]}"
+echo "--- A configuration named by GNUTLS_SYSTEM_PRIORITY_FILE"
+plant "$here/work/control/no-ciphers" "${no_ciphers[@]}"
+plant "$here/work/control/no-versions" "${no_versions[@]}"
+for name in no-ciphers no-versions; do
+    GNUTLS_SYSTEM_PRIORITY_FILE=$(cygpath -w "$here/work/control/$name")
+    export GNUTLS_SYSTEM_PRIORITY_FILE
+    ours_must_pass "with the variable naming $name"
+    control_must_fail "with the variable naming $name"
+    unset GNUTLS_SYSTEM_PRIORITY_FILE
 done
-# PKCS#11 module lists, in GnuTLS's old format and in p11-kit's, naming the marker.
-for file in /c/etc/gnutls/pkcs11.conf "$drive/etc/gnutls/pkcs11.conf"; do
-    plant "$file" "load=$(cygpath -m "$marker")"
-done
-for dir in "$probe/target/etc/pkcs11" "$(cygpath -u "$USERPROFILE")/.config/pkcs11" \
-    /c/ucrt64/etc/pkcs11 "$drive/ucrt64/etc/pkcs11"; do
-    plant "$dir/pkcs11.conf" "user-config: merge"
-    plant "$dir/modules/planted.module" "module: $(cygpath -m "$marker")"
-done
-rm -f "$marker.loaded"
 
-echo "--- The output must ignore all of it"
-run "$ours" probe || fail "the output's probe fails with the planted files in place"
-grep -qx 'RESULT: PASS' run.txt || fail "the output's probe did not pass"
-run "$ours" connect testuser testpass || fail "the output's connect fails with the planted files in place"
-grep -qx 'RESULT: PASS' run.txt || fail "the output's connect did not pass"
-[ ! -e "$marker.loaded" ] || fail "the output loaded the planted PKCS#11 module"
-echo "probe and connect pass; the planted module was not loaded"
-
-echo "--- The control must be broken by it"
-if run "$control" probe; then
-    fail "the control still passes, so the planted files are not where a library reads them"
-fi
-grep -q 'No or insufficient priorities were set' run.txt ||
-    fail "the control failed, but not because of the planted GnuTLS configuration"
-echo "the control fails: $(grep 'SSL connection failure' run.txt | head -1)"
-if [ -e "$marker.loaded" ]; then
-    echo "the control also loaded the planted PKCS#11 module"
-else
-    echo "the control did not load the planted PKCS#11 module"
-fi
+echo "--- Configurations at the paths the stock library looks in, and their neighbours"
+for file in /d/M/msys64/ucrt64/etc/gnutls/config /c/etc/gnutls/config "$drive/etc/gnutls/config" \
+    /c/ucrt64/etc/gnutls/config "$drive/ucrt64/etc/gnutls/config" "$here/out/etc/gnutls/config"; do
+    plant "$file" "${no_versions[@]}"
+done
+ours_must_pass "with the files planted"
+control_must_fail "with the files planted"

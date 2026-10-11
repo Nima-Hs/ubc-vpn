@@ -39,6 +39,14 @@ locked() {
 # --- GnuTLS, built from source or reused from an earlier build ---------------
 
 "$here/gnutls.sh"
+# A build reused from an earlier run is recorded as such, and tests/approve.sh
+# will not mark the output shippable.
+if [ -e "$work/gnutls-built-in-this-run" ]; then gnutls_built=true; else gnutls_built=false; fi
+# What configure decided when the library was built, checked on every run.
+grep -q '^#define DISABLE_SYSTEM_CONFIG 1$' "$gnutls/build-info/config.h" ||
+    die "GnuTLS was built with a system configuration file"
+! grep -q '^#define ENABLE_PKCS11' "$gnutls/build-info/config.h" ||
+    die "GnuTLS was built with PKCS#11 support"
 gnutls_sha=$(locked_sha sources.lock "$GNUTLS_TARBALL")
 [ "$(sha256 "$gnutls/$GNUTLS_TARBALL")" = "$gnutls_sha" ] ||
     die "$GNUTLS_TARBALL does not have the SHA-256 in sources.lock"
@@ -56,13 +64,18 @@ fetched=$(git -C "$work/git" rev-parse "FETCH_HEAD^{commit}")
 archive=openconnect-$VERSION.tar.gz
 git -C "$work/git" -c core.autocrlf=false archive \
     --prefix="openconnect-$VERSION/" -o "$out/source/$archive" "$COMMIT"
-cp "$here"/patches/*.patch "$out/source/"
+
+# The patches and the recipe itself ship with the source: the LGPL asks for the
+# scripts that control the build.
+mkdir -p "$out/source/patches" "$out/source/recipe"
+cp -r "$here/patches/." "$out/source/patches/"
+cp "$here"/common.sh "$here"/setup.sh "$here"/gnutls.sh "$here"/build.sh "$here"/*.lock "$out/source/recipe/"
 
 # --- Build it, from the archive and patches that ship ------------------------
 
 tar -xzf "$out/source/$archive" -C "$work"
 cd "$work/openconnect-$VERSION"
-for p in "$out"/source/*.patch; do
+for p in "$out"/source/patches/openconnect/*.patch; do
     patch -p1 <"$p"
 done
 ./autogen.sh
@@ -72,6 +85,7 @@ PKG_CONFIG_PATH=$gnutls/lib/pkgconfig ./configure \
     --without-libproxy --without-stoken --without-libpskc --without-libpcsclite \
     --with-vpnc-script=vpnc-script-win.js \
     CFLAGS="-O2 -ffile-prefix-map=$(cygpath -m "$work")=."
+! grep -q '^#define HAVE_P11KIT' config.h || die "OpenConnect was configured with PKCS#11 support"
 make -j"$(nproc)" libopenconnect.la
 cp .libs/libopenconnect-5.dll "$out/bin/"
 cp COPYING.LGPL "$out/licenses/openconnect/"
@@ -203,13 +217,27 @@ EOF
     )
 done
 
-patches=$(cd "$out" && printf '"%s", ' source/*.patch)
+# json_list <file>...: the names as a JSON list.
+json_list() {
+    local list
+    list=$(printf '"%s", ' "$@")
+    echo "[${list%, }]"
+}
+openconnect_patches=$(cd "$out" && json_list source/patches/openconnect/*.patch)
+gnutls_patches=$(cd "$out" && json_list source/patches/gnutls/*.patch)
+# On GitHub the commit being built; elsewhere the one checked out.
+commit=${GITHUB_SHA:-$(git -c safe.directory='*' -C "$here" rev-parse HEAD)}
 # shellcheck disable=SC2086 # the file list is split on purpose
 cat >"$out/manifest.json" <<EOF
 {
   "target": "x86_64-w64-mingw32 (MSYS2 UCRT64)",
   "shippable": false,
   "blockers": ["The tests in the Native library (Windows) workflow have not passed on this output."],
+  "recipe": {
+    "repository": "https://github.com/Nima-Hs/ubc-vpn",
+    "commit": "$commit",
+    "files": "source/recipe/"
+  },
   "components": [
     {
       "name": "openconnect",
@@ -222,7 +250,7 @@ cat >"$out/manifest.json" <<EOF
         "commit": "$COMMIT",
         "archive": "source/$archive",
         "sha256": "$(sha256 "$out/source/$archive")",
-        "patches": [${patches%, }]
+        "patches": $openconnect_patches
       },
       "files": [$(json_files libopenconnect-5.dll)
       ]
@@ -233,7 +261,13 @@ cat >"$out/manifest.json" <<EOF
       "version": "$GNUTLS_VERSION",
       "licence": "$(elected_licence gnutls)",
       "licence_text": "licenses/gnutls/",
-      "source": {"file": "source/$GNUTLS_TARBALL", "url": "$GNUTLS_URL", "sha256": "$gnutls_sha"},
+      "built_in_this_run": $gnutls_built,
+      "source": {
+        "file": "source/$GNUTLS_TARBALL",
+        "url": "$GNUTLS_URL",
+        "sha256": "$gnutls_sha",
+        "patches": $gnutls_patches
+      },
       "files": [$(json_files $gnutls_files)
       ]
     }$components
