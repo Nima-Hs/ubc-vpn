@@ -44,4 +44,14 @@ For each MSYS2 package that contributes a DLL, `build.sh` downloads the source p
 
 The MinGW runtime (`crt`, `headers`) and `libgcc` are linked statically into `libopenconnect-5.dll`. Their licence texts are included; their source is not.
 
+## Known issue: do not ship this output in the service yet
+
+MSYS2's GnuTLS reads configuration from paths that an ordinary user may be able to create. Tracing the probe on the build runner showed it opening, on every run:
+
+- `D:\M\msys64\ucrt64\etc\gnutls\config`, the path of MSYS2's own build machine. A file planted there changed the TLS settings and made the probe's handshake fail.
+- `\etc\gnutls\pkcs11.conf` on the current drive, a file that can name PKCS#11 modules to load.
+- `..\etc\pkcs11\` beside the program's folder, and `.config\pkcs11\` in the user's profile, through p11-kit.
+
+A service running with admin rights must not read any of these. The fix, a GnuTLS built here without PKCS#11 and with a safe configuration path, is not part of this recipe yet.
+
 Wintun, the tunnel driver the library loads at run time, is deliberately not in the output. The workflow downloads it for the connection test only.
