@@ -29,11 +29,19 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    # ubuntu:22.04, the oldest supported system.
-    container: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    # A one-entry matrix, so the image is written once and can also be passed
+    # to the build for the manifest. It is ubuntu:22.04, the oldest supported
+    # system.
+    strategy:
+      matrix:
+        image: ["ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401"]
+    container: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build libopenconnect
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_IMAGE: ${{ matrix.image }}
         run: bash native/linux/build.sh out
       - name: Pack
         run: tar -C out -czf libopenconnect-linux-x64.tar.gz .
@@ -86,7 +94,7 @@ jobs:
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "/CN=localhost"
           python3 fake_server.py cert.pem key.pem 4444 &
-          sleep 3
+          bash ../linux/wait-for-port.sh 4444
       - name: Probe (certificate, login form and logging callbacks)
         run: bash native/linux/check-probe.sh "$EXPECT" stage/bin/oc-probe probe https://127.0.0.1:4444
       - name: Login, connect and tunnel device against the fake gateway
@@ -99,7 +107,7 @@ jobs:
           sed -e "s#@DIR@#$d#g" -e "s#@GROUP@#nogroup#" -e "s#@DEVICE@#vpns#" native/probe/ocserv.conf.in > "$d/ocserv.conf"
           printf 'testpass\ntestpass\n' | sudo ocpasswd -c "$d/passwd" testuser
           sudo ocserv -f -c "$d/ocserv.conf" > "$d/server.log" 2>&1 &
-          sleep 4
+          bash native/linux/wait-for-port.sh 4443
           bash native/linux/check-probe.sh "$EXPECT" sudo stage/bin/oc-probe connect https://127.0.0.1:4443 testuser testpass
       - name: Show the ocserv log
         if: failure()

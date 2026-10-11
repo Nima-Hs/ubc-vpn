@@ -11,15 +11,31 @@ LIBXML2_VERSION=2.15.4
 LIBXML2_SHA256=98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
 LIBXML2_URL=https://download.gnome.org/sources/libxml2/2.15/libxml2-$LIBXML2_VERSION.tar.xz
 
+# Build packages come from this dated snapshot of the Ubuntu archive, so
+# every build installs the same versions. The base image has no CA
+# certificates, so the snapshot is read over http; apt still verifies the
+# archive signatures.
+APT_SNAPSHOT=20261011T000000Z
+
 # The only shared libraries the result may need. All four have the same
 # soname on every supported system.
 ALLOWED_NEEDED="libc.so.6 libm.so.6 libgnutls.so.30 libz.so.1"
 
 [ $# -eq 1 ] || { echo "usage: build.sh <output-dir>" >&2; exit 2; }
+# Recorded in the manifest: the commit of this repository and the image
+# the build runs in.
+: "${SOURCE_COMMIT:?set SOURCE_COMMIT to the commit of this repository}"
+: "${BUILD_IMAGE:?set BUILD_IMAGE to the container image reference}"
+script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 mkdir -p "$1"
 out=$(cd "$1" && pwd)
 work=$(mktemp -d)
 
+cat > /etc/apt/sources.list <<EOF
+deb http://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT jammy main
+deb http://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT jammy-updates main
+deb http://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT jammy-security main
+EOF
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -28,11 +44,13 @@ apt-get install -y --no-install-recommends \
 
 mkdir -p "$out/lib/pkgconfig" "$out/include" "$out/source" \
     "$out/licenses/openconnect" "$out/licenses/json-parser" "$out/licenses/libxml2"
+# The script that controls the build is part of the source we ship.
+cp "$script" "$out/source/build.sh"
 
 # libxml2, static. It is linked into libopenconnect because its soname is
 # not the same on every supported system.
 cd "$work"
-curl -fsSLO "$LIBXML2_URL"
+curl --proto '=https' --proto-redir '=https' -fsSLO "$LIBXML2_URL"
 echo "$LIBXML2_SHA256  libxml2-$LIBXML2_VERSION.tar.xz" | sha256sum -c -
 cp "libxml2-$LIBXML2_VERSION.tar.xz" "$out/source/"
 tar -xf "libxml2-$LIBXML2_VERSION.tar.xz"
@@ -73,7 +91,7 @@ PKG_CONFIG_PATH="$work/deps/lib/pkgconfig" ./configure --prefix="$work/stage" \
     --without-external-browser --with-vpnc-script=/etc/vpnc/vpnc-script \
     ac_cv_func_gnutls_pkcs11_add_provider=no \
     ac_cv_func_gnutls_hkdf_expand=no \
-    CFLAGS=-O2 LDFLAGS=-Wl,-z,defs
+    CFLAGS=-O2 LDFLAGS=-Wl,-z,defs,-z,relro,-z,now
 make -j"$(nproc)" libopenconnect.la
 make install-libLTLIBRARIES install-includeHEADERS install-pkgconfigDATA
 
@@ -89,22 +107,34 @@ sed -e 's|^prefix=.*|prefix=${pcfiledir}/../..|' \
 
 # Checks on the result.
 lib="$out/lib/libopenconnect.so.5"
+fail() { echo "error: $*" >&2; exit 1; }
+
 needed=$(objdump -p "$lib" | awk '$1 == "NEEDED" { print $2 }')
+[ -n "$needed" ] || fail "no NEEDED entries were read from $lib"
 echo "NEEDED:" $needed
 for n in $needed; do
     case " $ALLOWED_NEEDED " in
         *" $n "*) ;;
-        *) echo "error: unexpected dependency $n" >&2; exit 1 ;;
+        *) fail "unexpected dependency $n" ;;
     esac
 done
-if nm -D --defined-only "$lib" | awk '{ print $NF }' | grep -Ev '^(openconnect_|OPENCONNECT_)'; then
-    echo "error: the symbols above should not be exported" >&2
-    exit 1
-fi
+
+exports=$(nm -D --defined-only "$lib" | awk '{ print $NF }')
+[ -n "$exports" ] || fail "no exported symbols were read from $lib"
+stray=$(grep -Ev '^(openconnect_|OPENCONNECT_)' <<<"$exports" || true)
+[ -z "$stray" ] || fail "these symbols should not be exported: $stray"
+
+dynamic=$(readelf -d "$lib")
+grep BIND_NOW <<<"$dynamic" || fail "the library is not linked with -z now"
+segments=$(readelf -lW "$lib")
+grep GNU_RELRO <<<"$segments" || fail "the library is not linked with -z relro"
+
 echo "Highest GLIBC symbol versions required:"
 objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 3
 glibc=$(objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
 gnutls=$(dpkg-query -W -f '${Version}' libgnutls28-dev)
+lib_sha256=$(sha256sum "$lib" | cut -d ' ' -f 1)
+packages=$(dpkg-query -W -f '      "${Package}": "${Version}",\n' | sed '$ s/,$//')
 
 json_list() {
     local sep="" item
@@ -117,7 +147,16 @@ json_list() {
 cat > "$out/manifest.json" <<EOF
 {
   "target": "x86_64-unknown-linux-gnu",
-  "built_on": "ubuntu:22.04",
+  "build": {
+    "repository_commit": "$SOURCE_COMMIT",
+    "script": "source/build.sh",
+    "image": "$BUILD_IMAGE",
+    "apt_snapshot": "$APT_SNAPSHOT",
+    "time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "packages": {
+$packages
+    }
+  },
   "components": [
     {
       "name": "openconnect",
@@ -127,7 +166,8 @@ cat > "$out/manifest.json" <<EOF
       "licence_file": "licenses/openconnect/COPYING.LGPL",
       "source": "source/openconnect-$OPENCONNECT_VERSION.tar.gz",
       "patches": [],
-      "files": ["lib/libopenconnect.so.5"]
+      "file": "lib/libopenconnect.so.5",
+      "file_sha256": "$lib_sha256"
     },
     {
       "name": "json-parser",

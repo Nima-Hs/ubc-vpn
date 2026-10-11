@@ -7,6 +7,7 @@ Builds `libopenconnect` v9.21 (GnuTLS backend) for x64 from the pinned upstream 
 | `build.sh` | Builds the library and writes the output folder |
 | `check-probe.sh` | Runs the probe and requires the expected version and `RESULT: PASS` |
 | `load-test.sh` | Runs the probe in another distribution's container with only the declared packages installed |
+| `wait-for-port.sh` | Waits for a test server to start listening |
 
 There are no patches.
 
@@ -15,12 +16,13 @@ There are no patches.
 The build runs as root in the `ubuntu:22.04` image pinned by digest in `.github/workflows/native-linux.yml`. That workflow is the reference build; its artifact is `libopenconnect-linux-x64`. To run it locally, from the repository root:
 
 ```sh
+image=ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
 docker run --rm -v "$PWD:/src" -w /src \
-  ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401 \
-  bash native/linux/build.sh out
+  -e SOURCE_COMMIT="$(git rev-parse HEAD)" -e BUILD_IMAGE="$image" \
+  "$image" bash native/linux/build.sh out
 ```
 
-The script installs its build tools with `apt-get`, so the compiler and the GnuTLS and zlib headers are whatever Ubuntu 22.04 currently ships. They are not pinned one by one; the GnuTLS version built against is recorded in `manifest.json`.
+The compiler, the other build tools and the GnuTLS and zlib headers are installed with `apt-get` from a dated snapshot of the Ubuntu archive (`APT_SNAPSHOT` in `build.sh`), so every build gets the same versions. The version of every package in the build container is recorded in `manifest.json`.
 
 ## Output
 
@@ -29,8 +31,8 @@ lib/libopenconnect.so.5      the library (plus the usual symlinks)
 lib/pkgconfig/openconnect.pc relocatable; point PKG_CONFIG_PATH here
 include/openconnect.h
 licenses/                    licence text for each component
-source/                      the exact source archives that were built
-manifest.json                components, versions, licences, system libraries
+source/                      the exact source archives that were built, and build.sh
+manifest.json                components, versions, licences, system libraries, build details
 ```
 
 | Component | Version | Licence | How it ships |
@@ -85,8 +87,14 @@ RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN/../lib'
 
 The loader then finds our `libopenconnect.so.5` before it looks in the system paths, so a distribution `libopenconnect` is neither needed nor used. Do not set `LD_LIBRARY_PATH` for the service: it is searched before the rpath, and `sudo` drops it anyway.
 
+The service must never be made setuid or given file capabilities. glibc ignores an `$ORIGIN` rpath for such programs, so the library would not be found, or a system one would be loaded instead. A service started as root by systemd is not affected.
+
 The workflow proves this: the probe is laid out this way, runs under `sudo` on a system with no distribution `libopenconnect`, and must report `v9.21`.
 
 ## Updating
 
-Change the version and commit (or SHA-256) at the top of `build.sh`, the expected version in the workflow, and the table above. If the soname table changes, revisit what is bundled.
+Change the version and commit (or SHA-256) at the top of `build.sh`, the expected version in the workflow, and the table above. To pick up newer build packages, move `APT_SNAPSHOT` to a later date. If the soname table changes, revisit what is bundled.
+
+`build.sh` passes two `ac_cv_func_*` settings to openconnect's `configure`. They turn off PKCS#11 smart-card support and the external-browser login (which uses HPKE), because neither has a switch of its own. With them on, the library would link p11-kit, nettle, hogweed and gmp directly, and the nettle and hogweed sonames differ between distributions. Removing the two settings brings both features back, along with those links, which then have to be declared as package dependencies or bundled.
+
+The library is linked with `-z relro -z now`, and `build.sh` checks the result.
