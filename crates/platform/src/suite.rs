@@ -1,11 +1,17 @@
 //! Checks every implementation of the seam must pass.
 //!
-//! The fake passes them in this crate's tests. Each real implementation runs
-//! the same functions on a CI machine with admin rights and a live tunnel
-//! interface. They panic on the first property that does not hold.
+//! The fake passes them in this crate's tests, and each real implementation
+//! must pass the same functions. They panic on the first property that does
+//! not hold. For a real implementation the routing and DNS checks need admin
+//! rights and a live tunnel interface, and the transport check needs a way to
+//! connect as a second user; the others need nothing special.
 //!
 //! They use addresses reserved for documentation (192.0.2.0/24 and
 //! 198.51.100.0/24), which no real network routes specially.
+//!
+//! Not checked here, and so required of each real implementation's own tests:
+//! that [`Routes::remove_all`], called from a new process, removes what an
+//! earlier process added and spares every route this product did not add.
 
 use std::net::Ipv4Addr;
 use std::thread;
@@ -14,7 +20,7 @@ use std::time::Duration;
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 use ubc_vpn_core::routes::Ipv4Net;
 
-use crate::{Dns, Error, Paths, Routes, SplitDns, Transport, UserId, Verified};
+use crate::{Connection, Dns, Error, Paths, Result, Routes, SplitDns, Transport, Verified};
 
 /// Long enough for another thread to get going, short enough for a test.
 const PAUSE: Duration = Duration::from_millis(50);
@@ -95,17 +101,33 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str) {
         resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
         domains: vec!["suite.example".to_string()],
     };
-    let second = SplitDns {
+    let other_resolvers = SplitDns {
         resolvers: vec![Ipv4Addr::new(192, 0, 2, 54)],
+        ..first.clone()
+    };
+    let other_domains = SplitDns {
+        domains: vec!["other.example".to_string()],
+        ..first.clone()
+    };
+    let more_domains = SplitDns {
         domains: vec!["suite.example".to_string(), "other.example".to_string()],
+        ..first.clone()
+    };
+    let second = SplitDns {
+        resolvers: other_resolvers.resolvers.clone(),
+        domains: more_domains.domains.clone(),
     };
     let (yes, no) = (Verified::Yes, Verified::No);
 
     dns.clear_split_dns().expect("clear when nothing is set");
     assert_eq!(dns.split_dns_matches(&first), no);
 
+    // A match is exact: the same resolvers and the same domains, no more.
     dns.set_split_dns(tunnel, &first).expect("set");
     assert_eq!(dns.split_dns_matches(&first), yes);
+    assert_eq!(dns.split_dns_matches(&other_resolvers), no, "resolvers");
+    assert_eq!(dns.split_dns_matches(&other_domains), no, "domains");
+    assert_eq!(dns.split_dns_matches(&more_domains), no, "more domains");
     assert_eq!(dns.split_dns_matches(&second), no);
 
     // Setting replaces: nothing of the first setting stays in effect.
@@ -119,8 +141,15 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str) {
 }
 
 /// Checks [`Transport`], using the channel `name`, which nothing may hold.
-/// `stranger` is any real user other than the one running the check.
-pub fn check_transport(transport: &dyn Transport, name: &str, stranger: &UserId) {
+///
+/// `as_another_user` connects to the given name as a real user other than the
+/// one running the check. The harness supplies it, because only it knows how
+/// on its OS: the fake does it directly, a real one with a helper process.
+pub fn check_transport(
+    transport: &dyn Transport,
+    name: &str,
+    as_another_user: &dyn Fn(&str) -> Result<Connection>,
+) {
     let refused = |error| assert_eq!(transport.connect(name).err(), Some(error));
 
     // The name is claimed exclusively.
@@ -129,43 +158,50 @@ pub fn check_transport(transport: &dyn Transport, name: &str, stranger: &UserId)
     let second = transport.listen(name).err();
     assert_eq!(second, Some(Error::AlreadyExists), "the name was shared");
 
-    // The listener learns who is calling.
+    // The listener learns who is calling, and tells callers apart.
     let pair = || {
         let client = transport.connect(name).expect("connect");
         let (server, caller) = listener.accept().expect("accept");
         (client, server, caller)
     };
     let (client, server, me) = pair();
-    assert_ne!(&me, stranger, "pass a user other than the current one");
+    let _other = as_another_user(name).expect("connect as another user");
+    let (_, other) = listener.accept().expect("accept another user");
+    assert_ne!(other, me, "two users were reported as one");
 
-    // Lines travel both ways, up to the limit.
+    // Lines travel both ways, up to the limit. The reader runs on its own
+    // thread: a real pipe stops taking bytes nobody reads.
     let longest = "a".repeat(MAX_LINE_BYTES - 1);
-    client.write_line("ping").expect("write");
-    client.write_line(&longest).expect("write the longest line");
+    thread::scope(|scope| {
+        let reader = scope.spawn(|| [server.read_line(), server.read_line()]);
+        client.write_line("ping").expect("write");
+        client.write_line(&longest).expect("write the longest line");
+        let read = reader.join().expect("reader");
+        assert_eq!(read, [Ok(Some("ping".to_string())), Ok(Some(longest))]);
+    });
     server.write_line("pong").expect("write back");
-    assert_eq!(server.read_line(), Ok(Some("ping".to_string())));
-    assert_eq!(server.read_line(), Ok(Some(longest)));
     assert_eq!(client.read_line(), Ok(Some("pong".to_string())));
 
     // A line over the limit is refused, and so is everything after it.
     let oversized = [vec![b'a'; MAX_LINE_BYTES], b"{\"smuggled\":1}\n".to_vec()].concat();
     thread::scope(|scope| {
-        // On its own thread: a real pipe stops taking bytes nobody reads.
         scope.spawn(|| client.raw().write_all(&oversized));
         assert_eq!(server.read_line(), Err(Error::LineTooLong));
         assert_eq!(server.read_line(), Err(Error::LineTooLong));
         server.close();
     });
 
-    // A silent peer cannot hold a reader for ever, and loses nothing.
+    // A silent peer cannot hold a reader for ever, and what it had sent of a
+    // line is not lost.
     let (client, server, _) = pair();
-    server.set_read_timeout(Some(PAUSE));
+    server.set_read_timeout(Some(PAUSE)).expect("set timeout");
+    client.raw().write_all(b"half a ").expect("write half");
     assert_eq!(server.read_line(), Err(Error::TimedOut));
-    client.write_line("late").expect("write");
-    assert_eq!(server.read_line(), Ok(Some("late".to_string())));
+    client.write_line("line").expect("write the rest");
+    assert_eq!(server.read_line(), Ok(Some("half a line".to_string())));
 
     // Closing ends a read waiting on another thread, and the peer sees it.
-    server.set_read_timeout(None);
+    server.set_read_timeout(None).expect("clear timeout");
     thread::scope(|scope| {
         let reader = scope.spawn(|| server.read_line());
         thread::sleep(PAUSE);
@@ -175,9 +211,9 @@ pub fn check_transport(transport: &dyn Transport, name: &str, stranger: &UserId)
     assert_eq!(client.read_line(), Ok(None));
 
     // Narrowing refuses everyone but the owner, and still admits the owner.
-    listener.restrict_to(stranger).expect("restrict");
-    refused(Error::PermissionDenied);
-    listener.restrict_to(&me).expect("restrict to the caller");
+    listener.restrict_to(&me).expect("restrict to the owner");
+    let stranger = as_another_user(name).err();
+    assert_eq!(stranger, Some(Error::PermissionDenied), "not narrowed");
     let (_client, _server, caller) = pair();
     assert_eq!(caller, me);
 

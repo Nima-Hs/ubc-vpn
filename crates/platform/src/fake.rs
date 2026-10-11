@@ -434,6 +434,12 @@ impl RawConnection for PipeEnd {
         Ok(())
     }
 
+    /// Nothing to set: the fake takes every byte at once, so a write never
+    /// waits.
+    fn set_write_timeout(&self, _timeout: Option<Duration>) -> Result<()> {
+        Ok(())
+    }
+
     fn close(&self) {
         for half in [&self.incoming, &self.outgoing] {
             lock(&half.state).closed = true;
@@ -473,7 +479,8 @@ mod tests {
         let fake = Fake::new();
         suite::check_routes(&fake, TUNNEL);
         suite::check_dns(&fake, TUNNEL);
-        suite::check_transport(&fake, "suite", &user("stranger"));
+        let as_stranger = |name: &str| fake.connect_as(name, &user("stranger"));
+        suite::check_transport(&fake, "suite", &as_stranger);
         assert_eq!(fake.applied(), Applied::default());
         assert!(fake.state().listeners.is_empty());
     }

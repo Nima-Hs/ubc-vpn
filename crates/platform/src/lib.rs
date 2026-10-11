@@ -76,7 +76,9 @@ pub enum Error {
     AlreadyExists,
     /// A line was longer than [`MAX_LINE_BYTES`]. Drop the connection.
     LineTooLong,
-    /// Nothing arrived within the read timeout. Nothing was lost.
+    /// A whole line did not arrive within the read timeout, or the peer did
+    /// not take a line within the write timeout. What a read had received so
+    /// far is kept; a write that timed out closes the connection.
     TimedOut,
     /// The connection or listener was closed, by this side or the other.
     Closed,
@@ -275,10 +277,10 @@ impl fmt::Display for UserId {
 impl FromStr for UserId {
     type Err = Error;
 
-    /// Reads back a value written with `to_string`. Refuses an empty string
-    /// and any whitespace or control character.
+    /// Reads back a value written with `to_string`. Accepts printable ASCII
+    /// only, with no spaces, so no two values can look alike.
     fn from_str(s: &str) -> Result<Self> {
-        if s.is_empty() || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        if s.is_empty() || !s.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(Error::Failed("not a user identity".to_string()));
         }
         Ok(Self(s.to_string()))
@@ -341,15 +343,21 @@ pub trait RawConnection: Send + Sync {
     /// passes first.
     fn read(&self, buf: &mut [u8]) -> Result<usize>;
 
-    /// Sends all of `bytes`.
+    /// Sends all of `bytes`. Fails with [`Error::TimedOut`] when the peer
+    /// has not taken them all within the write timeout.
     fn write_all(&self, bytes: &[u8]) -> Result<()>;
 
     /// Sets how long each later [`RawConnection::read`] waits; `None` waits
-    /// for ever.
+    /// for ever. Never called with zero.
     fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()>;
 
-    /// Closes both directions. A `read` waiting on another thread returns
-    /// promptly, with any result. Closing twice is fine.
+    /// Sets how long each later [`RawConnection::write_all`] may take as a
+    /// whole; `None` waits for ever. Never called with zero.
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<()>;
+
+    /// Closes both directions. A `read` or `write_all` waiting on another
+    /// thread returns promptly, with any result, and one started afterwards
+    /// returns at once. Closing twice is fine.
     fn close(&self);
 }
 
@@ -361,7 +369,8 @@ pub struct Connection {
     raw: Box<dyn RawConnection>,
     reading: Mutex<Reading>,
     writing: Mutex<()>,
-    timeout: Mutex<Option<Duration>>,
+    read_timeout: Mutex<Option<Duration>>,
+    write_timeout: Mutex<Option<Duration>>,
     closed: AtomicBool,
 }
 
@@ -376,6 +385,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Refuses a timeout of zero, which could only ever fail.
+fn nonzero(timeout: Option<Duration>) -> Result<Option<Duration>> {
+    match timeout {
+        Some(Duration::ZERO) => Err(Error::Failed("a timeout cannot be zero".to_string())),
+        timeout => Ok(timeout),
+    }
+}
+
 impl Connection {
     /// Wraps an implementation's bytes. Every [`Transport`] and [`Listener`]
     /// hands out connections made here, so none can skip the line rules.
@@ -384,7 +401,8 @@ impl Connection {
             raw,
             reading: Mutex::default(),
             writing: Mutex::default(),
-            timeout: Mutex::default(),
+            read_timeout: Mutex::default(),
+            write_timeout: Mutex::default(),
             closed: AtomicBool::new(false),
         }
     }
@@ -393,16 +411,23 @@ impl Connection {
     /// when the peer closed the connection.
     ///
     /// A line longer than [`MAX_LINE_BYTES`], newline included, fails with
-    /// [`Error::LineTooLong`] without being buffered, and so does every read
-    /// after it: the rest of that line is never mistaken for a message.
+    /// [`Error::LineTooLong`]: at most the limit is buffered before it is
+    /// refused, and nothing beyond. Every read after it fails the same way,
+    /// so the rest of that line is never mistaken for a message.
+    ///
     /// Fails with [`Error::TimedOut`] when no whole line arrives within the
-    /// read timeout, and with [`Error::Closed`] after [`Connection::close`].
+    /// read timeout; the part that did arrive is kept for the next call.
+    /// Fails with [`Error::Closed`] after [`Connection::close`], even when
+    /// lines had already arrived.
     pub fn read_line(&self) -> Result<Option<String>> {
         let mut reading = lock(&self.reading);
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::Closed);
+        }
         if reading.too_long {
             return Err(Error::LineTooLong);
         }
-        let deadline = lock(&self.timeout).map(|timeout| Instant::now() + timeout);
+        let deadline = lock(&self.read_timeout).map(|timeout| Instant::now() + timeout);
         let mut searched = 0;
         loop {
             let unsearched = &reading.pending[searched..];
@@ -446,27 +471,44 @@ impl Connection {
 
     /// Sends one line, whole: lines from other threads go before or after it,
     /// never inside it. Refuses a line that is too long or contains a
-    /// newline, and sends nothing in that case. Any other failure closes the
-    /// connection, because part of the line may have been sent.
+    /// newline, and sends nothing in that case. Any other failure, including
+    /// [`Error::TimedOut`] when the peer does not take the line within the
+    /// write timeout, closes the connection, because part of the line may
+    /// have been sent.
     pub fn write_line(&self, line: &str) -> Result<()> {
         let bytes = encode_line(line)?;
         let _writing = lock(&self.writing);
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Closed);
         }
-        self.raw.write_all(&bytes).inspect_err(|_| self.close())
+        let timeout = *lock(&self.write_timeout);
+        let ready = self.raw.set_write_timeout(timeout);
+        let sent = ready.and_then(|()| self.raw.write_all(&bytes));
+        sent.inspect_err(|_| self.close())
     }
 
     /// Limits how long each later [`Connection::read_line`] waits for a whole
     /// line, however slowly its bytes arrive. `None`, the default, waits for
-    /// ever. The service sets one so a silent client cannot hold it up.
-    pub fn set_read_timeout(&self, timeout: Option<Duration>) {
-        *lock(&self.timeout) = timeout;
+    /// ever. Zero is refused. The service sets one so a silent client cannot
+    /// hold it up.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        *lock(&self.read_timeout) = nonzero(timeout)?;
+        Ok(())
     }
 
-    /// Closes the connection. A [`Connection::read_line`] waiting on another
-    /// thread returns [`Error::Closed`], and the peer sees the end of the
-    /// stream. Closing twice is fine.
+    /// Limits how long each later [`Connection::write_line`] waits for the
+    /// peer to take the line. `None`, the default, waits for ever. Zero is
+    /// refused. The service sets one so a client that never reads cannot hold
+    /// a writer, and every writer waiting behind it, for ever.
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        *lock(&self.write_timeout) = nonzero(timeout)?;
+        Ok(())
+    }
+
+    /// Closes the connection. A [`Connection::read_line`] or
+    /// [`Connection::write_line`] waiting on another thread returns
+    /// [`Error::Closed`], and the peer sees the end of the stream. Closing
+    /// twice is fine.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.raw.close();
@@ -492,12 +534,16 @@ fn encode_line(line: &str) -> Result<Vec<u8>> {
 }
 
 /// Whether the program runs as the installed product or in dev mode.
+///
+/// Dev mode exists only when the crate is built with the `dev-mode` feature,
+/// which a release build never enables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// The installed service and its clients.
     Installed,
     /// A developer's unprivileged run. Everything lives in per-user places
     /// that can never collide with the installed product's.
+    #[cfg(feature = "dev-mode")]
     Dev,
 }
 
@@ -542,19 +588,27 @@ impl Platform {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Condvar;
     use std::sync::atomic::AtomicUsize;
     use std::thread;
 
     use super::*;
 
     /// A raw connection that plays back `input` at most `step` bytes at a
-    /// time, counts what was taken from it, and keeps what was written.
+    /// time, counts what was taken from it, and keeps what was written. Its
+    /// writes can be made to fail, or to wait as for a peer that never reads.
+    #[derive(Default)]
     struct Script {
         input: Mutex<VecDeque<u8>>,
         step: usize,
         delay: Duration,
         taken: AtomicUsize,
         written: Mutex<Vec<u8>>,
+        write_error: Option<Error>,
+        stalled: bool,
+        write_timeout: Mutex<Option<Duration>>,
+        closed: Mutex<bool>,
+        closing: Condvar,
     }
 
     fn script(input: &[u8], step: usize, delay: Duration) -> Arc<Script> {
@@ -562,9 +616,16 @@ mod tests {
             input: Mutex::new(input.iter().copied().collect()),
             step,
             delay,
-            taken: AtomicUsize::new(0),
-            written: Mutex::default(),
+            ..Script::default()
         })
+    }
+
+    /// A connection whose peer never reads.
+    fn stalled() -> Connection {
+        Connection::new(Box::new(Arc::new(Script {
+            stalled: true,
+            ..Script::default()
+        })))
     }
 
     fn connection(script: &Arc<Script>) -> Connection {
@@ -585,6 +646,22 @@ mod tests {
 
         // One byte at a time, so unguarded writers would interleave.
         fn write_all(&self, bytes: &[u8]) -> Result<()> {
+            if let Some(error) = &self.write_error {
+                return Err(error.clone());
+            }
+            if self.stalled {
+                let timeout = lock(&self.write_timeout).unwrap_or(Duration::from_secs(5));
+                let open = |closed: &mut bool| !*closed;
+                let waited = self
+                    .closing
+                    .wait_timeout_while(lock(&self.closed), timeout, open);
+                let (closed, _) = waited.unwrap();
+                return Err(if *closed {
+                    Error::Closed
+                } else {
+                    Error::TimedOut
+                });
+            }
             for byte in bytes {
                 lock(&self.written).push(*byte);
                 thread::yield_now();
@@ -596,7 +673,83 @@ mod tests {
             Ok(())
         }
 
-        fn close(&self) {}
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+            *lock(&self.write_timeout) = timeout;
+            Ok(())
+        }
+
+        fn close(&self) {
+            *lock(&self.closed) = true;
+            self.closing.notify_all();
+        }
+    }
+
+    // Closing means no more messages, even ones that had already arrived.
+    #[test]
+    fn a_closed_connection_returns_no_buffered_line() {
+        let raw = script(b"first\nsecond\n", usize::MAX, Duration::ZERO);
+        let connection = connection(&raw);
+        assert_eq!(connection.read_line(), Ok(Some("first".to_string())));
+        connection.close();
+        assert_eq!(connection.read_line(), Err(Error::Closed));
+    }
+
+    // Part of a line may have gone out, so nothing more may follow it.
+    #[test]
+    fn a_failed_write_closes_the_connection() {
+        let broken = Error::Failed("broken".to_string());
+        let connection = Connection::new(Box::new(Arc::new(Script {
+            input: Mutex::new(b"waiting\n".iter().copied().collect()),
+            step: usize::MAX,
+            write_error: Some(broken.clone()),
+            ..Script::default()
+        })));
+        assert_eq!(connection.write_line("{}"), Err(broken));
+        assert_eq!(connection.read_line(), Err(Error::Closed));
+        assert_eq!(connection.write_line("{}"), Err(Error::Closed));
+    }
+
+    // Security rule: a client that never reads cannot hold a writer, or the
+    // writers queued behind it, for ever.
+    #[test]
+    fn a_write_nobody_takes_times_out_and_closes() {
+        let connection = stalled();
+        let timeout = Some(Duration::from_millis(50));
+        connection.set_write_timeout(timeout).unwrap();
+        let started = Instant::now();
+        assert_eq!(connection.write_line("{}"), Err(Error::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(2), "not passed on");
+        assert_eq!(connection.write_line("{}"), Err(Error::Closed));
+    }
+
+    #[test]
+    fn close_ends_a_blocked_write_and_those_queued_behind_it() {
+        let connection = stalled();
+        thread::scope(|scope| {
+            let writers = [(); 2].map(|()| scope.spawn(|| connection.write_line("{}")));
+            thread::sleep(Duration::from_millis(50));
+            connection.close();
+            for writer in writers {
+                assert_eq!(writer.join().unwrap(), Err(Error::Closed));
+            }
+        });
+    }
+
+    // A zero timeout could only ever fail, so it is refused, not stored.
+    #[test]
+    fn a_zero_timeout_is_refused() {
+        let connection = connection(&script(b"waiting\n", usize::MAX, Duration::ZERO));
+        let zero = Some(Duration::ZERO);
+        assert!(matches!(
+            connection.set_read_timeout(zero),
+            Err(Error::Failed(_))
+        ));
+        assert!(matches!(
+            connection.set_write_timeout(zero),
+            Err(Error::Failed(_))
+        ));
+        assert_eq!(connection.read_line(), Ok(Some("waiting".to_string())));
+        assert_eq!(connection.write_line("{}"), Ok(()));
     }
 
     // Security rule: the rest of an oversized line is never read as the next
@@ -673,7 +826,8 @@ mod tests {
     fn a_slow_line_times_out_as_a_whole() {
         let raw = script(&[b'a'; 1000], 1, Duration::from_millis(5));
         let connection = connection(&raw);
-        connection.set_read_timeout(Some(Duration::from_millis(50)));
+        let timeout = Some(Duration::from_millis(50));
+        connection.set_read_timeout(timeout).unwrap();
         assert_eq!(connection.read_line(), Err(Error::TimedOut));
         assert!(raw.taken.load(Ordering::SeqCst) < 100);
     }
@@ -693,7 +847,20 @@ mod tests {
         let id: UserId = "S-1-5-21-1-2-3-1001".parse().unwrap();
         assert_eq!(id.to_string().parse::<UserId>().unwrap(), id);
         assert_ne!("1001".parse::<UserId>(), "01001".parse::<UserId>());
-        for odd in ["", " 1001", "1001\n", "10 01", "1001\0", "1001\u{a0}"] {
+        // Empty, spaces, controls, no-break space, zero-width space, a
+        // right-to-left override, and full-width digits.
+        let odd = [
+            "",
+            " 1001",
+            "1001\n",
+            "10 01",
+            "1001\0",
+            "1001\u{a0}",
+            "1001\u{200b}",
+            "\u{202e}1001",
+            "\u{ff11}\u{ff10}\u{ff10}\u{ff11}",
+        ];
+        for odd in odd {
             assert!(odd.parse::<UserId>().is_err(), "{odd:?}");
         }
     }
@@ -705,9 +872,9 @@ mod tests {
         use unsupported::Native;
 
         let unsupported = Some(Error::Unsupported);
-        for mode in [Mode::Installed, Mode::Dev] {
-            assert_eq!(Platform::native(mode).err(), unsupported);
-        }
+        assert_eq!(Platform::native(Mode::Installed).err(), unsupported);
+        #[cfg(feature = "dev-mode")]
+        assert_eq!(Platform::native(Mode::Dev).err(), unsupported);
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let physical = PhysicalNetwork {
             interface: "eth0".to_string(),
