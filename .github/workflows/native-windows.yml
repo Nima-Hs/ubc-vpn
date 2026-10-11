@@ -36,6 +36,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build libopenconnect (MSYS2 UCRT64)
         shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
@@ -43,7 +45,7 @@ jobs:
           MSYSTEM: UCRT64
           CHERE_INVOKING: "yes"
         run: |
-          pacman -Sy --noconfirm --needed - < native/windows/packages.txt
+          native/windows/setup.sh
           native/windows/build.sh
 
       - name: Check the manifest
@@ -71,9 +73,13 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "//CN=localhost"
           python fake_server.py cert.pem key.pem 4444 &
           sleep 3
-          # Control: without the build output there is no libopenconnect to load.
-          if PATH="$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4444; then
-            echo "the probe ran with a libopenconnect that is not ours"
+          # Control: without the build output there is no libopenconnect to load,
+          # so the probe cannot start and never prints a version.
+          status=0
+          PATH="$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4444 >control.txt 2>&1 || status=$?
+          cat control.txt
+          if [ "$status" = 0 ] || grep -q '^version' control.txt; then
+            echo "the probe loaded a libopenconnect that is not ours"
             exit 1
           fi
           PATH="$ours:$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4444 | tee probe.txt
@@ -95,6 +101,59 @@ jobs:
           PATH="$ours:$windows" ./target/release/oc-probe.exe connect https://127.0.0.1:4445 testuser testpass | tee connect.txt
           grep -qE '^version  = v9\.21(-|$)' connect.txt
           grep -qx 'RESULT: PASS' connect.txt
+
+      # TEMPORARY, for the review of #7: which configuration paths the bundled
+      # DLLs really look at. Reports only; removed before merge.
+      - name: Investigate embedded search paths
+        continue-on-error: true
+        timeout-minutes: 8
+        working-directory: native/probe
+        run: |
+          windows=/c/Windows/System32:/c/Windows
+          ours=$(cd ../windows/out/bin && pwd)
+          echo "::group::Absolute paths embedded in the DLLs"
+          for dll in "$ours"/*.dll; do
+            LC_ALL=C grep -a -o -E '[A-Za-z]:/[ -~]{4,}|(file://)?/ucrt64/[ -~]+' "$dll" | sort -u | sed "s|^|${dll##*/}: |" || true
+          done
+          echo "::endgroup::"
+
+          # Plant a GnuTLS configuration that turns every TLS version off at the
+          # path embedded in libgnutls-30.dll. If the probe now fails, it was read.
+          mkdir -p /d/M/msys64/ucrt64/etc/gnutls
+          printf '[overrides]\ndisabled-version = tls1.0\ndisabled-version = tls1.1\ndisabled-version = tls1.2\ndisabled-version = tls1.3\n' > /d/M/msys64/ucrt64/etc/gnutls/config
+          python fake_server.py cert.pem key.pem 4448 &
+          sleep 3
+          if PATH="$ours:$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4448 >planted.txt 2>&1; then
+            echo "PLANTED GNUTLS CONFIG: ignored, the probe still passes"
+          else
+            echo "PLANTED GNUTLS CONFIG: honoured, the probe now fails:"
+            tail -20 planted.txt
+          fi
+          rm -rf /d/M
+
+          curl -fsSLo procmon.zip https://download.sysinternals.com/files/ProcessMonitor.zip
+          unzip -q procmon.zip -d procmon
+          trace=$(cygpath -w "$PWD/trace.pml")
+          csv=$(cygpath -w "$PWD/trace.csv")
+          ./procmon/Procmon64.exe //AcceptEula //Quiet //Minimized //BackingFile "$trace" &
+          procmon=$!
+          ./procmon/Procmon64.exe //AcceptEula //WaitForIdle
+          python fake_server.py cert.pem key.pem 4446 &
+          python fake_server.py cert.pem key.pem 4447 &
+          sleep 3
+          PATH="$ours:$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4446 | tail -1 || true
+          PATH="$ours:$windows" ./target/release/oc-probe.exe connect https://127.0.0.1:4447 testuser testpass | tail -1 || true
+          ./procmon/Procmon64.exe //AcceptEula //Terminate
+          wait "$procmon" || true
+          ./procmon/Procmon64.exe //AcceptEula //OpenLog "$trace" //SaveAs "$csv"
+          ls -l trace.csv
+          grep -a '"oc-probe.exe"' trace.csv | awk -F'","' '{print $4 " | " $5 " | " $6}' | sort | uniq -c > probe-trace.txt || true
+          echo "::group::Configuration-like paths the probe touched"
+          grep -i -E 'ucrt64|msys64|pkcs11|\\etc\\|gnutls|locale|catalog|\.conf|[A-Z]:\\M\\' probe-trace.txt | head -300 || true
+          echo "::endgroup::"
+          echo "::group::Files the probe touched outside C:\\Windows"
+          grep -v -E '\| (HK|C:\\Windows)' probe-trace.txt | grep -E '\| [A-Za-z]:' | head -300 || true
+          echo "::endgroup::"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
