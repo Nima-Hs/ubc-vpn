@@ -15,7 +15,7 @@ It is an open-source app with a GUI, installed from a release file, for Windows,
 | Routing | Transparent: once connected, every program reaches the chosen subnets with no per-program setup |
 | GUI | Electron |
 | Privilege | A small installed service holds the admin rights; the GUI and CLI run as the user |
-| Control | Only the owner, the first user to open the app after install, may control the service |
+| Control | Only the owner, the first user to run the app or the CLI after install, may control the service |
 | Channel | Named pipe (Windows) or Unix socket (macOS, Linux), JSON messages |
 | Login | Done by an unprivileged program; the service receives only a session cookie |
 | CLI | A small one: `login`, `connect`, `disconnect`, `status` |
@@ -55,7 +55,7 @@ flowchart LR
 2. The client reads the gateway address and certificate pin from the service's policy file, sends the username and password to that gateway only, and completes MFA.
 3. The gateway returns a session cookie. The client passes it to the service over the channel.
 4. The service connects with the cookie, checking the gateway against its own copy of the pin.
-5. The service creates the tunnel device, adds routes for the chosen subnets only, and sets DNS for the chosen domains only.
+5. The service creates the tunnel device, pins a route to the gateway through the physical network, adds routes for the chosen subnets only, and sets DNS for the chosen domains only.
 6. The service verifies the result and reports "connected". If it cannot confirm the routes are right, it reports failure and tears everything down.
 
 ## Security model
@@ -110,6 +110,8 @@ Consequences we accept:
 TypeScript, React, Vite (through `electron-vite`), Tailwind CSS with shadcn/ui components, Motion for animation, zustand for state, pnpm for packages. Tests use Vitest and Playwright; Biome lints and formats.
 
 The interface runs sandboxed, loads only local files, and reaches the service through a small fixed set of functions. Fonts and icons are bundled so the app looks the same everywhere.
+
+The look is a clean dark theme, and dark is the default. Every colour, size, radius and motion value comes from one set of design tokens, and every screen is built from one shared set of components, so buttons, inputs and panels look and behave the same everywhere. A screen never styles a control by hand.
 
 ## Install, updates and releases
 
@@ -183,13 +185,15 @@ An update replaces `policy.json` and never touches `state.json` or `settings.jso
 
 The user chooses the subnets, but the service does not apply them blindly. It refuses:
 
-- any route wider than `/8`, which rules out a default route and the usual ways of splitting one in two;
+- any route wider than `/8`, which rules out a default route and the usual ways of splitting one in two. This guards against mistakes; it does not cap how much a long list of routes covers in total;
 - any IPv6 route;
+- any route that touches a loopback, link-local, multicast or reserved range;
+- more than 256 subnets or 256 DNS domains;
 - anything outside the policy's allow-list, when the policy has one.
 
 A refused route fails the connection with a clear reason. Nothing is applied partially.
 
-A chosen subnet may contain the gateway itself; UBC's gateway sits inside a campus range users will want. So that traffic to the gateway never loops into its own tunnel, the service first adds a route for the one address the tunnel is connected to, through the physical network, and keeps it there for the life of the connection. It decides which network is physical when the tunnel is created and never re-derives it from a table that already contains the tunnel.
+A chosen subnet may contain the gateway itself; UBC's gateway sits inside a campus range users will want. So that traffic to the gateway never loops into its own tunnel, the service first adds a route for the one address the tunnel is connected to, through the physical network, and keeps it there for the life of the connection. It decides which network is physical when the tunnel is created and never re-derives it from a table that already contains the tunnel. When the physical network changes, the tunnel is no longer usable: the service tears everything down and reconnects from a clean state.
 
 ### Who the owner is
 
@@ -207,10 +211,10 @@ This works the same way on all three OSes, and does not depend on which account 
 The app never handles the cookie, and never talks to the gateway. It runs the CLI and relays prompts:
 
 1. The app starts `ubc-vpn connect --json`.
-2. The CLI takes the username from settings and the password from the keyring when they are saved, and asks for whatever is missing.
+2. The CLI takes the username from settings and the password from the keyring when they are saved, and asks for whatever is missing. A saved password is tried once: if the gateway rejects it, the CLI deletes it from the keyring and reports `wrong_password`, so it is never sent twice. After a successful login the CLI saves the password when the settings ask for that.
 3. Each question is one JSON line on the CLI's standard output: `{"type":"prompt","id":1,"kind":"password","label":"Password"}`. `kind` is `username`, `password`, `code` or `text`.
 4. The app answers on the CLI's standard input: `{"type":"answer","id":1,"value":"..."}`, or `{"type":"cancel"}` to stop.
-5. When the gateway accepts the login, the CLI sends the service a `connect` request carrying the cookie and the chosen routes, over the channel.
+5. When the gateway accepts the login, the CLI sends the service a `connect` request carrying the cookie, the chosen subnets and the chosen DNS domains, over the channel.
 6. The CLI ends with one final line and exits: `{"type":"done"}`, or `{"type":"error","code":"wrong_password","message":"..."}`. Error codes include `wrong_password`, `pin_mismatch`, `cancelled`, `gateway_unreachable`, `route_refused` and `service_unavailable`.
 
 From then on the app learns the connection state from the events the service pushes on the app's own channel connection. `ubc-vpn login` does steps 2 to 4 only and reports whether the credentials work, without connecting.

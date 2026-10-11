@@ -1,0 +1,4 @@
+# Where `cargo test` writes the TypeScript types generated from crates/core.
+# CI fails if the committed files differ from what the Rust types produce.
+[env]
+TS_RS_EXPORT_DIR = { value = "app/src/shared/protocol", relative = true }
