@@ -573,10 +573,15 @@ fn log_lines_are_level_limited_scrubbed_and_redacted() {
         };
         let mut prompts = Prompts::new(&mut ask);
         let session = engine.login(&gateway, &mut prompts, &Cancel::new(), &sink);
+        // The service's sink is a different one: it has never seen the cookie.
+        let (service_sink, service_lines) = capture(max);
         let (tx, _rx) = channel();
-        let tunnel = engine.open(&gateway, &session.unwrap(), &Cancel::new(), tx, sink);
+        let session = session.unwrap();
+        let tunnel = engine.open(&gateway, &session, &Cancel::new(), tx, service_sink);
         assert!(tunnel.is_ok());
-        lines.lock().unwrap().clone()
+        let mut all = lines.lock().unwrap().clone();
+        all.extend(service_lines.lock().unwrap().clone());
+        all
     };
 
     let info = run(LogLevel::Info);
