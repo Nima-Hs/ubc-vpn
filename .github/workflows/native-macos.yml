@@ -77,8 +77,12 @@ jobs:
           tar -xzf "$ARTIFACT.tar.gz" -C "$APP" --strip-components 1
           cat "$APP/manifest.json"
           sw_vers
-          # For the record: which of these Homebrew has on this machine.
-          brew list --versions openconnect gnutls nettle gmp || true
+          # For the record: Homebrew's copies on this machine and the macOS they need.
+          for lib in /opt/homebrew/lib/lib{openconnect,gnutls,nettle,hogweed,gmp}.dylib; do
+            if [ -e "$lib" ]; then
+              echo "$lib: macOS $(otool -l "$lib" | awk '$1 == "minos" { print $2; exit }')"
+            fi
+          done
       - name: Build the probe against it
         working-directory: native/probe
         env:
