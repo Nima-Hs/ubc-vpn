@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::{Pin, Policy, PolicyError};
@@ -17,8 +18,9 @@ use ubc_vpn_core::redact::{Secret, redact_line};
 
 use crate::fake::{FakeEngine, Script};
 use crate::{
-    Cancel, CloseMode, DEBUG_LINES, Gateway, LogLevel, LogSink, LoginEngine, LoginError, Prompt,
-    Prompts, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent, check_gateway_addr,
+    Cancel, CloseMode, DEBUG_LINES, Gateway, LogLevel, LogSink, LoginEngine, LoginError,
+    MIN_HIDDEN_LEN, Prompt, Prompts, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent,
+    check_gateway_addr,
 };
 
 const USER: &str = "alice";
@@ -98,6 +100,17 @@ fn open(engine: &FakeEngine, pins: &[Pin], session: &Session) -> (Opened, Receiv
     let (tx, rx) = channel();
     let result = engine.open(&gateway(pins), session, &Cancel::new(), tx, LogSink::none());
     (result, rx)
+}
+
+/// Runs `work` on another thread and fails if it has not finished in ten
+/// seconds, so a lost wake-up fails the test run and does not hang it.
+fn within_time<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = channel();
+    thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("the call panicked or stayed blocked")
 }
 
 fn drain(events: &Receiver<TunnelEvent>) -> Vec<TunnelEvent> {
@@ -292,30 +305,60 @@ fn a_login_waiting_for_mfa_can_be_cancelled_from_another_thread() {
         let mut prompts = Prompts::new(&mut ask);
         worker.login(&gateway(&[pin('A')]), &mut prompts, &stop, &LogSink::none())
     });
-    engine.wait_until_blocked();
-    cancel.cancel();
-    assert_eq!(waiting.join().unwrap(), Err(LoginError::Cancelled));
+    let result = within_time(move || {
+        engine.wait_until_blocked();
+        cancel.cancel();
+        waiting.join().unwrap()
+    });
+    assert_eq!(result, Err(LoginError::Cancelled));
+}
+
+fn counting_hook(runs: &Arc<AtomicUsize>) -> impl Fn() + Send + Sync + 'static {
+    let runs = Arc::clone(runs);
+    move || {
+        runs.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[test]
 fn cancel_hooks_run_once_and_at_once_if_already_cancelled() {
     let runs = Arc::new(AtomicUsize::new(0));
-    let hook = |runs: &Arc<AtomicUsize>| {
-        let runs = Arc::clone(runs);
-        move || {
-            runs.fetch_add(1, Ordering::SeqCst);
-        }
-    };
     let cancel = Cancel::new();
-    cancel.on_cancel(hook(&runs));
+    let _armed = cancel.on_cancel(counting_hook(&runs));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     assert!(!cancel.is_cancelled());
     cancel.clone().cancel();
     cancel.cancel();
     assert!(cancel.is_cancelled());
     assert_eq!(runs.load(Ordering::SeqCst), 1);
-    cancel.on_cancel(hook(&runs));
+    let _late = cancel.on_cancel(counting_hook(&runs));
     assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+// Security rule: a hook cannot fire after its guard is dropped, so a cancel
+// that arrives after a call has returned touches nothing the call left.
+#[test]
+fn a_cancel_hook_is_disarmed_when_its_guard_is_dropped() {
+    let (dropped, kept) = (Arc::default(), Arc::default());
+    let cancel = Cancel::new();
+    let guard = cancel.on_cancel(counting_hook(&dropped));
+    let _kept = cancel.on_cancel(counting_hook(&kept));
+    drop(guard);
+    cancel.cancel();
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    assert_eq!(kept.load(Ordering::SeqCst), 1);
+
+    // The fake keeps its hook only while a call is inside it: cancelling
+    // after `open` has returned leaves the open tunnel alone.
+    let engine = engine();
+    let session = session(&engine);
+    let cancel = Cancel::new();
+    let (tx, events) = channel();
+    let gateway = gateway(&[pin('A')]);
+    let tunnel = engine.open(&gateway, &session, &cancel, tx, LogSink::none());
+    cancel.cancel();
+    assert!(tunnel.is_ok() && engine.tunnel_is_open());
+    assert!(drain(&events).is_empty());
 }
 
 // ---- Tunnel ----
@@ -393,6 +436,35 @@ fn a_tunnel_refuses_an_address_no_gateway_can_have() {
     assert_eq!(
         ErrorCode::from(TunnelError::BadAddress),
         ErrorCode::BadRequest
+    );
+
+    // It comes before everything else: with the gateway unreachable, a bad
+    // address is still refused as such, so nothing was contacted.
+    let engine = self::engine();
+    let loopback = Session {
+        gateway_addr: Ipv4Addr::LOCALHOST,
+        ..self::session(&engine)
+    };
+    engine.set_reachable(false);
+    let (result, _events) = open(&engine, &[pin('X')], &loopback);
+    assert_eq!(result.err(), Some(TunnelError::BadAddress));
+}
+
+#[test]
+fn a_cancel_set_before_open_stops_it_at_once() {
+    let engine = engine();
+    let session = session(&engine);
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let (tx, events) = channel();
+    let gateway = gateway(&[pin('A')]);
+    let result = engine.open(&gateway, &session, &cancel, tx, LogSink::none());
+    assert_eq!(result.err(), Some(TunnelError::Cancelled));
+    assert!(!engine.tunnel_is_open());
+    assert!(drain(&events).is_empty());
+    assert_eq!(
+        ErrorCode::from(TunnelError::Cancelled),
+        ErrorCode::EngineFailed
     );
 }
 
@@ -507,8 +579,14 @@ fn held_open(
     let opening = thread::spawn(move || {
         worker.open(&gateway(&[pin('A')]), &session, &stop, tx, LogSink::none())
     });
-    engine.wait_until_blocked();
+    let waiter = engine.clone();
+    within_time(move || waiter.wait_until_blocked());
     (opening, rx)
+}
+
+/// Waits for a held call to return, failing if it stays blocked.
+fn finish<T: Send + 'static>(call: thread::JoinHandle<T>) -> T {
+    within_time(move || call.join().unwrap())
 }
 
 #[test]
@@ -517,7 +595,7 @@ fn opening_can_be_cancelled_from_another_thread() {
     let cancel = Cancel::new();
     let (opening, events) = held_open(&engine, &cancel);
     cancel.cancel();
-    let result = opening.join().unwrap();
+    let result = finish(opening);
     assert_eq!(result.err(), Some(TunnelError::Cancelled));
     assert!(!engine.tunnel_is_open());
     assert!(drain(&events).is_empty());
@@ -529,19 +607,19 @@ fn a_held_open_sees_the_gateway_as_it_is_when_released() {
     let (opening, _events) = held_open(&engine, &Cancel::new());
     engine.expire_session();
     engine.release();
-    let result = opening.join().unwrap();
+    let result = finish(opening);
     assert_eq!(result.err(), Some(TunnelError::LoginNeeded));
 
     let (opening, _events) = held_open(&engine, &Cancel::new());
     engine.set_reachable(false);
     engine.release();
-    let result = opening.join().unwrap();
+    let result = finish(opening);
     assert_eq!(result.err(), Some(TunnelError::GatewayUnreachable));
 
     engine.set_reachable(true);
     let (opening, _events) = held_open(&engine, &Cancel::new());
     engine.release();
-    assert!(opening.join().unwrap().is_ok());
+    assert!(finish(opening).is_ok());
 }
 
 // ---- Secrets and logs ----
@@ -590,8 +668,11 @@ fn log_lines_are_level_limited_scrubbed_and_redacted() {
     assert!(info.iter().all(|(level, _)| *level <= LogLevel::Info));
 
     let debug = run(LogLevel::Debug);
+    // The fake echoes the cookie and every answer at debug level.
     for (_, line) in &debug {
-        assert!(!line.contains(COOKIE), "{line:?} leaks the cookie");
+        for secret in [COOKIE, PASSWORD, USER] {
+            assert!(!line.contains(secret), "{line:?} leaks {secret:?}");
+        }
     }
     // Debug output exists only where the build allows it, never in release.
     let debug_lines = debug.iter().filter(|(l, _)| *l == LogLevel::Debug);
@@ -616,13 +697,35 @@ fn hidden_values_are_scrubbed_from_marker_free_lines() {
     assert_eq!(redact_line(&line), line, "the line has no marker");
     let clone = sink.clone();
     clone.hide(&Secret::new(COOKIE));
+    // Too short to register: hiding these would shred ordinary lines.
     clone.hide(&Secret::new(""));
+    clone.hide(&Secret::new("1"));
+    clone.hide(&Secret::new("a".repeat(MIN_HIDDEN_LEN - 1)));
     sink.log(LogLevel::Info, &line);
-    sink.log(LogLevel::Info, "plain");
-    let lines = lines.lock().unwrap();
-    assert!(!lines[0].1.contains(COOKIE), "{:?}", lines[0].1);
-    assert!(lines[0].1.starts_with("GET /+CSCOE+/"));
-    assert_eq!(lines[1].1, "plain", "an empty secret hides nothing");
+    sink.log(LogLevel::Info, "plain aaa 192.0.2.1");
+    let seen = lines.lock().unwrap().clone();
+    assert!(!seen[0].1.contains(COOKIE), "{:?}", seen[0].1);
+    assert!(seen[0].1.starts_with("GET /+CSCOE+/"));
+    assert_eq!(seen[1].1, "plain aaa 192.0.2.1");
+
+    // A value of exactly the minimum length is hidden.
+    let shortest = "b".repeat(MIN_HIDDEN_LEN);
+    sink.hide(&Secret::new(shortest.clone()));
+    sink.log(LogLevel::Info, &format!("x {shortest} y"));
+    assert!(!lines.lock().unwrap()[2].1.contains(&shortest));
+}
+
+// Security rule: the text of one `log` call is scrubbed as a whole before it
+// is split into lines, so a hidden value that contains a line break is still
+// removed.
+#[test]
+fn a_hidden_value_that_spans_a_line_break_is_scrubbed() {
+    let (sink, lines) = capture(LogLevel::Info);
+    sink.hide(&Secret::new("first-half\nsecond-half"));
+    sink.log(LogLevel::Info, "before first-half\nsecond-half after");
+    let text = format!("{:?}", lines.lock().unwrap());
+    assert!(!text.contains("first-half") && !text.contains("second-half"));
+    assert!(text.contains("before") && text.contains("after"));
 }
 
 // Security rule: errors and events cannot carry a secret. A `Copy + 'static`
@@ -693,9 +796,38 @@ fn guard_files_hold_only_the_guard_with_private_fields() {
         ("log.rs", include_str!("log.rs")),
     ];
     for (name, source) in files {
-        for banned in ["pub(", "unsafe ", "extern \"", "\nmod ", "Engine for "] {
+        for banned in [
+            "pub(",
+            "unsafe ",
+            "extern \"",
+            "\nmod ",
+            "Engine for ",
+            // A `Default` would be a second way to make a guard.
+            "Default",
+            "fn default",
+        ] {
             assert!(!source.contains(banned), "{name} contains {banned:?}");
         }
+    }
+    // Every public function, so that adding one (a `forget`, say) is a
+    // visible, deliberate change to this list.
+    let allowed = [
+        vec!["from_policy", "host", "pins", "accepts"],
+        vec!["new", "ask", "asked"],
+        vec!["new", "none", "hide", "log"],
+    ];
+    for ((name, source), allowed) in files.iter().zip(allowed) {
+        let found: Vec<&str> = source
+            .split("pub ")
+            .skip(1)
+            .map(|rest| {
+                rest.trim_start_matches("const ")
+                    .trim_start_matches("async ")
+            })
+            .filter_map(|rest| rest.strip_prefix("fn "))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .collect();
+        assert_eq!(found, allowed, "public functions of {name}");
     }
     let field = |source: &str, field: &str| source.contains(&format!("\n    {field}: "));
     let pub_field = |source: &str, field: &str| source.contains(&format!("pub {field}: "));

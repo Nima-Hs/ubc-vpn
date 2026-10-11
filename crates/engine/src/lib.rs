@@ -49,12 +49,18 @@
 //!   before the library is first used. GnuTLS honours all three.
 //! - Never set a vpnc-script, a CSD wrapper or a proxy. The tunnel device is
 //!   created with a null script; routes and DNS belong to the service.
-//! - Disable IPv6 in the library (`openconnect_disable_ipv6`). v0.1.0 is IPv4
-//!   only.
+//! - Keep to IPv4, which takes two steps. `openconnect_disable_ipv6` only
+//!   stops IPv6 inside the tunnel, and must be called before anything is
+//!   sent. The connection to the gateway still resolves both families, so
+//!   also install `openconnect_override_getaddrinfo` with a callback that
+//!   asks for `AF_INET` only, or fail when the peer turns out to be IPv6.
+//!   Without this a login cannot fill [`Session::gateway_addr`].
 //! - Never enable a software-token mode, an external-browser or
 //!   single-sign-on login, or a client certificate.
 //! - Let one thread own the library handle and make every library call on
-//!   it. Other threads touch only the command pipe.
+//!   it. Other threads touch only the write end of the command pipe from
+//!   `openconnect_setup_cmd_pipe`. On Windows that end is a socket, written
+//!   with `send`.
 //!
 //! **Certificates**
 //!
@@ -68,43 +74,59 @@
 //!
 //! **Login**
 //!
-//! - Map form fields to prompt kinds by field type and name: the text
-//!   field named `username` is the username; the password field named
-//!   `password` is the password; any other password field, and any field the
-//!   library flags as second authentication, is a one-time code; any other
-//!   text field is free text. Skip hidden and ignored fields. Put the form's
-//!   message or error text in [`Prompt::message`].
+//! - Map form fields to prompt kinds by field type and field name only: the
+//!   text field named `username` is the username; the password field named
+//!   `password` is the password; any other password field is a one-time
+//!   code; any other text field is free text. Skip hidden fields and fields
+//!   flagged `OC_FORM_OPT_IGNORE`. Put the form's message or error text in
+//!   [`Prompt::message`].
+//! - Read the cookie with `openconnect_get_cookie` after
+//!   `openconnect_obtain_cookie` succeeds, and register it with
+//!   [`LogSink::hide`] at once.
 //! - Treat a form shown again with its error set as a rejection: ask again
 //!   through [`Prompts::ask`], which stops the login, and never answer from
 //!   memory. Fill each field from one `ask` call and keep no copy of the
 //!   answer.
 //! - Fail with [`LoginError::Failed`] on a form that needs a choice of group
-//!   or realm. UBC selects the MFA method through the username, so group
-//!   selection is out of scope for v0.1.0.
-//! - Register an [`on_cancel`](Cancel::on_cancel) hook that writes the
-//!   library's cancel command to the command pipe, so a login waiting for an
-//!   MFA approval stops at once.
+//!   or realm. Group selection is out of scope for v0.1.0, on the working
+//!   assumption that UBC selects the MFA method through the username. The
+//!   first login probe against the real gateway must confirm this.
+//! - Register an [`on_cancel`](Cancel::on_cancel) hook that writes
+//!   `OC_CMD_CANCEL` to the command pipe, so a login waiting for an MFA
+//!   approval, or a tunnel being opened, stops at once. Hold the returned
+//!   guard only for the duration of that one call and drop it before
+//!   returning, so a late cancel can never write to a live tunnel's pipe or
+//!   to a freed handle.
 //!
 //! **Tunnel**
 //!
 //! - Treat [`Session::gateway_addr`] as untrusted: it comes from an
 //!   unprivileged program. Call [`check_gateway_addr`] before anything else.
-//!   Reach the address through the library's address-resolution override
-//!   while still using the policy's host name for TLS and HTTP, never
-//!   through a URL built from client input. After connecting, check that the
-//!   address the tunnel is connected to equals the session's and report it in
-//!   [`Assigned::gateway_addr`].
+//!   Reach the address through `openconnect_override_getaddrinfo`, with a
+//!   callback that answers with that one address, while still using the
+//!   policy's host name for TLS and HTTP. Never build a URL from client
+//!   input. After connecting, check that the address the tunnel is connected
+//!   to equals the session's and report it in [`Assigned::gateway_addr`].
+//! - Hand the cookie to the library with `openconnect_set_cookie`, after
+//!   registering it with [`LogSink::hide`].
 //! - Make the tunnel side's own auth-form callback cancel. A gateway that
 //!   answers a cookie with a login form has refused the session, which is
 //!   [`TunnelError::LoginNeeded`].
-//! - Stop with the command that matches the [`CloseMode`]: the cancel command
-//!   (`OC_CMD_CANCEL`) for [`CloseMode::LogOff`], which logs the session off
-//!   at the gateway, and the detach command (`OC_CMD_DETACH`) for
-//!   [`CloseMode::KeepSession`], which leaves the cookie valid.
+//! - Start one thread per tunnel to run `openconnect_mainloop`. That thread
+//!   sends the tunnel's one [`TunnelEvent`], and [`Tunnel::close`] and drop
+//!   return only after it has ended and the device is gone. The fake has no
+//!   such thread and cannot show either rule.
+//! - Stop with the command that matches the [`CloseMode`]: `OC_CMD_CANCEL`
+//!   for [`CloseMode::LogOff`], which logs the session off and makes the main
+//!   loop return `-EINTR`; `OC_CMD_DETACH` for [`CloseMode::KeepSession`],
+//!   which leaves the cookie valid and returns `-ECONNABORTED`. Both are
+//!   [`TunnelEvent::Closed`].
+//! - Read every other result of the main loop like this: `-EPERM` (the
+//!   cookie expired) and `-EPIPE` (the gateway ended the session) are
+//!   [`TunnelEvent::LoginNeeded`]; any other negative result is
+//!   [`TunnelEvent::ConnectionLost`].
 //! - Bound the library's own silent reconnects with a short reconnect
-//!   timeout in the main loop, so a dead tunnel is reported as
-//!   [`TunnelEvent::ConnectionLost`] and not hidden. A reconnect the gateway
-//!   refuses is [`TunnelEvent::LoginNeeded`].
+//!   timeout in the main loop, so a dead tunnel is reported and not hidden.
 //! - Never retry after a pin mismatch or a refused session, and never try to
 //!   log in.
 //!
@@ -139,7 +161,9 @@ mod prompts;
 mod tests;
 
 pub use gateway::Gateway;
-pub use log::{DEBUG_LINES, LogLevel, LogSink};
+pub use log::{DEBUG_LINES, LogLevel, LogSink, MIN_HIDDEN_LEN};
+
+type Hooks = (u64, Vec<(u64, Hook)>);
 pub use prompts::{Prompt, Prompts};
 
 type Hook = Box<dyn Fn() + Send + Sync>;
@@ -147,11 +171,17 @@ type Hook = Box<dyn Fn() + Send + Sync>;
 #[derive(Default)]
 struct CancelState {
     cancelled: AtomicBool,
-    hooks: Mutex<Vec<Hook>>,
+    /// The armed hooks, each with the number its guard knows it by.
+    hooks: Mutex<Hooks>,
 }
 
-/// Lets another thread stop one login or one tunnel opening that is in
-/// progress. Clones share one flag. Make a new one for every call.
+/// Lets another thread ask one login or one tunnel opening to stop. Clones
+/// share one flag. Make a new one for every call.
+///
+/// Cancelling is a request, not a guarantee. The call normally returns
+/// `Cancelled` promptly, but it may already have finished its work and
+/// return success instead. A caller that cancelled and still gets a tunnel
+/// must close it, and one that still gets a session must discard it.
 #[derive(Clone, Default)]
 pub struct Cancel(Arc<CancelState>);
 
@@ -161,13 +191,12 @@ impl Cancel {
         Self::default()
     }
 
-    /// Asks the call to stop. Safe from any thread, any number of times. The
-    /// call then returns `Cancelled` promptly, without waiting on the
-    /// gateway.
+    /// Asks the call to stop. Safe from any thread, any number of times,
+    /// before or during the call.
     pub fn cancel(&self) {
         let hooks = self.hooks();
         if !self.0.cancelled.swap(true, Ordering::SeqCst) {
-            hooks.iter().for_each(|hook| hook());
+            hooks.1.iter().for_each(|(_, hook)| hook());
         }
     }
 
@@ -176,22 +205,40 @@ impl Cancel {
         self.0.cancelled.load(Ordering::SeqCst)
     }
 
-    /// For engines: runs `hook` once when the caller cancels, on the
-    /// cancelling thread, or at once if that has already happened. An engine
-    /// blocked inside its library uses this to wake itself, with no polling.
-    /// The hook must be quick and must not call back into this `Cancel`.
-    pub fn on_cancel(&self, hook: impl Fn() + Send + Sync + 'static) {
+    /// For engines: runs `hook` once if the caller cancels while the returned
+    /// guard is alive, on the cancelling thread, or at once if the caller
+    /// already has. An engine blocked inside its library uses this to wake
+    /// itself, with no polling.
+    ///
+    /// Dropping the guard disarms the hook: it will not start afterwards, and
+    /// if it is running the drop waits for it. Hold the guard only for the
+    /// duration of the call, so a late cancel touches nothing. The hook must
+    /// be quick and must not use this `Cancel` or drop the guard.
+    #[must_use = "the hook is disarmed as soon as the guard is dropped"]
+    pub fn on_cancel(&self, hook: impl Fn() + Send + Sync + 'static) -> CancelHook {
         let mut hooks = self.hooks();
+        hooks.0 += 1;
+        let number = hooks.0;
         if self.is_cancelled() {
             drop(hooks);
             hook();
         } else {
-            hooks.push(Box::new(hook));
+            hooks.1.push((number, Box::new(hook)));
         }
+        CancelHook(self.clone(), number)
     }
 
-    fn hooks(&self) -> std::sync::MutexGuard<'_, Vec<Hook>> {
+    fn hooks(&self) -> std::sync::MutexGuard<'_, Hooks> {
         self.0.hooks.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Keeps a [`Cancel::on_cancel`] hook armed. Dropping it disarms the hook.
+pub struct CancelHook(Cancel, u64);
+
+impl Drop for CancelHook {
+    fn drop(&mut self) {
+        self.0.hooks().1.retain(|(number, _)| *number != self.1);
     }
 }
 
@@ -379,8 +426,12 @@ pub enum TunnelEvent {
 /// What closing a tunnel does to the session at the gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseMode {
-    /// Log the session off. The cookie stops working. For when the user
+    /// Log the session off, so the cookie stops working. For when the user
     /// disconnects.
+    ///
+    /// This is best effort. It logs nothing off when the tunnel had already
+    /// ended, and the gateway may never hear it. The service must forget the
+    /// cookie itself and not count on the gateway refusing it.
     LogOff,
     /// Detach and leave the session alive, so the same cookie can open a new
     /// tunnel. For teardown before a reconnect, such as after sleep or a
@@ -399,9 +450,12 @@ pub trait TunnelEngine: Send + Sync {
     /// cookie is sent only after the gateway's key has matched a pin.
     ///
     /// Blocks until the device exists, opening fails, or `cancel` stops it.
-    /// On success the engine has started a thread of its own that runs the
-    /// tunnel until it ends. That thread sends the tunnel's one
-    /// [`TunnelEvent`] on `events`; no event is sent when opening fails.
+    /// A `cancel` that is already set stops it before anything is contacted.
+    /// On success the tunnel runs by itself until it ends, and then sends its
+    /// one [`TunnelEvent`] on `events`; no event is sent when opening fails.
+    ///
+    /// A real engine runs the tunnel on a thread it starts and owns, and the
+    /// event is sent from that thread. The fake starts no thread.
     fn open(
         &self,
         gateway: &Gateway,
@@ -422,8 +476,11 @@ pub trait Tunnel: Send + Sync {
     /// Safe from any thread and more than once. Only the first call on a
     /// live tunnel does anything: it decides the mode and causes
     /// [`TunnelEvent::Closed`]. On a tunnel that has already ended it sends
-    /// nothing. Every call, and a drop, returns only after the engine's
-    /// tunnel thread has ended and the device is gone, so the caller may
-    /// clean up routes or open a new tunnel straight away.
+    /// nothing, whatever the mode.
+    ///
+    /// With a real engine every call, and a drop, returns only after the
+    /// engine's tunnel thread has ended and the device is gone, so the caller
+    /// may clean up routes or open a new tunnel straight away. That is a rule
+    /// for the real engine; the fake has no thread or device to show it.
     fn close(&self, how: CloseMode);
 }

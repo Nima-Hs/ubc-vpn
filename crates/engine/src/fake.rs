@@ -210,7 +210,8 @@ impl FakeEngine {
     /// means the caller cancelled.
     fn pass_gate(&self, cancel: &Cancel) -> bool {
         let shared = Arc::clone(&self.shared);
-        cancel.on_cancel(move || {
+        // Armed only while this call waits; dropped, after `state`, on return.
+        let _armed = cancel.on_cancel(move || {
             // Taking the lock first means a waiter cannot miss the wake-up.
             let _state = shared.lock();
             shared.changed.notify_all();
@@ -259,6 +260,8 @@ impl LoginEngine for FakeEngine {
                 shown.message = message.clone().or(shown.message);
                 let answer = prompts.ask(&shown)?;
                 logs.hide(&answer);
+                // A real library can echo what it posts, with no marker word.
+                logs.log(LogLevel::Debug, &format!("> {}", answer.expose()));
                 accepted &= answer == *wanted;
                 self.shared.lock().answers.push((prompt.kind, answer));
             }

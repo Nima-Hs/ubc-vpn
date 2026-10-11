@@ -20,6 +20,12 @@ use ubc_vpn_core::redact::{REDACTED, Secret, redact_line};
 /// are release builds and must not enable the feature, so either mistake
 /// alone still leaves debug output off. It is off because the library's debug
 /// output holds the session cookie.
+///
+/// Without the feature it is false whatever the build profile:
+///
+/// ```
+/// assert!(cfg!(feature = "debug-logs") || !ubc_vpn_engine::DEBUG_LINES);
+/// ```
 pub const DEBUG_LINES: bool = cfg!(all(any(test, feature = "debug-logs"), debug_assertions));
 
 /// How serious a log line is. Ordered from least to most detail.
@@ -32,6 +38,9 @@ pub enum LogLevel {
     /// Protocol detail. Delivered only where [`DEBUG_LINES`] is true.
     Debug,
 }
+
+/// The shortest value, in bytes, that [`LogSink::hide`] will register.
+pub const MIN_HIDDEN_LEN: usize = 4;
 
 type LogFn = dyn Fn(LogLevel, &str) + Send + Sync;
 
@@ -82,15 +91,23 @@ impl LogSink {
     /// now on and in every clone. Engines register the cookie and each answer
     /// as soon as they hold it. This catches a secret on a line that carries
     /// no marker [`redact_line`] knows.
+    ///
+    /// What it covers is narrow: the exact text of the value, found whole
+    /// inside the text of one [`LogSink::log`] call, line breaks included. It
+    /// does not catch a value split across two calls, or an encoded form of
+    /// it such as base64 or URL escaping. A value shorter than
+    /// [`MIN_HIDDEN_LEN`] bytes is not registered, because removing every
+    /// occurrence of, say, `1` would shred ordinary lines; marker redaction
+    /// still applies to it.
     pub fn hide(&self, secret: &Secret) {
-        if !secret.expose().is_empty() {
+        if secret.expose().len() >= MIN_HIDDEN_LEN {
             self.hidden().push(secret.clone());
         }
     }
 
-    /// For engines: reports raw output. It is filtered by level, scrubbed of
-    /// hidden values, split into lines and redacted before the caller sees
-    /// it.
+    /// For engines: reports raw output. It is filtered by level and scrubbed
+    /// of hidden values as a whole, then split into lines and redacted before
+    /// the caller sees it.
     pub fn log(&self, level: LogLevel, text: &str) {
         if level > self.max {
             return;
