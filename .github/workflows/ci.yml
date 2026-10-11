@@ -31,6 +31,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: rm -rf app/src/shared/protocol
       - run: cargo test --locked --workspace
+      # Some rules only exist in release builds, such as dropping the VPN
+      # library's debug output, so their tests must run in release mode too.
+      - name: Release-mode tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --locked --workspace --release
       - name: Generated TypeScript types match the Rust types
         if: matrix.os == 'ubuntu-latest'
         run: |
