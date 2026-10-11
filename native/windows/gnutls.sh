@@ -21,6 +21,19 @@ mkdir -p "$gnutls" "$build"
 curl -fsSL -o "$gnutls/$tarball" "$GNUTLS_URL"
 [ "$(sha256 "$gnutls/$tarball")" = "$(locked_sha sources.lock "$tarball")" ] ||
     die "$tarball does not have the SHA-256 in sources.lock"
+
+# The release must also carry a signature by the GnuTLS maintainer whose key is
+# in keys/ (Zoltan Fridrich; the key expires on 2027-01-01). Releases have a
+# second signature by another maintainer, which is not checked.
+SIGNER=5D46CB0F763405A7053556F47A75A648B3F9220C
+curl -fsSL -o "$build/$tarball.sig" "$GNUTLS_URL.sig"
+mkdir "$build/gnupg"
+gpg --homedir "$build/gnupg" --no-permission-warning --batch --quiet --import "$here/keys/gnutls-release.asc"
+gpg --homedir "$build/gnupg" --no-permission-warning --batch --status-fd 1 \
+    --verify "$build/$tarball.sig" "$gnutls/$tarball" 2>/dev/null |
+    grep -q "^\[GNUPG:\] VALIDSIG $SIGNER " ||
+    die "$tarball is not signed by $SIGNER"
+
 tar -xf "$gnutls/$tarball" -C "$build"
 cd "$build/gnutls-$GNUTLS_VERSION"
 

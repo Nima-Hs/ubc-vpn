@@ -36,7 +36,7 @@ The `Native library (Windows)` workflow runs the same two scripts on GitHub's Wi
 ## What is pinned
 
 - **OpenConnect.** `build.sh` names the commit that tag `v9.21` points to and stops if the tag has moved. The build is made from the archive of that commit, with the one patch in `patches/`.
-- **GnuTLS.** `common.sh` names the release and `sources.lock` its SHA-256. It is the release the macOS build uses.
+- **GnuTLS.** `common.sh` names the release and `sources.lock` its SHA-256. `gnutls.sh` also requires the signature of a GnuTLS maintainer, whose key is in `keys/`. It is the release the macOS build uses.
 - **The compiler and the libraries.** `packages.lock` lists every MinGW package file with its SHA-256. `setup.sh` downloads exactly those files from `repo.msys2.org`, which keeps old versions, checks them and installs them. `build.sh` stops if the installed MinGW packages are not exactly the locked ones.
 - **The build tools.** `tools.lock` does the same for autoconf, automake, libtool, make, patch, perl, git and what they need. `build.sh` stops if one is missing or at another version.
 - **The MSYS2 source packages.** `sources.lock` lists each one with its SHA-256.
@@ -52,7 +52,7 @@ MSYS2's GnuTLS was traced reading `D:\M\msys64\ucrt64\etc\gnutls\config`, a path
 
 `gnutls.sh` removes both, and what led to them:
 
-- **The configuration file is compiled out.** GnuTLS takes its path from `--with-system-priority-file`, which defaults to `<prefix>/etc/gnutls/config`. Given an empty value, as here, GnuTLS is built without the feature. No path is chosen, so there is none to protect.
+- **The configuration file is compiled out.** GnuTLS takes its path from `--with-system-priority-file`, which defaults to `<prefix>/etc/gnutls/config`. Given an empty value, as here, GnuTLS is built without the feature: it reads no configuration file, not even one named in the environment. No path is chosen, so there is none to protect. The macOS build keeps the file, at `/etc/gnutls/config`, which only root can write there.
 - **PKCS#11 is compiled out** with `--without-p11-kit`. The `pkcs11.conf` path is fixed in GnuTLS's PKCS#11 code, and p11-kit has its own module folders; with the option none of that code is built and `libp11-kit` is not needed. We give up smart-card and token support, which the app does not use.
 - **Message translation is off** (`--disable-nls`), so the library does not look for a `locale` folder.
 - **Nothing optional is linked**: no IDN, compression, TPM or DANE, and GnuTLS's own copies of libtasn1 and libunistring are used. That leaves Nettle and GMP as its only dependencies.
@@ -64,8 +64,8 @@ Nettle and GMP stay as MSYS2 packages. They are arithmetic libraries: the string
 The workflow runs these on every build output, reused GnuTLS or not. The scripts are in `tests/`.
 
 - **Probe and connect.** [`../probe`](../README.md) must pass in both modes, loading DLLs only from the output and Windows.
-- **Planted files** (`planted-files.sh`). Creates every location the old build read, and a few more, with a GnuTLS configuration that turns all TLS versions off and PKCS#11 module lists that name a marker DLL. The probe must still pass in both modes and the marker must not be loaded. The same files are then tried on MSYS2's stock GnuTLS (`control.sh` unpacks it from the packages in `control.lock`; it is never installed or shipped), and that run must fail. Without it the test would prove nothing.
-- **File trace** (`trace.sh`). Runs the probe under Process Monitor and lists every path it touches outside its own folder and `C:\Windows`. Each must match a rule in `trace-allow.txt`.
+- **Planted files** (`planted-files.sh`). Creates every location the old build read, and a few more, with a GnuTLS configuration that turns all TLS versions off and PKCS#11 module lists that name a marker DLL. The probe must still pass in both modes and the marker must not be loaded. A configuration named by `GNUTLS_SYSTEM_PRIORITY_FILE` must be ignored too. The same files are then tried on MSYS2's stock GnuTLS (`control.sh` unpacks it from the packages in `control.lock`; it is never installed or shipped), and those runs must fail. Without them the test would prove nothing.
+- **File trace** (`trace.sh`). Runs the probe under Process Monitor and lists every path it touches outside its own folder and `C:\Windows`. Each must match a rule in `trace-allow.txt`. Today it touches none, so the file has no rules.
 - **String scan** (`scan-strings.sh`). Searches every DLL for absolute paths and for `ucrt64`, `msys64`, `/etc/`, `\etc\` and `pkcs11`. Each hit must match a rule in `strings-allow.txt`, with the reason it is harmless.
 
 `manifest.json` is written with `"shippable": false`. The workflow's last step before the upload (`approve.sh`) sets it to `true`, and only runs if every test passed on that same output. Anything that consumes the output must refuse it unless the flag is `true`.
@@ -92,6 +92,6 @@ The build removes the paths; these remain the job of the program that loads the 
 
 - Install the DLLs in a folder only administrators can write, and its parent likewise. libxml2 looks for a catalogue at `..\etc\xml\catalog` relative to its own DLL if a document ever asks for one.
 - Load them from that folder only: a full path or `SetDefaultDllDirectories`, never the current directory or `PATH`.
-- Start with a clean environment. GnuTLS still obeys `GNUTLS_SYSTEM_PRIORITY_FILE` (a configuration file), `SSLKEYLOGFILE` (writes session keys to a file) and `GNUTLS_DEBUG_LEVEL`; remove all three before loading it.
+- Start with a clean environment. GnuTLS still obeys `SSLKEYLOGFILE` (writes session keys to a file) and `GNUTLS_DEBUG_LEVEL`; remove both before loading it. This build ignores `GNUTLS_SYSTEM_PRIORITY_FILE`, and the planted-file test checks that, but remove it as well.
 - Set `TEMP` and `TMP` to a folder only administrators can write before calling `openconnect_setup_cmd_pipe()`. OpenConnect makes a short-lived socket file there, and falls back to `C:\Windows\Temp`, `C:\Temp` and the current folder.
 - Load Wintun from a full path as well.

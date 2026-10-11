@@ -62,12 +62,24 @@ echo "--- Before planting: both the output and the control must work"
 run "$ours" probe || fail "the output does not pass the probe"
 run "$control" probe || fail "the control does not pass the probe, so it cannot show anything"
 
-echo "--- Planting"
 # A GnuTLS configuration that turns every TLS version off: any handshake by a
 # library that reads it fails.
+hostile=("[overrides]" "disabled-version = tls1.0" "disabled-version = tls1.1"
+    "disabled-version = tls1.2" "disabled-version = tls1.3")
+
+echo "--- A configuration named by the environment: ignored by the output, obeyed by the control"
+plant "$here/work/control/hostile-config" "${hostile[@]}"
+named=$(cygpath -w "$here/work/control/hostile-config")
+GNUTLS_SYSTEM_PRIORITY_FILE=$named run "$ours" probe ||
+    fail "the output obeys GNUTLS_SYSTEM_PRIORITY_FILE"
+if GNUTLS_SYSTEM_PRIORITY_FILE=$named run "$control" probe; then
+    fail "the control ignores GNUTLS_SYSTEM_PRIORITY_FILE, so the check above shows nothing"
+fi
+echo "the output passes; the control fails: $(grep 'SSL connection failure' run.txt | head -1)"
+
+echo "--- Planting where the stock libraries look"
 for file in /d/M/msys64/ucrt64/etc/gnutls/config /c/etc/gnutls/config "$drive/etc/gnutls/config"; do
-    plant "$file" "[overrides]" "disabled-version = tls1.0" "disabled-version = tls1.1" \
-        "disabled-version = tls1.2" "disabled-version = tls1.3"
+    plant "$file" "${hostile[@]}"
 done
 # PKCS#11 module lists, in GnuTLS's old format and in p11-kit's, naming the marker.
 for file in /c/etc/gnutls/pkcs11.conf "$drive/etc/gnutls/pkcs11.conf"; do
@@ -87,15 +99,6 @@ run "$ours" connect testuser testpass || fail "the output's connect fails with t
 grep -qx 'RESULT: PASS' run.txt || fail "the output's connect did not pass"
 [ ! -e "$marker.loaded" ] || fail "the output loaded the planted PKCS#11 module"
 echo "probe and connect pass; the planted module was not loaded"
-
-echo "--- For the record: does the output obey GNUTLS_SYSTEM_PRIORITY_FILE?"
-# Not a failure either way. The README tells the service to clear the variable;
-# this shows whether that still matters.
-if GNUTLS_SYSTEM_PRIORITY_FILE='C:\etc\gnutls\config' run "$ours" probe; then
-    echo "no: the probe passes with the variable naming the planted configuration"
-else
-    echo "yes: $(grep 'SSL connection failure' run.txt | head -1)"
-fi
 
 echo "--- The control must be broken by it"
 if run "$control" probe; then
