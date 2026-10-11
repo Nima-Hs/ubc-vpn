@@ -40,11 +40,11 @@ locked() {
     [ -n "$pkgsha" ] || die "$1 $version is installed but is not the version in packages.lock; run setup.sh"
 }
 
-while read -r _ file; do
-    name=${file%-any.pkg.tar.zst} # name-pkgver-pkgrel
-    name=${name%-*-*}
-    locked "$name"
-done <"$here/packages.lock"
+# Every installed MinGW package must be a locked one, and the other way round:
+# an extra package could supply a header or a static library unnoticed.
+diff <(pacman -Q | sed -n 's/^\(mingw-w64-ucrt-x86_64-[^ ]*\) \(.*\)$/\1-\2-any.pkg.tar.zst/p' | sort) \
+    <(cut -d' ' -f3 "$here/packages.lock" | sort) ||
+    die "the installed MinGW packages (<) are not those in packages.lock (>); run setup.sh"
 
 # --- Source: the tag must still point at the pinned commit -------------------
 
@@ -72,6 +72,12 @@ done
 make -j"$(nproc)" libopenconnect.la
 cp .libs/libopenconnect-5.dll "$out/bin/"
 cp COPYING.LGPL "$out/licenses/openconnect/"
+
+# licences.txt takes the MinGW headers under ZPL-2.1. That holds only while no
+# header from their LGPL part, the DDK, is compiled in.
+included=$(find . -name '*.Plo' -exec cat {} +)
+grep -q '/include/windows\.h' <<<"$included" || die "the compiler's dependency files are missing"
+! grep -q '/ddk/' <<<"$included" || die "a DDK header is compiled in; review the headers entry in licences.txt"
 cd "$here"
 
 # --- Dependencies: follow the import tables, starting from our DLL -----------
@@ -101,19 +107,28 @@ done
 
 # --- Per MSYS2 package: licence, licence text and source ---------------------
 
-# Sets srcfile and srcsha. Downloads the MSYS2 source package the installed
-# binary was built from into out/source, and checks its signature.
-fetch_source() {
-    local pkgbase=$1
+# Sets pkgbase, srcfile and srcsha: the MSYS2 source package the installed
+# binary was built from, which must be listed in sources.lock.
+locked_source() {
+    pkgbase=$(sed -n '/^%BASE%$/{n;p}' "/var/lib/pacman/local/$pkg-$version/desc")
+    [ -n "$pkgbase" ] || die "cannot tell which source package $pkg was built from"
     srcfile=$pkgbase-$version.src.tar.zst
+    srcsha=$(awk -v f="$srcfile" '$2 == f { print $1 }' "$here/sources.lock")
+    [ -n "$srcsha" ] || die "$srcfile, the source of $pkg, is not in sources.lock"
+}
+
+# Downloads that source package into out/source, and checks it against
+# sources.lock and against the signature of an MSYS2 packager.
+fetch_source() {
     curl -fsSL -o "$work/sources/$srcfile" "$SOURCES/$srcfile" &&
         curl -fsSL -o "$work/sources/$srcfile.sig" "$SOURCES/$srcfile.sig" ||
         die "cannot download the source of $pkg from $SOURCES/$srcfile"
+    [ "$(sha256 "$work/sources/$srcfile")" = "$srcsha" ] ||
+        die "$srcfile does not have the SHA-256 in sources.lock"
     gpg --homedir "$work/gnupg" --no-permission-warning --batch --quiet --verify \
         "$work/sources/$srcfile.sig" "$work/sources/$srcfile" ||
         die "the signature of $srcfile is not from an MSYS2 packager"
     mv "$work/sources/$srcfile" "$out/source/"
-    srcsha=$(sha256 "$out/source/$srcfile")
 }
 
 # Copies a package's licence text to out/licenses: the files the package
@@ -127,7 +142,7 @@ copy_licence_text() {
     done < <(pacman -Qlq "$pkg" | grep "^$PREFIX/share/licenses/.*[^/]\$" || true)
     [ -z "$(ls -A "$dest")" ] || return 0
 
-    [ -n "${srcfile:-}" ] || die "$pkg installs no licence text"
+    [ -f "$out/source/$srcfile" ] || die "$pkg installs no licence text"
     mkdir -p "$work/unpacked/$pkg"
     tar -xf "$out/source/$srcfile" -C "$work/unpacked/$pkg"
     for inner in "$work/unpacked/$pkg"/*/*.tar.*; do
@@ -158,15 +173,16 @@ for pkg in $(printf '%s\n' "${!files_of[@]}" | sort) $STATIC_RUNTIME; do
     [ -n "$licence" ] || die "$pkg is not in licences.txt; review its licence before it ships"
     declared=$(LC_ALL=C pacman -Qi "$pkg" | sed -n 's/^Licenses *: //p' | sed 's/spdx://g; s/   */, /g')
 
-    srcfile=""
-    detail='"linked": "statically, into libopenconnect-5.dll"'
+    locked_source
     if [ -n "${files_of[$pkg]:-}" ]; then
-        pkgbase=$(sed -n '/^%BASE%$/{n;p}' "/var/lib/pacman/local/$pkg-$version/desc")
-        [ -n "$pkgbase" ] || die "cannot tell which source package $pkg was built from"
-        fetch_source "$pkgbase"
+        fetch_source
         # shellcheck disable=SC2086 # the file list is split on purpose
         detail=$(printf '"source": {"pkgbase": "%s", "file": "source/%s", "url": "%s", "sha256": "%s"},\n      "files": [%s\n      ]' \
             "$pkgbase" "$srcfile" "$SOURCES/$srcfile" "$srcsha" "$(json_files ${files_of[$pkg]})")
+    else
+        # The static runtime's source is recorded but not shipped.
+        detail=$(printf '"source": {"pkgbase": "%s", "shipped": false, "url": "%s", "sha256": "%s"},\n      "linked": "statically, into libopenconnect-5.dll"' \
+            "$pkgbase" "$SOURCES/$srcfile" "$srcsha")
     fi
     copy_licence_text
 
@@ -190,6 +206,13 @@ patches=$(cd "$out" && printf '"%s", ' source/*.patch)
 cat >"$out/manifest.json" <<EOF
 {
   "target": "x86_64-w64-mingw32 (MSYS2 UCRT64)",
+  "shippable": false,
+  "blockers": [
+    {
+      "issue": "https://github.com/Nima-Hs/ubc-vpn/issues/13",
+      "reason": "The bundled GnuTLS reads its configuration from a path ordinary users can create."
+    }
+  ],
   "components": [
     {
       "name": "openconnect",

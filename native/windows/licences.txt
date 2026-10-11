@@ -21,5 +21,8 @@ mingw-w64-ucrt-x86_64-zstd             BSD-3-Clause
 
 # The compiler's runtime, linked statically into libopenconnect-5.dll.
 mingw-w64-ucrt-x86_64-crt              ZPL-2.1
+# MSYS2 declares the headers as "ZPL-2.1 AND LGPL-2.1-or-later"; the LGPL part
+# is the DDK headers. build.sh reads the compiler's dependency files and stops
+# if any ddk/ header was compiled in, so ZPL-2.1 alone applies.
 mingw-w64-ucrt-x86_64-headers          ZPL-2.1
 mingw-w64-ucrt-x86_64-gcc              GPL-3.0-or-later WITH GCC-exception-3.1

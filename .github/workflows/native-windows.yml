@@ -55,6 +55,8 @@ jobs:
           # Every DLL is listed, and Wintun is not bundled.
           for dll in bin/*.dll; do grep -qF "\"$dll\"" manifest.json; done
           test ! -e bin/wintun.dll
+          # Not safe to ship until issue #13 is fixed. Changing this must be a visible diff.
+          python -c "import json; assert json.load(open('manifest.json'))['shippable'] is False"
 
       - name: Build the probe (MSVC target)
         working-directory: native/probe
@@ -104,6 +106,6 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: libopenconnect-windows-x64
+          name: libopenconnect-windows-x64-unsafe
           path: native/windows/out
           if-no-files-found: error
