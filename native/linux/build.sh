@@ -11,6 +11,12 @@ LIBXML2_VERSION=2.15.4
 LIBXML2_SHA256=98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
 LIBXML2_URL=https://download.gnome.org/sources/libxml2/2.15/libxml2-$LIBXML2_VERSION.tar.xz
 
+# Build packages are installed from this dated snapshot of the Ubuntu
+# archive, so every build gets the same versions.
+APT_SNAPSHOT=20261011T000000Z
+BUILD_PACKAGES="autoconf automake curl gcc git libc6-dev libgnutls28-dev
+    libtool make pkg-config xz-utils zlib1g-dev"
+
 # The only shared libraries the result may need. All four have the same
 # soname on every supported system.
 ALLOWED_NEEDED="libc.so.6 libm.so.6 libgnutls.so.30 libz.so.1"
@@ -25,11 +31,35 @@ mkdir -p "$1"
 out=$(cd "$1" && pwd)
 work=$(mktemp -d)
 
+fail() { echo "error: $*" >&2; exit 1; }
+
+# ca-certificates is the one thing taken from the live archive: the snapshot
+# service is https only and the base image cannot verify its certificate
+# without it.
 export DEBIAN_FRONTEND=noninteractive
+installed_before=$(dpkg-query -W -f '${Package} ${Version}\n' | sort)
 apt-get update
-apt-get install -y --no-install-recommends \
-    autoconf automake ca-certificates curl gcc git libc6-dev libgnutls28-dev \
-    libtool make pkg-config xz-utils zlib1g-dev
+apt-get install -y --no-install-recommends ca-certificates
+mapfile -t live_packages < <(comm -13 <(echo "$installed_before") \
+    <(dpkg-query -W -f '${Package} ${Version}\n' | sort))
+
+# Everything else comes from the snapshot, and only its package lists are kept.
+snapshot_url="https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT"
+cat > /etc/apt/sources.list <<EOF
+deb $snapshot_url jammy main
+deb $snapshot_url jammy-updates main
+deb $snapshot_url jammy-security main
+EOF
+rm -rf /var/lib/apt/lists/*
+apt-get update
+uris=$(apt-get install -y --no-install-recommends --print-uris $BUILD_PACKAGES \
+    | grep -o "^'[^']*'" | tr -d "'" || true)
+[ -n "$uris" ] || fail "apt listed no packages to download"
+echo "Packages to download:"
+echo "$uris"
+stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
+[ -z "$stray" ] || fail "these packages are not from the snapshot: $stray"
+apt-get install -y --no-install-recommends $BUILD_PACKAGES
 
 mkdir -p "$out/lib/pkgconfig" "$out/include" "$out/source" \
     "$out/licenses/openconnect" "$out/licenses/json-parser" "$out/licenses/libxml2"
@@ -96,8 +126,6 @@ sed -e 's|^prefix=.*|prefix=${pcfiledir}/../..|' \
 
 # Checks on the result.
 lib="$out/lib/libopenconnect.so.5"
-fail() { echo "error: $*" >&2; exit 1; }
-
 needed=$(objdump -p "$lib" | awk '$1 == "NEEDED" { print $2 }')
 [ -n "$needed" ] || fail "no NEEDED entries were read from $lib"
 echo "NEEDED:" $needed
@@ -140,6 +168,8 @@ cat > "$out/manifest.json" <<EOF
     "repository_commit": "$SOURCE_COMMIT",
     "script": "source/build.sh",
     "image": "$BUILD_IMAGE",
+    "apt_snapshot": "$snapshot_url",
+    "packages_from_live_archive": [$(json_list "${live_packages[@]}")],
     "time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "packages": {
 $packages
