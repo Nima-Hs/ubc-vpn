@@ -1,11 +1,17 @@
 [package]
 name = "ubc-vpn-engine"
-description = "Wrapper around libopenconnect for UBC VPN"
+description = "The VPN engine interface for UBC VPN, with a fake for tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[features]
+# The real engine, a binding to libopenconnect, will live behind this feature.
+# It is off by default and enables nothing yet, so ordinary builds and tests
+# need no native library.
+libopenconnect = []
 
 [dependencies]
 ubc-vpn-core.workspace = true
