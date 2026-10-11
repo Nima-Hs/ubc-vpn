@@ -26,28 +26,6 @@ defaults:
     shell: bash
 
 jobs:
-  # TEMPORARY: evidence for which libraries to bundle. Removed before review.
-  survey:
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          for image in ubuntu:26.04 debian:13; do
-            echo "== $image"
-            docker run --rm "$image" sh -c '
-              apt-get update -qq >/dev/null
-              apt-get install -y -qq --no-install-recommends libgnutls28-dev libxml2-dev liblz4-dev libp11-kit-dev nettle-dev zlib1g-dev >/dev/null 2>&1
-              ldconfig -p | grep -E "libgnutls\.|libxml2|liblz4|libp11-kit|libnettle|libhogweed|libgmp\.|libz\." | grep -v "\.so$" | sort
-              dpkg -S libgnutls.so libxml2.so liblz4.so libp11-kit.so libz.so | grep -v dev
-              ldd --version | head -n 1'
-          done
-          echo "== fedora:rawhide"
-          docker run --rm fedora:rawhide sh -c '
-            cat /etc/fedora-release
-            dnf install -y -q gnutls libxml2 lz4-libs p11-kit nettle zlib >/dev/null 2>&1
-            ldconfig -p | grep -E "libgnutls\.|libxml2|liblz4|libp11-kit|libnettle|libhogweed|libgmp\.|libz\." | sort
-            rpm -q gnutls libxml2 lz4-libs p11-kit nettle glibc
-            rpm -q --whatprovides zlib'
-
   build:
     name: Build
     runs-on: ubuntu-latest
