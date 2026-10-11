@@ -13,6 +13,8 @@ repos:
         args: [--markdown-linebreak-ext=md]
       - id: end-of-file-fixer
       - id: check-yaml
+        # pnpm writes its lockfile as more than one YAML document.
+        exclude: ^app/pnpm-lock\.yaml$
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files
