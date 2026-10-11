@@ -22,7 +22,9 @@ Cargo does not manage native libraries, build and packaging tools, GitHub Action
 Our own code is `MIT OR Apache-2.0`. The app is redistributed to users, so every dependency's license must allow that. Do not add a dependency with a copyleft or unknown license without asking first.
 
 - Rust crates are checked by `cargo deny check` against the allow-list in `deny.toml`. Do not widen the list without approval.
-- Approved exception: `libopenconnect` and its native dependencies (LGPL) are bundled. They must stay separate, replaceable library files that are loaded at run time, never statically linked.
+- Approved exception: `libopenconnect` and its native dependencies (LGPL) are bundled. Each LGPL library must stay a separate, replaceable library file that is loaded at run time. Never link an LGPL library statically, into our own programs or into another library.
+- Code under a licence in the `deny.toml` allow-list may be built into `libopenconnect` itself, either because openconnect's own source includes it or because the system library's version differs between distributions. `libopenconnect` stays replaceable, and that code's licence text and exact source still ship.
+- The compiler's own runtime may be linked into a library. Ship its licence text and record where its source comes from.
 - For every bundled LGPL library, each release must ship its license text and the exact source it was built from, including our patches.
 
 ## Updates
