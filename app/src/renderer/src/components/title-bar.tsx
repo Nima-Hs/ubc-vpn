@@ -30,15 +30,15 @@ export function TitleBar({ children }: { children?: ReactNode }) {
     return (
         <header
             className={cn(
-                "drag-region flex h-11 shrink-0 items-center gap-2 pr-1.5",
-                mac ? "pl-20" : "pl-4",
+                "drag-region flex h-11 shrink-0 items-center gap-2 pe-1.5",
+                mac ? "ps-20" : "ps-4",
             )}
         >
             <Mark />
             <span className="shrink-0 whitespace-nowrap font-strong text-label text-text">
                 UBC VPN
             </span>
-            <div className="ml-auto flex items-center gap-1">
+            <div className="ms-auto flex items-center gap-1">
                 {children}
                 {!mac && (
                     <>

@@ -54,6 +54,14 @@ const SCENARIOS: Record<string, LinkState> = {
         link: "ready",
         conn: { state: "connected", tunnel: { ...TUNNEL, subnets: [], dns_domains: [] } },
     },
+    // The count of exactly one, where a careless plural shows.
+    "connected-one": {
+        link: "ready",
+        conn: {
+            state: "connected",
+            tunnel: { ...TUNNEL, subnets: ["203.0.113.0/24"], dns_domains: ["campus.example"] },
+        },
+    },
     disconnecting: { link: "ready", conn: { state: "disconnecting" } },
     "login-needed": { link: "ready", conn: { state: "login_needed" } },
     ...Object.fromEntries(
@@ -62,6 +70,21 @@ const SCENARIOS: Record<string, LinkState> = {
             { link: "ready", conn: { state: "failed", code: code as ErrorCode, message } },
         ]),
     ),
+    // Text the app did not write: another script, an emoji, and a long
+    // run with nowhere to break.
+    "failed-awkward-message": {
+        link: "ready",
+        conn: {
+            state: "failed",
+            code: "engine_failed",
+            message: `Không thể tạo thiết bị đường hầm 🚧 トンネルを開けません ${"/sys/devices/virtual/net".repeat(9)}`,
+        },
+    },
+    "update-needed-long-version": {
+        link: "update_needed",
+        appVersion: "0.1.0",
+        serviceVersion: "0.2.0-nightly.20261011+build.4127",
+    },
     "service-unavailable": { link: "unavailable", reason: "not_running" },
     "service-garbled": { link: "unavailable", reason: "protocol_error" },
     "update-needed": { link: "update_needed", appVersion: "0.1.0", serviceVersion: "0.2.0" },

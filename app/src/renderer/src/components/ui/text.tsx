@@ -16,7 +16,11 @@ const tones = {
 
 /** The largest text on a screen: what the screen is saying, in a few words. */
 export function Heading({ children, className }: { children: ReactNode; className?: string }) {
-    return <h1 className={cn("font-strong text-display text-text", className)}>{children}</h1>;
+    return (
+        <h1 className={cn("text-balance font-strong text-display text-text", className)}>
+            {children}
+        </h1>
+    );
 }
 
 /** A heading for a part of a screen. */

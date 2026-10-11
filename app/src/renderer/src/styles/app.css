@@ -133,11 +133,8 @@
         font-size: var(--type-body-size);
         line-height: var(--type-body-line);
         font-weight: var(--weight-regular);
-        font-synthesis: none;
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
-        /* This is an app, not a page: its chrome is not selectable text. */
-        user-select: none;
         cursor: default;
     }
 

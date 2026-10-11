@@ -55,7 +55,7 @@ export function ConnectionView() {
     const noticeText = notice === null ? null : describeActionError(notice);
 
     return (
-        <main className="flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
+        <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
             <TunnelDiagram tone={copy.tone} className="shrink-0" />
 
             {/* The words change the instant the state does; only their arrival is animated. */}
@@ -72,7 +72,9 @@ export function ConnectionView() {
                 {copy.title}. {copy.body} {noticeText}
             </p>
 
-            <div className="flex min-h-0 flex-1 flex-col">
+            {/* Keeps a minimum height, so when the text is zoomed past what the
+                window can hold, the screen scrolls and the button stays reachable. */}
+            <div className="flex min-h-24 flex-1 flex-col">
                 {tunnel !== null && <TunnelDetails tunnel={tunnel} />}
                 {copy.detail !== undefined && (
                     <Panel

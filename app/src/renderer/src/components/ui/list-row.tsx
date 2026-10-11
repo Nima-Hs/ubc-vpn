@@ -31,10 +31,12 @@ export function ListRow({
         >
             <dt className="shrink-0 text-label text-text-secondary">{label}</dt>
             <dd
+                // An address is not a word: translation tools must leave it alone.
+                translate={data ? "no" : undefined}
                 className={cn(
                     "min-w-0 select-text wrap-anywhere text-text",
                     data ? "font-data text-label" : "text-body",
-                    !stacked && "text-right",
+                    !stacked && "text-end",
                 )}
             >
                 {children}

@@ -11,7 +11,8 @@ import { readFileSync } from "node:fs";
 const config = JSON.parse(
     readFileSync(new URL("../allowed-licenses.json", import.meta.url), "utf8"),
 );
-const allowed = new Set(config.allowed);
+const awaiting = new Set(config.awaitingOwnerApproval.licences);
+const allowed = new Set([...config.allowed, ...awaiting]);
 const shippedDev = new Set(config.shippedDevDependencies.packages);
 
 /** Runs `pnpm licenses list` and returns `{ licence: [package, ...] }`. */
@@ -47,6 +48,10 @@ for (const [licence, packages] of Object.entries(list("--dev"))) {
     shipped.push(
         ...packages.filter((pkg) => shippedDev.has(pkg.name)).map((pkg) => ({ licence, pkg })),
     );
+}
+
+for (const { licence, pkg } of shipped.filter((entry) => awaiting.has(entry.licence))) {
+    console.warn(`awaiting the owner's approval: ${pkg.name} is licensed ${licence}`);
 }
 
 const found = new Set(shipped.map(({ pkg }) => pkg.name));

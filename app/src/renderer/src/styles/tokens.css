@@ -97,15 +97,15 @@
 
     /* A short scale: each step is a size, a line height and a weight. */
     --type-caption-size: 0.75rem;
-    --type-caption-line: 1rem;
+    --type-caption-line: 1.34;
     --type-label-size: 0.8125rem;
-    --type-label-line: 1.125rem;
+    --type-label-line: 1.39;
     --type-body-size: 0.875rem;
-    --type-body-line: 1.3125rem;
+    --type-body-line: 1.5;
     --type-title-size: 1rem;
-    --type-title-line: 1.375rem;
+    --type-title-line: 1.375;
     --type-display-size: 1.875rem;
-    --type-display-line: 2.125rem;
+    --type-display-line: 1.14;
     --type-display-tracking: -0.022em;
     --weight-regular: 400;
     --weight-medium: 500;

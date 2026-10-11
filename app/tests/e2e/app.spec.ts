@@ -33,6 +33,19 @@ test.beforeAll(async () => {
         env: { ...process.env, UBC_VPN_DEMO_STEP_MS: "600" },
     });
     page = await app.firstWindow();
+    // The real mouse pointer hovers whatever is under it. Put the window
+    // somewhere the pointer is not, so no screenshot shows a stray hover.
+    await app.evaluate(({ BrowserWindow, screen }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        if (window === undefined) {
+            return;
+        }
+        const pointer = screen.getCursorScreenPoint();
+        const area = screen.getDisplayNearestPoint(pointer).workArea;
+        const [width = 0] = window.getSize();
+        const leftHalf = pointer.x < area.x + area.width / 2;
+        window.setPosition(leftHalf ? area.x + area.width - width - 40 : area.x + 40, area.y + 40);
+    });
     // A blocked script, style or request shows up here, as does any error.
     page.on("console", (message) => {
         if (message.type() === "error" || message.type() === "warning") {
@@ -149,6 +162,56 @@ test("the component gallery", async () => {
     await page.getByRole("button", { name: "Delete route" }).last().hover();
     await shoot("components-hover");
     await page.getByRole("button", { name: "Connection" }).click();
+});
+
+test("the keyboard enlarges, shrinks and resets the interface", async () => {
+    const view = () =>
+        app.evaluate(({ BrowserWindow }) => {
+            const window = BrowserWindow.getAllWindows()[0];
+            return {
+                zoom: window?.webContents.getZoomFactor(),
+                width: window?.getContentSize()[0],
+            };
+        });
+    // Sent through the app, as a real key press is: the shortcut is handled
+    // before the page sees the key.
+    const chord = (key: string) =>
+        app.evaluate(({ BrowserWindow }, keyCode) => {
+            BrowserWindow.getAllWindows()[0]?.webContents.sendInputEvent({
+                type: "keyDown",
+                keyCode,
+                modifiers: [process.platform === "darwin" ? "meta" : "control"],
+            });
+        }, key);
+    await scenario("disconnected");
+    const start = await view();
+    expect(start.zoom).toBe(1);
+
+    await chord("=");
+    await chord("=");
+    await expect.poll(async () => (await view()).zoom).toBe(1.25);
+    // The window grows with the text, so nothing is cut off.
+    expect((await view()).width).toBeGreaterThan(start.width ?? 0);
+    await expect(action()).toBeInViewport({ ratio: 1 });
+
+    await chord("-");
+    await expect.poll(async () => (await view()).zoom).toBe(1.1);
+    await chord("0");
+    await expect.poll(view).toEqual(start);
+});
+
+test("a connection in progress does not trap the user", async () => {
+    await scenario("connecting");
+    await expect(action()).toHaveAttribute("aria-busy", "true");
+    // The window can still be put away, and the app can still be quit.
+    await page.evaluate(() => window.ubcVpn.hideWindow());
+    await expect
+        .poll(() =>
+            app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible()),
+        )
+        .toBe(false);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.show());
+    await scenario("disconnected");
 });
 
 test("closing the window keeps the app in the tray", async () => {

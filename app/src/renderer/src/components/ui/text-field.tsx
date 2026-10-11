@@ -22,6 +22,9 @@ export function TextField({ label, hint, error, className, ...props }: TextField
             </label>
             <input
                 id={id}
+                // What goes in these fields is not prose, and not for a password manager.
+                spellCheck={false}
+                autoComplete="off"
                 aria-invalid={error !== undefined || undefined}
                 aria-describedby={note === undefined ? undefined : noteId}
                 className={cn(

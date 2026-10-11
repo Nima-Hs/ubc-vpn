@@ -63,8 +63,8 @@ const FAILURES: Record<ErrorCode, Failure> = {
         retry: false,
     },
     bad_request: {
-        title: "Couldn't connect",
-        body: `The VPN service did not understand the app's request. ${UPDATE_BOTH}`,
+        title: "Couldn’t connect",
+        body: `The VPN service did not understand the app’s request. ${UPDATE_BOTH}`,
         retry: false,
     },
     route_refused: {
@@ -74,7 +74,7 @@ const FAILURES: Record<ErrorCode, Failure> = {
     },
     pin_mismatch: {
         title: "Connection blocked",
-        body: "The server that answered could not prove it is UBC's VPN, so nothing was sent to it. Try again from another network, and do not connect from this one while this keeps happening.",
+        body: "The server that answered could not prove it is UBC’s VPN, so nothing was sent to it. Try again from another network, and do not connect from this one while this keeps happening.",
         retry: true,
     },
     login_needed: {
@@ -83,8 +83,8 @@ const FAILURES: Record<ErrorCode, Failure> = {
         retry: true,
     },
     gateway_unreachable: {
-        title: "Can't reach UBC",
-        body: "UBC's VPN did not answer. Check your internet connection, then try again.",
+        title: "Can’t reach UBC",
+        body: "UBC’s VPN did not answer. Check your internet connection, then try again.",
         retry: true,
     },
     engine_failed: {
@@ -129,7 +129,7 @@ function describeConn(conn: ConnState): StateCopy {
                 tone: "busy",
                 title: "Connecting",
                 body: "Opening the tunnel and setting up your routes.",
-                action: { kind: "connect", label: "Connecting" },
+                action: { kind: "connect", label: "Connecting…" },
                 working: true,
             };
         case "connected": {
@@ -150,7 +150,7 @@ function describeConn(conn: ConnState): StateCopy {
                 tone: "busy",
                 title: "Disconnecting",
                 body: "Closing the tunnel and removing its routes.",
-                action: { kind: "disconnect", label: "Disconnecting" },
+                action: { kind: "disconnect", label: "Disconnecting…" },
                 working: true,
             };
         case "login_needed":
@@ -197,8 +197,8 @@ export function describe(state: LinkState): StateCopy {
                 title: "Service not running",
                 body:
                     state.reason === "not_running"
-                        ? "UBC VPN's background service is not answering, so the app cannot connect. Restart your computer. If that does not help, install UBC VPN again."
-                        : `Something answered in place of UBC VPN's background service, and the app could not understand it. ${UPDATE_BOTH}`,
+                        ? "UBC VPN’s background service is not answering, so the app cannot connect. Restart your computer. If that does not help, install UBC VPN again."
+                        : `Something answered in place of UBC VPN’s background service, and the app could not understand it. ${UPDATE_BOTH}`,
                 action: { kind: "retry", label: "Check again" },
                 working: false,
             };

@@ -54,6 +54,10 @@ The end-to-end test saves a screenshot of every state to `test-results/screens`,
 
 The interface runs sandboxed with no Node access, loads only the app's own files under a strict Content-Security-Policy, and cannot navigate, open windows, or make a network request. The channel client never logs a line it sends or receives, because a line can hold a session cookie.
 
+The pipe or socket name the app connects to is in [`src/main/channel/endpoint.ts`](src/main/channel/endpoint.ts) and nowhere else. It must equal the name `crates/platform` uses, and is a placeholder until that crate's transports land.
+
+Ctrl or Cmd with plus, minus and zero enlarge, shrink and reset the interface. The window grows with it.
+
 Every word the app shows about the connection is in [`src/shared/copy.ts`](src/shared/copy.ts). The window and the tray both read from it.
 
 ## The design system
@@ -84,4 +88,4 @@ If a screen needs something the components cannot do, change the component or ad
 
 ## Dependencies
 
-Every version is exact, and `pnpm-lock.yaml` is committed. Packages under `dependencies` are shipped in the app; their licences must be on the list in [`allowed-licenses.json`](allowed-licenses.json). Build tools are under `devDependencies`. Electron is there too, as packaging requires, but it is shipped and so is checked as well.
+Every version is exact, and `pnpm-lock.yaml` is committed. Packages under `dependencies` are shipped in the app; their licences must be on the list in [`allowed-licenses.json`](allowed-licenses.json). The fonts' licence, OFL-1.1, is listed there as awaiting the owner's approval: the check passes with a warning until it is approved or removed. Build tools are under `devDependencies`. Electron is there too, as packaging requires, but it is shipped and so is checked as well.

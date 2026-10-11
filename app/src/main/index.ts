@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
 import { app, type BrowserWindow, Menu } from "electron";
-import { defaultChannelPath } from "./channel/endpoint";
+import { serviceChannelPath } from "./channel/endpoint";
 import { Controller } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
@@ -42,7 +42,7 @@ async function start(): Promise<void> {
             });
         };
     } else {
-        link = createServiceLink({ path: defaultChannelPath(), appVersion: app.getVersion() });
+        link = createServiceLink({ path: serviceChannelPath(), appVersion: app.getVersion() });
     }
     const controller = new Controller(link);
 
