@@ -12,6 +12,15 @@ publish.workspace = true
 # It is off by default and enables nothing yet, so ordinary builds and tests
 # need no native library.
 libopenconnect = []
+# The scripted engine in `fake`, for other crates' tests (as a
+# dev-dependency feature) and for the service's dev-mode feature. A release
+# build of the service must never enable it. This crate's own tests always
+# have the fake.
+fake = []
+# Lets debug-level log lines through `LogSink`, and only in builds that also
+# have debug assertions. For development only: the library's debug output
+# holds the session cookie, so a release build must never enable it.
+debug-logs = []
 
 [dependencies]
 ubc-vpn-core.workspace = true

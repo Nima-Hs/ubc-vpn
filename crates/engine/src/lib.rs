@@ -1,11 +1,12 @@
 //! The VPN engine interface.
 //!
 //! An engine speaks the AnyConnect protocol to the gateway. This crate defines
-//! what the rest of the workspace may ask of one, and [`fake`] provides a
-//! scripted engine for tests and for the service's dev mode. The real engine,
-//! a binding to `libopenconnect`, will live behind the `libopenconnect` Cargo
-//! feature. That feature is off by default and enables nothing yet, so
-//! ordinary builds and tests need no native library.
+//! what the rest of the workspace may ask of one. The `fake` module, behind
+//! the `fake` Cargo feature, is a scripted engine for tests and for the
+//! service's dev mode. The real engine, a binding to `libopenconnect`, will
+//! live behind the `libopenconnect` feature. That feature is off by default
+//! and enables nothing yet, so ordinary builds and tests need no native
+//! library.
 //!
 //! There are two capabilities, because they run in two processes:
 //!
@@ -19,14 +20,20 @@
 //!
 //! # What the types enforce
 //!
+//! [`Gateway`], [`Prompts`] and [`LogSink`] each live in a file of their own
+//! with private fields, so not even code inside this crate can get round
+//! them. No engine may ever be added to those three files.
+//!
 //! - **Pins.** Both capabilities take a [`Gateway`], which cannot exist
-//!   without at least one pin. There is no way to accept any certificate.
+//!   without a valid host name and at least one pin. There is no way to
+//!   accept any certificate.
 //! - **No blind retries.** An engine can reach the user only through
 //!   [`Prompts`], which refuses to ask for the username or the password a
 //!   second time and reports [`LoginError::WrongPassword`] instead.
 //! - **Secrets.** Cookies and answers are [`Secret`]s. Errors and events are
-//!   plain enums with no data, so they cannot carry one. Log lines reach the
-//!   caller only through [`LogSink`], which redacts and filters them.
+//!   `Copy` enums, so they cannot own text and cannot carry a secret. Log
+//!   lines reach the caller only through [`LogSink`], which filters them by
+//!   level, removes registered secrets and redacts what is left.
 //! - **Session expiry.** A tunnel that the gateway ends or refuses reports
 //!   "login needed", which is distinct from a network failure. Nothing on the
 //!   tunnel side can prompt, so it cannot log in again.
@@ -35,190 +42,118 @@
 //!
 //! The fake cannot enforce these. The `libopenconnect` binding must:
 //!
-//! - Turn system trust off (`openconnect_set_system_trust(v, 0)`) and make the
-//!   pin check the only judge: the certificate callback accepts a peer only
-//!   when its `pin-sha256:` hash equals one of the [`Gateway`]'s pins, compared
-//!   in full, and anything else is a pin mismatch. Do not hand pins to the
-//!   library for matching; it accepts prefixes.
-//! - For a tunnel, connect to [`Session::gateway_addr`] and accept only
-//!   [`Session::pin`], and only if the service's own [`Gateway`] lists it. Both
-//!   fields come from an unprivileged program and are hints, not authority.
-//! - Never set a vpnc-script, a CSD wrapper or a proxy. The tunnel device is
-//!   created with a null script; routes and DNS belong to the service.
+//! **Process and library setup**
+//!
 //! - Clear `SSLKEYLOGFILE`, `GNUTLS_SYSTEM_PRIORITY_FILE` and
 //!   `GNUTLS_DEBUG_LEVEL` from the environment of the privileged process
 //!   before the library is first used. GnuTLS honours all three.
-//! - Fill each form field from one [`Prompts::ask`] call and keep no copy of
-//!   the answer. When the library shows a form again, ask again; never answer
-//!   from memory.
+//! - Never set a vpnc-script, a CSD wrapper or a proxy. The tunnel device is
+//!   created with a null script; routes and DNS belong to the service.
+//! - Disable IPv6 in the library (`openconnect_disable_ipv6`). v0.1.0 is IPv4
+//!   only.
+//! - Never enable a software-token mode, an external-browser or
+//!   single-sign-on login, or a client certificate.
+//! - Let one thread own the library handle and make every library call on
+//!   it. Other threads touch only the command pipe.
+//!
+//! **Certificates**
+//!
+//! - Turn system trust off (`openconnect_set_system_trust(v, 0)`) and make the
+//!   pin check the only judge: the certificate callback accepts a peer only
+//!   when its `pin-sha256:` hash satisfies [`Gateway::accepts`], and anything
+//!   else is a pin mismatch. Do not hand pins to the library for matching; it
+//!   accepts prefixes.
+//! - Reject inside the certificate callback, so that nothing, the cookie
+//!   least of all, is sent before the pin check has passed.
+//!
+//! **Login**
+//!
+//! - Map form fields to prompt kinds by field type and name: the text
+//!   field named `username` is the username; the password field named
+//!   `password` is the password; any other password field, and any field the
+//!   library flags as second authentication, is a one-time code; any other
+//!   text field is free text. Skip hidden and ignored fields. Put the form's
+//!   message or error text in [`Prompt::message`].
+//! - Treat a form shown again with its error set as a rejection: ask again
+//!   through [`Prompts::ask`], which stops the login, and never answer from
+//!   memory. Fill each field from one `ask` call and keep no copy of the
+//!   answer.
+//! - Fail with [`LoginError::Failed`] on a form that needs a choice of group
+//!   or realm. UBC selects the MFA method through the username, so group
+//!   selection is out of scope for v0.1.0.
+//! - Register an [`on_cancel`](Cancel::on_cancel) hook that writes the
+//!   library's cancel command to the command pipe, so a login waiting for an
+//!   MFA approval stops at once.
+//!
+//! **Tunnel**
+//!
+//! - Treat [`Session::gateway_addr`] as untrusted: it comes from an
+//!   unprivileged program. Call [`check_gateway_addr`] before anything else.
+//!   Reach the address through the library's address-resolution override
+//!   while still using the policy's host name for TLS and HTTP, never
+//!   through a URL built from client input. After connecting, check that the
+//!   address the tunnel is connected to equals the session's and report it in
+//!   [`Assigned::gateway_addr`].
+//! - Make the tunnel side's own auth-form callback cancel. A gateway that
+//!   answers a cookie with a login form has refused the session, which is
+//!   [`TunnelError::LoginNeeded`].
+//! - Stop with the command that matches the [`CloseMode`]: the cancel command
+//!   (`OC_CMD_CANCEL`) for [`CloseMode::LogOff`], which logs the session off
+//!   at the gateway, and the detach command (`OC_CMD_DETACH`) for
+//!   [`CloseMode::KeepSession`], which leaves the cookie valid.
+//! - Bound the library's own silent reconnects with a short reconnect
+//!   timeout in the main loop, so a dead tunnel is reported as
+//!   [`TunnelEvent::ConnectionLost`] and not hidden. A reconnect the gateway
+//!   refuses is [`TunnelEvent::LoginNeeded`].
+//! - Never retry after a pin mismatch or a refused session, and never try to
+//!   log in.
+//!
+//! **Logs**
+//!
 //! - Send every line the library logs through [`LogSink::log`] and nowhere
-//!   else. The library logs the session cookie at debug level, so its debug
-//!   output must be dropped in release builds ([`LogSink`] does this), and it
-//!   must never be asked to dump request or response bodies.
-//! - Never retry after a pin mismatch or a rejected login, and never try to
-//!   log in again from the tunnel side.
-//! - Stay inside v0.1.0: IPv4 only, no external-browser login, no client
-//!   certificates.
+//!   else, and register the cookie and each answer with [`LogSink::hide`] as
+//!   soon as it is held. The library logs the session cookie at debug level,
+//!   so its debug output is dropped in release builds (see
+//!   [`DEBUG_LINES`]), and the library must never be asked to dump request
+//!   or response bodies.
 
 #![cfg_attr(not(feature = "libopenconnect"), forbid(unsafe_code))]
 
 use std::fmt;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
-use ubc_vpn_core::policy::{Pin, Policy, PolicyError};
+use ubc_vpn_core::login::LoginErrorCode;
 use ubc_vpn_core::protocol::ErrorCode;
-use ubc_vpn_core::redact::{Secret, redact_line};
+use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::Ipv4Net;
 
+#[cfg(any(test, feature = "fake"))]
 pub mod fake;
+mod gateway;
+mod log;
+mod prompts;
+#[cfg(test)]
+mod tests;
 
-/// The gateway an engine may talk to: a host name and the pins that identify
-/// it. It always holds at least one pin.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Gateway {
-    host: String,
-    pins: Vec<Pin>,
+pub use gateway::Gateway;
+pub use log::{DEBUG_LINES, LogLevel, LogSink};
+pub use prompts::{Prompt, Prompts};
+
+type Hook = Box<dyn Fn() + Send + Sync>;
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: AtomicBool,
+    hooks: Mutex<Vec<Hook>>,
 }
 
-impl Gateway {
-    /// Takes the gateway from a policy, refusing a policy that is not valid.
-    /// This is the only way to make one, so an engine is never called with a
-    /// bad host name or without pins.
-    pub fn from_policy(policy: &Policy) -> Result<Self, PolicyError> {
-        policy.validate()?;
-        Ok(Self {
-            host: policy.gateway.clone(),
-            pins: policy.pins.clone(),
-        })
-    }
-
-    /// The gateway's host name.
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    /// The pins the gateway's key may match. Never empty.
-    pub fn pins(&self) -> &[Pin] {
-        &self.pins
-    }
-
-    /// Whether `key`, the hash of the key a server presented, matches a pin.
-    /// An engine must refuse a server for which this is false.
-    pub fn accepts(&self, key: &Pin) -> bool {
-        self.pins.contains(key)
-    }
-}
-
-/// How serious a log line is. Ordered from least to most detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
-    /// Something failed.
-    Error,
-    /// Normal progress.
-    Info,
-    /// Protocol detail. Never delivered in release builds.
-    Debug,
-}
-
-/// Where an engine's log lines go.
-///
-/// The caller may rely on every line it receives having been through
-/// [`redact_line`] and being no more detailed than the level it asked for. In
-/// release builds debug lines are dropped whatever was asked for, because the
-/// library's debug output holds the session cookie.
-#[derive(Clone)]
-pub struct LogSink {
-    max: LogLevel,
-    write: Arc<LogFn>,
-}
-
-type LogFn = dyn Fn(LogLevel, &str) + Send + Sync;
-
-impl LogSink {
-    /// Delivers lines up to and including `max` to `write`, one line per call.
-    pub fn new(max: LogLevel, write: impl Fn(LogLevel, &str) + Send + Sync + 'static) -> Self {
-        let max = if cfg!(debug_assertions) {
-            max
-        } else {
-            max.min(LogLevel::Info)
-        };
-        Self {
-            max,
-            write: Arc::new(write),
-        }
-    }
-
-    /// A sink that throws everything away.
-    pub fn none() -> Self {
-        Self::new(LogLevel::Error, |_, _| {})
-    }
-
-    /// For engines: reports raw output. It is split into lines, filtered by
-    /// level and redacted before the caller sees it.
-    pub fn log(&self, level: LogLevel, text: &str) {
-        if level <= self.max {
-            for line in text.lines() {
-                (self.write)(level, &redact_line(line));
-            }
-        }
-    }
-}
-
-/// A question the gateway asks during login.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prompt {
-    /// What kind of answer is wanted.
-    pub kind: PromptKind,
-    /// The gateway's wording.
-    pub label: String,
-}
-
-/// The engine's only way to ask the user something during login.
-///
-/// It wraps the caller's callback and enforces the no-retry rule: the username
-/// and the password are each asked for at most once. A gateway that asks for
-/// either again has rejected the login, so the second request does not reach
-/// the caller and fails with [`LoginError::WrongPassword`]. One-time codes and
-/// free text may be asked for again; each is typed afresh by the user.
-pub struct Prompts<'a> {
-    ask: &'a mut dyn FnMut(&Prompt) -> Option<Secret>,
-    asked: Vec<PromptKind>,
-}
-
-impl<'a> Prompts<'a> {
-    /// Wraps the caller's callback. The callback returns the user's answer,
-    /// or `None` to cancel the login.
-    pub fn new(ask: &'a mut dyn FnMut(&Prompt) -> Option<Secret>) -> Self {
-        Self {
-            ask,
-            asked: Vec::new(),
-        }
-    }
-
-    /// For engines: asks the user one question. An error must be returned
-    /// from the login as it is, without contacting the gateway again.
-    pub fn ask(&mut self, kind: PromptKind, label: &str) -> Result<Secret, LoginError> {
-        let once_only = matches!(kind, PromptKind::Username | PromptKind::Password);
-        if once_only && self.asked.contains(&kind) {
-            return Err(LoginError::WrongPassword);
-        }
-        self.asked.push(kind);
-        let prompt = Prompt {
-            kind,
-            label: label.to_string(),
-        };
-        (self.ask)(&prompt).ok_or(LoginError::Cancelled)
-    }
-}
-
-/// Lets another thread stop a login that is in progress, for example while
-/// it waits for an MFA approval. Clones share one flag.
-#[derive(Debug, Clone, Default)]
-pub struct Cancel(Arc<AtomicBool>);
+/// Lets another thread stop one login or one tunnel opening that is in
+/// progress. Clones share one flag. Make a new one for every call.
+#[derive(Clone, Default)]
+pub struct Cancel(Arc<CancelState>);
 
 impl Cancel {
     /// A flag that is not yet set.
@@ -226,15 +161,37 @@ impl Cancel {
         Self::default()
     }
 
-    /// Asks the login to stop. Safe to call from any thread, any number of
-    /// times.
+    /// Asks the call to stop. Safe from any thread, any number of times. The
+    /// call then returns `Cancelled` promptly, without waiting on the
+    /// gateway.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        let hooks = self.hooks();
+        if !self.0.cancelled.swap(true, Ordering::SeqCst) {
+            hooks.iter().for_each(|hook| hook());
+        }
     }
 
     /// For engines: whether the caller asked to stop.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// For engines: runs `hook` once when the caller cancels, on the
+    /// cancelling thread, or at once if that has already happened. An engine
+    /// blocked inside its library uses this to wake itself, with no polling.
+    /// The hook must be quick and must not call back into this `Cancel`.
+    pub fn on_cancel(&self, hook: impl Fn() + Send + Sync + 'static) {
+        let mut hooks = self.hooks();
+        if self.is_cancelled() {
+            drop(hooks);
+            hook();
+        } else {
+            hooks.push(Box::new(hook));
+        }
+    }
+
+    fn hooks(&self) -> std::sync::MutexGuard<'_, Vec<Hook>> {
+        self.0.hooks.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -246,16 +203,21 @@ pub struct Session {
     pub cookie: Secret,
     /// The address the login actually connected to. A host name may resolve
     /// to several gateways, and the cookie is only good at this one.
+    ///
+    /// On the tunnel side this value arrives from an unprivileged program
+    /// and is a hint, not authority: see [`check_gateway_addr`].
     pub gateway_addr: Ipv4Addr,
-    /// The pin the gateway's key matched during login.
-    pub pin: Pin,
 }
 
 /// Why a login failed. None of these is retried by the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginError {
-    /// The gateway rejected the credentials: it asked again for something
-    /// already answered. Nothing was sent twice.
+    /// The gateway rejected the login: it asked again for something already
+    /// answered. Nothing was sent twice.
+    ///
+    /// This also covers a rejected one-time code, because the gateway simply
+    /// shows the form again and does not say which answer was wrong. Use
+    /// [`Prompts::asked`] to tell whether a code was involved.
     WrongPassword,
     /// The gateway's key matched none of the pins. Nothing was sent to it.
     PinMismatch,
@@ -296,13 +258,14 @@ impl From<LoginError> for LoginErrorCode {
 }
 
 /// Logging in. Used by the unprivileged command-line client.
-pub trait LoginEngine {
+pub trait LoginEngine: Send + Sync {
     /// Logs in to `gateway` and returns the session.
     ///
     /// Blocks until the login succeeds, fails or is cancelled, either by the
     /// prompt callback returning `None` or through `cancel`. The gateway is
     /// checked against the pins before anything is asked or sent. Each answer
-    /// is sent to the gateway at most once.
+    /// is sent to the gateway at most once. A cancelled login never returns
+    /// a session.
     fn login(
         &self,
         gateway: &Gateway,
@@ -322,8 +285,9 @@ pub struct Assigned {
     pub address: Ipv4Addr,
     /// The netmask that goes with `address`.
     pub netmask: Ipv4Addr,
-    /// The gateway address the tunnel is connected to. The service routes
-    /// this one address through the physical network.
+    /// The gateway address the tunnel is connected to, always equal to the
+    /// session's. The service routes this one address through the physical
+    /// network.
     pub gateway_addr: Ipv4Addr,
     /// The DNS servers the gateway offers.
     pub dns: Vec<Ipv4Addr>,
@@ -337,13 +301,18 @@ pub struct Assigned {
 /// Why a tunnel could not be opened. The engine retries none of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelError {
-    /// The gateway's key did not match the session's pin, or that pin is not
-    /// in the service's policy.
+    /// The gateway's key matched none of the service's pins. Nothing was
+    /// sent to it.
     PinMismatch,
     /// The gateway refused the session cookie. The user must log in again.
     LoginNeeded,
     /// The gateway could not be reached.
     GatewayUnreachable,
+    /// The caller cancelled. No device was left behind.
+    Cancelled,
+    /// The session's gateway address is not one a gateway can have. Nothing
+    /// was contacted.
+    BadAddress,
     /// Anything else, such as the tunnel device not being created.
     Failed,
 }
@@ -354,6 +323,8 @@ impl fmt::Display for TunnelError {
             Self::PinMismatch => "The gateway's certificate is not the expected one.",
             Self::LoginNeeded => "The session is no longer valid. Log in again.",
             Self::GatewayUnreachable => "The gateway could not be reached.",
+            Self::Cancelled => "Connecting was cancelled.",
+            Self::BadAddress => "The gateway address is not a usable address.",
             Self::Failed => "The tunnel could not be opened.",
         })
     }
@@ -366,8 +337,33 @@ impl From<TunnelError> for ErrorCode {
         match e {
             TunnelError::PinMismatch => Self::PinMismatch,
             TunnelError::LoginNeeded => Self::LoginNeeded,
-            TunnelError::GatewayUnreachable | TunnelError::Failed => Self::EngineFailed,
+            TunnelError::BadAddress => Self::BadRequest,
+            // Moves to `ErrorCode::GatewayUnreachable` once core has it.
+            TunnelError::GatewayUnreachable => Self::EngineFailed,
+            // The service cancels its own connect and normally reports
+            // "disconnected" instead of an error.
+            TunnelError::Cancelled | TunnelError::Failed => Self::EngineFailed,
         }
+    }
+}
+
+/// Checks a gateway address that came from an unprivileged client before
+/// anything connects to it. Every tunnel engine calls this first.
+///
+/// It refuses addresses no gateway can have: the "this network" block
+/// (`0.0.0.0/8`), loopback, link-local, multicast and broadcast. Such an
+/// address could point the privileged service at a local program. Whatever
+/// passes still has to present a pinned key before the cookie is sent.
+pub fn check_gateway_addr(addr: Ipv4Addr) -> Result<(), TunnelError> {
+    let bad = addr.octets()[0] == 0
+        || addr.is_loopback()
+        || addr.is_link_local()
+        || addr.is_multicast()
+        || addr.is_broadcast();
+    if bad {
+        Err(TunnelError::BadAddress)
+    } else {
+        Ok(())
     }
 }
 
@@ -385,30 +381,54 @@ pub enum TunnelEvent {
     ConnectionLost,
 }
 
+/// What closing a tunnel does to the session at the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseMode {
+    /// Log the session off. The cookie stops working. For when the user
+    /// disconnects.
+    LogOff,
+    /// Detach and leave the session alive, so the same cookie can open a new
+    /// tunnel. For teardown before a reconnect, such as after sleep or a
+    /// network change.
+    KeepSession,
+}
+
 /// Opening tunnels. Used by the privileged service.
-pub trait TunnelEngine {
+pub trait TunnelEngine: Send + Sync {
     /// Connects to the gateway with the session's cookie and creates the
     /// tunnel device, running no script and changing no routes or DNS.
     ///
     /// `gateway` must come from the service's own policy, never from a
-    /// client. Blocks until the device exists or opening fails. After that
-    /// the tunnel runs by itself until it ends, and says how on `events`.
+    /// client. The session does come from a client: its address is checked
+    /// with [`check_gateway_addr`] before anything is contacted, and the
+    /// cookie is sent only after the gateway's key has matched a pin.
+    ///
+    /// Blocks until the device exists, opening fails, or `cancel` stops it.
+    /// On success the engine has started a thread of its own that runs the
+    /// tunnel until it ends. That thread sends the tunnel's one
+    /// [`TunnelEvent`] on `events`; no event is sent when opening fails.
     fn open(
         &self,
         gateway: &Gateway,
         session: &Session,
+        cancel: &Cancel,
         events: Sender<TunnelEvent>,
         logs: LogSink,
     ) -> Result<Box<dyn Tunnel>, TunnelError>;
 }
 
-/// An open tunnel. Dropping it closes it.
+/// An open tunnel. Dropping it closes it with [`CloseMode::KeepSession`].
 pub trait Tunnel: Send + Sync {
     /// What the gateway assigned. Fixed for the life of the tunnel.
     fn assigned(&self) -> &Assigned;
 
-    /// Closes the tunnel and removes its device. Safe to call from any
-    /// thread and more than once; only the first call on a live tunnel does
-    /// anything, and it sends [`TunnelEvent::Closed`].
-    fn close(&self);
+    /// Closes the tunnel and removes its device.
+    ///
+    /// Safe from any thread and more than once. Only the first call on a
+    /// live tunnel does anything: it decides the mode and causes
+    /// [`TunnelEvent::Closed`]. On a tunnel that has already ended it sends
+    /// nothing. Every call, and a drop, returns only after the engine's
+    /// tunnel thread has ended and the device is gone, so the caller may
+    /// clean up routes or open a new tunnel straight away.
+    fn close(&self, how: CloseMode);
 }
