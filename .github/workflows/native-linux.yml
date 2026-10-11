@@ -1,0 +1,145 @@
+name: Native library (Linux)
+
+on:
+  pull_request:
+    paths:
+      - native/linux/**
+      - native/probe/**
+      - .github/workflows/native-linux.yml
+  push:
+    branches: [main]
+    paths:
+      - native/linux/**
+      - native/probe/**
+      - .github/workflows/native-linux.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # TEMPORARY: evidence for which libraries to bundle. Removed before review.
+  survey:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for image in ubuntu:22.04 ubuntu:24.04 debian:12; do
+            echo "== $image"
+            docker run --rm "$image" sh -c '
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq --no-install-recommends libgnutls28-dev libxml2-dev liblz4-dev libp11-kit-dev nettle-dev zlib1g-dev >/dev/null 2>&1
+              ldconfig -p | grep -E "libgnutls\.|libxml2|liblz4|libp11-kit|libnettle|libhogweed|libgmp\.|libz\." | grep -v "\.so$" | sort
+              dpkg -S libgnutls.so.30 libxml2.so.2 liblz4.so.1 libp11-kit.so.0 libz.so.1 | grep -v dev
+              ldd --version | head -n 1'
+          done
+          echo "== fedora:latest"
+          docker run --rm fedora:latest sh -c '
+            cat /etc/fedora-release
+            dnf install -y -q gnutls libxml2 lz4-libs p11-kit nettle zlib >/dev/null 2>&1
+            ldconfig -p | grep -E "libgnutls\.|libxml2|liblz4|libp11-kit|libnettle|libhogweed|libgmp\.|libz\." | sort
+            rpm -q gnutls libxml2 lz4-libs p11-kit nettle glibc
+            rpm -q --whatprovides zlib'
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    # ubuntu:22.04, the oldest supported system.
+    container: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build libopenconnect
+        run: bash native/linux/build.sh out
+      - name: Pack
+        run: tar -C out -czf libopenconnect-linux-x64.tar.gz .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libopenconnect-linux-x64
+          path: libopenconnect-linux-x64.tar.gz
+          if-no-files-found: error
+
+  test:
+    name: Probe
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      EXPECT: v9.21
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-linux-x64
+      - name: Unpack
+        run: mkdir stage && tar -xzf libopenconnect-linux-x64.tar.gz -C stage
+
+      - name: Install the test server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ocserv pkg-config
+          sudo systemctl stop ocserv.socket ocserv.service || true
+      - name: Check that no distribution libopenconnect is installed
+        run: |
+          if ldconfig -p | grep libopenconnect; then exit 1; fi
+
+      # The probe goes in stage/bin and finds the library in stage/lib through
+      # its rpath, the same layout the installed app uses.
+      - name: Build the probe against our library
+        working-directory: native/probe
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/stage/lib/pkgconfig
+          RUSTFLAGS: -C link-arg=-Wl,-rpath,$ORIGIN/../lib
+        run: |
+          rustup toolchain install
+          cargo build --release --locked
+          mkdir ../../stage/bin
+          cp target/release/oc-probe ../../stage/bin/
+          readelf -d ../../stage/bin/oc-probe | grep -E 'NEEDED|RUNPATH'
+          ldd ../../stage/bin/oc-probe
+
+      - name: Start the fake gateway
+        working-directory: native/probe
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "/CN=localhost"
+          python3 fake_server.py cert.pem key.pem 4444 &
+          sleep 3
+      - name: Probe (certificate, login form and logging callbacks)
+        run: bash native/linux/check-probe.sh "$EXPECT" stage/bin/oc-probe probe https://127.0.0.1:4444
+      - name: Login, connect and tunnel device against the fake gateway
+        run: bash native/linux/check-probe.sh "$EXPECT" sudo stage/bin/oc-probe connect https://127.0.0.1:4444 testuser testpass
+      - name: Login, connect and tunnel device against ocserv
+        run: |
+          d=/tmp/oc
+          mkdir -p "$d"
+          cp native/probe/cert.pem native/probe/key.pem "$d/"
+          sed -e "s#@DIR@#$d#g" -e "s#@GROUP@#nogroup#" -e "s#@DEVICE@#vpns#" native/probe/ocserv.conf.in > "$d/ocserv.conf"
+          printf 'testpass\ntestpass\n' | sudo ocpasswd -c "$d/passwd" testuser
+          sudo ocserv -f -c "$d/ocserv.conf" > "$d/server.log" 2>&1 &
+          sleep 4
+          bash native/linux/check-probe.sh "$EXPECT" sudo stage/bin/oc-probe connect https://127.0.0.1:4443 testuser testpass
+      - name: Show the ocserv log
+        if: failure()
+        run: sudo cat /tmp/oc/server.log || true
+
+      # The other supported systems, with only the declared packages installed.
+      - name: Load on ubuntu:24.04
+        run: >
+          bash native/linux/load-test.sh stage "$EXPECT"
+          ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          "apt-get update -qq && apt-get install -y --no-install-recommends libgnutls30 zlib1g"
+      - name: Load on debian:12
+        run: >
+          bash native/linux/load-test.sh stage "$EXPECT"
+          debian@sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858
+          "apt-get update -qq && apt-get install -y --no-install-recommends libgnutls30 zlib1g"
+      - name: Load on fedora:latest
+        run: >
+          bash native/linux/load-test.sh stage "$EXPECT"
+          fedora@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+          "dnf install -y gnutls zlib"
