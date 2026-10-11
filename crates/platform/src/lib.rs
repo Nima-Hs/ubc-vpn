@@ -3,37 +3,51 @@
 //! Everything that differs between Windows, macOS and Linux sits behind the
 //! traits in this file: [`Routes`], [`Dns`], [`NetworkEvents`] and
 //! [`Transport`], plus the well-known [`Paths`]. [`Platform`] bundles them.
-//! Each OS gets a real implementation; [`fake`] is an in-memory one for tests
-//! and for the service's dev mode. No other crate contains OS-specific code.
+//! Each OS gets a real implementation. The `fake` feature adds an in-memory
+//! one (`fake`) for tests and for the service's dev mode, and the checks every
+//! implementation must pass (`suite`). No other crate contains OS-specific
+//! code.
 //!
-//! The rules every implementation keeps (the shared checks are in [`suite`]):
+//! The rules every implementation keeps. The suite checks those that can be
+//! observed from outside; the rest are promises each implementation's own
+//! tests must cover.
 //!
 //! - **Teardown is always safe.** Every `add_*` or `set_*` has a `remove_*` or
-//!   `clear_*` that succeeds when there is nothing to remove.
+//!   `clear_*` that succeeds when there is nothing to remove, and
+//!   [`Routes::remove_all`] and [`Dns::clear_split_dns`] undo everything this
+//!   product applied, even in an earlier run that crashed.
 //! - **The physical network is captured once,** before the tunnel exists, as a
 //!   [`PhysicalNetwork`] the caller holds and passes back. Nothing here looks
 //!   it up again from a routing table that may already contain the tunnel.
 //! - **Checks answer three ways.** A [`Verified`] of anything but `Yes` is a
 //!   failure; `Unknown` is never a "probably fine".
 //! - **Nothing polls and nothing is async.** Calls block; events are pushed by
-//!   the OS and arrive on a standard channel.
+//!   the OS and arrive on a standard channel. Blocking channel calls can be
+//!   ended from another thread or by a timeout.
+//! - **The line limit cannot be skipped.** An implementation supplies raw
+//!   bytes ([`RawConnection`]); [`Connection`], which this crate owns, turns
+//!   them into lines.
 //! - **Error messages never contain a secret.**
 //!
 //! The tunnel device itself is created by the VPN engine. This crate only
 //! ever receives its interface name.
 
 use std::fmt;
-use std::io::{self, BufRead, Read};
+use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 use ubc_vpn_core::routes::Ipv4Net;
 
+#[cfg(any(test, feature = "fake"))]
 pub mod fake;
+#[cfg(any(test, feature = "fake"))]
 pub mod suite;
 mod unsupported;
 
@@ -62,6 +76,10 @@ pub enum Error {
     AlreadyExists,
     /// A line was longer than [`MAX_LINE_BYTES`]. Drop the connection.
     LineTooLong,
+    /// Nothing arrived within the read timeout. Nothing was lost.
+    TimedOut,
+    /// The connection or listener was closed, by this side or the other.
+    Closed,
     /// Anything else. The message is for a log or the user and never contains
     /// a secret.
     Failed(String),
@@ -78,6 +96,8 @@ impl fmt::Display for Error {
             Self::NotFound => "not found",
             Self::AlreadyExists => "already exists",
             Self::LineTooLong => "line too long",
+            Self::TimedOut => "timed out",
+            Self::Closed => "closed",
             Self::Failed(message) => message,
         })
     }
@@ -87,11 +107,14 @@ impl std::error::Error for Error {}
 
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
+        use io::ErrorKind as Kind;
         match error.kind() {
-            io::ErrorKind::PermissionDenied => Self::PermissionDenied,
-            io::ErrorKind::NotFound => Self::NotFound,
-            io::ErrorKind::AlreadyExists | io::ErrorKind::AddrInUse => Self::AlreadyExists,
-            io::ErrorKind::Unsupported => Self::Unsupported,
+            Kind::PermissionDenied => Self::PermissionDenied,
+            Kind::NotFound => Self::NotFound,
+            Kind::AlreadyExists | Kind::AddrInUse => Self::AlreadyExists,
+            Kind::Unsupported => Self::Unsupported,
+            Kind::TimedOut | Kind::WouldBlock => Self::TimedOut,
+            Kind::BrokenPipe | Kind::ConnectionReset | Kind::ConnectionAborted => Self::Closed,
             kind => Self::Failed(kind.to_string()),
         }
     }
@@ -113,9 +136,10 @@ pub enum Verified {
 /// The network the machine uses without the tunnel: an interface and the next
 /// hop on it.
 ///
-/// Only [`Routes::capture_physical`] produces one, and there is deliberately
-/// no other way to build it: the caller captures it before the tunnel exists
-/// and passes the same value back for the life of the connection.
+/// Only [`Routes::capture_physical`] produces one. There is deliberately no
+/// other way to build it and no way to store it: the caller captures it before
+/// the tunnel exists and passes the same value back for the life of the
+/// connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalNetwork {
     pub(crate) interface: String,
@@ -136,9 +160,15 @@ impl PhysicalNetwork {
 }
 
 /// The routing table. IPv4 only; IPv6 is never touched.
+///
+/// An implementation must mark or record every route **when it adds it**, so
+/// that [`Routes::remove_all`] can find it later, even from a new process
+/// after a crash: a private route protocol value on Linux, a route flag on
+/// macOS, an admin-only journal in the state folder on Windows.
 pub trait Routes: Send + Sync {
     /// Records how the OS reaches `gateway` right now. Call it once, before
-    /// the tunnel device exists; called later it could describe the tunnel.
+    /// the tunnel device exists: called later it could describe the tunnel,
+    /// so an implementation may refuse when it can tell.
     fn capture_physical(&self, gateway: Ipv4Addr) -> Result<PhysicalNetwork>;
 
     /// Routes the one address `gateway` through the physical network, so
@@ -146,7 +176,8 @@ pub trait Routes: Send + Sync {
     /// route is already there.
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()>;
 
-    /// Removes that route. Succeeds if it is not there.
+    /// Removes that route. Succeeds if it is not there, and when the physical
+    /// interface no longer exists.
     fn remove_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()>;
 
     /// Routes `subnets` through the interface named `tunnel`. Never disturbs a
@@ -154,9 +185,14 @@ pub trait Routes: Send + Sync {
     /// routes already there. On error some may have been added: remove them.
     fn add_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()>;
 
-    /// Removes those routes. Succeeds for any that are not there, and when
-    /// the interface no longer exists.
+    /// Removes those routes and nothing else; a gateway route stays. Succeeds
+    /// for any that are not there, and when the interface no longer exists.
     fn remove_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()>;
+
+    /// Removes every route this product added, in this run or an earlier one.
+    /// Succeeds when there are none. The service calls it at start-up and as
+    /// the last step of every teardown.
+    fn remove_all(&self) -> Result<()>;
 
     /// Asks the OS which interface it would really use to reach `dest`, and
     /// whether that is `interface`.
@@ -166,7 +202,9 @@ pub trait Routes: Send + Sync {
 /// Resolvers that answer for some domains only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitDns {
-    /// The resolvers, reached through the tunnel.
+    /// The resolvers. They are reached by ordinary routing, so the caller
+    /// must route them through the tunnel and check that with
+    /// [`Routes::uses_interface`].
     pub resolvers: Vec<Ipv4Addr>,
     /// The domains they answer for, such as `ece.ubc.ca`. Every other name
     /// keeps using the system's resolvers.
@@ -175,24 +213,28 @@ pub struct SplitDns {
 
 /// Split DNS. There is at most one tunnel, so at most one setting.
 pub trait Dns: Send + Sync {
-    /// Sends lookups for `dns.domains` to `dns.resolvers` on the interface
-    /// named `tunnel`, replacing whatever this app set before.
+    /// Sends lookups for `dns.domains` to `dns.resolvers`, replacing whatever
+    /// this product set before. `tunnel` tells an OS that attaches DNS to an
+    /// interface where to attach it; Windows has no such notion and ignores
+    /// it.
     fn set_split_dns(&self, tunnel: &str, dns: &SplitDns) -> Result<()>;
 
-    /// Removes any split DNS this app set, including what an earlier run of
-    /// the process left behind. Succeeds when nothing is set, so teardown and
-    /// crash recovery call it unconditionally.
+    /// Removes any split DNS this product set, including what an earlier run
+    /// of the process left behind. Succeeds when nothing is set, so teardown
+    /// and crash recovery call it unconditionally.
     fn clear_split_dns(&self) -> Result<()>;
 
-    /// Whether exactly `dns` is in effect on `tunnel`.
-    fn split_dns_matches(&self, tunnel: &str, dns: &SplitDns) -> Verified;
+    /// Whether the split DNS this product set is in effect and is exactly
+    /// `dns`: these domains, these resolvers, nothing more. The interface is
+    /// not part of the question, so the answer means the same on every OS.
+    fn split_dns_matches(&self, dns: &SplitDns) -> Verified;
 }
 
 /// Something the OS reported about the machine's network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkEvent {
-    /// The physical network changed. A [`PhysicalNetwork`] captured earlier
-    /// is no longer valid.
+    /// The physical network being watched changed or went away. The
+    /// [`PhysicalNetwork`] is no longer valid.
     PhysicalChanged,
     /// The system is about to sleep.
     Sleeping,
@@ -202,14 +244,25 @@ pub enum NetworkEvent {
 
 /// Notifications pushed by the OS. There is no way to poll.
 pub trait NetworkEvents: Send + Sync {
-    /// Starts delivering events. Dropping the receiver ends the subscription.
-    fn subscribe(&self) -> Result<Receiver<NetworkEvent>>;
+    /// Starts delivering events about `watching`. Dropping the receiver ends
+    /// the subscription.
+    ///
+    /// [`NetworkEvent::PhysicalChanged`] is sent only for a change to
+    /// `watching` itself. It is never sent for a route this product added or
+    /// removed, nor for anything that happens to the tunnel interface.
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>>;
 }
 
-/// An OS user: a SID on Windows, a numeric user ID elsewhere.
+/// An OS user, as text in one canonical form: the decimal user ID with no
+/// leading zeros on macOS and Linux (`1001`), the upper-case SID string on
+/// Windows (`S-1-5-21-…`).
 ///
-/// Opaque. Two values are equal exactly when they name the same user. It
-/// converts to and from a string so the owner can be kept in `state.json`.
+/// Values are compared as text. Implementations only ever produce the
+/// canonical form, so the same user always compares equal; any other spelling
+/// of the same user compares unequal, which refuses rather than admits.
+///
+/// A `UserId` must only come from [`Listener::accept`] or from the service's
+/// own state file. Never build one from anything a client sent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserId(String);
 
@@ -222,19 +275,23 @@ impl fmt::Display for UserId {
 impl FromStr for UserId {
     type Err = Error;
 
-    /// Refuses an empty string, which could never name a user.
+    /// Reads back a value written with `to_string`. Refuses an empty string
+    /// and any whitespace or control character.
     fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "" => Err(Error::Failed("empty user identity".to_string())),
-            _ => Ok(Self(s.to_string())),
+        if s.is_empty() || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(Error::Failed("not a user identity".to_string()));
         }
+        Ok(Self(s.to_string()))
     }
 }
 
 /// The channel's transport: a named pipe on Windows, a Unix socket elsewhere.
+///
+/// A transport is built for one [`Mode`] by [`Platform::native`], which is how
+/// it knows what [`Transport::connect`] has to verify.
 pub trait Transport: Send + Sync {
     /// Claims `name` and starts listening. The claim is exclusive: it fails
-    /// with [`Error::AlreadyExists`] while any other process holds the name.
+    /// with [`Error::AlreadyExists`] while any other listener holds the name.
     /// Only programs on this machine can connect; remote clients are refused.
     fn listen(&self, name: &str) -> Result<Box<dyn Listener>>;
 
@@ -242,56 +299,189 @@ pub trait Transport: Send + Sync {
     /// [`Error::NotFound`] when nothing listens there and with
     /// [`Error::PermissionDenied`] when the channel is narrowed to another
     /// user.
-    fn connect(&self, name: &str) -> Result<Box<dyn Connection>>;
+    ///
+    /// In [`Mode::Installed`] it must also refuse a listener that is not the
+    /// privileged service, such as another local user who claimed the name
+    /// while the service was down, and must never lend the caller's identity
+    /// to the listener. On Windows that means checking the pipe's owner and
+    /// allowing identification-level impersonation only; elsewhere, a socket
+    /// in a folder only root can write.
+    fn connect(&self, name: &str) -> Result<Connection>;
 }
 
-/// The service's end of the channel. Dropping it releases the name.
+/// The service's end of the channel. Dropping it closes it.
 pub trait Listener: Send + Sync {
     /// Waits for the next connection and reports who is calling. The identity
-    /// comes from the OS, not from anything the caller sent.
-    fn accept(&self) -> Result<(Box<dyn Connection>, UserId)>;
+    /// comes from the OS, not from anything the caller sent. Fails with
+    /// [`Error::Closed`] once the listener is closed.
+    fn accept(&self) -> Result<(Connection, UserId)>;
 
-    /// Narrows the channel so the OS itself refuses every user but `owner`.
-    /// Applies to connections made from now on. May be called while another
-    /// thread waits in [`Listener::accept`].
+    /// Narrows the channel so the OS itself refuses every user but `owner`,
+    /// replacing any earlier narrowing. May be called while another thread
+    /// waits in [`Listener::accept`].
+    ///
+    /// It only affects connections made afterwards. One already accepted, or
+    /// already waiting to be accepted, stays attached whoever made it. So the
+    /// service must still compare the caller's [`UserId`] with the owner on
+    /// every request, and close other users' connections once an owner
+    /// exists.
     fn restrict_to(&self, owner: &UserId) -> Result<()>;
+
+    /// Stops listening and releases the name. An [`Listener::accept`] waiting
+    /// on another thread returns [`Error::Closed`]. Closing twice is fine.
+    fn close(&self);
+}
+
+/// The bytes of one channel connection, as an OS implementation provides
+/// them. Only [`Connection`] calls this; nothing else reads or writes a
+/// channel. Dropping it closes it.
+pub trait RawConnection: Send + Sync {
+    /// Waits for bytes and copies up to `buf.len()` of them. `Ok(0)` means
+    /// the peer closed. Fails with [`Error::TimedOut`] when the read timeout
+    /// passes first.
+    fn read(&self, buf: &mut [u8]) -> Result<usize>;
+
+    /// Sends all of `bytes`.
+    fn write_all(&self, bytes: &[u8]) -> Result<()>;
+
+    /// Sets how long each later [`RawConnection::read`] waits; `None` waits
+    /// for ever.
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()>;
+
+    /// Closes both directions. A `read` waiting on another thread returns
+    /// promptly, with any result. Closing twice is fine.
+    fn close(&self);
 }
 
 /// One end of a channel connection, carrying whole lines of text.
 ///
-/// One thread may read while another writes.
-pub trait Connection: Send + Sync {
-    /// Waits for the next line and returns it without its newline, or `None`
-    /// when the peer closed the connection. Fails with [`Error::LineTooLong`]
-    /// past [`MAX_LINE_BYTES`], without buffering the rest; the connection is
-    /// then unusable and must be dropped.
-    fn read_line(&self) -> Result<Option<String>>;
-
-    /// Sends one line. Refuses a line that is too long or contains a newline,
-    /// and sends nothing in that case.
-    fn write_line(&self, line: &str) -> Result<()>;
+/// Any number of threads may share it: one line is read at a time, and lines
+/// written from different threads never mix.
+pub struct Connection {
+    raw: Box<dyn RawConnection>,
+    reading: Mutex<Reading>,
+    writing: Mutex<()>,
+    timeout: Mutex<Option<Duration>>,
+    closed: AtomicBool,
 }
 
-/// Reads one line the way every [`Connection`] must: at most
-/// [`MAX_LINE_BYTES`] are taken from `reader`, newline included.
-pub fn read_line(reader: &mut impl BufRead) -> Result<Option<String>> {
-    let mut line = Vec::new();
-    let read = reader
-        .take(MAX_LINE_BYTES as u64)
-        .read_until(b'\n', &mut line)?;
-    match line.pop() {
-        None => Ok(None),
-        Some(b'\n') => String::from_utf8(line)
-            .map(Some)
-            .map_err(|_| Error::Failed("line is not UTF-8".to_string())),
-        Some(_) if read == MAX_LINE_BYTES => Err(Error::LineTooLong),
-        Some(_) => Err(Error::Failed("connection closed mid-line".to_string())),
+#[derive(Default)]
+struct Reading {
+    /// Bytes received and not yet returned. Never more than the line limit.
+    pending: Vec<u8>,
+    too_long: bool,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Connection {
+    /// Wraps an implementation's bytes. Every [`Transport`] and [`Listener`]
+    /// hands out connections made here, so none can skip the line rules.
+    pub fn new(raw: Box<dyn RawConnection>) -> Self {
+        Self {
+            raw,
+            reading: Mutex::default(),
+            writing: Mutex::default(),
+            timeout: Mutex::default(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// Waits for the next line and returns it without its newline, or `None`
+    /// when the peer closed the connection.
+    ///
+    /// A line longer than [`MAX_LINE_BYTES`], newline included, fails with
+    /// [`Error::LineTooLong`] without being buffered, and so does every read
+    /// after it: the rest of that line is never mistaken for a message.
+    /// Fails with [`Error::TimedOut`] when no whole line arrives within the
+    /// read timeout, and with [`Error::Closed`] after [`Connection::close`].
+    pub fn read_line(&self) -> Result<Option<String>> {
+        let mut reading = lock(&self.reading);
+        if reading.too_long {
+            return Err(Error::LineTooLong);
+        }
+        let deadline = lock(&self.timeout).map(|timeout| Instant::now() + timeout);
+        let mut searched = 0;
+        loop {
+            let unsearched = &reading.pending[searched..];
+            if let Some(at) = unsearched.iter().position(|byte| *byte == b'\n') {
+                let mut line: Vec<u8> = reading.pending.drain(..=searched + at).collect();
+                line.pop();
+                let text = String::from_utf8(line);
+                return text
+                    .map(Some)
+                    .map_err(|_| Error::Failed("line is not UTF-8".to_string()));
+            }
+            searched = reading.pending.len();
+            if searched >= MAX_LINE_BYTES {
+                *reading = Reading {
+                    pending: Vec::new(),
+                    too_long: true,
+                };
+                return Err(Error::LineTooLong);
+            }
+            let left = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+            if left.is_some_and(|left| left.is_zero()) {
+                return Err(Error::TimedOut);
+            }
+            self.raw.set_read_timeout(left)?;
+            let mut chunk = [0; 4096];
+            let room = chunk.len().min(MAX_LINE_BYTES - searched);
+            let read = self.raw.read(&mut chunk[..room]);
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(Error::Closed);
+            }
+            match read? {
+                0 if reading.pending.is_empty() => return Ok(None),
+                0 => {
+                    reading.pending.clear();
+                    return Err(Error::Closed);
+                }
+                n => reading.pending.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+
+    /// Sends one line, whole: lines from other threads go before or after it,
+    /// never inside it. Refuses a line that is too long or contains a
+    /// newline, and sends nothing in that case. Any other failure closes the
+    /// connection, because part of the line may have been sent.
+    pub fn write_line(&self, line: &str) -> Result<()> {
+        let bytes = encode_line(line)?;
+        let _writing = lock(&self.writing);
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::Closed);
+        }
+        self.raw.write_all(&bytes).inspect_err(|_| self.close())
+    }
+
+    /// Limits how long each later [`Connection::read_line`] waits for a whole
+    /// line, however slowly its bytes arrive. `None`, the default, waits for
+    /// ever. The service sets one so a silent client cannot hold it up.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) {
+        *lock(&self.timeout) = timeout;
+    }
+
+    /// Closes the connection. A [`Connection::read_line`] waiting on another
+    /// thread returns [`Error::Closed`], and the peer sees the end of the
+    /// stream. Closing twice is fine.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.raw.close();
+    }
+
+    /// For the suite only: lets it send bytes no `write_line` would.
+    #[cfg(any(test, feature = "fake"))]
+    pub(crate) fn raw(&self) -> &dyn RawConnection {
+        &*self.raw
     }
 }
 
-/// Turns `line` into the bytes every [`Connection`] must send for it: the
-/// line and one newline. Refuses a line the peer would reject.
-pub fn encode_line(line: &str) -> Result<Vec<u8>> {
+/// The bytes sent for `line`: the line and one newline. Refuses a line the
+/// peer would reject.
+fn encode_line(line: &str) -> Result<Vec<u8>> {
     if line.len() >= MAX_LINE_BYTES {
         return Err(Error::LineTooLong);
     }
@@ -342,84 +532,208 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// The real implementation for the OS this was built for.
+    /// The real implementation for the OS this was built for, set up for
+    /// `mode`.
     pub fn native(mode: Mode) -> Result<Self> {
-        Ok(Self {
-            routes: Arc::new(os::Native),
-            dns: Arc::new(os::Native),
-            events: Arc::new(os::Native),
-            transport: Arc::new(os::Native),
-            paths: os::paths(mode)?,
-        })
+        os::native(mode)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+    use std::thread;
+
     use super::*;
 
-    fn line_of(len: usize) -> Vec<u8> {
-        [vec![b'a'; len - 1], vec![b'\n']].concat()
+    /// A raw connection that plays back `input` at most `step` bytes at a
+    /// time, counts what was taken from it, and keeps what was written.
+    struct Script {
+        input: Mutex<VecDeque<u8>>,
+        step: usize,
+        delay: Duration,
+        taken: AtomicUsize,
+        written: Mutex<Vec<u8>>,
     }
 
-    // Security rule: a line over the limit is rejected, and no more than the
-    // limit is taken from the reader to find that out.
-    #[test]
-    fn an_oversized_line_is_rejected_without_reading_it_all() {
-        let mut at_limit = &line_of(MAX_LINE_BYTES)[..];
-        let line = read_line(&mut at_limit).unwrap().unwrap();
-        assert_eq!(line.len(), MAX_LINE_BYTES - 1);
+    fn script(input: &[u8], step: usize, delay: Duration) -> Arc<Script> {
+        Arc::new(Script {
+            input: Mutex::new(input.iter().copied().collect()),
+            step,
+            delay,
+            taken: AtomicUsize::new(0),
+            written: Mutex::default(),
+        })
+    }
 
-        let bytes = line_of(2 * MAX_LINE_BYTES);
-        let mut over = &bytes[..];
-        assert_eq!(read_line(&mut over), Err(Error::LineTooLong));
-        assert_eq!(over.len(), bytes.len() - MAX_LINE_BYTES);
+    fn connection(script: &Arc<Script>) -> Connection {
+        Connection::new(Box::new(script.clone()))
+    }
+
+    impl RawConnection for Arc<Script> {
+        fn read(&self, buf: &mut [u8]) -> Result<usize> {
+            thread::sleep(self.delay);
+            let mut input = lock(&self.input);
+            let n = buf.len().min(self.step).min(input.len());
+            for (slot, byte) in buf.iter_mut().zip(input.drain(..n)) {
+                *slot = byte;
+            }
+            self.taken.fetch_add(n, Ordering::SeqCst);
+            Ok(n)
+        }
+
+        // One byte at a time, so unguarded writers would interleave.
+        fn write_all(&self, bytes: &[u8]) -> Result<()> {
+            for byte in bytes {
+                lock(&self.written).push(*byte);
+                thread::yield_now();
+            }
+            Ok(())
+        }
+
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> Result<()> {
+            Ok(())
+        }
+
+        fn close(&self) {}
+    }
+
+    // Security rule: the rest of an oversized line is never read as the next
+    // message, and no more than the limit is taken in to find that out.
+    #[test]
+    fn an_oversized_line_poisons_the_connection() {
+        let input = [vec![b'a'; MAX_LINE_BYTES], b"{\"smuggled\":1}\n".to_vec()].concat();
+        let raw = script(&input, usize::MAX, Duration::ZERO);
+        let connection = connection(&raw);
+        assert_eq!(connection.read_line(), Err(Error::LineTooLong));
+        assert_eq!(connection.read_line(), Err(Error::LineTooLong));
+        assert_eq!(raw.taken.load(Ordering::SeqCst), MAX_LINE_BYTES);
     }
 
     #[test]
-    fn reads_lines_then_end_of_stream() {
-        let mut input = &b"one\ntwo\nthr"[..];
-        assert_eq!(read_line(&mut input), Ok(Some("one".to_string())));
-        assert_eq!(read_line(&mut input), Ok(Some("two".to_string())));
-        assert!(matches!(read_line(&mut input), Err(Error::Failed(_))));
-        assert_eq!(read_line(&mut input), Ok(None));
+    fn reads_lines_up_to_the_limit_however_they_are_split() {
+        let longest = "a".repeat(MAX_LINE_BYTES - 1);
+        let input = format!("one\ntwo\n{longest}\nthr");
+        for step in [1, 7, usize::MAX] {
+            let connection = connection(&script(input.as_bytes(), step, Duration::ZERO));
+            assert_eq!(connection.read_line(), Ok(Some("one".to_string())));
+            assert_eq!(connection.read_line(), Ok(Some("two".to_string())));
+            assert_eq!(connection.read_line(), Ok(Some(longest.clone())));
+            // The peer went away in the middle of a line.
+            assert_eq!(connection.read_line(), Err(Error::Closed));
+            assert_eq!(connection.read_line(), Ok(None));
+        }
     }
 
     // Security rule: nothing is sent that the peer's limit would reject, and
     // one call can never smuggle a second message.
     #[test]
-    fn refuses_to_encode_an_oversized_or_multi_line_message() {
-        assert_eq!(encode_line("{}"), Ok(b"{}\n".to_vec()));
+    fn refuses_to_write_an_oversized_or_multi_line_message() {
+        let raw = script(b"", 1, Duration::ZERO);
+        let connection = connection(&raw);
         let longest = "a".repeat(MAX_LINE_BYTES - 1);
-        assert_eq!(encode_line(&longest).unwrap().len(), MAX_LINE_BYTES);
-        assert_eq!(encode_line(&format!("{longest}a")), Err(Error::LineTooLong));
-        assert!(matches!(encode_line("{}\n{}"), Err(Error::Failed(_))));
+        assert_eq!(connection.write_line(&longest), Ok(()));
+        assert_eq!(lock(&raw.written).len(), MAX_LINE_BYTES);
+        let too_long = format!("{longest}a");
+        assert_eq!(connection.write_line(&too_long), Err(Error::LineTooLong));
+        assert!(matches!(
+            connection.write_line("{}\n{}"),
+            Err(Error::Failed(_))
+        ));
+        assert_eq!(lock(&raw.written).len(), MAX_LINE_BYTES);
+    }
+
+    // A reply and a pushed event are written by different threads. Neither
+    // may land inside the other.
+    #[test]
+    fn lines_written_by_two_threads_never_interleave() {
+        let raw = script(b"", 1, Duration::ZERO);
+        let connection = connection(&raw);
+        thread::scope(|scope| {
+            for letter in ["a", "b"] {
+                let connection = &connection;
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        connection.write_line(&letter.repeat(200)).unwrap();
+                    }
+                });
+            }
+        });
+        let written = String::from_utf8(lock(&raw.written).clone()).unwrap();
+        assert_eq!(written.lines().count(), 100);
+        for line in written.lines() {
+            assert!(line == "a".repeat(200) || line == "b".repeat(200), "{line}");
+        }
+    }
+
+    // Security rule: the timeout covers the whole line, so a client cannot
+    // hold the service by sending one byte at a time.
+    #[test]
+    fn a_slow_line_times_out_as_a_whole() {
+        let raw = script(&[b'a'; 1000], 1, Duration::from_millis(5));
+        let connection = connection(&raw);
+        connection.set_read_timeout(Some(Duration::from_millis(50)));
+        assert_eq!(connection.read_line(), Err(Error::TimedOut));
+        assert!(raw.taken.load(Ordering::SeqCst) < 100);
     }
 
     #[test]
-    fn user_ids_round_trip_through_strings() {
+    fn a_closed_connection_refuses_reads_and_writes() {
+        let connection = connection(&script(b"waiting\n", 1, Duration::ZERO));
+        connection.close();
+        assert_eq!(connection.read_line(), Err(Error::Closed));
+        assert_eq!(connection.write_line("late"), Err(Error::Closed));
+    }
+
+    // Security rule: an identity is one exact piece of text. Anything that
+    // could be confused with another spelling of it is refused or unequal.
+    #[test]
+    fn user_ids_round_trip_and_refuse_odd_text() {
         let id: UserId = "S-1-5-21-1-2-3-1001".parse().unwrap();
         assert_eq!(id.to_string().parse::<UserId>().unwrap(), id);
-        assert_ne!(id, "1001".parse().unwrap());
-        assert!("".parse::<UserId>().is_err());
+        assert_ne!("1001".parse::<UserId>(), "01001".parse::<UserId>());
+        for odd in ["", " 1001", "1001\n", "10 01", "1001\0", "1001\u{a0}"] {
+            assert!(odd.parse::<UserId>().is_err(), "{odd:?}");
+        }
     }
 
     // Until an OS is implemented it must say so, not pretend to succeed, and
-    // its checks must fail closed.
+    // its checks must fail closed. Every method is listed.
     #[test]
     fn the_unimplemented_os_reports_unsupported() {
+        use unsupported::Native;
+
+        let unsupported = Some(Error::Unsupported);
+        for mode in [Mode::Installed, Mode::Dev] {
+            assert_eq!(Platform::native(mode).err(), unsupported);
+        }
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
-        assert_eq!(Platform::native(Mode::Dev).err(), Some(Error::Unsupported));
-        assert_eq!(
-            os::Native.capture_physical(gateway),
-            Err(Error::Unsupported)
-        );
-        assert_eq!(os::Native.clear_split_dns(), Err(Error::Unsupported));
-        assert_eq!(
-            os::Native.uses_interface(gateway, "tun0"),
-            Verified::Unknown
-        );
-        assert!(os::Native.subscribe().is_err());
-        assert!(os::Native.listen("ubc-vpn-test").is_err());
+        let physical = PhysicalNetwork {
+            interface: "eth0".to_string(),
+            next_hop: None,
+        };
+        let subnets = ["192.0.2.0/24".parse().unwrap()];
+        let dns = SplitDns {
+            resolvers: vec![gateway],
+            domains: vec!["ece.example".to_string()],
+        };
+
+        assert_eq!(Native.capture_physical(gateway).err(), unsupported);
+        let results = [
+            Native.add_gateway_route(gateway, &physical),
+            Native.remove_gateway_route(gateway, &physical),
+            Native.add_tunnel_routes("tun0", &subnets),
+            Native.remove_tunnel_routes("tun0", &subnets),
+            Native.remove_all(),
+            Native.set_split_dns("tun0", &dns),
+            Native.clear_split_dns(),
+        ];
+        assert_eq!(results, [const { Err(Error::Unsupported) }; 7]);
+        assert_eq!(Native.uses_interface(gateway, "tun0"), Verified::Unknown);
+        assert_eq!(Native.split_dns_matches(&dns), Verified::Unknown);
+        assert_eq!(Native.subscribe(&physical).err(), unsupported);
+        assert_eq!(Native.listen("ubc-vpn-test").err(), unsupported);
+        assert_eq!(Native.connect("ubc-vpn-test").err(), unsupported);
     }
 }

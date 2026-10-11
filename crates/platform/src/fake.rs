@@ -6,25 +6,26 @@
 //! an operation, it delivers the network events a test injects, and its
 //! channel lets a test choose who each caller is.
 
-use std::collections::HashMap;
-use std::io::{self, BufReader, Read};
+use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
     Connection, Dns, Error, Listener, NetworkEvent, NetworkEvents, Paths, PhysicalNetwork,
-    Platform, Result, Routes, SplitDns, Transport, UserId, Verified, encode_line, read_line,
+    Platform, RawConnection, Result, Routes, SplitDns, Transport, UserId, Verified, lock,
 };
 
 /// The interface the fake reports as physical.
 pub const PHYSICAL_INTERFACE: &str = "fake-eth0";
 
-/// A routing or DNS operation, as recorded by [`Fake::calls`] and chosen for
-/// [`Fake::set_failure`].
+/// An operation that [`Fake::set_failure`] can make fail. The routing and DNS
+/// ones are also what [`Fake::calls`] records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
     /// [`Routes::capture_physical`].
@@ -37,6 +38,8 @@ pub enum Op {
     AddTunnelRoutes,
     /// [`Routes::remove_tunnel_routes`].
     RemoveTunnelRoutes,
+    /// [`Routes::remove_all`].
+    RemoveAllRoutes,
     /// [`Routes::uses_interface`].
     VerifyRoute,
     /// [`Dns::set_split_dns`].
@@ -45,6 +48,12 @@ pub enum Op {
     ClearSplitDns,
     /// [`Dns::split_dns_matches`].
     VerifyDns,
+    /// [`NetworkEvents::subscribe`]. Not recorded.
+    Subscribe,
+    /// [`Transport::listen`]. Not recorded.
+    Listen,
+    /// [`Listener::restrict_to`]. Not recorded.
+    RestrictTo,
 }
 
 /// What is applied right now. After a full teardown it equals
@@ -55,7 +64,7 @@ pub struct Applied {
     pub gateway_routes: Vec<(Ipv4Addr, PhysicalNetwork)>,
     /// Routes through a tunnel, by interface name.
     pub tunnel_routes: Vec<(String, Ipv4Net)>,
-    /// The split DNS in effect and the interface it is on.
+    /// The split DNS in effect and the interface it was set on.
     pub split_dns: Option<(String, SplitDns)>,
 }
 
@@ -69,12 +78,13 @@ struct State {
 }
 
 struct Endpoint {
-    incoming: Sender<(Box<dyn Connection>, UserId)>,
+    incoming: Sender<(Connection, UserId)>,
     owner: Option<UserId>,
 }
 
 /// The fake OS. Clones share one state, so a test keeps one and hands the
-/// service another.
+/// service another. The state outlives any one user of it, which is how a
+/// test plays a service that crashed and started again.
 #[derive(Clone, Default)]
 pub struct Fake(Arc<Mutex<State>>);
 
@@ -105,8 +115,12 @@ impl Fake {
         self.state().applied.clone()
     }
 
-    /// Makes every later `op` fail with `error` and change nothing, or with
-    /// `None` work again. A failing check answers [`Verified::Unknown`].
+    /// Makes every later `op` fail with `error`, or with `None` work again.
+    ///
+    /// A failing operation changes nothing, with one exception: a failing
+    /// [`Routes::add_tunnel_routes`] first adds every subnet but the last, as
+    /// an OS that fails partway would. A failing check answers
+    /// [`Verified::Unknown`].
     pub fn set_failure(&self, op: Op, error: Option<Error>) {
         let mut state = self.state();
         match error {
@@ -123,49 +137,65 @@ impl Fake {
 
     /// Connects to `name` as `user`. [`Transport::connect`] on the fake
     /// connects as the user `fake-user`.
-    pub fn connect_as(&self, name: &str, user: &UserId) -> Result<Box<dyn Connection>> {
+    pub fn connect_as(&self, name: &str, user: &UserId) -> Result<Connection> {
         let state = self.state();
         let endpoint = state.listeners.get(name).ok_or(Error::NotFound)?;
         if endpoint.owner.as_ref().is_some_and(|owner| owner != user) {
             return Err(Error::PermissionDenied);
         }
         let (client, server) = pipe_pair();
-        let accepted = endpoint.incoming.send((Box::new(server), user.clone()));
+        let accepted = endpoint.incoming.send((server, user.clone()));
         accepted.map_err(|_| Error::NotFound)?;
-        Ok(Box::new(client))
+        Ok(client)
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.0.lock().expect("a test panicked while using the fake")
+        lock(&self.0)
+    }
+
+    /// Records `op` if it is a routing or DNS one, and reports whether it was
+    /// told to fail.
+    fn start(&self, op: Op) -> (MutexGuard<'_, State>, Result<()>) {
+        let mut state = self.state();
+        if !matches!(op, Op::Subscribe | Op::Listen | Op::RestrictTo) {
+            state.calls.push(op);
+        }
+        let outcome = state.failures.get(&op).cloned().map_or(Ok(()), Err);
+        (state, outcome)
     }
 
     /// Records `op`, then applies it unless it was told to fail.
     fn run<T>(&self, op: Op, apply: impl FnOnce(&mut Applied) -> T) -> Result<T> {
-        let mut state = self.state();
-        state.calls.push(op);
-        match state.failures.get(&op) {
-            Some(error) => Err(error.clone()),
-            None => Ok(apply(&mut state.applied)),
-        }
+        let (mut state, outcome) = self.start(op);
+        outcome.map(|()| apply(&mut state.applied))
     }
 }
 
-/// The locations the fake uses: folders under `root`, which nothing creates.
+/// The locations a fake rooted at `root` uses: folders under it, which
+/// nothing creates, and a channel name no other root shares.
 pub fn paths(root: &Path) -> Paths {
     Paths {
         policy_dir: root.join("policy"),
         state_dir: root.join("state"),
         settings_dir: root.join("settings"),
-        channel_name: "ubc-vpn-fake".to_string(),
+        channel_name: format!("ubc-vpn-fake-{}", root.display()),
     }
 }
 
 impl Routes for Fake {
+    /// Refuses while tunnel routes are applied, so a service that captures
+    /// too late fails its tests.
     fn capture_physical(&self, _gateway: Ipv4Addr) -> Result<PhysicalNetwork> {
-        self.run(Op::CapturePhysical, |_| PhysicalNetwork {
-            interface: PHYSICAL_INTERFACE.to_string(),
-            next_hop: Some(Ipv4Addr::new(192, 168, 0, 1)),
-        })
+        self.run(Op::CapturePhysical, |applied| {
+            if !applied.tunnel_routes.is_empty() {
+                let late = "captured while tunnel routes are applied";
+                return Err(Error::Failed(late.to_string()));
+            }
+            Ok(PhysicalNetwork {
+                interface: PHYSICAL_INTERFACE.to_string(),
+                next_hop: Some(Ipv4Addr::new(192, 168, 0, 1)),
+            })
+        })?
     }
 
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
@@ -183,20 +213,28 @@ impl Routes for Fake {
     }
 
     fn add_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()> {
-        self.run(Op::AddTunnelRoutes, |applied| {
-            for subnet in subnets {
-                let route = (tunnel.to_string(), *subnet);
-                if !applied.tunnel_routes.contains(&route) {
-                    applied.tunnel_routes.push(route);
-                }
+        let (mut state, outcome) = self.start(Op::AddTunnelRoutes);
+        let skipped = usize::from(outcome.is_err() && !subnets.is_empty());
+        for subnet in &subnets[..subnets.len() - skipped] {
+            let route = (tunnel.to_string(), *subnet);
+            if !state.applied.tunnel_routes.contains(&route) {
+                state.applied.tunnel_routes.push(route);
             }
-        })
+        }
+        outcome
     }
 
     fn remove_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()> {
         self.run(Op::RemoveTunnelRoutes, |applied| {
             let routes = &mut applied.tunnel_routes;
             routes.retain(|(name, subnet)| !(name == tunnel && subnets.contains(subnet)));
+        })
+    }
+
+    fn remove_all(&self) -> Result<()> {
+        self.run(Op::RemoveAllRoutes, |applied| {
+            applied.gateway_routes.clear();
+            applied.tunnel_routes.clear();
         })
     }
 
@@ -207,10 +245,10 @@ impl Routes for Fake {
         let verdict = self.run(Op::VerifyRoute, |applied| {
             let host = applied.gateway_routes.iter().find(|(d, _)| *d == dest);
             let subnets = applied.tunnel_routes.iter();
-            let widest = subnets
+            let narrowest = subnets
                 .filter(|(_, subnet)| subnet.contains_addr(dest))
                 .max_by_key(|(_, subnet)| subnet.prefix_len());
-            let used = match (host, widest) {
+            let used = match (host, narrowest) {
                 (Some((_, physical)), _) => physical.interface(),
                 (None, Some((tunnel, _))) => tunnel,
                 (None, None) => PHYSICAL_INTERFACE,
@@ -236,9 +274,9 @@ impl Dns for Fake {
         self.run(Op::ClearSplitDns, |applied| applied.split_dns = None)
     }
 
-    fn split_dns_matches(&self, tunnel: &str, dns: &SplitDns) -> Verified {
+    fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
         let verdict = self.run(Op::VerifyDns, |applied| match &applied.split_dns {
-            Some((name, set)) if name == tunnel && set == dns => Verified::Yes,
+            Some((_, set)) if set == dns => Verified::Yes,
             _ => Verified::No,
         });
         verdict.unwrap_or(Verified::Unknown)
@@ -246,16 +284,20 @@ impl Dns for Fake {
 }
 
 impl NetworkEvents for Fake {
-    fn subscribe(&self) -> Result<Receiver<NetworkEvent>> {
+    /// Delivers only what [`Fake::send_event`] injects, whatever is watched.
+    fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+        let (mut state, outcome) = self.start(Op::Subscribe);
+        outcome?;
         let (sender, receiver) = mpsc::channel();
-        self.state().subscribers.push(sender);
+        state.subscribers.push(sender);
         Ok(receiver)
     }
 }
 
 impl Transport for Fake {
     fn listen(&self, name: &str) -> Result<Box<dyn Listener>> {
-        let mut state = self.state();
+        let (mut state, outcome) = self.start(Op::Listen);
+        outcome?;
         if state.listeners.contains_key(name) {
             return Err(Error::AlreadyExists);
         }
@@ -269,10 +311,11 @@ impl Transport for Fake {
             fake: self.clone(),
             name: name.to_string(),
             accepted: Mutex::new(accepted),
+            closed: AtomicBool::new(false),
         }))
     }
 
-    fn connect(&self, name: &str) -> Result<Box<dyn Connection>> {
+    fn connect(&self, name: &str) -> Result<Connection> {
         self.connect_as(name, &"fake-user".parse()?)
     }
 }
@@ -280,77 +323,128 @@ impl Transport for Fake {
 struct FakeListener {
     fake: Fake,
     name: String,
-    accepted: Mutex<Receiver<(Box<dyn Connection>, UserId)>>,
+    accepted: Mutex<Receiver<(Connection, UserId)>>,
+    closed: AtomicBool,
 }
 
 impl Listener for FakeListener {
-    fn accept(&self) -> Result<(Box<dyn Connection>, UserId)> {
-        let accepted = self.accepted.lock().expect("accept panicked");
-        accepted
-            .recv()
-            .map_err(|_| Error::Failed("listener closed".to_string()))
+    fn accept(&self) -> Result<(Connection, UserId)> {
+        // Closing drops the sending end, which ends the wait.
+        let accepted = lock(&self.accepted).recv();
+        match self.closed.load(Ordering::SeqCst) {
+            true => Err(Error::Closed),
+            false => accepted.map_err(|_| Error::Closed),
+        }
     }
 
     fn restrict_to(&self, owner: &UserId) -> Result<()> {
-        let mut state = self.fake.state();
-        let endpoint = state.listeners.get_mut(&self.name).ok_or(Error::NotFound)?;
+        let (mut state, outcome) = self.fake.start(Op::RestrictTo);
+        outcome?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::Closed);
+        }
+        let endpoint = state.listeners.get_mut(&self.name).ok_or(Error::Closed)?;
         endpoint.owner = Some(owner.clone());
         Ok(())
+    }
+
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            self.fake.state().listeners.remove(&self.name);
+        }
     }
 }
 
 impl Drop for FakeListener {
     fn drop(&mut self) {
-        self.fake.state().listeners.remove(&self.name);
+        self.close();
     }
 }
 
-/// One end of an in-process connection: bytes go out on one channel and come
-/// in on another, through the same line rules as a real pipe or socket.
-struct Pipe {
-    outgoing: Sender<Vec<u8>>,
-    incoming: Mutex<BufReader<PipeReader>>,
+/// One direction of an in-process connection.
+#[derive(Default)]
+struct Half {
+    state: Mutex<HalfState>,
+    changed: Condvar,
 }
 
-struct PipeReader {
-    chunks: Receiver<Vec<u8>>,
-    pending: Vec<u8>,
+#[derive(Default)]
+struct HalfState {
+    bytes: VecDeque<u8>,
+    closed: bool,
 }
 
-fn pipe_pair() -> (Pipe, Pipe) {
-    let end = |outgoing, chunks| Pipe {
-        outgoing,
-        incoming: Mutex::new(BufReader::new(PipeReader {
-            chunks,
-            pending: Vec::new(),
-        })),
+/// One end of an in-process connection.
+struct PipeEnd {
+    incoming: Arc<Half>,
+    outgoing: Arc<Half>,
+    timeout: Mutex<Option<Duration>>,
+}
+
+fn pipe_pair() -> (Connection, Connection) {
+    let (up, down) = (Arc::new(Half::default()), Arc::new(Half::default()));
+    let end = |incoming: &Arc<Half>, outgoing: &Arc<Half>| {
+        Connection::new(Box::new(PipeEnd {
+            incoming: incoming.clone(),
+            outgoing: outgoing.clone(),
+            timeout: Mutex::default(),
+        }))
     };
-    let (to_server, from_client) = mpsc::channel();
-    let (to_client, from_server) = mpsc::channel();
-    (end(to_server, from_server), end(to_client, from_client))
+    (end(&down, &up), end(&up, &down))
 }
 
-impl Read for PipeReader {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.pending.is_empty() {
-            // An error means the peer is gone, which reads as end of stream.
-            self.pending = self.chunks.recv().unwrap_or_default();
+impl RawConnection for PipeEnd {
+    fn read(&self, buf: &mut [u8]) -> Result<usize> {
+        let timeout = *lock(&self.timeout);
+        let half = &self.incoming;
+        let waiting = |state: &mut HalfState| state.bytes.is_empty() && !state.closed;
+        let state = lock(&half.state);
+        let waited = match timeout {
+            None => half.changed.wait_while(state, waiting).ok(),
+            Some(timeout) => half
+                .changed
+                .wait_timeout_while(state, timeout, waiting)
+                .ok()
+                .map(|(state, _)| state),
+        };
+        let panicked = || Error::Failed("a test panicked while using the fake".to_string());
+        let mut state = waited.ok_or_else(panicked)?;
+        if waiting(&mut state) {
+            return Err(Error::TimedOut);
         }
-        let n = out.len().min(self.pending.len());
-        out[..n].copy_from_slice(&self.pending[..n]);
-        self.pending.drain(..n);
+        let n = buf.len().min(state.bytes.len());
+        for (slot, byte) in buf.iter_mut().zip(state.bytes.drain(..n)) {
+            *slot = byte;
+        }
         Ok(n)
     }
-}
 
-impl Connection for Pipe {
-    fn read_line(&self) -> Result<Option<String>> {
-        read_line(&mut *self.incoming.lock().expect("read_line panicked"))
+    fn write_all(&self, bytes: &[u8]) -> Result<()> {
+        let mut state = lock(&self.outgoing.state);
+        if state.closed {
+            return Err(Error::Closed);
+        }
+        state.bytes.extend(bytes);
+        self.outgoing.changed.notify_all();
+        Ok(())
     }
 
-    fn write_line(&self, line: &str) -> Result<()> {
-        let sent = self.outgoing.send(encode_line(line)?);
-        sent.map_err(|_| Error::Failed("connection closed".to_string()))
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        *lock(&self.timeout) = timeout;
+        Ok(())
+    }
+
+    fn close(&self) {
+        for half in [&self.incoming, &self.outgoing] {
+            lock(&half.state).closed = true;
+            half.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for PipeEnd {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -358,58 +452,117 @@ impl Connection for Pipe {
 mod tests {
     use super::*;
     use crate::suite;
-    use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const TUNNEL: &str = "fake-tun0";
 
     fn user(name: &str) -> UserId {
         name.parse().unwrap()
     }
 
+    fn subnets() -> [Ipv4Net; 2] {
+        ["192.0.2.0/24", "198.51.100.0/24"].map(|s| s.parse().unwrap())
+    }
+
+    fn failed() -> Option<Error> {
+        Some(Error::Failed("injected".to_string()))
+    }
+
     #[test]
     fn passes_the_shared_suite_and_ends_clean() {
         let fake = Fake::new();
-        suite::check_routes(&fake, "fake-tun0");
-        suite::check_dns(&fake, "fake-tun0");
+        suite::check_routes(&fake, TUNNEL);
+        suite::check_dns(&fake, TUNNEL);
+        suite::check_transport(&fake, "suite", &user("stranger"));
         assert_eq!(fake.applied(), Applied::default());
+        assert!(fake.state().listeners.is_empty());
     }
 
     #[test]
     fn records_calls_in_order_and_the_resulting_state() {
         let fake = Fake::new();
-        let subnet: Ipv4Net = "192.0.2.0/24".parse().unwrap();
+        let [subnet, _] = subnets();
         let physical = fake.capture_physical(GATEWAY).unwrap();
         fake.add_gateway_route(GATEWAY, &physical).unwrap();
-        fake.add_tunnel_routes("fake-tun0", &[subnet, subnet])
-            .unwrap();
-        assert_eq!(
-            fake.calls(),
-            [
-                Op::CapturePhysical,
-                Op::AddGatewayRoute,
-                Op::AddTunnelRoutes
-            ]
-        );
+        fake.add_tunnel_routes(TUNNEL, &[subnet, subnet]).unwrap();
+        let _events = fake.subscribe(&physical).unwrap();
+        let expected = [
+            Op::CapturePhysical,
+            Op::AddGatewayRoute,
+            Op::AddTunnelRoutes,
+        ];
+        assert_eq!(fake.calls(), expected);
         let applied = fake.applied();
         assert_eq!(applied.gateway_routes, [(GATEWAY, physical)]);
-        assert_eq!(applied.tunnel_routes, [("fake-tun0".to_string(), subnet)]);
+        assert_eq!(applied.tunnel_routes, [(TUNNEL.to_string(), subnet)]);
     }
 
     #[test]
     fn a_failing_operation_changes_nothing_until_healed() {
         let fake = Fake::new();
-        let subnets = ["192.0.2.0/24".parse().unwrap()];
-        fake.set_failure(Op::AddTunnelRoutes, Some(Error::PermissionDenied));
-        assert_eq!(
-            fake.add_tunnel_routes("fake-tun0", &subnets),
-            Err(Error::PermissionDenied)
-        );
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        fake.set_failure(Op::AddGatewayRoute, Some(Error::PermissionDenied));
+        let refused = fake.add_gateway_route(GATEWAY, &physical);
+        assert_eq!(refused, Err(Error::PermissionDenied));
         assert_eq!(fake.applied(), Applied::default());
-        assert_eq!(fake.calls(), [Op::AddTunnelRoutes]);
-        // Teardown still works after a failed setup.
-        assert_eq!(fake.remove_tunnel_routes("fake-tun0", &subnets), Ok(()));
-        fake.set_failure(Op::AddTunnelRoutes, None);
-        assert_eq!(fake.add_tunnel_routes("fake-tun0", &subnets), Ok(()));
+        assert_eq!(fake.calls(), [Op::CapturePhysical, Op::AddGatewayRoute]);
+        fake.set_failure(Op::AddGatewayRoute, None);
+        assert_eq!(fake.add_gateway_route(GATEWAY, &physical), Ok(()));
+    }
+
+    // "On error some may have been added": the fake leaves some, so a service
+    // that does not clean up after a failed add fails its tests.
+    #[test]
+    fn a_failing_add_of_tunnel_routes_leaves_some_behind() {
+        let fake = Fake::new();
+        let [first, _] = subnets();
+        fake.set_failure(Op::AddTunnelRoutes, failed());
+        assert!(fake.add_tunnel_routes(TUNNEL, &subnets()).is_err());
+        assert_eq!(fake.applied().tunnel_routes, [(TUNNEL.to_string(), first)]);
+        assert_eq!(fake.remove_all(), Ok(()));
+        assert_eq!(fake.applied(), Applied::default());
+    }
+
+    // Security rule: the physical network is captured before the tunnel
+    // exists. Captured later it could be the tunnel, the previous client's bug.
+    #[test]
+    fn refuses_to_capture_the_physical_network_too_late() {
+        let fake = Fake::new();
+        fake.add_tunnel_routes(TUNNEL, &subnets()).unwrap();
+        assert!(matches!(
+            fake.capture_physical(GATEWAY),
+            Err(Error::Failed(_))
+        ));
+        fake.remove_all().unwrap();
+        assert!(fake.capture_physical(GATEWAY).is_ok());
+    }
+
+    // Crash recovery: a new run has no PhysicalNetwork and no memory of what
+    // the old one added, and must still be able to remove it all.
+    #[test]
+    fn a_later_run_can_remove_what_an_earlier_one_left() {
+        let fake = Fake::new();
+        let dns = SplitDns {
+            resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
+            domains: vec!["ece.example".to_string()],
+        };
+        {
+            let crashed = fake.platform(Path::new("fake"));
+            let physical = crashed.routes.capture_physical(GATEWAY).unwrap();
+            crashed
+                .routes
+                .add_gateway_route(GATEWAY, &physical)
+                .unwrap();
+            crashed
+                .routes
+                .add_tunnel_routes(TUNNEL, &subnets())
+                .unwrap();
+            crashed.dns.set_split_dns(TUNNEL, &dns).unwrap();
+        }
+        let restarted = fake.platform(Path::new("fake"));
+        restarted.routes.remove_all().unwrap();
+        restarted.dns.clear_split_dns().unwrap();
+        assert_eq!(fake.applied(), Applied::default());
     }
 
     // Security rule: "could not tell" is its own answer, never a "no" and
@@ -421,80 +574,81 @@ mod tests {
             resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
             domains: vec!["ece.example".to_string()],
         };
-        fake.set_split_dns("fake-tun0", &dns).unwrap();
-        assert_eq!(fake.uses_interface(GATEWAY, "fake-tun0"), Verified::No);
-        assert_eq!(fake.split_dns_matches("fake-tun0", &dns), Verified::Yes);
+        fake.set_split_dns(TUNNEL, &dns).unwrap();
+        assert_eq!(fake.uses_interface(GATEWAY, TUNNEL), Verified::No);
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Yes);
 
-        let error = Some(Error::Failed("injected".to_string()));
-        fake.set_failure(Op::VerifyRoute, error.clone());
-        fake.set_failure(Op::VerifyDns, error);
+        fake.set_failure(Op::VerifyRoute, failed());
+        fake.set_failure(Op::VerifyDns, failed());
         let route = fake.uses_interface(GATEWAY, PHYSICAL_INTERFACE);
         assert_eq!(route, Verified::Unknown);
-        let dns = fake.split_dns_matches("fake-tun0", &dns);
-        assert_eq!(dns, Verified::Unknown);
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Unknown);
         assert_ne!(Verified::Unknown, Verified::No);
     }
 
     #[test]
     fn delivers_injected_events_to_every_subscriber() {
         let fake = Fake::new();
-        let (first, second) = (fake.subscribe().unwrap(), fake.subscribe().unwrap());
-        drop(fake.subscribe().unwrap());
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        let subscribe = || fake.subscribe(&physical).unwrap();
+        let (first, second) = (subscribe(), subscribe());
+        drop(subscribe());
         fake.send_event(NetworkEvent::PhysicalChanged);
         fake.send_event(NetworkEvent::Sleeping);
         assert_eq!(first.try_recv(), Ok(NetworkEvent::PhysicalChanged));
         assert_eq!(first.try_recv(), Ok(NetworkEvent::Sleeping));
         assert_eq!(second.try_recv(), Ok(NetworkEvent::PhysicalChanged));
+
+        fake.set_failure(Op::Subscribe, failed());
+        assert_eq!(fake.subscribe(&physical).err(), failed());
     }
 
     // Security rule: the service learns who is calling from the transport,
-    // and once narrowed to an owner nobody else gets a connection at all.
+    // and once narrowed to an owner nobody else gets a new connection.
     #[test]
     fn reports_the_caller_and_refuses_others_once_restricted() {
         let fake = Fake::new();
         let listener = fake.listen("svc").unwrap();
         let _mallory = fake.connect_as("svc", &user("mallory")).unwrap();
+        let _queued = fake.connect_as("svc", &user("mallory")).unwrap();
         assert_eq!(listener.accept().unwrap().1, user("mallory"));
 
         listener.restrict_to(&user("alice")).unwrap();
         let refused = fake.connect_as("svc", &user("mallory")).err();
         assert_eq!(refused, Some(Error::PermissionDenied));
         assert_eq!(fake.connect("svc").err(), Some(Error::PermissionDenied));
+        // A connection made before narrowing still arrives, as on a real OS:
+        // the service has to check every caller itself.
+        assert_eq!(listener.accept().unwrap().1, user("mallory"));
         let _alice = fake.connect_as("svc", &user("alice")).unwrap();
         assert_eq!(listener.accept().unwrap().1, user("alice"));
     }
 
-    // Security rule: the service's name cannot be claimed twice, so another
-    // process cannot pose as the service.
     #[test]
-    fn a_name_is_claimed_exclusively_until_released() {
+    fn transport_operations_can_be_made_to_fail() {
         let fake = Fake::new();
-        assert_eq!(fake.connect("svc").err(), Some(Error::NotFound));
+        fake.set_failure(Op::Listen, Some(Error::PermissionDenied));
+        assert_eq!(fake.listen("svc").err(), Some(Error::PermissionDenied));
+        fake.set_failure(Op::Listen, None);
         let listener = fake.listen("svc").unwrap();
-        assert_eq!(fake.listen("svc").err(), Some(Error::AlreadyExists));
-        drop(listener);
-        assert!(fake.listen("svc").is_ok());
+        fake.set_failure(Op::RestrictTo, failed());
+        assert_eq!(listener.restrict_to(&user("alice")).err(), failed());
+        // The failed narrowing narrowed nothing.
+        assert!(fake.connect_as("svc", &user("mallory")).is_ok());
+        assert_eq!(fake.calls(), []);
     }
 
+    // A listener that was closed must not release a name someone else has
+    // claimed since.
     #[test]
-    fn connections_carry_lines_both_ways_and_enforce_the_limit() {
+    fn a_closed_listener_no_longer_owns_the_name() {
         let fake = Fake::new();
-        let listener = fake.listen("svc").unwrap();
-        let client = fake.connect("svc").unwrap();
-        let (server, _) = listener.accept().unwrap();
-
-        client.write_line("ping").unwrap();
-        client.write_line("again").unwrap();
-        server.write_line("pong").unwrap();
-        assert_eq!(server.read_line(), Ok(Some("ping".to_string())));
-        assert_eq!(server.read_line(), Ok(Some("again".to_string())));
-        assert_eq!(client.read_line(), Ok(Some("pong".to_string())));
-
-        let too_long = "a".repeat(MAX_LINE_BYTES);
-        assert_eq!(client.write_line(&too_long), Err(Error::LineTooLong));
-        drop(client);
-        assert_eq!(server.read_line(), Ok(None));
-        assert!(server.write_line("late").is_err());
+        let old = fake.listen("svc").unwrap();
+        old.close();
+        let _new = fake.listen("svc").unwrap();
+        assert_eq!(old.restrict_to(&user("alice")), Err(Error::Closed));
+        drop(old);
+        assert_eq!(fake.listen("svc").err(), Some(Error::AlreadyExists));
     }
 
     // Security rule: dev mode never shares a file or a channel with the
@@ -502,15 +656,21 @@ mod tests {
     #[test]
     fn the_paths_check_catches_a_collision() {
         let installed = paths(Path::new("installed"));
-        let mut dev = paths(Path::new("dev"));
-        let collides = |dev: &Paths| {
-            let (installed, dev) = (installed.clone(), dev.clone());
-            std::panic::catch_unwind(move || suite::check_paths(&installed, &dev)).is_err()
+        let collides = |other: &Paths| {
+            let (installed, other) = (installed.clone(), other.clone());
+            let checks = [
+                std::panic::catch_unwind(|| suite::check_paths(&installed, &other)),
+                std::panic::catch_unwind(|| suite::check_paths(&other, &installed)),
+            ];
+            assert_eq!(checks[0].is_err(), checks[1].is_err(), "not symmetric");
+            checks[0].is_err()
         };
-        assert!(collides(&dev), "same channel name");
-        dev.channel_name = "ubc-vpn-fake-dev".to_string();
-        assert!(!collides(&dev));
+        let mut dev = paths(Path::new("dev"));
+        assert!(!collides(&dev), "two roots share nothing");
         dev.state_dir = installed.policy_dir.join("dev");
         assert!(collides(&dev), "a dev folder inside an installed one");
+        dev = paths(Path::new("dev"));
+        dev.channel_name = installed.channel_name.clone();
+        assert!(collides(&dev), "same channel name");
     }
 }

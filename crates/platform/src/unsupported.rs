@@ -3,18 +3,31 @@
 //! [`Verified::Unknown`].
 
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
     Connection, Dns, Error, Listener, Mode, NetworkEvent, NetworkEvents, Paths, PhysicalNetwork,
-    Result, Routes, SplitDns, Transport, Verified,
+    Platform, Result, Routes, SplitDns, Transport, Verified,
 };
 
 pub(crate) struct Native;
 
-pub(crate) fn paths(_mode: Mode) -> Result<Paths> {
+/// The shape a real OS module fills in: it builds every part for `mode`, so
+/// the transport and anything kept on disk know which mode they serve.
+pub(crate) fn native(mode: Mode) -> Result<Platform> {
+    Ok(Platform {
+        routes: Arc::new(Native),
+        dns: Arc::new(Native),
+        events: Arc::new(Native),
+        transport: Arc::new(Native),
+        paths: paths(mode)?,
+    })
+}
+
+fn paths(_mode: Mode) -> Result<Paths> {
     Err(Error::Unsupported)
 }
 
@@ -34,6 +47,9 @@ impl Routes for Native {
     fn remove_tunnel_routes(&self, _tunnel: &str, _subnets: &[Ipv4Net]) -> Result<()> {
         Err(Error::Unsupported)
     }
+    fn remove_all(&self) -> Result<()> {
+        Err(Error::Unsupported)
+    }
     fn uses_interface(&self, _dest: Ipv4Addr, _interface: &str) -> Verified {
         Verified::Unknown
     }
@@ -46,13 +62,13 @@ impl Dns for Native {
     fn clear_split_dns(&self) -> Result<()> {
         Err(Error::Unsupported)
     }
-    fn split_dns_matches(&self, _tunnel: &str, _dns: &SplitDns) -> Verified {
+    fn split_dns_matches(&self, _dns: &SplitDns) -> Verified {
         Verified::Unknown
     }
 }
 
 impl NetworkEvents for Native {
-    fn subscribe(&self) -> Result<Receiver<NetworkEvent>> {
+    fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
         Err(Error::Unsupported)
     }
 }
@@ -61,7 +77,7 @@ impl Transport for Native {
     fn listen(&self, _name: &str) -> Result<Box<dyn Listener>> {
         Err(Error::Unsupported)
     }
-    fn connect(&self, _name: &str) -> Result<Box<dyn Connection>> {
+    fn connect(&self, _name: &str) -> Result<Connection> {
         Err(Error::Unsupported)
     }
 }
