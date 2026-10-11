@@ -52,12 +52,16 @@ jobs:
       - name: The service and the CLI ship no dev-mode, fake or debug code
         if: matrix.os == 'ubuntu-latest'
         run: |
+          pattern='^ubc-vpn-.*\[.*(dev|fake|debug)'
+          # A broken pattern makes grep fail, which looks the same as "nothing
+          # found". So first prove the pattern matches what it is meant to.
+          grep -Eq "$pattern" <<<'ubc-vpn-example v0.0.0 (path) [dev-mode,fake]'
           for program in ubc-vpn-service ubc-vpn-cli; do
             # Capture first, so a failing cargo tree fails the step instead of
             # looking like "nothing found". The format prints each crate with
             # the features it would really be built with, on every target.
             tree=$(cargo tree --locked -p "$program" -e normal --target all --prefix none -f '{p} [{f}]')
-            if grep -E '^ubc-vpn-.*[.*(dev|fake|debug)' <<<"$tree"; then
+            if grep -E "$pattern" <<<"$tree"; then
               echo "$program would ship code meant for development only."
               exit 1
             fi
