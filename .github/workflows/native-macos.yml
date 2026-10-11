@@ -21,9 +21,13 @@ concurrency:
   group: native-macos-${{ github.ref }}
   cancel-in-progress: true
 
+# Naming the shell turns on pipefail, so a failure before a pipe counts.
+defaults:
+  run:
+    shell: bash
+
 env:
   ARTIFACT: libopenconnect-macos-arm64
-  HOMEBREW_NO_AUTO_UPDATE: "1"
 
 jobs:
   build:
@@ -33,16 +37,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Only used to generate openconnect's build files; see native/macos/README.md.
-      - name: Install build tools
-        run: brew install autoconf automake libtool pkgconf
-      # GMP, Nettle and GnuTLS take most of the build time and change rarely.
+      # A cached build is reused only on the same runner image and with the
+      # same pinned versions, Xcode included (it is named in versions.env).
+      - name: Identify the runner image
+        id: image
+        run: echo "id=$ImageOS-$ImageVersion-$(uname -m)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             build/prefix
             build/sources
-          key: native-macos-15-arm64-${{ hashFiles('native/macos/versions.env', 'native/macos/build.sh') }}
+          key: native-${{ steps.image.outputs.id }}-${{ hashFiles('native/macos/versions.env', 'native/macos/build.sh') }}
       - name: Build
         run: bash native/macos/build.sh build
       - name: Bundle and check
@@ -89,7 +94,8 @@ jobs:
           PKG_CONFIG_PATH: ${{ env.APP }}/lib/pkgconfig
           RUSTFLAGS: -C link-arg=-Wl,-rpath,${{ env.APP }}/lib
         run: |
-          brew install pkgconf
+          # The probe's build script calls pkg-config. This is the test, not the build.
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install pkgconf
           rustup toolchain install
           cargo build --release --locked
           otool -L target/release/oc-probe
@@ -97,6 +103,7 @@ jobs:
       - name: Run the probe
         working-directory: native/probe
         run: |
+          set -o pipefail
           # The run must pass, report the version we built, load every one of
           # our libraries from the unpacked folder, and load nothing from Homebrew.
           check() {

@@ -2,7 +2,7 @@
 # Turns what build.sh produced into a folder that can be moved anywhere:
 # libopenconnect and the libraries it needs, made relocatable and signed,
 # with their licences, their sources and a manifest. Fails if any library
-# does not meet the rules checked at the end.
+# does not meet the rules checked below.
 #
 # Usage: bundle.sh <work-dir> <out-dir>
 set -euo pipefail
@@ -11,6 +11,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=versions.env
 . "$here/versions.env"
 
+export DEVELOPER_DIR=$XCODE/Contents/Developer
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
 work=$(cd "${1:?usage: bundle.sh <work-dir> <out-dir>}" && pwd)
 prefix=$work/prefix
 sources=$work/sources
@@ -18,27 +21,42 @@ rm -rf "${2:?usage: bundle.sh <work-dir> <out-dir>}"
 mkdir -p "$2/lib/pkgconfig" "$2/include" "$2/licenses" "$2/sources/recipe"
 out=$(cd "$2" && pwd)
 
-# The libraries a file loads. For a library the list includes its own name.
+# The only parts of macOS the libraries may load.
+system_libraries="/usr/lib/libSystem.B.dylib
+/usr/lib/libiconv.2.dylib
+/usr/lib/libxml2.2.dylib
+/usr/lib/libz.1.dylib
+/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+/System/Library/Frameworks/Security.framework/Versions/A/Security"
+
+is_system() {
+    grep -qxF "$1" <<< "$system_libraries"
+}
+
+# The libraries a file loads, one per line. For a library the list includes
+# its own name.
 loads() {
-    otool -L "$1" | awk 'NR > 1 { print $1 }'
+    otool -L "$1" | sed -n 's/^[[:space:]]*\(.*\) (compatibility version .*/\1/p'
 }
 
 # Copies a library and, in turn, everything it loads from our prefix.
 collect() {
-    local name=${1##*/} dep
+    local name=${1##*/} deps dep
     [ -f "$out/lib/$name" ] && return 0
     cp -L "$1" "$out/lib/$name"
     chmod 644 "$out/lib/$name"
-    for dep in $(loads "$1"); do
+    deps=$(loads "$1")
+    while IFS= read -r dep; do
         case $dep in
             "$prefix"/*) collect "$dep" ;;
-            /usr/lib/* | /System/Library/*) ;;
             *)
-                echo "$name loads $dep, which is neither ours nor the system's." >&2
-                exit 1
+                if ! is_system "$dep"; then
+                    echo "$name loads $dep, which is neither ours nor an expected system library." >&2
+                    exit 1
+                fi
                 ;;
         esac
-    done
+    done <<< "$deps"
 }
 collect "$prefix/lib/libopenconnect.5.dylib"
 
@@ -49,17 +67,14 @@ collect "$prefix/lib/libopenconnect.5.dylib"
 for lib in "$out"/lib/*.dylib; do
     strip -S "$lib"
     install_name_tool -id "@rpath/${lib##*/}" "$lib"
-    for dep in $(loads "$lib"); do
+    deps=$(loads "$lib")
+    while IFS= read -r dep; do
         case $dep in
             "$prefix"/*) install_name_tool -change "$dep" "@loader_path/${dep##*/}" "$lib" ;;
         esac
-    done
+    done <<< "$deps"
     codesign --force --sign - "$lib"
 done
-
-minos() {
-    otool -l "$1" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }'
-}
 
 # Check every library before anything else is written.
 failed=0
@@ -69,25 +84,44 @@ fail() {
 }
 for lib in "$out"/lib/*.dylib; do
     name=${lib##*/}
-    [ "$(lipo -archs "$lib")" = arm64 ] || fail "$name is not arm64 only"
-    [ "$(minos "$lib")" = "$MACOS_MIN" ] || fail "$name needs macOS $(minos "$lib"), not $MACOS_MIN"
-    otool -hv "$lib" | grep -q TWOLEVEL || fail "$name uses a flat namespace"
+    archs=$(lipo -archs "$lib")
+    [ "$archs" = arm64 ] || fail "$name is $archs, not arm64 only"
+
+    minos=$(otool -l "$lib" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
+    [ "$minos" = "$MACOS_MIN" ] || fail "$name needs macOS $minos, not $MACOS_MIN"
+
+    # A weak import is a function the SDK has but the oldest macOS may not.
+    # It loads as a null pointer there and crashes when called.
+    symbols=$(nm -m "$lib")
+    if grep 'undefined) weak external' <<< "$symbols" >&2; then
+        fail "$name has the weak imports above"
+    fi
+
+    header=$(otool -hv "$lib")
+    grep -q TWOLEVEL <<< "$header" || fail "$name uses a flat namespace"
+
     codesign --verify --strict "$lib" || fail "$name has no valid signature"
-    if otool -l "$lib" | grep -q LC_RPATH; then
+
+    commands=$(otool -l "$lib")
+    if grep -q LC_RPATH <<< "$commands"; then
         fail "$name carries a search path of its own"
     fi
-    for dep in $(loads "$lib"); do
+
+    deps=$(loads "$lib")
+    while IFS= read -r dep; do
         case $dep in
-            @rpath/* | @loader_path/* | /usr/lib/* | /System/Library/*) ;;
-            *) fail "$name loads $dep" ;;
+            "@rpath/$name" | @loader_path/lib*.dylib) [ -f "$out/lib/${dep##*/}" ] || fail "$name loads $dep, which is not in the folder" ;;
+            *) is_system "$dep" || fail "$name loads $dep" ;;
         esac
-    done
+    done <<< "$deps"
+
     if grep -q "$work" "$lib"; then
         fail "$name contains the build directory:"
         grep -a -o "[[:print:]]*$work[[:print:]]*" "$lib" | sort -u | head -5 >&2
     fi
-    echo "$name: macOS $(minos "$lib")"
-    loads "$lib" | sed 's/^/    /'
+
+    echo "$name: arm64, macOS $minos, no weak imports, signed; loads:"
+    sed 's/^/    /' <<< "$deps"
 done
 [ "$failed" = 0 ]
 
@@ -105,62 +139,81 @@ Libs: -L\${libdir} -lopenconnect
 Cflags: -I\${includedir}
 EOF
 
-# The LGPL asks us to ship the source we built from and how we built it.
-cp "$sources"/* "$out/sources/"
+# One call per shipped component: copies its source archive and licence
+# texts (the LGPL asks us to ship the source we built from) and adds it to
+# the manifest.
+components=""
+listed=0
+component() { # <name> <version> <licence> <url> "<licence files>" <library>...
+    local name=$1 version=$2 licence=$3 archive=${4##*/} files=$5 file lib libs="" sha256
+    shift 5
+    cp "$sources/$archive" "$out/sources/"
+    sha256=$(shasum -a 256 "$sources/$archive" | cut -d' ' -f1)
+
+    mkdir -p "$out/licenses/$name"
+    for file in $files; do
+        tar -xOf "$sources/$archive" "$name-$version/$file" > "$out/licenses/$name/${file//\//-}"
+    done
+
+    for lib in "$@"; do
+        [ -f "$out/lib/$lib" ]
+        libs="$libs${libs:+, }\"lib/$lib\""
+        listed=$((listed + 1))
+    done
+
+    components="$components${components:+,
+}    {
+      \"name\": \"$name\",
+      \"version\": \"$version\",
+      \"licence\": \"$licence\",
+      \"min_macos\": \"$MACOS_MIN\",
+      \"libraries\": [$libs],
+      \"source\": \"sources/$archive\",
+      \"source_sha256\": \"$sha256\"
+    }"
+}
+component openconnect "$OPENCONNECT_VERSION" "LGPL-2.1-only AND BSD-2-Clause" "$OPENCONNECT_URL" \
+    "COPYING.LGPL json/LICENSE" libopenconnect.5.dylib
+component gnutls "$GNUTLS_VERSION" "LGPL-2.1-or-later" "$GNUTLS_URL" \
+    "COPYING.LESSERv2" libgnutls.30.dylib
+component nettle "$NETTLE_VERSION" "LGPL-3.0-or-later OR GPL-2.0-or-later" "$NETTLE_URL" \
+    "COPYING.LESSERv3 COPYINGv3 COPYINGv2" libnettle.9.dylib libhogweed.7.dylib
+component gmp "$GMP_VERSION" "LGPL-3.0-or-later OR GPL-2.0-or-later" "$GMP_URL" \
+    "COPYING.LESSERv3 COPYINGv3 COPYINGv2" libgmp.10.dylib
+
+# Every library in the folder must belong to a component above.
+shipped=$(find "$out/lib" -type f -name '*.dylib' | wc -l)
+if [ "$shipped" -ne "$listed" ]; then
+    echo "FAIL: $shipped libraries in the folder, $listed in the manifest." >&2
+    exit 1
+fi
+
 cp "$here/build.sh" "$here/bundle.sh" "$here/versions.env" "$out/sources/recipe/"
 
-licences() { # <component> <archive> <file>...
-    local component=$1 archive=$2 file
-    shift 2
-    mkdir -p "$out/licenses/$component"
-    for file in "$@"; do
-        tar -xOf "$sources/$archive" "${archive%.tar.*}/$file" \
-            > "$out/licenses/$component/${file//\//-}"
-    done
-}
-openconnect_src=openconnect-$OPENCONNECT_VERSION.tar.gz
-licences openconnect "$openconnect_src" COPYING.LGPL json/LICENSE
-licences gnutls "${GNUTLS_URL##*/}" COPYING.LESSERv2
-licences nettle "${NETTLE_URL##*/}" COPYING.LESSERv3 COPYINGv3 COPYINGv2
-licences gmp "${GMP_URL##*/}" COPYING.LESSERv3 COPYINGv3 COPYINGv2
-
-component() { # <name> <version> <licence> <archive> <library name prefix>...
-    local name=$1 version=$2 licence=$3 archive=$4 libs="" lib
-    shift 4
-    for lib in "$@"; do
-        lib=$(cd "$out" && echo lib/"$lib".*.dylib)
-        libs="$libs${libs:+, }\"$lib\""
-    done
-    cat <<EOF
-    {
-      "name": "$name",
-      "version": "$version",
-      "licence": "$licence",
-      "min_macos": "$(minos "$out/${lib}")",
-      "libraries": [$libs],
-      "source": "sources/$archive",
-      "source_sha256": "$(shasum -a 256 "$sources/$archive" | cut -d' ' -f1)"
-    }
-EOF
-}
+macos=$(sw_vers -productVersion)
+xcode=$(xcodebuild -version | tr '\n' ' ' | sed 's/ $//')
+sdk=$(xcrun --show-sdk-version)
+compiler=$(cc --version | sed -n 1p)
+make=$(make --version | sed -n 1p)
+m4=$(m4 --version | sed -n 1p)
 cat > "$out/manifest.json" <<EOF
 {
   "target": "macos-arm64",
   "min_macos": "$MACOS_MIN",
   "components": [
-$(component openconnect "$OPENCONNECT_VERSION" "LGPL-2.1-only AND BSD-2-Clause" "$openconnect_src" libopenconnect),
-$(component gnutls "$GNUTLS_VERSION" "LGPL-2.1-or-later" "${GNUTLS_URL##*/}" libgnutls),
-$(component nettle "$NETTLE_VERSION" "LGPL-3.0-or-later OR GPL-2.0-or-later" "${NETTLE_URL##*/}" libnettle libhogweed),
-$(component gmp "$GMP_VERSION" "LGPL-3.0-or-later OR GPL-2.0-or-later" "${GMP_URL##*/}" libgmp)
+$components
   ],
-  "openconnect_commit": "$OPENCONNECT_COMMIT",
+  "openconnect_tag_commit": "$OPENCONNECT_COMMIT",
   "built_with": {
-    "macos": "$(sw_vers -productVersion)",
-    "sdk": "$(xcrun --show-sdk-version)",
-    "compiler": "$(cc --version | head -1)",
-    "autoconf": "$(autoconf --version | head -1)",
-    "automake": "$(automake --version | head -1)",
-    "libtool": "$(glibtool --version | head -1)"
+    "macos": "$macos",
+    "xcode": "$xcode",
+    "sdk": "$sdk",
+    "compiler": "$compiler",
+    "make": "$make",
+    "m4": "$m4",
+    "pkgconf": "$PKGCONF_VERSION",
+    "pkgconf_source": "$PKGCONF_URL",
+    "pkgconf_source_sha256": "$PKGCONF_SHA256"
   }
 }
 EOF

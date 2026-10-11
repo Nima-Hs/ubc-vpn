@@ -13,6 +13,10 @@ if [ "$(uname -sm)" != "Darwin arm64" ]; then
     echo "This recipe is for macOS on Apple silicon." >&2
     exit 1
 fi
+if [ ! -d "$XCODE/Contents/Developer" ]; then
+    echo "The pinned Xcode is not installed at $XCODE." >&2
+    exit 1
+fi
 
 mkdir -p "${1:?usage: build.sh <work-dir>}"
 work=$(cd "$1" && pwd)
@@ -21,12 +25,19 @@ sources=$work/sources
 src=$work/src
 mkdir -p "$prefix" "$sources" "$src"
 
+# Only macOS, the pinned Xcode and what this script builds take part.
+# Homebrew is not on the path.
+export DEVELOPER_DIR=$XCODE/Contents/Developer
+export PATH=$prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+# The SDK is newer than the oldest macOS we support. Turn the use of any
+# function that macOS lacks into an error rather than a warning.
 export MACOSX_DEPLOYMENT_TARGET=$MACOS_MIN
-export CFLAGS="-O2 -mmacosx-version-min=$MACOS_MIN"
+export CFLAGS="-O2 -mmacosx-version-min=$MACOS_MIN -Werror=unguarded-availability-new"
 export CPPFLAGS="-I$prefix/include"
 export LDFLAGS="-L$prefix/lib -mmacosx-version-min=$MACOS_MIN"
-# Look for libraries in our own prefix only, so nothing from Homebrew is
-# picked up by accident.
+# Look for libraries in our own prefix only.
+export PKG_CONFIG=$prefix/bin/pkgconf
 export PKG_CONFIG_LIBDIR=$prefix/lib/pkgconfig
 unset PKG_CONFIG_PATH
 
@@ -39,8 +50,8 @@ fetch() { # <url> <sha256>
     echo "$2  $file" | shasum -a 256 -c -
 }
 
-# Builds one dependency, unless an earlier run already did.
-dependency() { # <name> <version> <url> <sha256> <check|nocheck> [configure options]
+# Builds one component, unless an earlier run already did.
+component() { # <name> <version> <url> <sha256> <check|nocheck> [configure options]
     local name=$1 version=$2 url=$3 sha256=$4 check=$5
     shift 5
     fetch "$url" "$sha256"
@@ -61,18 +72,20 @@ dependency() { # <name> <version> <url> <sha256> <check|nocheck> [configure opti
     touch "$stamp"
 }
 
+component pkgconf "$PKGCONF_VERSION" "$PKGCONF_URL" "$PKGCONF_SHA256" nocheck
+
 # --build without a CPU model stops GMP tuning itself for the build machine.
-dependency gmp "$GMP_VERSION" "$GMP_URL" "$GMP_SHA256" check \
+component gmp "$GMP_VERSION" "$GMP_URL" "$GMP_SHA256" check \
     --build="aarch64-apple-darwin$(uname -r)"
 
-dependency nettle "$NETTLE_VERSION" "$NETTLE_URL" "$NETTLE_SHA256" check \
+component nettle "$NETTLE_VERSION" "$NETTLE_URL" "$NETTLE_SHA256" check \
     --disable-documentation --disable-openssl
 
 # Library only, with every optional dependency switched off. With no trust
 # store file, GnuTLS takes the system's trusted certificates from the Keychain.
 # The priority file is given an absolute path so that the build directory is
 # not compiled in.
-dependency gnutls "$GNUTLS_VERSION" "$GNUTLS_URL" "$GNUTLS_SHA256" nocheck \
+component gnutls "$GNUTLS_VERSION" "$GNUTLS_URL" "$GNUTLS_SHA256" nocheck \
     --disable-doc --disable-tools --disable-tests --disable-cxx --disable-nls \
     --disable-libdane \
     --with-included-libtasn1 --with-included-unistring \
@@ -81,36 +94,15 @@ dependency gnutls "$GNUTLS_VERSION" "$GNUTLS_URL" "$GNUTLS_SHA256" nocheck \
     --without-default-trust-store-file \
     --with-system-priority-file=/etc/gnutls/config
 
-# openconnect, from git. The build runs inside the checkout because that is
-# how the library learns its own version (version.sh asks git).
-tag=v$OPENCONNECT_VERSION
-oc=$src/openconnect
-rm -rf "$oc"
-git init -q "$oc"
-git -C "$oc" fetch -q --depth 1 "$OPENCONNECT_REPO" "refs/tags/$tag:refs/tags/$tag"
-git -C "$oc" checkout -q "$tag"
-if [ "$(git -C "$oc" rev-parse HEAD)" != "$OPENCONNECT_COMMIT" ]; then
-    echo "Tag $tag is not at the pinned commit $OPENCONNECT_COMMIT." >&2
-    exit 1
-fi
-# The exact source we build, kept to ship next to the library.
-git -C "$oc" archive --prefix="openconnect-$OPENCONNECT_VERSION/" \
-    -o "$sources/openconnect-$OPENCONNECT_VERSION.tar.gz" HEAD
-
+# libxml2 and zlib are the system's; the SDK has no pkg-config file for
+# libxml2, so say where it is. strchrnul exists only from macOS 15.4, so make
+# openconnect use its own. The vpnc-script path is used by the command-line
+# client only, which is built but not shipped; the library never runs it.
 sdk=$(xcrun --show-sdk-path)
-(
-    cd "$oc"
-    ./autogen.sh
-    # libxml2 and zlib are the system's; the SDK has no pkg-config file for
-    # libxml2, so say where it is. The library never runs the vpnc-script
-    # path given here: only the command-line client does, and it is not built.
-    ./configure --prefix="$prefix" --libdir="$prefix/lib" \
-        --with-gnutls --disable-nls --disable-docs \
-        --without-libproxy --without-stoken --without-libpskc \
-        --without-libpcsclite --without-lz4 --without-gssapi \
-        --with-vpnc-script=/nonexistent/vpnc-script \
-        LIBXML2_CFLAGS="-I$sdk/usr/include/libxml2" LIBXML2_LIBS=-lxml2
-    make -j"$jobs" libopenconnect.la
-    grep -q "\"$tag\"" version.c
-    make install-libLTLIBRARIES install-includeHEADERS
-)
+component openconnect "$OPENCONNECT_VERSION" "$OPENCONNECT_URL" "$OPENCONNECT_SHA256" nocheck \
+    --with-gnutls --disable-nls --disable-docs \
+    --without-libproxy --without-stoken --without-libpskc \
+    --without-libpcsclite --without-lz4 --without-gssapi \
+    --with-vpnc-script=/nonexistent/vpnc-script \
+    ac_cv_func_strchrnul=no \
+    LIBXML2_CFLAGS="-I$sdk/usr/include/libxml2" LIBXML2_LIBS=-lxml2
