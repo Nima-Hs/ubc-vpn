@@ -308,4 +308,13 @@ fn a_library_loaded_before_the_folder_was_chosen_is_refused() {
     };
     let set = [("UBC_VPN_TEST_CARELESS", first.as_os_str())];
     assert_eq!(outcome(libs, libs, &set), refused(LoadError::LoadedEarly));
+    // Linux: a copy from another folder counts too. glibc would answer the
+    // full path with that copy, because it has the same name inside.
+    if cfg!(target_os = "linux") {
+        let copy = scratch("early");
+        copy_libs(&copy);
+        let first = copy.join(os::FILE);
+        let set = [("UBC_VPN_TEST_CARELESS", first.as_os_str())];
+        assert_eq!(outcome(libs, libs, &set), refused(LoadError::LoadedEarly));
+    }
 }
