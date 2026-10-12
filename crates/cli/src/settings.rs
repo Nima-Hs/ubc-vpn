@@ -85,21 +85,36 @@ fn answer(
     let typed = typed(input)?;
     // Without a readable policy everything but the allow-list is checked.
     let allowed = policy.as_ref().and_then(|p| p.allowed_routes.as_deref());
-    let reply = match check_input(&typed, allowed) {
-        Err(problems) => RoutesReply::Invalid { problems },
-        Ok(routes) if command == Command::CheckRoutes => RoutesReply::Ok { routes },
-        Ok(routes) => {
-            let dir = settings_dir.ok_or(SettingsFailureCode::Unwritable)?;
-            let current = stored(dir)?;
-            if let Some(text) = &current {
-                understood(text)?;
-            }
-            let text = replace_routes(current.as_deref(), &routes)?;
-            save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)?;
-            RoutesReply::Ok { routes }
-        }
+    let routes = match check_input(&typed, allowed) {
+        Ok(routes) => routes,
+        Err(problems) => return encode(&RoutesReply::Invalid { problems }).map_err(unencodable),
     };
-    encode(&reply).map_err(unencodable)
+    // The reply repeats the routes and so is a little longer than the input,
+    // and what `get` prints is longer again. Routes whose reply, or whose
+    // settings, would not fit in one line are refused here, before anything
+    // is saved: a save must never be reported as a failure, and `get` must
+    // never be left unable to answer by what `set-routes` accepted.
+    let too_long = |_| SettingsFailureCode::BadInput;
+    let line = encode(&RoutesReply::Ok {
+        routes: routes.clone(),
+    })
+    .map_err(too_long)?;
+    let mut settings = Settings::default();
+    let mut current = None;
+    if command == Command::SetRoutes {
+        let dir = settings_dir.ok_or(SettingsFailureCode::Unwritable)?;
+        current = stored(dir)?;
+        if let Some(text) = &current {
+            settings = understood(text)?;
+        }
+    }
+    settings.routes = routes.clone();
+    encode(&SettingsView::new(settings, policy.as_ref())).map_err(too_long)?;
+    if let Some(dir) = settings_dir.filter(|_| command == Command::SetRoutes) {
+        let text = replace_routes(current.as_deref(), &routes)?;
+        save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)?;
+    }
+    Ok(line)
 }
 
 /// The policy, if its file is there and valid. Nothing fails for want of
@@ -141,10 +156,12 @@ fn understood(text: &str) -> Result<Settings, SettingsFailureCode> {
     serde_json::from_str(text).map_err(unreadable)
 }
 
-/// Opens a new file that only the user can read. On Unix that is mode 0600,
-/// whatever the umask. On Windows a new file takes the access list of its
-/// folder: under the user's profile that is the user, administrators and the
-/// system, and nobody else.
+/// Opens a new file for the settings. On Unix it is created with mode 0600,
+/// whatever the umask, so only the user can read it. On Windows a new file
+/// takes the access list of the folder it is in, whatever that is: under a
+/// user's profile that is usually the user, administrators and the system,
+/// and on a domain machine it can include other accounts. The file holds
+/// the username and the routes, and no secret.
 fn create_private(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

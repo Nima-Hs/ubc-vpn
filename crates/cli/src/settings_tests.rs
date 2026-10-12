@@ -379,7 +379,10 @@ fn settings_are_never_written_through_a_link() {
     let partial = machine.root.join("settings/settings.json.tmp");
     if let Err(error) = link_to_file(&target, &partial) {
         // Windows lets only an admin, or anyone in Developer Mode, make one.
-        eprintln!("SKIPPED settings_are_never_written_through_a_link: no link ({error})");
+        // Written past the test harness's capture, so that a CI log shows
+        // whether this test ran or not.
+        let skipped = format!("SKIPPED settings_are_never_written_through_a_link: {error}\n");
+        std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes()).unwrap();
         return;
     }
     assert!(matches!(
@@ -413,4 +416,78 @@ fn no_more_than_the_limit_is_read_from_standard_input() {
     assert_eq!(out, b"{\"error\":\"bad_input\"}\n");
     let taken = input.get_ref().0;
     assert!(taken <= 2 * MAX_LINE_BYTES, "{taken} bytes were read");
+}
+
+/// A set of routes whose input line, newline included, is `bytes` long:
+/// one subnet and 256 domains, the last ones shortened to fit.
+fn routes_filling(bytes: usize) -> String {
+    // A valid name exactly `len` bytes long: labels of at most 63, then
+    // `.test`.
+    let domain = |len: usize| {
+        let (whole, rest) = ((len - 5) / 63, (len - 5) % 63);
+        let mut labels = vec!["a".repeat(62); whole];
+        match rest {
+            0 => labels[0].push('a'),
+            rest => labels.push("b".repeat(rest)),
+        }
+        labels.join(".") + ".test"
+    };
+    let line = |lengths: &[usize]| {
+        let domains: Vec<String> = lengths
+            .iter()
+            .map(|len| format!("\"{}\"", domain(*len)))
+            .collect();
+        format!(
+            r#"{{"subnets":["10.19.0.0/16"],"dns_domains":[{}]}}"#,
+            domains.join(",")
+        )
+    };
+    let mut lengths = vec![253; 256];
+    let mut spare = line(&lengths).len() + 1 - bytes;
+    for len in lengths.iter_mut().rev() {
+        let cut = spare.min(*len - 20);
+        (*len, spare) = (*len - cut, spare - cut);
+    }
+    let made = line(&lengths);
+    assert_eq!(made.len() + 1, bytes);
+    made
+}
+
+// Security rule: a save is never reported as a failure, and nothing that
+// `set-routes` accepts can leave `get` unable to answer. Routes that fit
+// in the input line but whose reply or settings would not fit in a line are
+// refused as bad input, with the file untouched.
+#[test]
+fn routes_too_long_to_report_are_refused_before_anything_is_saved() {
+    // A field this version does not know, so that the settings are otherwise
+    // the defaults and both commands judge the same length.
+    let before = r#"{"theme":"dark"}"#;
+    // From an input of exactly the limit downwards, to the first that fits.
+    let sizes = (0..40).map(|step| MAX_LINE_BYTES - step * 16);
+    let mut refused = 0;
+    for size in sizes {
+        let machine = Machine::new();
+        machine.write_settings(before);
+        let typed = routes_filling(size);
+        let (status, line) = machine.run(Command::SetRoutes, &typed);
+        let (check_status, check_line) = machine.run(Command::CheckRoutes, &typed);
+        assert_eq!(
+            (check_status, &check_line),
+            (status, &line),
+            "{size}: the two agree"
+        );
+        // Whatever was answered, the settings can still be shown.
+        let view = machine.view();
+        if status == 1 {
+            assert_eq!(line, "{\"error\":\"bad_input\"}\n", "{size}");
+            let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+            assert_eq!(untouched, before, "{size}: nothing was saved");
+            refused += 1;
+            continue;
+        }
+        assert_eq!(view.settings.routes.dns_domains.len(), 256, "{size}: saved");
+        assert!(refused > 0, "an input of exactly the limit must not fit");
+        return;
+    }
+    panic!("no size was accepted");
 }
