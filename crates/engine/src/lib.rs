@@ -58,30 +58,42 @@
 //!
 //! **Process and library setup**
 //!
-//! - Load the library once, as the first thing the program does, before any
-//!   other thread exists, from the folder the program itself was installed
+//! - Two steps open every program that uses the real engine, in this order
+//!   and before any other thread exists: deal with the environment, then
+//!   load the library. The order matters. GnuTLS reads some variables in
+//!   its start-up code, which runs while the library is being loaded.
+//! - The environment. The libraries read about a dozen variables, among
+//!   them `SSLKEYLOGFILE`, `GNUTLS_SYSTEM_PRIORITY_FILE` and
+//!   `GNUTLS_DEBUG_LEVEL`. Keep one list of them in this crate, with the
+//!   reason for each, and nowhere else. Leave out variables every user has
+//!   set, such as `USER`, which the libraries read only for features the
+//!   engine never turns on.
+//!   - On Windows remove them, and point the temporary folder at one only
+//!     the system can write. The libraries read the C runtime's copy of the
+//!     environment, which `std::env` does not change, so remove and set
+//!     through the C runtime (`_putenv_s`), and test it by watching what
+//!     the loaded library does, not by reading the variable back.
+//!   - On macOS and Linux remove nothing, because changing the environment
+//!     is only sound while no other thread exists: refuse to start while
+//!     one of them is set.
+//!   - The privileged service also refuses to start while a variable that
+//!     steers the system loader is set (`LD_*`, and `DYLD_*` other than
+//!     the two `DYLD_FALLBACK_*` ones). Nothing may ever remove a `DYLD_*`
+//!     variable: the loader read its value at process start and still uses
+//!     it, so removing it only hides that from the check made at loading.
+//!   - A name found in the environment was chosen by whoever set it. Do not
+//!     put it in a public error, and filter it before it is logged or shown.
+//! - Loading. Load once, from the folder the program itself was installed
 //!   in. The folder never comes from configuration, the environment or a
 //!   client. Treat every loading error as fatal: after some of them a
 //!   library is already in the process and its start-up code has run.
-//! - Loading controls which `libopenconnect` file is used and nothing more.
-//!   That file's own dependencies are found by the system loader, and
-//!   anything that controls the program's start-up environment can inject
-//!   code before `main`. So the privileged service must also be installed
-//!   in a folder ordinary accounts cannot change, and be started by the
-//!   system's service manager with a clean environment.
-//! - Deal with the environment once, at program start, before the library is
-//!   used. The libraries read about a dozen variables, among them
-//!   `SSLKEYLOGFILE`, `GNUTLS_SYSTEM_PRIORITY_FILE` and
-//!   `GNUTLS_DEBUG_LEVEL`; one list in this crate names them all. On
-//!   Windows remove them, and point the temporary folder at one only the
-//!   system can write. On macOS and Linux remove nothing, because changing
-//!   the environment is only sound while no other thread exists: refuse to
-//!   start while one of them is set.
-//! - The privileged service also refuses to start while a variable that
-//!   steers the system loader is set (`LD_*`, and `DYLD_*` other than the
-//!   two `DYLD_FALLBACK_*` ones). Nothing may remove a `DYLD_*` variable
-//!   before the library is loaded: the loader acted on its value at process
-//!   start, and removing it only hides that from the check.
+//! - Loading controls which `libopenconnect` file is used. On Windows its
+//!   dependencies then come from the same folder or the system's own. On
+//!   macOS and Linux they are found by the system loader, and anything that
+//!   controls the program's start-up environment can inject code before
+//!   `main`. So the privileged service must also be installed in a folder
+//!   ordinary accounts cannot change, nor any folder above it, and be
+//!   started by the system's service manager with a clean environment.
 //! - On Windows the library asks for `wintun.dll` by name in the program's
 //!   own folder, so that file sits beside the service program, and after
 //!   loading nothing else can be loaded by name from that folder.
@@ -110,7 +122,22 @@
 //! - The library calls the certificate callback only for a certificate its
 //!   own verification did not accept. With system trust off that is every
 //!   certificate, but do not rely on it: record that the callback ran and
-//!   accepted, and fail the login or the tunnel if it did not.
+//!   accepted, and fail the login or the tunnel if it did not. The library
+//!   forgets the certificate at each new connection, so clear the record
+//!   before every connection, reconnects included.
+//!
+//! **A gateway on this machine, for tests**
+//!
+//! - [`Gateway::test_endpoint`] is `None` in anything that ships. When it
+//!   is set, connect to that address and port in place of resolving the
+//!   host name and using port 443, and change nothing else: the host name
+//!   used for TLS and HTTP is still the policy's, and the pin check is the
+//!   same.
+//! - A login made that way reports the endpoint's address as
+//!   [`Session::gateway_addr`]. On the tunnel side, a gateway with a test
+//!   endpoint accepts exactly one address, the endpoint's own, in place of
+//!   calling [`check_gateway_addr`], which refuses loopback. A gateway
+//!   without one always calls [`check_gateway_addr`].
 //! - Reject inside the certificate callback, so that nothing, the cookie
 //!   least of all, is sent before the pin check has passed.
 //!

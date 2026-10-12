@@ -3,7 +3,8 @@
 //! This type lives in a file of its own so that its fields are private to
 //! this file. Rust privacy is per module: code anywhere else in the crate,
 //! the `libopenconnect` binding included, can obtain a [`Gateway`] only
-//! through [`Gateway::from_policy`].
+//! through [`Gateway::from_policy`], or in tests through
+//! [`Gateway::for_test`], which calls it.
 //!
 //! **Never put an engine, the binding or any other code in this file, and
 //! never widen a field's visibility.** A test fails if a field becomes
@@ -69,8 +70,8 @@ impl Gateway {
     }
 
     /// Takes the gateway from a policy, refusing a policy that is not valid.
-    /// This is the only way to make one, so an engine is never called with a
-    /// bad host name or without pins.
+    /// Every gateway is made through this, so an engine is never called with
+    /// a bad host name or without pins.
     pub fn from_policy(policy: &Policy) -> Result<Self, PolicyError> {
         policy.validate()?;
         Ok(Self {
