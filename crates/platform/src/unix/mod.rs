@@ -26,8 +26,9 @@
 //! - **The owner cannot keep the service from listening.** On macOS a file's
 //!   owner can mark it unchangeable, which holds off even root. So before the
 //!   socket file is removed or handed on, it is taken back: the mark is
-//!   cleared and the file made root's, repeated until that works once, after
-//!   which it is no longer the owner's to mark. This defeats a mark set once
+//!   cleared, the file made root's and the change tried, repeated while the
+//!   OS refuses. Once it is root's it is no longer the owner's to mark, bar
+//!   a mark already on its way. This defeats a mark set once
 //!   and a program that sets it in a loop. It is bounded: an owner who won
 //!   every try for a second would get an error reported, by `listen` and
 //!   `restrict_to`; `close` has nobody to tell, and the next `listen` tries
@@ -237,24 +238,26 @@ fn open_lock(path: &Path) -> io::Result<File> {
 /// file. One try takes microseconds, and one win is enough.
 const TAKE_BACK_WAIT: Duration = Duration::from_secs(1);
 
-/// Makes a socket file this process's own again, before it is removed or
-/// handed to someone else. Only for the holder of its lock.
+/// Makes a socket file this process's own again and then does `act` to it:
+/// removes it, or hands it to someone else. Only for the holder of its lock.
 ///
 /// Security rule: the owner a socket was narrowed to cannot stop the service
 /// by marking the file unchangeable (macOS, see `clear_flags` there). Clearing
 /// the mark is not enough, because the owner can set it again before the next
-/// call. So the mark is cleared and the file taken back, again and again,
-/// until taking it back works once: from then on it is not the owner's to
-/// mark. An owner who wins every try for [`TAKE_BACK_WAIT`] gets an error
-/// reported, not a service that waits for ever.
-fn take_back(path: &Path) -> io::Result<()> {
+/// call. So the mark is cleared, the file taken back and `act` tried, again
+/// and again while the OS refuses. Once taking it back has worked the file
+/// is not the owner's to mark; a mark the owner was already in the middle of
+/// setting can still land after that, which is why `act` is inside the loop.
+/// An owner who wins every try for [`TAKE_BACK_WAIT`] gets an error reported,
+/// not a service that waits for ever.
+fn take_back<T>(path: &Path, act: impl Fn() -> io::Result<T>) -> io::Result<T> {
     let me = geteuid().as_raw();
     let deadline = Instant::now() + TAKE_BACK_WAIT;
     loop {
         os::clear_flags(path)?;
-        match lchown(path, Some(me), None) {
+        match lchown(path, Some(me), None).and_then(|()| act()) {
             Err(error) if refused(&error) && Instant::now() < deadline => {}
-            taken => return taken,
+            done => return done,
         }
     }
 }
@@ -265,8 +268,7 @@ fn refused(error: &io::Error) -> bool {
 
 /// Removes a socket file. Only for the holder of its lock.
 fn remove_socket(path: &Path) -> io::Result<()> {
-    take_back(path)?;
-    fs::remove_file(path)
+    take_back(path, || fs::remove_file(path))
 }
 
 /// Connects, giving up after [`CONNECT_WAIT`]: a service that has stopped
@@ -433,9 +435,11 @@ impl Listener for SocketListener {
         }
         // Taken back from an earlier owner, closed to everyone but root,
         // then handed over.
-        take_back(&self.path)?;
-        set_mode(&self.path, 0o600)?;
-        Ok(chown(&self.path, Some(user), None)?)
+        let narrow = || {
+            fs::set_permissions(&self.path, Permissions::from_mode(0o600))?;
+            chown(&self.path, Some(user), None)
+        };
+        Ok(take_back(&self.path, narrow)?)
     }
 
     fn close(&self) {
