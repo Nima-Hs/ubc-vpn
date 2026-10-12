@@ -11,6 +11,10 @@ on:
     paths:
       - crates/platform/**
       - crates/core/**
+      # The programs this workflow builds and looks into on macOS.
+      - crates/service/**
+      - crates/cli/**
+      - crates/engine/**
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/platform-unix.yml
@@ -19,6 +23,10 @@ on:
     paths:
       - crates/platform/**
       - crates/core/**
+      # The programs this workflow builds and looks into on macOS.
+      - crates/service/**
+      - crates/cli/**
+      - crates/engine/**
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/platform-unix.yml
@@ -118,3 +126,29 @@ jobs:
             echo "A test was skipped."
             exit 1
           fi
+      # The interrupt handler asks the kernel through the C library's
+      # `syscall`, which Apple discourages and may remove. It is looked up by
+      # name when it is needed. Were a program to link to it instead, that
+      # program would not start at all on a macOS without it, and one of
+      # them is the service. So the programs as shipped must not name it
+      # among the functions they need from outside.
+      - name: The programs do not link to syscall
+        if: runner.os == 'macOS' && matrix.profile == 'release'
+        run: |
+          # One program at a time, as a release is built.
+          cargo build --locked --release -p ubc-vpn-service
+          cargo build --locked --release -p ubc-vpn-cli
+          for program in ubc-vpn-service ubc-vpn; do
+            nm -u "target/release/$program" > needed.txt
+            # The check must be able to find a function a program does link
+            # to, or it would pass by finding nothing at all.
+            if ! grep -qE '(^|[[:space:]])_write$' needed.txt; then
+              echo "$program: the list of what it links to could not be read."
+              exit 1
+            fi
+            if grep -E '(^|[[:space:]])_syscall$' needed.txt; then
+              echo "$program links to syscall."
+              exit 1
+            fi
+            echo "$program: $(wc -l < needed.txt) functions from outside, syscall not among them."
+          done
