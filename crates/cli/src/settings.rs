@@ -29,7 +29,7 @@ const STALE: Duration = Duration::from_secs(3600);
 
 /// How many damaged settings files `reset` keeps aside. A further one takes
 /// the place of the oldest.
-pub(crate) const KEPT_ASIDE: usize = 3;
+const KEPT_ASIDE: usize = 3;
 
 /// The commands. Each is spelled with `--json`, the only form so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

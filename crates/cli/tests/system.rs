@@ -292,6 +292,9 @@ fn the_service_and_the_client_work_together() {
     assert_eq!((status, &saved), (0, &checked));
     let (status, shown) = home.run(&["settings", "get", "--json"], "");
     assert!(status == 0 && shown.contains("ece.example.test"), "{shown}");
+    // Settings that can be read are not reset by asking.
+    let (status, kept) = home.run(&["settings", "reset", "--json"], "");
+    assert_eq!((status, kept.as_str()), (0, r#"{"type":"not_needed"}"#));
     let (status, refused) = home.run(&["settings", "set-routes", "--json"], "not json");
     assert_eq!((status, refused.as_str()), (1, r#"{"error":"bad_input"}"#));
 
