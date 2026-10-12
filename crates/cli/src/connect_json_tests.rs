@@ -491,3 +491,30 @@ fn a_cancel_before_the_service_is_contacted_claims_nothing() {
     scene.service = None;
     look_for_service(&scene);
 }
+
+/// Standard input that panics when it is read.
+struct Broken;
+
+impl std::io::Read for Broken {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        panic!("made up, to see what a reader that panics leaves behind");
+    }
+}
+
+// A reader of standard input that panics still cancels: the login is not
+// left waiting on the gateway with nobody able to stop it.
+#[test]
+fn a_reader_that_panics_cancels_the_login() {
+    let scene = Scene::usual();
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let begun = Arc::new(AtomicBool::new(false));
+    let engines = |_: &Policy| {
+        let (asks, begun) = (false, begun.clone());
+        Some(Box::new(TooLate { asks, begun }) as Box<dyn LoginEngine>)
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let input = BufReader::new(Broken);
+    let code = connect(&platform, &engines, input, brief(), &mut out, &mut err);
+    let line = format!("{}\n", error_line("cancelled", CANCELLED_LINE));
+    assert_eq!((code, String::from_utf8(out).unwrap()), (CANCELLED, line));
+}

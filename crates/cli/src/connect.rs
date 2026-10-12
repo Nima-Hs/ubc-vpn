@@ -220,7 +220,9 @@ pub(crate) fn start(
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
         return Err(failed(LoginErrorCode::RouteRefused, &message));
     }
-    // A user who has given up already is not made the owner of anything.
+    // A user already known to have given up is not made the owner of
+    // anything. This catches only a cancel that has been seen by now: one
+    // still on its way, from another thread, is caught before the request.
     if cancel.is_cancelled() {
         return Err(cancelled());
     }

@@ -176,9 +176,20 @@ fn cut(text: &str, most: usize) -> String {
     text.chars().take_while(fits).collect()
 }
 
+/// Cancels when dropped: however the reader of standard input ends, a panic
+/// included, a login is not left waiting for a cancel nobody can send.
+struct CancelAtTheEnd<'a>(&'a Cancel);
+
+impl Drop for CancelAtTheEnd<'_> {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Reads the app's lines until it cancels, goes away, or stops making sense.
 /// Each of those cancels the login, wherever it is.
 fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>, cancel: &Cancel) {
+    let _cancel = CancelAtTheEnd(cancel);
     // One buffer for every line, never grown, so that no copy of an answer
     // is left behind in memory this function has let go of.
     let mut line = Vec::with_capacity(MAX_LINE_BYTES + 1);
@@ -213,5 +224,4 @@ fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>, cancel: &Cancel) 
             break;
         }
     }
-    cancel.cancel();
 }
