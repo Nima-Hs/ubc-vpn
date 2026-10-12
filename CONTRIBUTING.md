@@ -23,6 +23,16 @@ pnpm install --frozen-lockfile
 
 The pnpm version is the `packageManager` field of `app/package.json`. `app/README.md` has the commands for running and testing the app.
 
+Ordinary builds and tests need no native library. Only the engine's `libopenconnect` feature does, and it takes our own build of it, never one installed on the system. Download the artifact of the newest `Native library` run on `main` for your OS, unpack it into an empty folder, and name that folder:
+
+```sh
+gh run list --workflow native-windows.yml --branch main --event push --status success --limit 1
+gh run download <run-id> --name libopenconnect-windows-x64 --dir <folder>
+UBC_VPN_NATIVE_DIR=<folder> cargo test -p ubc-vpn-engine --features libopenconnect
+```
+
+The macOS and Linux artifacts hold a tarball to unpack. `.github/workflows/engine.yml` has the exact steps.
+
 ## Workflow
 
 Branch from `main`, commit using Conventional Commits, and open a pull request whose title follows the same format. The full conventions are in [workflow](.claude/rules/workflow.md), [dependencies](.claude/rules/dependencies.md) and [security](.claude/rules/security.md).

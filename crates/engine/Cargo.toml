@@ -9,8 +9,10 @@ publish.workspace = true
 
 [features]
 # The real engine, a binding to libopenconnect, will live behind this feature.
-# It is off by default and enables nothing yet, so ordinary builds and tests
-# need no native library.
+# It is off by default, so ordinary builds and tests need no native library.
+# With it, build.rs requires UBC_VPN_NATIVE_DIR to name our own pinned build
+# of the library, and the tests in tests/ link and load it. Nothing in the
+# crate itself uses the binding yet.
 libopenconnect = []
 # The scripted engine in `fake`, for other crates' tests (as a
 # dev-dependency feature) and for the service's dev-mode feature. A release
