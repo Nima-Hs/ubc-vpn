@@ -1,9 +1,16 @@
+import { type SpawnOptions, spawn } from "node:child_process";
 import type { LinkState, Snapshot } from "@shared/api";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
 import { createServiceLink, type ServiceLink } from "../src/main/link";
 import { type MockBridge, type MockRun, mockBridge, pause, TUNNEL, until } from "./bridge-harness";
+
+// The real `spawn`, watched: one test reads how the bridge was started.
+vi.mock("node:child_process", async (original) => {
+    const actual = await original<typeof import("node:child_process")>();
+    return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 const cleanups: (() => unknown)[] = [];
 
@@ -36,6 +43,25 @@ function linkWith(limits: { replyTimeoutMs: number }, ...runs: MockRun[]): Linke
 }
 
 describe("the link to the service", () => {
+    it("starts the bridge in dev mode when it is told to, and not otherwise", async () => {
+        const spawned = vi.mocked(spawn);
+        const env = { ...process.env, XDG_RUNTIME_DIR: "/run/user/1000" };
+        for (const dev of [undefined, true]) {
+            const bridge = mockBridge({});
+            spawned.mockClear();
+            const link = createServiceLink({
+                command: bridge.command,
+                args: bridge.args,
+                appVersion: "0.1.0",
+                env,
+                ...(dev !== undefined && { dev }),
+            });
+            cleanups.push(() => link.dispose());
+            const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
+            expect(Object.keys(options.env ?? {}).includes("XDG_RUNTIME_DIR")).toBe(dev === true);
+        }
+    });
+
     it("claims the service once the bridge is ready, then shows the state it reports", async () => {
         const connected = { state: "connected", tunnel: TUNNEL };
         const { bridge, link, seen } = linkTo({

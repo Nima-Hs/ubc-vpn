@@ -371,6 +371,9 @@ export function describeActionError(error: ActionError): NoticeCopy {
     }
 }
 
+/** Shown on every screen while the app talks to a dev-mode service. */
+export const DEVELOPMENT_MODE = "Development mode. This is not the real VPN.";
+
 /** The Routes screen's fixed words. */
 export const ROUTES = {
     title: "Routes",

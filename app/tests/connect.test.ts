@@ -928,6 +928,40 @@ describe("how the client is started", () => {
         ).toMatchObject({ args: ["connect", "--json"] });
     });
 
+    it("is told to use dev mode first of all, when the switch is on, and never when installed", () => {
+        const where = { resourcesPath: "/opt/app/resources", platform: "linux" as const };
+        expect(
+            connectCommand({ isPackaged: false }, { ...where, env: { UBC_VPN_DEV: "1" } }),
+        ).toMatchObject({ args: ["--dev", "connect", "--json"], dev: true });
+        expect(
+            connectCommand({ isPackaged: true }, { ...where, env: { UBC_VPN_DEV: "1" } }),
+        ).toMatchObject({ args: ["connect", "--json"], dev: false });
+    });
+
+    it("gets the dev-mode variables only in dev mode", async () => {
+        const spawned = vi.mocked(spawn);
+        const env = { ...process.env, XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/someone" };
+        for (const dev of [false, true]) {
+            const cli = mockCli([{ prompt: PASSWORD_PROMPT }, { hang: true }]);
+            const runner = new ConnectRunner({
+                command: cli.command,
+                args: cli.args,
+                onState: () => {},
+                disconnect: async () => {},
+                minStartGapMs: 0,
+                env,
+                dev,
+            });
+            cleanups.push(() => runner.stop());
+            spawned.mockClear();
+            runner.start();
+            const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
+            const names = Object.keys(options.env ?? {});
+            expect(names.includes("XDG_RUNTIME_DIR"), String(dev)).toBe(dev);
+            expect(names.includes("TMPDIR"), String(dev)).toBe(dev);
+        }
+    });
+
     it("is the same bundled client the bridge uses, and cannot be redirected when installed", () => {
         const where = { resourcesPath: "/opt/app/resources", platform: "linux" as const };
         const installed = connectCommand(
@@ -1074,6 +1108,21 @@ describe("a password", () => {
 });
 
 describe("the controller", () => {
+    it("tells the interface whether this is dev mode, in everything it sends", async () => {
+        const plain = new Controller(createDemoLink(10));
+        const dev = new Controller(createDemoLink(10), undefined, true);
+        cleanups.push(() => plain.dispose());
+        cleanups.push(() => dev.dispose());
+        expect(plain.getSnapshot().development).toBe(false);
+        expect(dev.getSnapshot().development).toBe(true);
+        const sent: Snapshot[] = [];
+        dev.subscribe((snapshot) => sent.push(snapshot));
+        dev.setCloseHides(true);
+        await dev.disconnect();
+        expect(sent.length).toBeGreaterThan(0);
+        expect(sent.every((snapshot) => snapshot.development)).toBe(true);
+    });
+
     it("says this build cannot log in when it has been given no way to", async () => {
         const controller = new Controller(createDemoLink(10));
         cleanups.push(() => controller.dispose());

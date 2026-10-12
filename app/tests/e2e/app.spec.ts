@@ -1,8 +1,18 @@
 // Launches the real app in demo mode and looks at it. Screenshots of every
 // state go to `SCREENSHOT_DIR`, or `test-results/screens` when it is not set.
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
     type ElectronApplication,
@@ -21,9 +31,33 @@ const launchArgs = () => [
     // test machine's windows usually are. Keep them running.
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
-    // Its own profile, so it never collides with a running copy.
-    `--user-data-dir=${mkdtempSync(join(tmpdir(), "ubc-vpn-e2e-"))}`,
 ];
+/** A profile of its own for each launch, so it never collides with a running copy. */
+const newProfile = () => mkdtempSync(join(tmpdir(), "ubc-vpn-e2e-"));
+const mainProfile = newProfile();
+
+// Where Electron would keep the profile if the app did not move it. On
+// Windows and macOS that is the folder the installed command-line client
+// keeps the user's settings in. Nothing here may write to it.
+const installedFolder = join(
+    process.platform === "win32"
+        ? (process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"))
+        : process.platform === "darwin"
+          ? join(homedir(), "Library", "Application Support")
+          : (process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")),
+    "UBC VPN",
+);
+/** What is in a folder: each entry's name, size and time of last change. */
+const contentsOf = (folder: string): string[] =>
+    existsSync(folder)
+        ? readdirSync(folder)
+              .sort()
+              .map((name) => {
+                  const entry = statSync(join(folder, name));
+                  return `${name} ${entry.size} ${entry.mtimeMs}`;
+              })
+        : ["(no such folder)"];
+const installedFolderBefore = contentsOf(installedFolder);
 const launchEnv = {
     ...process.env,
     UBC_VPN_DEMO_STEP_MS: "600",
@@ -44,7 +78,7 @@ test.beforeAll(async () => {
     app = await electron.launch({
         ...launchOptions,
         args: launchArgs(),
-        env: launchEnv,
+        env: { ...launchEnv, UBC_VPN_PROFILE: mainProfile },
     });
     page = await app.firstWindow();
     // The real mouse pointer hovers whatever is under it. Put the window
@@ -180,6 +214,15 @@ const tab = (name: string) =>
     page.getByRole("navigation", { name: "Screens" }).getByRole("button", { name, exact: true });
 /** The one button on the connection screen. */
 const action = () => page.getByRole("main").getByRole("button");
+
+test("an app that is not installed keeps its profile out of the installed product's folder", async () => {
+    const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath("userData"));
+    expect(realpathSync(userData)).toBe(realpathSync(mainProfile));
+    // Chromium has written its profile there, so the check below means something.
+    expect(readdirSync(mainProfile).length).toBeGreaterThan(0);
+    // And it is not in dev mode, so it does not say it is.
+    await expect(page.getByText("Development mode")).toHaveCount(0);
+});
 
 test("the window renders, locked down", async () => {
     await expect(heading()).toHaveText("Not connected");
@@ -969,7 +1012,11 @@ test("a built app ignores a dev server address in its environment", async () => 
     const other = await electron.launch({
         ...launchOptions,
         args: launchArgs(),
-        env: { ...launchEnv, ELECTRON_RENDERER_URL: "https://example.com/" },
+        env: {
+            ...launchEnv,
+            UBC_VPN_PROFILE: newProfile(),
+            ELECTRON_RENDERER_URL: "https://example.com/",
+        },
     });
     try {
         const window = await other.firstWindow();
@@ -979,4 +1026,34 @@ test("a built app ignores a dev server address in its environment", async () => 
     } finally {
         await other.close();
     }
+});
+
+test("says on every screen that it is in development mode, when it is", async () => {
+    const other = await electron.launch({
+        ...launchOptions,
+        args: launchArgs(),
+        env: { ...launchEnv, UBC_VPN_PROFILE: newProfile(), UBC_VPN_DEV: "1" },
+    });
+    try {
+        const window = await other.firstWindow();
+        await window.waitForLoadState("domcontentloaded");
+        await window.evaluate(() => document.fonts.ready);
+        const mark = window.getByText("Development mode. This is not the real VPN.");
+        await expect(mark).toBeInViewport({ ratio: 1 });
+        await window.screenshot({ path: join(screenshotDir, "development-mode.png") });
+        await window
+            .getByRole("navigation", { name: "Screens" })
+            .getByRole("button", { name: "Routes", exact: true })
+            .click();
+        await expect(window.getByRole("heading", { level: 1 })).toHaveText("Routes");
+        await expect(mark).toBeInViewport({ ratio: 1 });
+        await window.screenshot({ path: join(screenshotDir, "development-mode-routes.png") });
+    } finally {
+        await other.close();
+    }
+});
+
+// Last of all, after every launch above has come and gone.
+test("nothing was written in the installed product's folder", () => {
+    expect(contentsOf(installedFolder)).toEqual(installedFolderBefore);
 });

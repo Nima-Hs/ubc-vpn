@@ -9,6 +9,7 @@ export const useSnapshot = create<Snapshot>(() => ({
     notice: null,
     login: { phase: "idle" },
     closeHides: false,
+    development: false,
 }));
 
 /** Starts following the main process. Call once, before the first render. */

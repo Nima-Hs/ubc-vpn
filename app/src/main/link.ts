@@ -43,6 +43,10 @@ export interface ServiceLinkOptions {
     /** The command-line client and its arguments; see `bridgeCommand`. */
     command: string;
     args: readonly string[];
+    /** Whether the client is started in dev mode; see `bridgeCommand`. */
+    dev?: boolean;
+    /** The app's own environment, from which the bridge's short one is taken. */
+    env?: Record<string, string | undefined>;
     appVersion: string;
     onFault?(fault: BridgeFault): void;
     initialRetryDelayMs?: number;
@@ -137,6 +141,8 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
     const client = new BridgeClient({
         command: options.command,
         args: options.args,
+        ...(options.dev !== undefined && { dev: options.dev }),
+        ...(options.env !== undefined && { env: options.env }),
         onStatus,
         ...(options.onFault !== undefined && { onFault: options.onFault }),
         onEvent: (event) => {

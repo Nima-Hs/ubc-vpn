@@ -56,6 +56,8 @@ export interface ConnectOptions {
     exitGraceMs?: number;
     /** The app's own environment, from which the client's short one is taken. */
     env?: Record<string, string | undefined>;
+    /** Whether the client is started in dev mode; see `bridgeCommand`. */
+    dev?: boolean;
     /**
      * The least time between one login starting and the next. Each start can
      * send an MFA request to the user's phone; nothing, whether a held-down
@@ -146,7 +148,13 @@ export class ConnectRunner implements LoginRunner {
     private startTimer: NodeJS.Timeout | null = null;
 
     constructor(options: ConnectOptions) {
-        this.options = { exitGraceMs: 2_000, env: process.env, minStartGapMs: 3_000, ...options };
+        this.options = {
+            exitGraceMs: 2_000,
+            env: process.env,
+            dev: false,
+            minStartGapMs: 3_000,
+            ...options,
+        };
     }
 
     start(): boolean {
@@ -174,7 +182,12 @@ export class ConnectRunner implements LoginRunner {
         this.lastStartAt = Date.now();
         let child: ChildProcessWithoutNullStreams;
         try {
-            child = startClient(this.options.command, this.options.args, this.options.env);
+            child = startClient(
+                this.options.command,
+                this.options.args,
+                this.options.env,
+                this.options.dev,
+            );
         } catch {
             this.options.onState(BROKEN);
             return;

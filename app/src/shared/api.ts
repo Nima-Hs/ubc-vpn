@@ -101,6 +101,11 @@ export interface Snapshot {
      * Where there is no tray to come back from, closing quits instead.
      */
     closeHides: boolean;
+    /**
+     * Whether the app is talking to a dev-mode service: a pretend VPN on a
+     * developer's machine. Never true in an installed app.
+     */
+    development: boolean;
 }
 
 /** The whole of what the interface can ask the main process to do. */

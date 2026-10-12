@@ -22,7 +22,11 @@ pnpm dev    # the interface against the real service
 
 Demo mode replaces the service and the login with in-memory fakes, so you can see every state. The fake login accepts anything you type. The fake settings check routes with a rough copy of the real rules. It adds a **Parts** screen that shows each shared component and has a button for every state. Demo code is left out of production builds, and `pnpm check:build` fails if any is found.
 
-`pnpm dev` reaches the service through the command-line client, which it starts as `ubc-vpn bridge`. Set `UBC_VPN_CLI` to the client you built, for example `UBC_VPN_CLI=../target/debug/ubc-vpn pnpm dev`. Without it, or without a running service, the app shows "Service not running". An installed app ignores `UBC_VPN_CLI`. Connecting needs login, which is a later feature.
+`pnpm dev` reaches the service through the command-line client, which it starts as `ubc-vpn bridge`. Set `UBC_VPN_CLI` to the client you built, for example `UBC_VPN_CLI=../target/debug/ubc-vpn pnpm dev`. Without it, or without a running service, the app shows "Service not running". An installed app ignores `UBC_VPN_CLI`.
+
+To use a dev-mode service (one run as yourself with `ubc-vpn-service --dev`, with pretend routing and a pretend gateway), also set `UBC_VPN_DEV=1`. The app then starts the client with `--dev` first every time, passes on the two variables that say where a dev-mode service listens (`XDG_RUNTIME_DIR` on Linux, `TMPDIR` on macOS), and shows "Development mode. This is not the real VPN." on every screen. Only exactly `1` turns it on, and an installed app ignores it ([`src/main/channel/cli.ts`](src/main/channel/cli.ts)).
+
+The app never uses the place Electron would choose for its own profile (Chromium's caches and preferences): on Windows and macOS that is the very folder the client keeps your `settings.json` in. That file is the client's, and the app never creates, reads or writes it. An installed app keeps its profile in a sub-folder named `app` of the client's settings folder. An app that is not installed keeps out of the installed product's folders altogether: it uses a folder named `UBC VPN App Dev` beside them, or the one `UBC_VPN_PROFILE` names. An installed app ignores that variable too ([`src/main/profile.ts`](src/main/profile.ts)).
 
 ## Check it
 

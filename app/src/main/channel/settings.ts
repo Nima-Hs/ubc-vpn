@@ -45,12 +45,17 @@ export const SETTINGS_ARGS = {
 export interface SettingsOptions {
     /** The command-line client, as an absolute path. */
     command: string;
-    /** Put before the fixed arguments. Empty in the app; tests use it to run a script. */
+    /**
+     * Put before the fixed arguments. Empty in the app, or `--dev` in dev
+     * mode; tests use it to run a script.
+     */
     leadingArgs?: readonly string[];
     /** How long one call may take before the client is ended. */
     timeoutMs?: number;
     /** The app's own environment, from which the client's short one is taken. */
     env?: Record<string, string | undefined>;
+    /** Whether the client is started in dev mode; see `bridgeCommand`. */
+    dev?: boolean;
 }
 
 const UNAVAILABLE = { ok: false, error: "unavailable" } as const;
@@ -109,7 +114,13 @@ export class SettingsRunner implements SettingsService {
     private checking: ChildProcessWithoutNullStreams | null = null;
 
     constructor(options: SettingsOptions) {
-        this.options = { leadingArgs: [], timeoutMs: 10_000, env: process.env, ...options };
+        this.options = {
+            leadingArgs: [],
+            timeoutMs: 10_000,
+            env: process.env,
+            dev: false,
+            ...options,
+        };
     }
 
     getSettings(): Promise<SettingsResult<SettingsView>> {
@@ -219,6 +230,7 @@ export class SettingsRunner implements SettingsService {
                     this.options.command,
                     [...this.options.leadingArgs, ...args],
                     this.options.env,
+                    this.options.dev,
                 );
             } catch {
                 answer(null);
