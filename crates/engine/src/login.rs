@@ -33,6 +33,15 @@ const HTTPS: u16 = 443;
 const HASH_OF_NOTHING: &str = "pin-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 /// The real engine: `libopenconnect`, loaded into this process.
+///
+/// Its `library` accessor is for this crate's tests and exists only with the
+/// `fake` feature, which nothing that ships has:
+///
+/// ```compile_fail
+/// # #[cfg(feature = "fake")]
+/// # compile_error!("only meaningful without the fake feature");
+/// let _ = ubc_vpn_engine::OpenConnect::library;
+/// ```
 pub struct OpenConnect {
     library: Library,
 }
@@ -259,25 +268,37 @@ impl LoginEngine for OpenConnect {
             return Err(LoginError::Failed);
         }
         let result = handle.obtain_cookie();
-        let accepted = handle.certificate_accepted();
-        // Copied out at once and registered whole before anything else.
-        let cookie = (result == 0 && accepted).then(|| handle.cookie()).flatten();
-        if let Some(cookie) = &cookie {
-            logs.hide(cookie);
-        }
-        // The library holds copies of the answers until the handle is freed.
-        drop(handle);
-        conclude(Ended {
-            result,
-            accepted,
-            judged: notes.judged.get(),
-            refused: notes.refused.get(),
-            stopped: notes.stopped.take(),
-            cancelled: cancel.is_cancelled(),
-            cookie,
-            address: notes.address.get(),
-        })
+        finish(handle, result, &notes, cancel, logs)
     }
+}
+
+/// Reads what a handle holds once it has been asked for a cookie, frees it,
+/// and decides how the login ended. `result` is what the library answered.
+fn finish(
+    handle: Handle<'_>,
+    result: c_int,
+    notes: &Notes,
+    cancel: &Cancel,
+    logs: &LogSink,
+) -> Result<Session, LoginError> {
+    let accepted = handle.certificate_accepted();
+    // Copied out at once and registered whole before anything else.
+    let cookie = (result == 0 && accepted).then(|| handle.cookie()).flatten();
+    if let Some(cookie) = &cookie {
+        logs.hide(cookie);
+    }
+    // The library holds copies of the answers until the handle is freed.
+    drop(handle);
+    conclude(Ended {
+        result,
+        accepted,
+        judged: notes.judged.get(),
+        refused: notes.refused.get(),
+        stopped: notes.stopped.take(),
+        cancelled: cancel.is_cancelled(),
+        cookie,
+        address: notes.address.get(),
+    })
 }
 
 #[cfg(test)]
@@ -299,6 +320,52 @@ mod tests {
             allowed_routes: None,
         };
         Gateway::from_policy(&policy).expect("a valid policy")
+    }
+
+    #[path = "../../../tests/gateway/mod.rs"]
+    mod stand_in;
+
+    // Security rule: what a login returns depends on the handle's own record
+    // that a certificate was accepted on this connection, not only on the
+    // library saying it succeeded. A handle asked for a cookie a second time
+    // says so without connecting, with nothing judged. No login asks twice,
+    // so the test does, and hands the handle to the code that ends a login.
+    #[test]
+    fn a_handle_that_succeeded_unjudged_yields_no_session() {
+        let Some(gateway) = stand_in::Gateway::start("accept") else {
+            return;
+        };
+        let prepared = crate::prepare_environment(crate::Role::Client, None);
+        let libs = Path::new(env!("UBC_VPN_NATIVE_LIBS"));
+        let library = Library::load(libs, &prepared.expect("the environment is clean"));
+        let library = library.expect("the pinned library loads");
+        let local = SocketAddrV4::new(Ipv4Addr::LOCALHOST, gateway.port);
+        let logged_in = || {
+            let mut callbacks = Callbacks::refusing(Box::new(|_, _, _| {}));
+            callbacks.certificate = Box::new(|_| true);
+            callbacks.resolve = Box::new(move |_, _| Some(local));
+            callbacks.form = Box::new(|form| {
+                let value = Secret::new("not-a-real-answer");
+                let filled = form.answer(0, &value) && form.answer(1, &value);
+                [FormAnswer::Fail, FormAnswer::Submit][usize::from(filled)]
+            });
+            let handle = Handle::new(library, callbacks).expect("the library makes a handle");
+            assert_eq!(handle.parse_url(c"https://vpn.example.test"), 0);
+            assert_eq!(handle.obtain_cookie(), 0);
+            handle
+        };
+        let notes = Notes::default();
+        notes.address.set(Some(local));
+        notes.judged.set(true);
+        let (cancel, logs) = (Cancel::new(), LogSink::none());
+        // Asked once, as a login does: a session.
+        assert!(finish(logged_in(), 0, &notes, &cancel, &logs).is_ok());
+        // Asked again: success, and nothing was judged.
+        let handle = logged_in();
+        let again = handle.obtain_cookie();
+        assert_eq!(again, 0);
+        let unjudged = finish(handle, again, &notes, &cancel, &logs);
+        assert_eq!(unjudged, Err(LoginError::Failed));
     }
 
     /// An attempt that ended as a good login does.
