@@ -54,10 +54,13 @@ fn run(
         ["status", "--json"] => true,
         _ => return say(err, HELP, USAGE),
     };
-    match status(platform) {
+    let shown = status(platform).and_then(|state| match json {
         // One JSON line, exactly as the service reports the state.
-        Ok(state) if json => say(out, encode(&state).unwrap_or_default().trim_end(), 0),
-        Ok(state) => say(out, &describe(&state), 0),
+        true => Ok(encode(&state)?.trim_end().to_string()),
+        false => Ok(describe(&state)),
+    });
+    match shown {
+        Ok(text) => say(out, &text, 0),
         Err(error) => {
             let (code, message) = explain(&error);
             say(err, &format!("ubc-vpn: {message}"), code)
@@ -85,6 +88,12 @@ fn status(
     }
 }
 
+/// Text that came from the service, made safe to print: without control
+/// characters, which could do anything to a terminal.
+fn clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// The state in words.
 fn describe(state: &ConnState) -> String {
     match state {
@@ -92,15 +101,15 @@ fn describe(state: &ConnState) -> String {
         ConnState::Connecting => "Connecting".to_string(),
         ConnState::Disconnecting => "Disconnecting".to_string(),
         ConnState::LoginNeeded => "Login needed: the session has ended.".to_string(),
-        ConnState::Failed { message, .. } => format!("Failed: {message}"),
+        ConnState::Failed { message, .. } => format!("Failed: {}", clean(message)),
         ConnState::Connected { tunnel } => {
             let subnets: Vec<String> = tunnel.subnets.iter().map(ToString::to_string).collect();
             format!(
                 "Connected ({} as {})\n  Subnets: {}\n  DNS domains: {}",
-                tunnel.interface,
-                tunnel.address,
+                clean(&tunnel.interface),
+                clean(&tunnel.address),
                 subnets.join(", "),
-                tunnel.dns_domains.join(", ")
+                clean(&tunnel.dns_domains.join(", "))
             )
         }
     }
@@ -113,13 +122,16 @@ fn explain(error: &ClientError) -> (u8, String) {
             NOT_RUNNING,
             "The UBC VPN service is not running.".to_string(),
         ),
-        ClientError::Mismatch(service) => (
-            MISMATCH,
-            format!(
+        ClientError::Mismatch(service) => {
+            let service = service
+                .as_deref()
+                .map_or("another version".to_string(), clean);
+            let message = format!(
                 "Version mismatch: the service is {service} and this program is {VERSION}. \
                  Please update UBC VPN."
-            ),
-        ),
+            );
+            (MISMATCH, message)
+        }
         ClientError::NotOwner => (
             NOT_OWNER,
             "You are not the owner. Only the first user of UBC VPN on this computer can \
@@ -132,7 +144,7 @@ fn explain(error: &ClientError) -> (u8, String) {
              to it. Restart the service, or reinstall UBC VPN."
                 .to_string(),
         ),
-        ClientError::Refused(error) => (FAILED, error.message.clone()),
-        ClientError::Lost(why) => (FAILED, format!("The service could not be reached: {why}.")),
+        ClientError::Refused(error) => (FAILED, clean(&error.message)),
+        ClientError::Lost(why) => (FAILED, format!("The service did not answer: {why}.")),
     }
 }

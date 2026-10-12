@@ -4,14 +4,19 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use ubc_vpn_core::protocol::{Event, HelloReply, Outcome, PROTOCOL_VERSION, decode};
+use ubc_vpn_core::protocol::{
+    ErrorCode, Event, HelloReply, Outcome, PROTOCOL_VERSION, Request, Response, ServerMessage,
+    decode,
+};
 use ubc_vpn_engine::fake::{FakeEngine, Script};
 use ubc_vpn_platform::fake::{Fake, Op, paths};
-use ubc_vpn_platform::{Error, Transport};
+use ubc_vpn_platform::{Connection, Error, Transport};
 use ubc_vpn_service::{Service, Timeouts};
 
 use super::*;
+use crate::client::Limits;
 
 /// A fake machine with the files of one service in a folder of its own.
 struct Rig {
@@ -49,7 +54,7 @@ impl Rig {
         let other = "someone-else".parse().unwrap();
         let name = paths(&self.root).channel_name;
         let conn = self.fake.connect_as(&name, &other).unwrap();
-        let mut client = Client::over(conn, ClientKind::App).unwrap();
+        let mut client = Client::over(conn, ClientKind::App, Limits::default()).unwrap();
         client.claim_if_unowned().unwrap();
     }
 }
@@ -187,8 +192,6 @@ fn requests_are_answered_or_refused_with_the_services_reason() {
 // answer, and then it hangs up.
 #[test]
 fn responses_are_matched_by_id_and_events_are_kept() {
-    use ubc_vpn_core::protocol::{Request, Response, ServerMessage};
-
     let rig = Rig::new();
     let listener = rig.fake.listen(&paths(&rig.root).channel_name).unwrap();
     let service = std::thread::spawn(move || {
@@ -227,4 +230,286 @@ fn responses_are_matched_by_id_and_events_are_kept() {
     assert_eq!(client.next_event(), Ok(kept));
     // Nothing more was queued, and the service has gone.
     assert!(matches!(client.next_event(), Err(ClientError::Lost(_))));
+}
+
+/// How long a pretend service keeps going when the client does not hang up.
+/// A client that has lost its deadline then fails its test late, and does
+/// not hang it.
+const PATIENCE: Duration = Duration::from_secs(5);
+
+/// Stands in for the service on `rig`'s channel: accepts one connection and
+/// hands it to `script`. Its own reads give up after [`PATIENCE`].
+fn scripted(
+    rig: &Rig,
+    script: impl FnOnce(&Connection) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    let listener = rig.fake.listen(&paths(&rig.root).channel_name).unwrap();
+    std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        conn.set_read_timeout(Some(PATIENCE)).unwrap();
+        script(&conn);
+    })
+}
+
+/// Reads the hello and answers it as an owned service of this version.
+fn greet(conn: &Connection) {
+    conn.read_line().unwrap();
+    let reply = HelloReply {
+        protocol_version: PROTOCOL_VERSION,
+        service_version: "0.1.0".to_string(),
+        owner_claimed: true,
+    };
+    conn.write_line(encode(&reply).unwrap().trim_end()).unwrap();
+}
+
+/// Sends one message from the pretend service. False once the client is gone.
+fn tell(conn: &Connection, message: &ServerMessage) -> bool {
+    conn.write_line(encode(message).unwrap().trim_end()).is_ok()
+}
+
+/// Runs `status` against a pretend service that answers it with `answer`.
+fn status_answered_with(answer: ResponseBody, args: &[&str]) -> (u8, String, String) {
+    let rig = Rig::new();
+    let service = scripted(&rig, move |conn| {
+        greet(conn);
+        let asked: Request = decode(&conn.read_line().unwrap().unwrap()).unwrap();
+        let outcome = Outcome::Ok(answer);
+        let response = Response {
+            id: asked.id,
+            outcome,
+        };
+        tell(conn, &ServerMessage::Response(response));
+    });
+    let result = rig.run(args);
+    service.join().unwrap();
+    result
+}
+
+// `status` is how a person or a script learns whether traffic goes through
+// the tunnel, so every state has its exact words and its exact JSON.
+#[test]
+fn every_state_is_printed_exactly() {
+    let tunnel = ubc_vpn_core::state::TunnelInfo {
+        interface: "utun4".to_string(),
+        address: "10.255.0.2".to_string(),
+        subnets: vec![
+            "10.19.0.0/16".parse().unwrap(),
+            "142.103.0.0/16".parse().unwrap(),
+        ],
+        dns_domains: vec![
+            "ece.example.test".to_string(),
+            "cs.example.test".to_string(),
+        ],
+    };
+    let failed = ConnState::Failed {
+        code: ErrorCode::VerificationFailed,
+        // Whatever an OS error may hold, the terminal gets no control codes.
+        message: "10.19.0.0/16 is \u{1b}[2Jnot routed\r\n".to_string(),
+    };
+    let states = [
+        (
+            ConnState::Disconnected,
+            "Disconnected\n",
+            r#"{"state":"disconnected"}"#,
+        ),
+        (
+            ConnState::Connecting,
+            "Connecting\n",
+            r#"{"state":"connecting"}"#,
+        ),
+        (
+            ConnState::Disconnecting,
+            "Disconnecting\n",
+            r#"{"state":"disconnecting"}"#,
+        ),
+        (
+            ConnState::LoginNeeded,
+            "Login needed: the session has ended.\n",
+            r#"{"state":"login_needed"}"#,
+        ),
+        (
+            failed,
+            "Failed: 10.19.0.0/16 is [2Jnot routed\n",
+            r#"{"state":"failed","code":"verification_failed","message":"10.19.0.0/16 is \u001b[2Jnot routed\r\n"}"#,
+        ),
+        (
+            ConnState::Connected { tunnel },
+            "Connected (utun4 as 10.255.0.2)\n  Subnets: 10.19.0.0/16, 142.103.0.0/16\n  \
+             DNS domains: ece.example.test, cs.example.test\n",
+            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test","cs.example.test"]}}"#,
+        ),
+    ];
+    for (state, words, json) in states {
+        let answer = ResponseBody::Status(state);
+        let said = status_answered_with(answer.clone(), &["status"]);
+        assert_eq!(said, (0, words.to_string(), String::new()));
+        let said = status_answered_with(answer, &["status", "--json"]);
+        assert_eq!(said, (0, format!("{json}\n"), String::new()));
+    }
+}
+
+// An answer to `status` that is not a status is an error. Nothing is printed
+// as if it were the state.
+#[test]
+fn an_answer_that_is_not_a_status_is_an_error() {
+    for args in [&["status"][..], &["status", "--json"]] {
+        let (code, out, err) = status_answered_with(ResponseBody::Claimed, args);
+        assert_eq!((code, out.as_str()), (FAILED, ""));
+        assert!(err.contains("unexpected answer"), "{err}");
+    }
+}
+
+// A service of a later version may answer the hello in a shape this version
+// cannot read. That is still "please update", not a broken connection.
+#[test]
+fn a_reply_this_version_cannot_read_still_means_please_update() {
+    let rig = Rig::new();
+    let service = scripted(&rig, |conn| {
+        conn.read_line().unwrap();
+        let later = r#"{"protocol_version":99,"service":{"version":"9.9.9"}}"#;
+        conn.write_line(later).unwrap();
+    });
+    let (code, out, err) = rig.run(&["status"]);
+    service.join().unwrap();
+    assert_eq!((code, out.as_str()), (MISMATCH, ""));
+    assert!(
+        err.contains("another version") && err.contains("Please update"),
+        "{err}"
+    );
+}
+
+/// Short enough for a test to wait out, long enough for a slow machine.
+fn brief() -> Limits {
+    Limits {
+        answer: Duration::from_millis(600),
+        ..Limits::default()
+    }
+}
+
+/// Connects to the pretend service on `rig` with `limits`.
+fn client(rig: &Rig, limits: Limits) -> Result<Client, ClientError> {
+    let conn = rig.fake.connect(&paths(&rig.root).channel_name).unwrap();
+    Client::over(conn, ClientKind::Cli, limits)
+}
+
+/// Whether `result` is the client giving up, and soon enough after `started`.
+fn gave_up<T: std::fmt::Debug>(result: &Result<T, ClientError>, started: Instant) -> bool {
+    let soon = started.elapsed() < Duration::from_secs(3);
+    matches!(result, Err(ClientError::Lost(_))) && soon
+}
+
+// A service that stops answering does not hang the client: the hello reply
+// and each answer have one deadline, whatever else arrives meanwhile.
+#[test]
+fn an_answer_has_one_deadline_whatever_else_arrives() {
+    // Nothing after the connection is made.
+    let rig = Rig::new();
+    let silent = scripted(&rig, |conn| {
+        // It takes the hello, says nothing, and waits for whatever is next.
+        drop(conn.read_line());
+        drop(conn.read_line());
+    });
+    let started = Instant::now();
+    let refused = client(&rig, brief()).map(drop);
+    assert!(gave_up(&refused, started), "{refused:?}");
+    silent.join().unwrap();
+
+    // The hello is answered, the request never.
+    let rig = Rig::new();
+    let silent = scripted(&rig, |conn| {
+        greet(conn);
+        while conn.read_line().is_ok_and(|line| line.is_some()) {}
+    });
+    let mut asking = client(&rig, brief()).unwrap();
+    let started = Instant::now();
+    let answer = asking.request(RequestBody::Status);
+    assert!(gave_up(&answer, started), "{answer:?}");
+    drop(asking);
+    silent.join().unwrap();
+
+    // The hello is answered, then events keep coming and the answer never
+    // does. Each event arrives well inside the limit; the answer does not.
+    let rig = Rig::new();
+    let chatty = scripted(&rig, |conn| {
+        greet(conn);
+        let event = ServerMessage::Event(Event::StateChanged(ConnState::Connecting));
+        let started = Instant::now();
+        while started.elapsed() < PATIENCE && tell(conn, &event) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let mut asking = client(&rig, brief()).unwrap();
+    let started = Instant::now();
+    let answer = asking.request(RequestBody::Status);
+    assert!(gave_up(&answer, started), "{answer:?}");
+    drop(asking);
+    chatty.join().unwrap();
+}
+
+// Events that arrive while an answer is awaited are kept, but not without
+// end: a service that sends a flood of them and no answer is given up on.
+#[test]
+fn events_are_not_kept_without_end() {
+    let rig = Rig::new();
+    let flood = scripted(&rig, |conn| {
+        greet(conn);
+        let event = ServerMessage::Event(Event::StateChanged(ConnState::Connecting));
+        let started = Instant::now();
+        while started.elapsed() < PATIENCE && tell(conn, &event) {
+            std::thread::yield_now();
+        }
+    });
+    // The deadline is far away, so only the cap can end this.
+    let limits = Limits {
+        answer: Duration::from_secs(120),
+        kept_events: 5,
+        ..Limits::default()
+    };
+    let mut asking = client(&rig, limits).unwrap();
+    let started = Instant::now();
+    let answer = asking.request(RequestBody::Status);
+    assert!(gave_up(&answer, started), "{answer:?}");
+    // What was kept is still there for whoever wants it.
+    let kept = (0..5).filter(|_| asking.next_event().is_ok()).count();
+    assert_eq!(kept, 5);
+    drop(asking);
+    flood.join().unwrap();
+}
+
+// Every write to the service has a time limit too. The fake never makes a
+// write wait, so this checks the limit that the connection is given.
+#[test]
+fn writes_to_the_service_have_a_limit() {
+    use std::sync::Mutex;
+    use ubc_vpn_platform::RawConnection;
+
+    /// A connection whose peer has gone, which keeps its write limits.
+    #[derive(Clone, Default)]
+    struct Recording(Arc<Mutex<Vec<Option<Duration>>>>);
+
+    impl RawConnection for Recording {
+        fn read(&self, _buf: &mut [u8]) -> ubc_vpn_platform::Result<usize> {
+            Ok(0)
+        }
+        fn write_all(&self, _bytes: &[u8]) -> ubc_vpn_platform::Result<()> {
+            Ok(())
+        }
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> ubc_vpn_platform::Result<()> {
+            Ok(())
+        }
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> ubc_vpn_platform::Result<()> {
+            self.0.lock().unwrap().push(timeout);
+            Ok(())
+        }
+        fn close(&self) {}
+    }
+
+    let recording = Recording::default();
+    let limits = Limits {
+        write: Duration::from_secs(7),
+        ..Limits::default()
+    };
+    let conn = Connection::new(Box::new(recording.clone()));
+    assert!(Client::over(conn, ClientKind::Cli, limits).is_err());
+    assert_eq!(*recording.0.lock().unwrap(), [Some(limits.write)]);
 }
