@@ -3,10 +3,11 @@
 //! An engine speaks the AnyConnect protocol to the gateway. This crate defines
 //! what the rest of the workspace may ask of one. The `fake` module, behind
 //! the `fake` Cargo feature, is a scripted engine for tests and for the
-//! service's dev mode. The real engine, a binding to `libopenconnect`, will
-//! live behind the `libopenconnect` feature. That feature is off by default
-//! and enables nothing yet, so ordinary builds and tests need no native
-//! library.
+//! service's dev mode. The real engine, a binding to `libopenconnect`, lives
+//! behind the `libopenconnect` feature. That feature is off by default, so
+//! ordinary builds and tests need no native library. So far it holds the
+//! code that loads the library; the two capabilities below are not
+//! implemented on it yet.
 //!
 //! There are two capabilities, because they run in two processes:
 //!
@@ -38,15 +39,52 @@
 //!   "login needed", which is distinct from a network failure. Nothing on the
 //!   tunnel side can prompt, so it cannot log in again.
 //!
+//! # The binding is private
+//!
+//! The module that calls into `libopenconnect` cannot be reached from
+//! outside this crate in anything that ships. Only a build with the `fake`
+//! feature, which never ships, exposes it, so that tests can drive the real
+//! library, one process per test file.
+//!
+//! ```compile_fail
+//! # #[cfg(feature = "fake")]
+//! # compile_error!("only meaningful without the fake feature");
+//! use ubc_vpn_engine::ffi;
+//! ```
+//!
 //! # Rules for the real engine
 //!
 //! The fake cannot enforce these. The `libopenconnect` binding must:
 //!
 //! **Process and library setup**
 //!
-//! - Clear `SSLKEYLOGFILE`, `GNUTLS_SYSTEM_PRIORITY_FILE` and
-//!   `GNUTLS_DEBUG_LEVEL` from the environment of the privileged process
-//!   before the library is first used. GnuTLS honours all three.
+//! - Load the library once, as the first thing the program does, before any
+//!   other thread exists, from the folder the program itself was installed
+//!   in. The folder never comes from configuration, the environment or a
+//!   client. Treat every loading error as fatal: after some of them a
+//!   library is already in the process and its start-up code has run.
+//! - Loading controls which `libopenconnect` file is used and nothing more.
+//!   That file's own dependencies are found by the system loader, and
+//!   anything that controls the program's start-up environment can inject
+//!   code before `main`. So the privileged service must also be installed
+//!   in a folder ordinary accounts cannot change, and be started by the
+//!   system's service manager with a clean environment.
+//! - Deal with the environment once, at program start, before the library is
+//!   used. The libraries read about a dozen variables, among them
+//!   `SSLKEYLOGFILE`, `GNUTLS_SYSTEM_PRIORITY_FILE` and
+//!   `GNUTLS_DEBUG_LEVEL`; one list in this crate names them all. On
+//!   Windows remove them, and point the temporary folder at one only the
+//!   system can write. On macOS and Linux remove nothing, because changing
+//!   the environment is only sound while no other thread exists: refuse to
+//!   start while one of them is set.
+//! - The privileged service also refuses to start while a variable that
+//!   steers the system loader is set (`LD_*`, and `DYLD_*` other than the
+//!   two `DYLD_FALLBACK_*` ones). Nothing may remove a `DYLD_*` variable
+//!   before the library is loaded: the loader acted on its value at process
+//!   start, and removing it only hides that from the check.
+//! - On Windows the library asks for `wintun.dll` by name in the program's
+//!   own folder, so that file sits beside the service program, and after
+//!   loading nothing else can be loaded by name from that folder.
 //! - Never set a vpnc-script, a CSD wrapper or a proxy. The tunnel device is
 //!   created with a null script; routes and DNS belong to the service.
 //! - Keep to IPv4, which takes two steps. `openconnect_disable_ipv6` only
@@ -64,11 +102,15 @@
 //!
 //! **Certificates**
 //!
-//! - Turn system trust off (`openconnect_set_system_trust(v, 0)`) and make the
-//!   pin check the only judge: the certificate callback accepts a peer only
-//!   when its `pin-sha256:` hash satisfies [`Gateway::accepts`], and anything
-//!   else is a pin mismatch. Do not hand pins to the library for matching; it
-//!   accepts prefixes.
+//! - Turn system trust off (`openconnect_set_system_trust(v, 0)`), never set
+//!   a CA file, and make the pin check the only judge: the certificate
+//!   callback accepts a peer only when its `pin-sha256:` hash satisfies
+//!   [`Gateway::accepts`], and anything else is a pin mismatch. Do not hand
+//!   pins to the library for matching; it accepts prefixes.
+//! - The library calls the certificate callback only for a certificate its
+//!   own verification did not accept. With system trust off that is every
+//!   certificate, but do not rely on it: record that the callback ran and
+//!   accepted, and fail the login or the tunnel if it did not.
 //! - Reject inside the certificate callback, so that nothing, the cookie
 //!   least of all, is sent before the pin check has passed.
 //!
@@ -154,6 +196,12 @@ use ubc_vpn_core::routes::Ipv4Net;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+// Private in anything that ships; see "The binding is private" above.
+#[cfg(all(feature = "libopenconnect", not(feature = "fake")))]
+mod ffi;
+#[cfg(all(feature = "libopenconnect", feature = "fake"))]
+#[doc(hidden)]
+pub mod ffi;
 mod gateway;
 mod log;
 mod prompts;
