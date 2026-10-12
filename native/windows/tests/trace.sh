@@ -90,6 +90,7 @@ unexplained() {
 # The rules must still refuse what they are there to catch.
 refused=$(printf '%s\n' 'C:\Temp\evil.dll' 'D:\$Extend\evil.dll' 'HKCU\Software\GnuTLS' | unexplained | wc -l)
 [ "$refused" -eq 3 ] || die "trace-allow.txt lets through a path it must refuse"
+echo "Self-test: trace-allow.txt refuses all 3 paths it must refuse."
 
 # --- Files -------------------------------------------------------------------
 
@@ -109,6 +110,7 @@ user_writable() {
 printf '%s\n' 'C:\Windows\Temp\not-there.txt' 'C:\Windows\System32\not-there.txt' >"$tools/known.txt"
 [ "$(user_writable "$tools/known.txt")" = 'C:\Windows\Temp\not-there.txt' ] ||
     die "the permission check does not tell C:\\Windows\\Temp from C:\\Windows\\System32"
+echo "Self-test: the permission check reports C:\\Windows\\Temp and not C:\\Windows\\System32."
 user_writable "$tools/in-windows.txt" >"$tools/writable.txt"
 
 echo "Files: $(wc -l <"$tools/files.txt") touched, $(wc -l <"$tools/in-windows.txt") of them under C:\\Windows."
