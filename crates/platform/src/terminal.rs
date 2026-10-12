@@ -8,6 +8,9 @@
 //!
 //! - **Enter** ends the line. The newline it did not show is written out.
 //! - **Backspace** removes the last character, **Ctrl-U** the whole line.
+//! - **Arrow keys, Delete** and the like do nothing. On Linux and macOS they
+//!   arrive as an escape sequence, which is swallowed whole. (A lone Escape
+//!   therefore also swallows the key after it.)
 //! - **Ctrl-C** gives the line up: the call fails with [`Error::Closed`]. It
 //!   arrives as a key and not as a signal, so the program is still running
 //!   to put the terminal back. So does **Ctrl-D** on an empty line, and the
@@ -16,15 +19,24 @@
 //!   once Enter is pressed. It is never cut short, and the rest of it is not
 //!   left for the shell to read.
 //!
+//! Only an entered line leaves the keys after it for the next reader, which
+//! may be the next question. Keys typed before the prompt appeared are
+//! thrown away, so nothing typed blind starts a secret; and on every way out
+//! that is not an entered line, so are the keys still waiting, or the shell
+//! would read the rest of a password as a command.
+//!
 //! The terminal's mode is put back on every way out of the call, a panic
 //! included. It is not put back if the program is killed during the call by
-//! a signal from outside, or aborts: the user then has to type `stty sane`
-//! (a Windows shell resets the mode by itself).
+//! a signal from outside, or aborts, unless the program arranges for
+//! [`restore_after_signal`] to be called first. Otherwise the user has to
+//! type `stty sane` (a Windows shell resets the mode by itself).
 //!
 //! What is typed is kept in one fixed buffer that is wiped before the call
-//! returns. Not wiped, because out of reach: the copy inside the returned
-//! [`Secret`], which does not wipe itself, the last key read, and whatever
-//! the OS keeps.
+//! returns, with writes the compiler may not remove. Not wiped, because out
+//! of reach: the copy inside the returned [`Secret`], which does not wipe
+//! itself, and whatever the OS keeps.
+
+use std::sync::atomic::{Ordering, compiler_fence};
 
 use ubc_vpn_core::redact::Secret;
 
@@ -46,6 +58,41 @@ pub fn read_hidden_line(prompt: &str) -> Result<Secret> {
     os::read_hidden_line(prompt)
 }
 
+/// Puts the terminal back as it was when the [`read_hidden_line`] now in
+/// progress began, and throws away the keys still waiting. Does nothing when
+/// no call is in progress. It does not end the call: it is for a program
+/// about to exit because it was told to stop.
+///
+/// On Linux and macOS it may be called from a signal handler, on any thread:
+/// it reads only atomics and makes only calls POSIX lists as safe there
+/// (`open` of `/dev/tty`, `tcgetattr`, `tcsetattr`, `close`). It takes no
+/// lock and does not allocate. On Windows it may be called from a console
+/// control handler, which runs on a thread of its own, or from any thread.
+/// Nothing here installs a handler.
+pub fn restore_after_signal() {
+    os::restore_after_signal();
+}
+
+/// Overwrites `bytes` with zeros in a way the compiler must keep, though
+/// nothing reads them afterwards.
+pub(crate) fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        // SAFETY: `byte` is a valid, aligned reference to one byte that
+        // nothing else can reach during the write.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// Where in an escape sequence the keys are: `ESC [ ... final` for most
+/// keys, `ESC O final` for some.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    No,
+    Started,
+    Inside,
+}
+
 /// What a key did to the line.
 #[derive(Debug, PartialEq, Eq)]
 enum Key {
@@ -59,6 +106,7 @@ struct Line {
     bytes: [u8; MAX_HIDDEN_LINE_BYTES],
     len: usize,
     too_long: bool,
+    escape: Escape,
 }
 
 impl Line {
@@ -67,11 +115,24 @@ impl Line {
             bytes: [0; MAX_HIDDEN_LINE_BYTES],
             len: 0,
             too_long: false,
+            escape: Escape::No,
         }
     }
 
     /// Takes one byte as a terminal that edits nothing sends it.
     fn key(&mut self, byte: u8) -> Key {
+        // The rest of an arrow key or the like is no part of a secret.
+        if self.escape != Escape::No && byte >= 0x20 {
+            self.escape = match (self.escape, byte) {
+                (Escape::Started, b'[' | b'O') | (Escape::Inside, 0x20..=0x3f) => Escape::Inside,
+                _ => Escape::No,
+            };
+            return Key::More;
+        }
+        self.escape = match byte {
+            0x1b => Escape::Started,
+            _ => Escape::No,
+        };
         match byte {
             b'\r' | b'\n' => return Key::Entered,
             // Ctrl-C, and Ctrl-D on an empty line.
@@ -112,9 +173,8 @@ impl Line {
 
 impl Drop for Line {
     fn drop(&mut self) {
-        self.bytes.fill(0);
-        // Keeps the wipe from being optimised away as a write nobody reads.
-        std::hint::black_box(&self.bytes);
+        // Security rule: what was typed does not stay in memory here.
+        wipe(&mut self.bytes);
     }
 }
 
@@ -154,10 +214,48 @@ mod tests {
         );
         assert_eq!(typed(b"\x7f\x7fa\r"), Ok("a".to_string()));
         assert_eq!(typed(b"wrong\x15right\r"), Ok("right".to_string()));
-        // Arrow keys and the like leave no control bytes in the secret.
-        assert_eq!(typed(b"a\x1bb\tc\r"), Ok("abc".to_string()));
+        // No control byte enters the secret.
+        assert_eq!(typed(b"a\tb\0c\r"), Ok("abc".to_string()));
         assert_eq!(typed(b"a\x04b\r"), Ok("ab".to_string()));
         assert!(matches!(typed(b"\xff\r"), Err(Error::Failed(_))));
+    }
+
+    // An arrow key is three bytes or more. None of them is typed text, and a
+    // secret with `[D` in it that nobody typed would never match.
+    #[test]
+    fn arrow_keys_and_the_like_are_swallowed_whole() {
+        // Left arrow, then Delete; then the other form, as for F1 and Home.
+        assert_eq!(typed(b"a\x1b[Db\x1b[3~c\r"), Ok("abc".to_string()));
+        assert_eq!(typed(b"a\x1bOPb\x1b[1;5Cc\r"), Ok("abc".to_string()));
+        // Enter and Ctrl-C still count in the middle of one.
+        assert_eq!(typed(b"ab\x1b[\r"), Ok("ab".to_string()));
+        assert_eq!(typed(b"ab\x1b\x03"), Err(Error::Closed));
+        // What follows a finished one is text again.
+        assert_eq!(typed(b"\x1b[A[D\r"), Ok("[D".to_string()));
+    }
+
+    // Security rule: what was typed does not stay in the buffer. The CI
+    // workflows run this in a release build too, where a wipe the compiler
+    // may remove is removed.
+    #[test]
+    fn the_line_is_wiped_when_it_is_done_with() {
+        let mut line = std::mem::ManuallyDrop::new(Line::new());
+        for byte in b"NOT-A-REAL-PASSWORD" {
+            line.key(*byte);
+        }
+        assert_eq!(&line.bytes[..4], b"NOT-");
+        // SAFETY: the line is dropped once, here. It owns no memory but its
+        // own fields, which `ManuallyDrop` keeps in place, so they can still
+        // be read; `read_volatile` keeps the compiler from assuming what a
+        // dropped value holds.
+        let left: Vec<u8> = unsafe {
+            std::mem::ManuallyDrop::drop(&mut line);
+            let at = line.bytes.as_ptr();
+            (0..19)
+                .map(|index| std::ptr::read_volatile(at.add(index)))
+                .collect()
+        };
+        assert_eq!(left, [0; 19], "left in the buffer");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! `CONIN$` and `CONOUT$`, and its mode is the console input mode.
 
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use ubc_vpn_core::redact::Secret;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
@@ -10,12 +11,36 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Console::{
     ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
-    GetConsoleMode, ReadConsoleW, SetConsoleMode, WriteConsoleW,
+    FlushConsoleInputBuffer, GetConsoleMode, ReadConsoleW, SetConsoleMode, WriteConsoleW,
 };
 
 use super::security::{Handle, last_error, os_error, wide};
-use crate::terminal::read_keys;
+use crate::terminal::{read_keys, wipe};
 use crate::{Error, Result};
+
+/// Whether a call is in progress, and the console's mode as it was before.
+static READING: AtomicBool = AtomicBool::new(false);
+static MODE: AtomicU32 = AtomicU32::new(0);
+
+/// See `terminal::restore_after_signal`.
+pub(crate) fn restore_after_signal() {
+    if !READING.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Ok(input) = console("CONIN$") {
+        // SAFETY: plain calls on a console handle this function owns.
+        unsafe {
+            SetConsoleMode(input.0, MODE.load(Ordering::SeqCst));
+            FlushConsoleInputBuffer(input.0);
+        }
+    }
+}
+
+/// Throws away the keys waiting in the console.
+fn forget_keys(input: HANDLE) {
+    // SAFETY: a plain call on a handle the caller holds open.
+    unsafe { FlushConsoleInputBuffer(input) };
+}
 
 /// Opens the console's input or output, whatever the program's standard
 /// handles are. A program without a console cannot.
@@ -53,6 +78,7 @@ impl Drop for Restore {
     fn drop(&mut self) {
         // SAFETY: the handle is open for as long as the caller's borrow.
         unsafe { SetConsoleMode(self.0, self.1) };
+        READING.store(false, Ordering::SeqCst);
     }
 }
 
@@ -101,11 +127,17 @@ pub(crate) fn read_hidden_from(input: HANDLE, output: HANDLE, prompt: &str) -> R
     // time, so that Ctrl-C finds the program alive to put the mode back.
     let off = ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT;
     let quiet = before & !(off | ENABLE_VIRTUAL_TERMINAL_INPUT);
+    // What `restore_after_signal` puts back, in place before the change.
+    MODE.store(before, Ordering::SeqCst);
+    READING.store(true, Ordering::SeqCst);
+    let _restore = Restore(input, before);
+    // Security rule: keys typed before the prompt are thrown away. They
+    // were typed blind and are no secret's beginning.
+    forget_keys(input);
     // SAFETY: a plain call on a handle that was just shown to be a console.
     if unsafe { SetConsoleMode(input, quiet) } == 0 {
         return Err(os_error(last_error()));
     }
-    let _restore = Restore(input, before);
 
     // The bytes of the character being handed on, as UTF-8.
     let (mut bytes, mut at, mut len) = ([0u8; 4], 0, 0);
@@ -130,7 +162,13 @@ pub(crate) fn read_hidden_from(input: HANDLE, output: HANDLE, prompt: &str) -> R
             Ok(Some(bytes[at - 1]))
         })
     });
-    bytes.fill(0);
+    wipe(&mut bytes);
+    // Security rule: unless a line was entered, the keys still waiting are
+    // thrown away. The shell would read them next: the rest of a password,
+    // run as a command.
+    if typed.is_err() {
+        forget_keys(input);
+    }
     // The newline that Enter did not show.
     let _ = write(output, "\r\n");
     typed
@@ -144,8 +182,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::System::Console::{
-        COORD, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
-        ReadConsoleOutputCharacterW, WriteConsoleInputW,
+        COORD, GetNumberOfConsoleInputEvents, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT,
+        KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, ReadConsoleOutputCharacterW, WriteConsoleInputW,
     };
     use windows_sys::Win32::System::Threading::{CREATE_NEW_CONSOLE, DETACHED_PROCESS};
 
@@ -214,6 +252,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let quiet = mode(&input);
+        type_keys(&input, keys);
+        quiet
+    }
+
+    /// How many key events wait in the console.
+    fn waiting(input: &Handle) -> u32 {
+        let mut events = 0;
+        // SAFETY: `events` is a live integer and the handle is open.
+        let done = unsafe { GetNumberOfConsoleInputEvents(input.0, &mut events) };
+        assert_ne!(done, 0, "count the keys");
+        events
+    }
+
+    fn type_keys(input: &Handle, keys: &str) {
         for unit in keys.encode_utf16() {
             let key = KEY_EVENT_RECORD {
                 bKeyDown: 1,
@@ -232,7 +284,6 @@ mod tests {
             let done = unsafe { WriteConsoleInputW(input.0, &record, 1, &mut written) };
             assert_ne!(done, 0, "type a key");
         }
-        quiet
     }
 
     // Not a test of its own: the two tests above run it in a new process.
@@ -250,7 +301,9 @@ mod tests {
         let input = console("CONIN$").expect("the new console");
         let before = mode(&input);
         assert_ne!(before & ENABLE_ECHO_INPUT, 0, "a new console echoes");
-        let typist = std::thread::spawn(|| type_when_quiet("s3cret fakx\u{8}e\r"));
+        // Typed blind, before any prompt: no part of the secret.
+        type_keys(&input, "blind");
+        let typist = std::thread::spawn(|| type_when_quiet("s3cret fakx\u{8}e\rNEXT"));
         let read = read_hidden_line("Password: ").expect("read");
         let quiet = typist.join().expect("the typist");
         assert_eq!(read.expose(), "s3cret fake");
@@ -260,12 +313,33 @@ mod tests {
         let cooked = ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT;
         assert_eq!(quiet & cooked, 0, "the console's mode while reading");
 
-        // Ctrl-C comes as a key: the call gives up and the mode is put back.
-        let typist = std::thread::spawn(|| type_when_quiet("half\u{3}"));
+        // What follows an entered line stays for the next reader.
+        assert_ne!(waiting(&input), 0, "the keys after Enter were thrown away");
+
+        // Ctrl-C comes as a key: the call gives up, the mode is put back,
+        // and the rest of what was typed is not left for the shell.
+        let typist = std::thread::spawn(|| type_when_quiet("half\u{3}REST-OF-FAKE-SECRET\r"));
         let read = read_hidden_line("").map(|_| ());
         typist.join().expect("the typist");
         assert_eq!(read, Err(Error::Closed));
         assert_eq!(mode(&input), before, "the mode after Ctrl-C");
+        assert_eq!(waiting(&input), 0, "keys left after giving up");
+
+        // What a program told to stop calls: the mode is back as it was
+        // though the call has not returned.
+        let typist = std::thread::spawn(|| {
+            let input = console("CONIN$").expect("the console");
+            let quiet = type_when_quiet("");
+            restore_after_signal();
+            let restored = mode(&input);
+            type_keys(&input, "x\r");
+            (quiet, restored)
+        });
+        let read = read_hidden_line("").expect("read");
+        let (quiet, restored) = typist.join().expect("the typist");
+        assert_eq!(read.expose(), "x");
+        assert_ne!(quiet, before, "the call changed nothing");
+        assert_eq!(restored, before, "not put back during the call");
 
         // The first line of the screen: the prompt, and nothing typed.
         let output = console("CONOUT$").expect("the screen");
