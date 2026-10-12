@@ -14,7 +14,8 @@ service_version: string,
  */
 owner_claimed: boolean, } | { "type": "service_unavailable" } | { "type": "update_needed", 
 /**
- * The service's product version, to show the user.
+ * The service's product version, to show the user, or the word
+ * `unknown` when the reply did not show one the bridge could read.
  */
 service_version: string, } | { "type": "untrusted_service" } | { "type": "not_owner" } | { "type": "bad_line" } | { "type": "server", 
 /**
