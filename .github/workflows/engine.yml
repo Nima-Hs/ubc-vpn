@@ -150,9 +150,11 @@ jobs:
       # thrown away after the job. Its key never leaves runner.temp. Linux
       # only: it is the one runner where this is a single command. Never do
       # this on a machine that is kept; the test is skipped without the
-      # variable set here.
+      # variable set here. The step runs on GitHub's own runners only, so a
+      # machine someone registers as a runner is never touched; the check of
+      # the log below then fails there, which is the right answer.
       - name: Trust a throwaway authority on this runner
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         working-directory: ${{ runner.temp }}
         run: |
           mkdir gateway-trusted && cd gateway-trusted

@@ -392,16 +392,28 @@ impl Form<'_> {
         let Some(option) = self.options().get(index).copied() else {
             return false;
         };
-        let Ok(text) = CString::new(value.expose()) else {
-            return false;
-        };
-        let mut text = text.into_bytes_with_nul();
+        let set = self.library.set_option_value;
         // SAFETY: `option` is a live field of this form, and `text` is a
         // NUL-terminated string the library copies.
-        let taken = unsafe { (self.library.set_option_value)(option, text.as_ptr().cast()) == 0 };
-        wipe(&mut text);
-        taken
+        let taken = lend_wiped(value, |text| unsafe { set(option, text) == 0 });
+        // The wiped copy is dropped here.
+        taken.is_some_and(|(taken, _wiped)| taken)
     }
+}
+
+/// Lends `call` a NUL-terminated copy of `value`, then wipes the copy. The
+/// answer is what `call` returned, with the buffer the copy was in, which by
+/// then holds only zeros; the caller drops it. `None`, and nothing is
+/// copied or called, if the value has a NUL in it: C would read it as a
+/// shorter value than the one given.
+fn lend_wiped<T>(value: &Secret, call: impl FnOnce(*const c_char) -> T) -> Option<(T, Vec<u8>)> {
+    if value.expose().contains('\0') {
+        return None;
+    }
+    let mut text = CString::new(value.expose()).ok()?.into_bytes_with_nul();
+    let result = call(text.as_ptr().cast());
+    wipe(&mut text);
+    Some((result, text))
 }
 
 /// One `openconnect_info`, freed on drop. It is not `Send`: the thread that
@@ -570,6 +582,32 @@ mod tests {
         let mut text = b"NOT-A-REAL-PASSWORD\0".to_vec();
         super::wipe(&mut text);
         assert_eq!(text, [0; 20]);
+    }
+
+    // Security rule: an answer's copy is wiped once it has been handed over.
+    // This is the path `Form::answer` takes: the callee sees the whole
+    // value, and the buffer that comes back holds nothing.
+    #[test]
+    fn a_lent_copy_is_whole_while_lent_and_wiped_afterwards() {
+        use std::ffi::CStr;
+        let value = ubc_vpn_core::redact::Secret::new("NOT-A-REAL-PASSWORD");
+        // SAFETY: the pointer is the NUL-terminated copy, valid in the call.
+        let read = |text| unsafe { CStr::from_ptr(text) }.to_bytes().to_vec();
+        let (seen, left) = super::lend_wiped(&value, read).expect("no NUL in it");
+        assert_eq!(seen, b"NOT-A-REAL-PASSWORD");
+        assert_eq!(left, [0; 20]);
+    }
+
+    // Security rule: a value with a NUL in it is refused whole. C would stop
+    // reading at the NUL, and a shorter value than the one typed would go.
+    #[test]
+    fn a_value_with_a_nul_is_not_lent_at_all() {
+        let mut called = false;
+        for text in ["some\0one", "\0", "someone\0"] {
+            let value = ubc_vpn_core::redact::Secret::new(text);
+            assert!(super::lend_wiped(&value, |_| called = true).is_none());
+        }
+        assert!(!called);
     }
 }
 

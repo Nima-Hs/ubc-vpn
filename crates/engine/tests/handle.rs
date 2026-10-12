@@ -269,6 +269,27 @@ fn a_panic_in_any_callback_fails_the_login_and_goes_no_further() {
     assert_eq!(gateway.requests().len(), 1, "{:?}", gateway.requests());
 }
 
+// Security rule: an answer with a NUL in it is refused, not cut short at the
+// NUL and sent.
+#[test]
+fn an_answer_with_a_nul_in_it_is_refused() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let results = Arc::clone(&taken);
+    let fill: Fill = Box::new(move |form| {
+        let cut = form.answer(0, &Secret::new("some\0one"));
+        let whole = form.answer(0, &Secret::new("someone"));
+        results.lock().unwrap().extend([cut, whole]);
+        FormAnswer::Fail
+    });
+    let (handle, _) = handle(library, gateway.port, &yes(), Box::new(|_| true), fill);
+    assert_ne!(handle.obtain_cookie(), 0);
+    assert_eq!(*taken.lock().unwrap(), [false, true]);
+}
+
 #[test]
 fn a_form_that_is_cancelled_or_cannot_be_answered_gives_no_cookie() {
     let (library, _guard) = library();
