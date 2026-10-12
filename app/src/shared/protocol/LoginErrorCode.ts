@@ -3,4 +3,4 @@
 /**
  * The kinds of login failure the app can act on.
  */
-export type LoginErrorCode = "wrong_password" | "pin_mismatch" | "cancelled" | "gateway_unreachable" | "route_refused" | "service_unavailable" | "internal";
+export type LoginErrorCode = "wrong_password" | "pin_mismatch" | "cancelled" | "gateway_unreachable" | "route_refused" | "service_unavailable" | "busy" | "not_owner" | "internal";
