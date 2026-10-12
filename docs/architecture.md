@@ -1,6 +1,6 @@
 # Architecture
 
-Status: agreed design, 2026-10-11. No application code exists yet.
+Status: agreed design, 2026-10-11, kept up to date as the code is built. The app, the command-line client and the service exist and talk to each other in development mode; the real VPN engine, routes and DNS are not connected yet.
 
 ## What we are building
 
@@ -194,6 +194,14 @@ All three are JSON. Only the CLI reads and writes settings, through `crates/core
 
 An update replaces `policy.json` and never touches `state.json` or `settings.json`. Uninstalling removes the policy and the state.
 
+The settings folder belongs to the CLI. Beside `settings.json` it holds:
+
+- `settings.json.lock`, which a command holds from reading the settings to saving them, so one change cannot undo another. Where the file system cannot give the lock, the change goes ahead without it and says so.
+- `settings.json.damaged-1` to `-3`, earlier settings files that `ubc-vpn settings reset` moved aside. A reset never replaces one of them.
+- `app/`, the app's own profile (Electron's data). The app keeps nothing else there and never opens `settings.json`.
+
+On macOS and Linux the CLI creates the folder for the user alone and refuses to use one that the group or others can write to.
+
 The app does not open `settings.json` or `policy.json` itself. It runs `ubc-vpn settings`, which reads the settings, checks routes the user typed, and saves them, so the rules for routes exist once, in `crates/core`, and are the ones the service applies when connecting. The lines exchanged are defined in `crates/core/src/settings_cli.rs`. Saved routes are used by the next connection; a connection that is already up keeps the routes it started with.
 
 ### Which routes the service accepts
@@ -239,6 +247,16 @@ The exact message types live in `crates/core` and are the reference; this sectio
 ### Wire format
 
 Newline-delimited JSON, one message per line. The service drops a connection that sends a line longer than 64 KiB. TypeScript types are generated from the Rust types with `ts-rs`.
+
+### The log the owner can read
+
+The service keeps its recent log lines in memory and the owner can read them, for the app's log view and for a report to paste into a bug report. The shapes are in `crates/core/src/protocol.rs` (protocol version 3).
+
+- **What is kept:** 500 lines from the service and the engine, and 100 lines that the client hands over from a login, in a space of their own so a client cannot push the service's lines out. Nothing is written to disk.
+- **Before a line is kept:** the service removes any character that could mislead when shown, then every secret it holds at that moment, then everything from a word such as `cookie`, `pass` or `session` to the end of the line, which it replaces with `[redacted]`. A line that is empty or too long after the first step is replaced whole by a marker, not shortened to fit. Debug-level lines are never kept. Only the exact form of a secret is found; one that is split or encoded is not.
+- **The session cookie** is held for this cleaning for 30 seconds after a connection ends, or until the next one starts, and is then wiped.
+- **Reading:** `logs` returns a page of lines after a given point, `watch_logs` asks for new lines as events, and `diagnostics` returns a short summary with no paths and no user names. All are for the owner only. A reader that falls behind loses log events, not its connection, and reads the gap again with `logs`.
+- **What a reader may see:** login lines can name the username and what the gateway said, and lines can name local paths and addresses. The app's log view is not built yet; it will say so before it copies a report.
 
 ### When the session expires
 
