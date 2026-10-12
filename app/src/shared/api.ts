@@ -1,6 +1,7 @@
 // What the main process tells the interface, and the fixed set of functions
 // the interface may call. Both sides import this file, so they cannot drift.
 
+import type { LogsApi } from "./logs";
 import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
 import type { LoginErrorCode } from "./protocol/LoginErrorCode";
@@ -142,6 +143,8 @@ export interface VpnApi {
     minimizeWindow(): Promise<void>;
     /** Closes the window: to the tray where there is one, otherwise quitting. */
     closeWindow(): Promise<void>;
+    /** Present only in builds that have the log screen. */
+    readonly logs?: LogsApi;
     /** Present only in demo builds. */
     readonly demo?: DemoApi;
 }

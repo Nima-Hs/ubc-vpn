@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
-import { app, type BrowserWindow, Menu, protocol, session } from "electron";
+import { app, type BrowserWindow, clipboard, Menu, protocol, session } from "electron";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
 import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
 import { clientLogin } from "./login";
+import type { LogFeed } from "./logs/book";
 import { profileFolder } from "./profile";
 import { holdQuitForCancel, stopForQuit } from "./quit";
 import {
@@ -71,6 +72,7 @@ async function start(): Promise<void> {
     let link: ServiceLink;
     let login: LoginFactory;
     let demoSettings: SettingsService | undefined;
+    let logFeed: LogFeed | undefined;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
@@ -78,10 +80,13 @@ async function start(): Promise<void> {
         const { createDemoSettings, DEMO_SETTINGS_SCENARIOS } = await import(
             "./demo/demo-settings"
         );
+        const { createDemoLogs, DEMO_LOG_SCENARIOS } = await import("./demo/demo-logs");
         const fakeSettings = createDemoSettings();
         demoSettings = fakeSettings;
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
         const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
+        const fakeLogs = createDemoLogs(step);
+        logFeed = fakeLogs;
         const demo = createDemoLink(step);
         link = demo;
         let demoLogin: ReturnType<typeof createDemoLogin> | undefined;
@@ -94,6 +99,7 @@ async function start(): Promise<void> {
                 ...DEMO_SCENARIOS,
                 ...DEMO_LOGIN_SCENARIOS,
                 ...DEMO_SETTINGS_SCENARIOS,
+                ...DEMO_LOG_SCENARIOS,
             ]);
             handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
                 if (typeof name === "string") {
@@ -101,6 +107,7 @@ async function start(): Promise<void> {
                     demoLogin?.setScenario(name);
                     demo.setScenario(name);
                     fakeSettings.setScenario(name);
+                    fakeLogs.setScenario(name);
                 }
             });
         };
@@ -140,6 +147,20 @@ async function start(): Promise<void> {
 
     const window = createWindow(entryUrl, trayImage("on", 64), developmentBuild);
     registerIpc(window, controller, settings, devServerUrl);
+    // The log screen: in no production build until its contract is on main.
+    // Until then the only service that can be asked for its log is the
+    // demo's pretend one.
+    if (__LOGS__ && logFeed !== undefined) {
+        const { registerLogs } = await import("./logs/ipc");
+        registerLogs(window, devServerUrl, logFeed, {
+            appVersion: app.getVersion(),
+            platform: process.platform,
+            arch: process.arch,
+            link: () => controller.getSnapshot().state,
+            // Only ever called for the interface's "copy" press.
+            copy: (text) => clipboard.writeText(text),
+        });
+    }
     registerDemo?.(window);
 
     let quitting = false;

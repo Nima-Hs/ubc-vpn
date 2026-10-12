@@ -344,6 +344,10 @@ test("the app, the client and a dev-mode service work together", async () => {
     await expect(page.getByText("Development mode. This is not the real VPN.")).toBeInViewport({
         ratio: 1,
     });
+    // This is the production build: it has no log screen yet, and no way
+    // to ask for one.
+    await expect(tab("Logs")).toHaveCount(0);
+    expect(await page.evaluate(() => window.ubcVpn.logs === undefined)).toBe(true);
     const snapshot = await page.evaluate(() => window.ubcVpn.getSnapshot());
     expect(snapshot.development).toBe(true);
     expect(snapshot.state).toEqual({ link: "ready", conn: { state: "disconnected" } });

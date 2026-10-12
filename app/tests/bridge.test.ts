@@ -27,6 +27,7 @@ import {
     LineTooLongError,
     MAX_LINE_BYTES,
 } from "../src/main/channel/framing";
+import { isServerMessage } from "../src/main/channel/validate";
 import { profileFolder } from "../src/main/profile";
 import {
     alive,
@@ -411,6 +412,22 @@ describe("when the bridge ends", () => {
         await until(() => last() === "unavailable", "unavailable");
     });
 
+    it("refuses an answer of a kind it does not know, though it lets such an event by", () => {
+        const answer = (value: unknown) => ({
+            type: "response",
+            data: { id: 1, outcome: { status: "ok", value } },
+        });
+        expect(isServerMessage(answer({ kind: "claimed" }))).toBe(true);
+        expect(isServerMessage(answer({ kind: "status", value: { state: "disconnected" } }))).toBe(
+            true,
+        );
+        for (const kind of ["comet_sighted", "constructor", "", 7, undefined]) {
+            expect(isServerMessage(answer({ kind, value: {} })), String(kind)).toBe(false);
+        }
+        // The same unknown word on an event is let through, to be ignored.
+        expect(isServerMessage({ type: "event", data: { kind: "comet_sighted" } })).toBe(true);
+    });
+
     it("ignores an event of a kind it does not know, and carries on as before", async () => {
         // A newer service may say things this app has no use for.
         const unknown = (value: unknown) =>
@@ -457,6 +474,13 @@ describe("when the bridge ends", () => {
             '{"type":"server","message":{"type":"event","data":{"kind":"state_changed","value":{"state":"connected","tunnel":{"address":"198.51.100.1"}}}}}\n',
         ],
         ["a second ready", '{"type":"ready","service_version":"0.1.0","owner_claimed":true}\n'],
+        // An answer is to a request the app itself made, and it makes none
+        // whose answer it cannot read. So, unlike an event, an answer of a
+        // kind it does not know is a fault.
+        [
+            "an answer of a kind it does not know",
+            '{"type":"server","message":{"type":"response","data":{"id":1,"outcome":{"status":"ok","value":{"kind":"comet_sighted","value":{}}}}}}\n',
+        ],
         [
             "an event that does not say its kind",
             '{"type":"server","message":{"type":"event","data":{"value":1}}}\n',

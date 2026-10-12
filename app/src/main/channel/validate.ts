@@ -89,7 +89,7 @@ export function isConnState(value: unknown): value is ConnState {
     }
 }
 
-function isErrorInfo(value: unknown): value is ErrorInfo {
+export function isErrorInfo(value: unknown): value is ErrorInfo {
     return isObject(value) && isErrorCode(value.code) && typeof value.message === "string";
 }
 
