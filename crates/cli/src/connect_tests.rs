@@ -498,3 +498,147 @@ fn the_wait_for_the_outcome_has_an_end() {
     assert!(err.contains("did not answer in time"), "{err}");
     assert!(waited < std::time::Duration::from_secs(3), "{waited:?}");
 }
+
+/// A scene whose service takes a new login after a log-off, with these
+/// settings saved.
+fn returning(settings: &str) -> Scene {
+    let mut scene = Scene::new(Some(settings), "");
+    scene.service = None;
+    scene.service = Some(
+        scene
+            .rig
+            .service_on(FakeEngine::for_dev_mode(Script::new(pin()))),
+    );
+    scene
+}
+
+pub(crate) fn saved(scene: &Scene) -> serde_json::Value {
+    let text = std::fs::read_to_string(scene.rig.root.join("settings/settings.json")).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+// A username the user typed is kept once a connect made with it has been
+// accepted, and is not asked for again. Nothing else in the file changes.
+#[test]
+fn the_username_is_remembered_after_a_connect_that_was_accepted() {
+    let scene = returning(&format!(r#"{{"theme":"dark",{ROUTES}}}"#));
+    let before = saved(&scene);
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!((code, err.as_str()), (0, ""));
+    let mut expected = before;
+    expected["username"] = serde_json::json!("alice");
+    assert_eq!(saved(&scene), expected);
+
+    assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, 0);
+    assert_eq!(typist.asked, [PromptKind::Password, PromptKind::Code]);
+    assert_eq!(saved(&scene), expected);
+}
+
+// Nothing is remembered from a login that failed or was given up, or from
+// a connect the service did not accept.
+#[test]
+fn no_username_is_kept_from_a_connect_that_did_not_start() {
+    let attempts: [&[Option<&str>]; 3] = [
+        &[Some("alice"), Some("wrong-password-0000"), Some(CODE)],
+        &[Some("alice"), None],
+        &[None],
+    ];
+    for typed in attempts {
+        let scene = returning(&format!("{{{ROUTES}}}"));
+        let before = saved(&scene);
+        let mut typist = Typist::typing(typed);
+        assert_ne!(scene.connect(&mut typist).0, 0);
+        assert_eq!(saved(&scene), before, "{typed:?}");
+    }
+    // The login is good, and the service refuses the connect: the policy it
+    // read when it started does not allow routes the policy file now does.
+    let narrow = r#","allowed_routes":["142.103.0.0/16"]"#;
+    let scene = Scene::new(Some(&format!("{{{ROUTES}}}")), narrow);
+    let before = saved(&scene);
+    let open = format!(
+        r#"{{"gateway":"vpn.example.test","pins":["{}"]}}"#,
+        pin().as_str()
+    );
+    std::fs::write(scene.rig.root.join("policy/policy.json"), open).unwrap();
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!(code, FAILED, "{err}");
+    assert!(scene.gateway_was_asked(), "the login was made");
+    assert_eq!(saved(&scene), before);
+}
+
+// A saved username the gateway refuses is forgotten, and nothing else is:
+// the next connect asks for it. Until it can be forgotten on purpose, that
+// is how a wrong one is put right.
+#[test]
+fn a_saved_username_that_is_refused_is_asked_for_next_time() {
+    let scene = returning(&format!(
+        r#"{{"username":"alice","theme":"dark",{ROUTES}}}"#
+    ));
+    let mut expected = saved(&scene);
+    let mut typist = Typist::typing(&[Some("wrong-password-0000"), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, LOGIN_REFUSED);
+    expected.as_object_mut().unwrap().remove("username");
+    assert_eq!(saved(&scene), expected);
+
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, 0);
+    let asked = [PromptKind::Username, PromptKind::Password, PromptKind::Code];
+    assert_eq!(typist.asked, asked);
+    assert_eq!(saved(&scene)["username"], "alice");
+
+    // Any other failure leaves a saved username where it is.
+    assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
+    scene.gateway.set_reachable(false);
+    assert_eq!(scene.connect(&mut Typist::default()).0, FAILED);
+    let mut leaving = Typist::typing(&[None]);
+    scene.gateway.set_reachable(true);
+    assert_eq!(scene.connect(&mut leaving).0, CANCELLED);
+    assert_eq!(saved(&scene)["username"], "alice");
+}
+
+// A name nobody would type as a username is not kept, and the connect is
+// none the worse for it.
+#[test]
+fn an_odd_username_is_used_but_not_kept() {
+    let odd = "u".repeat(300);
+    let mut scene = returning(&format!("{{{ROUTES}}}"));
+    let before = saved(&scene);
+    let mut script = Script::new(pin());
+    script.form[0].1 = Secret::new(odd.as_str());
+    scene.gateway = FakeEngine::new(script);
+    let typed: &'static str = Box::leak(odd.into_boxed_str());
+    let mut typist = Typist::typing(&[Some(typed), Some(PASSWORD)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(saved(&scene), before);
+}
+
+// A username that cannot be saved does not undo a connect that worked. The
+// user is told, and is asked again next time.
+#[cfg(unix)]
+#[test]
+fn a_username_that_cannot_be_saved_does_not_fail_the_connect() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scene = returning(&format!("{{{ROUTES}}}"));
+    let before = saved(&scene);
+    let dir = scene.rig.root.join("settings");
+    let mode = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+    mode(0o500).unwrap();
+    let root = std::fs::write(dir.join("probe"), "").is_ok();
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    mode(0o700).unwrap();
+    assert_eq!(code, 0, "{err}");
+    if !root {
+        assert_eq!(
+            err,
+            "ubc-vpn: The username could not be saved in the settings.\n"
+        );
+        assert_eq!(saved(&scene), before);
+    }
+}

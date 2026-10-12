@@ -7,6 +7,13 @@
 //! checked first, so that a connect which could not succeed asks nothing and
 //! sends no MFA request.
 //!
+//! A username the user typed is saved in their settings once the service
+//! has accepted a connect made with it, so it is not asked for again. A
+//! saved username that the gateway refuses is removed, so the next connect
+//! asks for it: until there is a way to forget it on purpose, that is how a
+//! wrong one is corrected. Nothing is saved after a login that failed or
+//! was given up.
+//!
 //! The password, the one-time code and the cookie are [`Secret`]s. They are
 //! never printed or put in a message, they are registered with the engine's
 //! log sink, and the cookie leaves this program only inside the one request
@@ -22,6 +29,7 @@ use ubc_vpn_core::protocol::{
 };
 use ubc_vpn_core::redact::{REDACTED, Secret};
 use ubc_vpn_core::settings::Settings;
+use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{
     Cancel, Gateway, LogLevel, LogSink, LoginEngine, LoginError, Prompt, Prompts, Session,
@@ -260,17 +268,24 @@ pub(crate) fn start(
         return Err(busy());
     }
 
+    let mut typed = None;
+    let name = saved.username.as_deref();
+    let logged_in = login(&*engine, &gateway, name, &mut typed, ask, cancel, err);
     let Session {
         cookie,
         gateway_addr,
-    } = login(
-        &*engine,
-        &gateway,
-        saved.username.as_deref(),
-        ask,
-        cancel,
-        err,
-    )?;
+    } = match logged_in {
+        Ok(session) => session,
+        Err(stop) => {
+            // The gateway does not say which answer it refused. A saved
+            // username may be the one, and nothing else lets the user
+            // change it, so it is forgotten and asked for next time.
+            if stop.code == LoginErrorCode::WrongPassword && name.is_some() {
+                remember(&platform, &policy, None, err);
+            }
+            return Err(stop);
+        }
+    };
     // The cookie goes into the request and nowhere else.
     let params = ConnectParams {
         cookie,
@@ -284,7 +299,26 @@ pub(crate) fn start(
         return Err(cancelled());
     }
     client.request(RequestBody::Connect(params)).map_err(stop)?;
+    // Only now, with the login good and the connect accepted, is a username
+    // the user typed worth keeping.
+    if let Some(typed) = typed {
+        remember(&platform, &policy, Some(typed.expose()), err);
+    }
     Ok(client)
+}
+
+/// Saves `username` in the user's settings, or forgets the saved one. A
+/// connect never fails over this: the user is told, and is asked for the
+/// username again next time. A name too odd to keep is quietly not kept.
+fn remember(platform: &Platform, policy: &Policy, username: Option<&str>, err: &mut dyn Write) {
+    let dir = &platform.paths.settings_dir;
+    let kept = settings::remember_username(dir, Some(policy), username);
+    if kept.is_err_and(|why| why != SettingsFailureCode::BadInput) {
+        let _ = writeln!(
+            err,
+            "ubc-vpn: The username could not be saved in the settings."
+        );
+    }
 }
 
 /// The user's settings, or the defaults when none are saved.
@@ -304,11 +338,13 @@ fn saved(platform: &Platform) -> Result<Settings, Stop> {
 
 /// Logs in, asking the user what the gateway asks. A saved username answers
 /// the question for it; everything else is asked, and nothing is asked twice
-/// (the engine's [`Prompts`] sees to that).
+/// (the engine's [`Prompts`] sees to that). A username the user was asked
+/// for is left in `typed`.
 fn login(
     engine: &dyn LoginEngine,
     gateway: &Gateway,
     username: Option<&str>,
+    typed: &mut Option<Secret>,
     ask: &mut dyn Ask,
     cancel: &Cancel,
     err: &mut dyn Write,
@@ -320,6 +356,10 @@ fn login(
     let mut answer = |prompt: &Prompt| {
         let given = match (prompt.kind, username) {
             (PromptKind::Username, Some(name)) => Some(Secret::new(name)),
+            (PromptKind::Username, None) => {
+                *typed = ask.ask(prompt);
+                typed.clone()
+            }
             _ => ask.ask(prompt),
         };
         // Whatever was typed is kept out of every log line from here on.

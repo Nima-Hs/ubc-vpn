@@ -18,7 +18,7 @@ use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode, encode};
 use ubc_vpn_core::settings::Settings;
 use ubc_vpn_core::settings_cli::{
     RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView, check_input,
-    replace_routes,
+    replace_routes, replace_username,
 };
 use ubc_vpn_platform::{Paths, Platform};
 
@@ -130,6 +130,21 @@ fn answer(
         save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)?;
     }
     Ok(line)
+}
+
+/// Saves `username` in the settings in `dir`, or removes the saved one when
+/// it is `None`, changing nothing else in the file. Nothing is saved that
+/// would leave `settings get` unable to show the file.
+pub(crate) fn remember_username(
+    dir: &Path,
+    policy: Option<&Policy>,
+    username: Option<&str>,
+) -> Result<(), SettingsFailureCode> {
+    let current = stored(dir)?;
+    let text = replace_username(current.as_deref(), username)?;
+    let too_long = |_| SettingsFailureCode::BadInput;
+    encode(&SettingsView::new(understood(&text)?, policy)).map_err(too_long)?;
+    save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)
 }
 
 /// The policy, if its file is there and valid. Nothing fails for want of

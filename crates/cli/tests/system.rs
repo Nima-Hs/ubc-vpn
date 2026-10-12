@@ -17,7 +17,8 @@
 //!   Windows `USERPROFILE` holds the files.
 //! - On Windows the dev channel is a pipe named after the user, not after
 //!   the profile, so it is shared with any other dev-mode service this user
-//!   runs. The test checks first that none is running, and fails if one is.
+//!   runs. The test checks first that none is running, with a bridge, which
+//!   claims nothing, and fails if one is.
 //!
 //! Not covered here: a second user of the computer, who must be refused.
 //! That needs an account this test cannot make without admin rights; the
@@ -124,6 +125,18 @@ impl Drop for Running {
     }
 }
 
+/// Makes a folder that must not exist yet, for this user alone.
+fn create_private_dir(folder: &Path) -> std::io::Result<()> {
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        let mut private = builder;
+        std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
+        private
+    };
+    builder.create(folder)
+}
+
 /// A temporary home for dev mode, removed when dropped.
 struct Home {
     root: PathBuf,
@@ -138,8 +151,15 @@ impl Home {
             true => PathBuf::from("/tmp"),
             false => std::env::temp_dir(),
         };
-        let root = base.join(format!("ubcvpn-sys-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        // A name nobody can guess, and a folder that was not there before.
+        let root = (0..8).find_map(|_| {
+            use std::hash::{BuildHasher, Hasher};
+            let random = std::collections::hash_map::RandomState::new();
+            let name = format!("ubcvpn-sys-{:016x}", random.build_hasher().finish());
+            let root = base.join(name);
+            create_private_dir(&root).ok().map(|()| root)
+        });
+        let root = root.expect("a new temporary folder");
         let at = |name: &str| root.join(name);
         let variables = match cfg!(windows) {
             true => vec![("USERPROFILE", at("profile"))],
@@ -244,12 +264,12 @@ fn the_service_and_the_client_work_together() {
                      DNS domains: ece.example.test";
 
     // Nothing is running yet. On Windows this also shows that no other
-    // dev-mode service of this user holds the channel.
-    assert_eq!(
-        home.run(&["status"], "").0,
-        3,
-        "a service is running already"
-    );
+    // dev-mode service of this user holds the channel. A bridge asks, since
+    // it claims nothing: a developer's own service is left as it was.
+    let (status, line) = home.run(&["bridge"], "");
+    let nobody = (1, r#"{"type":"service_unavailable"}"#.to_string());
+    assert_eq!((status, line), nobody, "a service is running already");
+    assert_eq!(home.run(&["status"], "").0, 3);
 
     let start = || Running::start(home.command(Path::new(&service), &[]), &home.said);
     let running = start();
@@ -284,10 +304,12 @@ fn the_service_and_the_client_work_together() {
     assert!(answered.contains(&state("disconnected")), "{answered}");
 
     // Connect and disconnect, twice: the pretend gateway takes a new login
-    // after a log-off.
+    // after a log-off. The username is asked for the first time only: once
+    // a connect made with it was accepted, it is remembered.
+    let everything = [Some(USERNAME), Some(PASSWORD), Some(CODE)];
     for round in 1..=2 {
-        let replies = [Some(USERNAME), Some(PASSWORD), Some(CODE)];
-        let (status, last) = home.connect(&replies);
+        let replies = &everything[round - 1..];
+        let (status, last) = home.connect(replies);
         assert_eq!(
             (status, last.as_str()),
             (0, r#"{"type":"done"}"#),
@@ -306,18 +328,25 @@ fn the_service_and_the_client_work_together() {
         bridge.until(&state("disconnected"));
     }
 
+    let (_, shown) = home.run(&["settings", "get", "--json"], "");
+    assert!(shown.contains(r#""username":"alice""#), "{shown}");
+
     // A cancel at the password, and a wrong password: nothing is connected.
-    let (status, last) = home.connect(&[Some(USERNAME), None]);
+    let (status, last) = home.connect(&[None]);
     assert!(
         status == 9 && last.contains(r#""code":"cancelled""#),
         "{last}"
     );
-    let wrong = [Some(USERNAME), Some("wrong-password-0000"), Some(CODE)];
+    let wrong = [Some("wrong-password-0000"), Some(CODE)];
     let (status, last) = home.connect(&wrong);
     assert!(
         status == 8 && last.contains(r#""code":"wrong_password""#),
         "{last}"
     );
+    // The gateway refused a login made with the saved username, so it is
+    // forgotten, and the next connect, further down, is asked for it again.
+    let (_, shown) = home.run(&["settings", "get", "--json"], "");
+    assert!(shown.contains(r#""username":null"#), "{shown}");
     assert_eq!(home.run(&["status"], ""), (0, "Disconnected".to_string()));
     // In a terminal's place there is a pipe here, so the plain connect asks
     // nothing and says why.
