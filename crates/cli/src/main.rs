@@ -26,6 +26,9 @@ mod interrupt;
 #[cfg(test)]
 mod interrupt_tests;
 mod settings;
+mod settings_lock;
+#[cfg(test)]
+mod settings_lock_tests;
 #[cfg(test)]
 mod settings_tests;
 mod terminal;

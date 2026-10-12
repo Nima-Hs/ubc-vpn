@@ -1121,6 +1121,15 @@ fn no_number_of_resets_replaces_a_kept_file() {
         (good.to_string(), "damaged, the third time".to_string())
     );
     assert!(machine.kept(2).is_dir());
+
+    // The sentence about the kept files is for a reset that failed. A save
+    // that fails here, with every name still taken, says nothing of them.
+    let lock = machine.root.join("settings/settings.json.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let why = machine.fails(Command::SetRoutes, GOOD);
+    assert_eq!(why, SettingsFailureCode::Unwritable);
+    assert_eq!(*machine.said.borrow(), "");
 }
 
 // A reset that could not move the old file, or could not write the new
@@ -1215,6 +1224,13 @@ fn a_link_in_place_of_the_settings_is_moved_and_not_followed() {
     assert!(moved.is_symlink() && !nowhere.exists());
     let fresh = std::fs::symlink_metadata(machine.settings_file()).unwrap();
     assert!(fresh.is_file());
+
+    // That link now sits at a kept name, leading nowhere. It still takes
+    // the name: the next reset goes to the one after it.
+    std::fs::write(machine.settings_file(), "not json").unwrap();
+    assert_eq!(machine.reset(RESET), was_reset(3));
+    let still = std::fs::symlink_metadata(machine.kept(2)).unwrap();
+    assert!(still.is_symlink() && !nowhere.exists());
 }
 
 // Security rule: the folder rule holds for `reset` too. In a folder others
