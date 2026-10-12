@@ -43,10 +43,14 @@ jobs:
         run: |
           cargo clippy --locked -p ubc-vpn-platform --features dev-mode --all-targets -- -D warnings
           cargo test --locked -p ubc-vpn-platform --features dev-mode
-          cargo clippy --locked -p ubc-vpn-service --features dev-mode --all-targets -- -D warnings
-          cargo test --locked -p ubc-vpn-service --features dev-mode
           cargo clippy --locked -p ubc-vpn-engine --features fake,debug-logs --all-targets -- -D warnings
           cargo test --locked -p ubc-vpn-engine --features fake,debug-logs
+      # On every OS: a dev-mode service runs on that OS's real channel, so its
+      # tests do different things on each.
+      - name: The service's dev mode builds and passes its tests
+        run: |
+          cargo clippy --locked -p ubc-vpn-service --features dev-mode --all-targets -- -D warnings
+          cargo test --locked -p ubc-vpn-service --features dev-mode
       # A release must be built one program at a time (-p), never with
       # --workspace: features enabled by any other crate would be switched on
       # for these two as well.

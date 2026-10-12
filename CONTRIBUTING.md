@@ -27,7 +27,7 @@ The pnpm version is the `packageManager` field of `app/package.json`. `app/READM
 
 Branch from `main`, commit using Conventional Commits, and open a pull request whose title follows the same format. The full conventions are in [workflow](.claude/rules/workflow.md), [dependencies](.claude/rules/dependencies.md) and [security](.claude/rules/security.md).
 
-CI runs `cargo fmt`, `cargo clippy` and `cargo test`, and for the app lint, type check, unit tests and end-to-end tests. See `.github/workflows/ci.yml` and `.github/workflows/app.yml` for the exact commands.
+CI runs `cargo fmt`, `cargo clippy` and `cargo test`. For the app it runs the lint, type check, unit tests and end-to-end tests. See `.github/workflows/ci.yml` and `.github/workflows/app.yml` for the exact commands.
 
 The TypeScript types in `app/src/shared/protocol/` are generated from `crates/core` by `cargo test`. Never edit them by hand; change the Rust type, run the tests, and commit the result.
 
