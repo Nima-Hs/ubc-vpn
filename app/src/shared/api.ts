@@ -5,6 +5,10 @@ import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
 import type { LoginErrorCode } from "./protocol/LoginErrorCode";
 import type { PromptKind } from "./protocol/PromptKind";
+import type { RouteInput } from "./protocol/RouteInput";
+import type { RoutesReply } from "./protocol/RoutesReply";
+import type { SettingsFailureCode } from "./protocol/SettingsFailureCode";
+import type { SettingsView } from "./protocol/SettingsView";
 
 /** Why the service cannot be used right now. */
 export type UnavailableReason =
@@ -67,6 +71,21 @@ export type ActionError =
 
 export type ActionResult = { ok: true } | { ok: false; error: ActionError };
 
+/**
+ * Why a settings call gave no answer. The first three are the command-line
+ * client's own; the rest are the app's.
+ */
+export type SettingsError =
+    | SettingsFailureCode
+    /** The client could not be run, took too long, or answered with something else. */
+    | "unavailable"
+    /** A save is already under way. */
+    | "busy"
+    /** A newer check of the routes replaced this one. */
+    | "superseded";
+
+export type SettingsResult<T> = { ok: true; value: T } | { ok: false; error: SettingsError };
+
 /** What the interface is sent, whole, every time any part of it changes. */
 export interface Snapshot {
     state: LinkState;
@@ -101,6 +120,12 @@ export interface VpnApi {
     answerPrompt(id: number, value: string): Promise<void>;
     /** Gives up a login, or dismisses one that failed. */
     cancelLogin(): Promise<void>;
+    /** The user's settings, with the limits the policy puts on routes. */
+    getSettings(): Promise<SettingsResult<SettingsView>>;
+    /** Checks routes as typed. Changes nothing. */
+    checkRoutes(input: RouteInput): Promise<SettingsResult<RoutesReply>>;
+    /** Checks routes and saves them if every entry is acceptable. */
+    saveRoutes(input: RouteInput): Promise<SettingsResult<RoutesReply>>;
     /** Tries to reach the service now instead of waiting for the next attempt. */
     retry(): Promise<void>;
     minimizeWindow(): Promise<void>;
@@ -132,6 +157,9 @@ export const IPC = {
     retry: "vpn:retry",
     answerPrompt: "login:answer",
     cancelLogin: "login:cancel",
+    getSettings: "settings:get",
+    checkRoutes: "settings:check-routes",
+    saveRoutes: "settings:save-routes",
     minimizeWindow: "window:minimize",
     closeWindow: "window:close",
 } as const;

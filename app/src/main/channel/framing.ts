@@ -45,6 +45,11 @@ export class LineDecoder {
         this.pending = Buffer.from(data);
         return lines;
     }
+
+    /** Whether bytes have arrived that do not yet end in a newline. */
+    hasPartial(): boolean {
+        return this.pending.length > 0;
+    }
 }
 
 /** Turns a message into one line, newline included. */

@@ -1,5 +1,7 @@
 import { IPC } from "@shared/api";
+import type { RouteInput } from "@shared/protocol/RouteInput";
 import { type BrowserWindow, type IpcMainInvokeEvent, ipcMain } from "electron";
+import type { SettingsService } from "./channel/settings";
 import type { Controller } from "./controller";
 import { isTrustedOrigin } from "./security";
 
@@ -74,12 +76,54 @@ export function takePromptAnswer(
 }
 
 /**
- * The fixed set of things the interface can ask for. Only one takes
- * arguments, and it checks them.
+ * The most entries, and the longest entry, the interface may send to be
+ * checked. Both are above the client's own limits (256 entries of at most
+ * 253 bytes), so that an honest "too many" or "too long" still reaches the
+ * client and comes back as a problem the user can read. Past these, nothing
+ * is started at all.
+ */
+export const MAX_ROUTE_ENTRIES = 1024;
+export const MAX_ROUTE_ENTRY_LENGTH = 512;
+
+function isEntryList(value: unknown): value is string[] {
+    return (
+        Array.isArray(value) &&
+        value.length <= MAX_ROUTE_ENTRIES &&
+        value.every((entry) => typeof entry === "string" && entry.length <= MAX_ROUTE_ENTRY_LENGTH)
+    );
+}
+
+/**
+ * Takes routes from the interface: one argument, an object with exactly the
+ * two lists, each a bounded list of bounded strings. Returns a fresh object
+ * holding only those lists, or refuses.
+ */
+export function takeRouteInput(args: readonly unknown[]): RouteInput {
+    const [input] = args;
+    if (
+        args.length !== 1 ||
+        typeof input !== "object" ||
+        input === null ||
+        Array.isArray(input) ||
+        Object.keys(input).sort().join() !== "dns_domains,subnets"
+    ) {
+        throw new Error("refused");
+    }
+    const { subnets, dns_domains } = input as Record<string, unknown>;
+    if (!isEntryList(subnets) || !isEntryList(dns_domains)) {
+        throw new Error("refused");
+    }
+    return { subnets: [...subnets], dns_domains: [...dns_domains] };
+}
+
+/**
+ * The fixed set of things the interface can ask for. Three take arguments,
+ * and each checks them before anything else happens.
  */
 export function registerIpc(
     window: BrowserWindow,
     controller: Controller,
+    settings: SettingsService,
     devServerUrl: string | undefined,
 ): void {
     const handle = (channel: string, handler: () => unknown) =>
@@ -92,6 +136,13 @@ export function registerIpc(
     handle(IPC.cancelLogin, () => controller.cancelLogin());
     handleFromInterface(window, devServerUrl, IPC.answerPrompt, (...args) =>
         takePromptAnswer(controller, args),
+    );
+    handle(IPC.getSettings, () => settings.getSettings());
+    handleFromInterface(window, devServerUrl, IPC.checkRoutes, (...args) =>
+        settings.checkRoutes(takeRouteInput(args)),
+    );
+    handleFromInterface(window, devServerUrl, IPC.saveRoutes, (...args) =>
+        settings.saveRoutes(takeRouteInput(args)),
     );
     handle(IPC.minimizeWindow, () => window.minimize());
     handle(IPC.closeWindow, () => window.close());

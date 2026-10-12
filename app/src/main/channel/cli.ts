@@ -45,6 +45,15 @@ export function bridgeCommand(
 }
 
 /**
+ * The program that reads and writes the user's settings: the same client,
+ * found the same way. Its arguments are fixed, in `settings.ts`; nothing the
+ * user typed is ever among them.
+ */
+export function settingsCommand(...where: Parameters<typeof bridgeCommand>): string {
+    return bridgeCommand(...where).command;
+}
+
+/**
  * The program and arguments that log in and connect. The same client as the
  * bridge, found the same way. The app passes it no routes and no address:
  * the client reads the user's settings and the service's policy itself.

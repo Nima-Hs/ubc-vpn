@@ -83,6 +83,9 @@ export function plainText(text: string, maxLength: number): string {
     return kept;
 }
 
+/** What a question is called when the gateway's own label comes to nothing. */
+export const FALLBACK_LABEL = "Answer";
+
 const IDLE: LoginState = { phase: "idle" };
 const WORKING: LoginState = { phase: "working" };
 /** For everything that is the client misbehaving and not the gateway answering. */
@@ -231,7 +234,9 @@ export class ConnectRunner implements LoginRunner {
                 const prompt: LoginPrompt = {
                     id: this.lastPromptId,
                     kind: line.kind,
-                    label: plainText(line.label, MAX_LABEL),
+                    // A label that was nothing but characters the app removes
+                    // would leave a field with no name.
+                    label: plainText(line.label, MAX_LABEL) || FALLBACK_LABEL,
                     ...(line.message !== undefined && {
                         message: plainText(line.message, MAX_MESSAGE),
                     }),

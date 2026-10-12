@@ -11,7 +11,15 @@ import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import type { Outcome } from "@shared/protocol/Outcome";
 import type { PromptKind } from "@shared/protocol/PromptKind";
 import type { ResponseBody } from "@shared/protocol/ResponseBody";
+import type { RouteList } from "@shared/protocol/RouteList";
+import type { RouteProblem } from "@shared/protocol/RouteProblem";
+import type { RouteProblemCode } from "@shared/protocol/RouteProblemCode";
+import type { RouteSet } from "@shared/protocol/RouteSet";
+import type { RoutesReply } from "@shared/protocol/RoutesReply";
 import type { ServerMessage } from "@shared/protocol/ServerMessage";
+import type { SettingsFailure } from "@shared/protocol/SettingsFailure";
+import type { SettingsFailureCode } from "@shared/protocol/SettingsFailureCode";
+import type { SettingsView } from "@shared/protocol/SettingsView";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
 
 // Typed against `ErrorCode`, so a code added to the protocol fails the type
@@ -199,4 +207,84 @@ export function isCliMessage(value: unknown): value is CliMessage {
         default:
             return false;
     }
+}
+
+const ROUTE_PROBLEM_CODES: Record<RouteProblemCode, true> = {
+    no_subnets: true,
+    too_many: true,
+    bad_subnet: true,
+    too_wide: true,
+    reserved: true,
+    not_allowed: true,
+    bad_domain: true,
+};
+
+const ROUTE_LISTS: Record<RouteList, true> = { subnets: true, dns_domains: true };
+
+const SETTINGS_FAILURE_CODES: Record<SettingsFailureCode, true> = {
+    bad_input: true,
+    unreadable: true,
+    unwritable: true,
+};
+
+function isRouteSet(value: unknown): value is RouteSet {
+    return isObject(value) && isStringArray(value.subnets) && isStringArray(value.dns_domains);
+}
+
+function isRouteProblem(value: unknown): value is RouteProblem {
+    return (
+        isObject(value) &&
+        typeof value.code === "string" &&
+        Object.hasOwn(ROUTE_PROBLEM_CODES, value.code) &&
+        (value.list === null ||
+            (typeof value.list === "string" && Object.hasOwn(ROUTE_LISTS, value.list))) &&
+        (value.index === null || isU32(value.index))
+    );
+}
+
+/** Whether a parsed line is the answer to `settings get`. */
+export function isSettingsView(value: unknown): value is SettingsView {
+    if (!isObject(value) || !isObject(value.settings)) {
+        return false;
+    }
+    const settings = value.settings;
+    return (
+        (settings.username === null || typeof settings.username === "string") &&
+        isRouteSet(settings.routes) &&
+        typeof settings.save_password === "boolean" &&
+        typeof value.policy_readable === "boolean" &&
+        (value.allowed_routes === null || isStringArray(value.allowed_routes)) &&
+        isU32(value.min_prefix_len) &&
+        value.min_prefix_len <= 32 &&
+        isU32(value.max_routes)
+    );
+}
+
+/** Whether a parsed line is the answer to `check-routes` or `set-routes`. */
+export function isRoutesReply(value: unknown): value is RoutesReply {
+    if (!isObject(value)) {
+        return false;
+    }
+    switch (value.type) {
+        case "ok":
+            return isRouteSet(value.routes);
+        case "invalid":
+            // "At least one entry is not acceptable."
+            return (
+                Array.isArray(value.problems) &&
+                value.problems.length > 0 &&
+                value.problems.every(isRouteProblem)
+            );
+        default:
+            return false;
+    }
+}
+
+/** Whether a parsed line says a `settings` command could not do its work. */
+export function isSettingsFailure(value: unknown): value is SettingsFailure {
+    return (
+        isObject(value) &&
+        typeof value.error === "string" &&
+        Object.hasOwn(SETTINGS_FAILURE_CODES, value.error)
+    );
 }
