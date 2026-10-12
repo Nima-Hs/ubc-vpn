@@ -152,11 +152,12 @@ fn dns_servers(
                 ));
             }
         }
-    }
-    if servers.len() > MAX_DNS_SERVERS {
-        return refuse(format!(
-            "The gateway assigned more than {MAX_DNS_SERVERS} DNS servers."
-        ));
+        // Checked as the list grows, so a long list costs nothing to refuse.
+        if servers.len() > MAX_DNS_SERVERS {
+            return refuse(format!(
+                "The gateway assigned more than {MAX_DNS_SERVERS} DNS servers."
+            ));
+        }
     }
     Ok(servers)
 }

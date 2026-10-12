@@ -211,7 +211,14 @@ impl Machine {
                 self.recover();
             }
         }
-        let _ = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
+        // At shutdown too, a panic part-way must not be the end of it: what
+        // the first attempt took in hand is closed by then, and a second
+        // one runs the steps that need no memory of what was applied.
+        if panic::catch_unwind(AssertUnwindSafe(|| self.teardown())).is_err() {
+            self.logs
+                .push("teardown panicked at shutdown; trying again");
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
+        }
     }
 
     /// After a panic while handling a command, which is a bug somewhere in
@@ -226,8 +233,9 @@ impl Machine {
             Ok(true) => "Something went wrong inside the service. The connection was closed.",
             _ => LEFT_BEHIND,
         };
-        self.hub.publish(failed(ErrorCode::Internal, message));
+        // The gate first: a client that hears `failed` may ask again at once.
         lock(&self.gate).phase = Phase::Idle;
+        self.hub.publish(failed(ErrorCode::Internal, message));
     }
 
     fn handle(&mut self, command: Command) {

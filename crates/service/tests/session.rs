@@ -648,3 +648,58 @@ fn an_old_tunnels_ending_does_not_end_the_next_connection() {
     );
     assert!(rig.engine.tunnel_is_open());
 }
+
+// Security rule: a panic inside teardown itself still logs the session off
+// and still ends with nothing applied. The tunnel is closed properly, not
+// just dropped, which would leave the session alive at the gateway.
+#[test]
+fn a_panic_inside_teardown_still_logs_off_and_cleans_up() {
+    let steps = [
+        Op::RemoveTunnelRoutes,
+        Op::ClearSplitDns,
+        Op::RemoveGatewayRoute,
+        Op::RemoveAllRoutes,
+    ];
+    for step in steps {
+        let rig = rig();
+        let mut alice = rig.owner();
+        connected(&mut alice);
+        rig.os.panic_at(step);
+        assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+        assert_eq!(alice.state(), ConnState::Disconnecting);
+        let state = alice.state();
+        assert!(
+            failed_with(&state, ErrorCode::Internal),
+            "{step:?}: {state:?}"
+        );
+        assert!(rig.is_clean(), "{step:?} left something behind");
+        let closes = rig.spy.closes();
+        let modes: Vec<_> = closes.iter().map(|(how, _)| *how).collect();
+        assert_eq!(
+            modes,
+            [CloseMode::LogOff],
+            "{step:?}: closed once, with a log-off"
+        );
+        // The gateway agrees: the cookie no longer opens a tunnel.
+        assert_eq!(
+            alice.connect_ends(good()),
+            ConnState::LoginNeeded,
+            "{step:?}"
+        );
+    }
+}
+
+// The same at shutdown, where nobody is left to tell: a panic part-way does
+// not stop the rest of the cleanup.
+#[test]
+fn a_panic_in_the_teardown_at_shutdown_does_not_stop_the_cleanup() {
+    for step in [Op::RemoveTunnelRoutes, Op::RemoveAllRoutes] {
+        let mut rig = rig();
+        connected(&mut rig.owner());
+        rig.os.panic_at(step);
+        rig.stop();
+        assert!(rig.is_clean(), "{step:?} left something behind");
+        let modes: Vec<_> = rig.spy.closes().iter().map(|(how, _)| *how).collect();
+        assert_eq!(modes, [CloseMode::LogOff], "{step:?}");
+    }
+}
