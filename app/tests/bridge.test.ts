@@ -2,7 +2,7 @@
 // contract in `crates/core/src/bridge.rs`.
 
 import { type SpawnOptions, spawn } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Event } from "@shared/protocol/Event";
@@ -18,6 +18,7 @@ import {
     type BridgeRequestBody,
     type BridgeStatus,
     bridgeEnv,
+    DEV_ENV,
 } from "../src/main/channel/bridge";
 import { bridgeCommand } from "../src/main/channel/cli";
 import {
@@ -26,6 +27,7 @@ import {
     LineTooLongError,
     MAX_LINE_BYTES,
 } from "../src/main/channel/framing";
+import { profileFolder } from "../src/main/profile";
 import {
     alive,
     type MockBridge,
@@ -73,6 +75,7 @@ function start(
             | "initialRetryDelayMs"
             | "exitGraceMs"
             | "env"
+            | "dev"
         >
     > = {},
 ): Harness {
@@ -553,6 +556,7 @@ describe("where the command-line client is", () => {
         expect(command(true)).toEqual({
             command: native(`${resources}/bin/ubc-vpn`),
             args: ["bridge"],
+            dev: false,
         });
         expect(command(true, {}, "win32").command.endsWith("ubc-vpn.exe")).toBe(true);
     });
@@ -572,8 +576,95 @@ describe("where the command-line client is", () => {
         expect(command(false)).toEqual(command(true));
     });
 
+    it("is told to use dev mode only when the switch is exactly 1, and never when installed", () => {
+        expect(command(false, { UBC_VPN_DEV: "1" })).toMatchObject({
+            args: ["--dev", "bridge"],
+            dev: true,
+        });
+        // Anything else leaves it off.
+        for (const value of ["", "0", "true", "yes", "1 ", " 1", "11", undefined]) {
+            expect(command(false, { UBC_VPN_DEV: value }), String(value)).toMatchObject({
+                args: ["bridge"],
+                dev: false,
+            });
+        }
+        // An installed app cannot be turned away from the real service.
+        expect(command(true, { UBC_VPN_DEV: "1" })).toEqual(command(true));
+        expect(command(true, { UBC_VPN_DEV: "1" })).toMatchObject({ args: ["bridge"], dev: false });
+    });
+
     it("refuses a place that is not an absolute path, so PATH is never searched", () => {
         expect(() => command(true, {}, "linux", "resources")).toThrow();
+    });
+});
+
+describe("where the app keeps its own profile", () => {
+    const CONFIG = join("/home/someone/.config");
+    const electron = (isPackaged: boolean) => ({ isPackaged, getPath: () => CONFIG });
+    const on = (platform: NodeJS.Platform, env: Record<string, string | undefined> = {}) => ({
+        platform,
+        env,
+    });
+
+    it("is a sub-folder named 'app' of the client's settings folder, when installed", () => {
+        // The client's folder is "UBC VPN" on Windows and macOS and
+        // "ubc-vpn" on Linux; settings.json sits directly in it.
+        expect(profileFolder(electron(true), on("win32"))).toBe(join(CONFIG, "UBC VPN", "app"));
+        expect(profileFolder(electron(true), on("darwin"))).toBe(join(CONFIG, "UBC VPN", "app"));
+        expect(profileFolder(electron(true), on("linux"))).toBe(join(CONFIG, "ubc-vpn", "app"));
+    });
+
+    it("is never the folder that holds the user's settings file, on any OS, installed or not", () => {
+        for (const platform of ["win32", "darwin", "linux"] as const) {
+            for (const isPackaged of [true, false]) {
+                const profile = profileFolder(electron(isPackaged), on(platform));
+                expect(profile, `${platform} ${isPackaged}`).not.toMatch(/(UBC VPN|ubc-vpn)$/);
+            }
+        }
+    });
+
+    it("is outside the installed product's folders altogether, when not installed", () => {
+        for (const platform of ["win32", "darwin", "linux"] as const) {
+            const profile = profileFolder(electron(false), on(platform));
+            expect(profile).toBe(join(CONFIG, "UBC VPN App Dev"));
+            // Nor is it the folder dev mode keeps its own files in.
+            expect(profile).not.toMatch(/UBC VPN Dev$/);
+        }
+    });
+
+    it("is where the variable says, as an absolute path, when not installed", () => {
+        const profile = profileFolder(
+            electron(false),
+            on("linux", { UBC_VPN_PROFILE: "some/folder" }),
+        );
+        expect(profile).toMatch(/^(\/|[A-Za-z]:\\).*some[\\/]folder$/);
+        expect(profileFolder(electron(false), on("linux", { UBC_VPN_PROFILE: "" }))).toBe(
+            profileFolder(electron(false), on("linux")),
+        );
+    });
+
+    it("leaves the settings file to the client: the app's own code writes no file at all", () => {
+        // The one use of the file system in the app is reading its own
+        // interface files to serve them. Nothing can create, read or write
+        // settings.json, in the profile folder or anywhere else.
+        const root = join(__dirname, "..", "src");
+        const users = (readdirSync(root, { recursive: true }) as string[])
+            .filter((name) => /\.tsx?$/.test(name))
+            .filter((name) =>
+                /["']node:fs|["']fs["']|require\(/.test(readFileSync(join(root, name), "utf8")),
+            )
+            .map((name) => name.replaceAll("\\", "/"));
+        expect(users).toEqual(["main/security.ts"]);
+        const imports = readFileSync(join(root, "main/security.ts"), "utf8").match(
+            /import \{([^}]*)\} from "node:fs[^"]*"/g,
+        );
+        expect(imports).toEqual(['import { readFile } from "node:fs/promises"']);
+    });
+
+    it("cannot be moved through the environment in an installed app", () => {
+        expect(
+            profileFolder(electron(true), on("linux", { UBC_VPN_PROFILE: "/tmp/elsewhere" })),
+        ).toBe(profileFolder(electron(true), on("linux")));
     });
 });
 
@@ -621,10 +712,31 @@ describe("how the bridge is started", () => {
         }
     });
 
+    it("passes on where a dev-mode service listens only in dev mode", async () => {
+        const env = { HOME: "/home/someone", XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/x" };
+        expect(bridgeEnv(env)).toEqual({ HOME: "/home/someone" });
+        expect(bridgeEnv(env, true)).toEqual(env);
+        expect(bridgeEnv({ ...env, SECRET_TOKEN: "x" }, true)).toEqual(env);
+        expect(DEV_ENV).toEqual(["XDG_RUNTIME_DIR", "TMPDIR"]);
+        // And that is what the bridge is really started with.
+        const spawned = vi.mocked(spawn);
+        for (const dev of [false, true]) {
+            spawned.mockClear();
+            const { last } = start([{}], { env: { ...process.env, ...env }, dev });
+            await until(() => last() === "ready", "ready");
+            const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
+            expect(Object.keys(options.env ?? {}).includes("XDG_RUNTIME_DIR"), String(dev)).toBe(
+                dev,
+            );
+        }
+    });
+
     it("keeps only the listed variables, and only those that are set", () => {
-        expect(bridgeEnv({ HOME: "/home/someone", SECRET_TOKEN: "x", TMPDIR: undefined })).toEqual({
-            HOME: "/home/someone",
-        });
+        expect(bridgeEnv({ HOME: "/home/someone", SECRET_TOKEN: "x", APPDATA: undefined })).toEqual(
+            {
+                HOME: "/home/someone",
+            },
+        );
         expect(bridgeEnv({})).toEqual({});
     });
 

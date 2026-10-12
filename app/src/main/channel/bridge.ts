@@ -77,6 +77,8 @@ export interface BridgeOptions {
     exitGraceMs?: number;
     /** The app's own environment, from which the bridge's short one is taken. */
     env?: Record<string, string | undefined>;
+    /** Whether the client is started in dev mode; see `bridgeCommand`. */
+    dev?: boolean;
 }
 
 /**
@@ -102,16 +104,29 @@ export const BRIDGE_ENV = [
     "HOME",
     // Linux: where settings live when the user has moved them.
     "XDG_CONFIG_HOME",
-    // Linux: the per-user runtime folder, where a development service listens.
+] as const;
+
+/**
+ * Passed on as well when the client is started in dev mode, and only then:
+ * where a dev-mode service listens. The installed client does not read them.
+ */
+export const DEV_ENV = [
+    // Linux: the per-user runtime folder.
     "XDG_RUNTIME_DIR",
-    // macOS and Linux: temporary files, and macOS's per-user runtime folder.
+    // macOS: the per-user temporary folder.
     "TMPDIR",
 ] as const;
 
-/** The bridge's environment: the entries of {@link BRIDGE_ENV} that are set, and nothing else. */
-export function bridgeEnv(env: Record<string, string | undefined>): Record<string, string> {
+/**
+ * The bridge's environment: the entries of {@link BRIDGE_ENV} that are set,
+ * those of {@link DEV_ENV} too in dev mode, and nothing else.
+ */
+export function bridgeEnv(
+    env: Record<string, string | undefined>,
+    dev = false,
+): Record<string, string> {
     const kept: Record<string, string> = {};
-    for (const name of BRIDGE_ENV) {
+    for (const name of dev ? [...BRIDGE_ENV, ...DEV_ENV] : BRIDGE_ENV) {
         const value = env[name];
         if (value !== undefined) {
             kept[name] = value;
@@ -153,12 +168,13 @@ export function startClient(
     command: string,
     args: readonly string[],
     env: Record<string, string | undefined>,
+    dev = false,
 ): ChildProcessWithoutNullStreams {
     return spawn(command, [...args], {
         shell: false,
         windowsHide: true,
         stdio: ["pipe", "pipe", "ignore"],
-        env: bridgeEnv(env),
+        env: bridgeEnv(env, dev),
         cwd: dirname(command),
     }) as unknown as ChildProcessWithoutNullStreams;
 }
@@ -192,6 +208,7 @@ export class BridgeClient {
             replyTimeoutMs: 10_000,
             exitGraceMs: 2_000,
             env: process.env,
+            dev: false,
             ...options,
         };
         this.backoff = new Backoff(this.options.initialRetryDelayMs, this.options.maxRetryDelayMs);
@@ -272,7 +289,12 @@ export class BridgeClient {
     private launch(): void {
         let child: ChildProcessWithoutNullStreams;
         try {
-            child = startClient(this.options.command, this.options.args, this.options.env);
+            child = startClient(
+                this.options.command,
+                this.options.args,
+                this.options.env,
+                this.options.dev,
+            );
         } catch {
             // Starting a program can fail outright, for example when the file
             // is there but is not a program. That is the service being out of

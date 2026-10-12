@@ -454,12 +454,12 @@ describe("a client that does not behave", () => {
     });
 
     it("that is missing is unusable, not a crash", async () => {
-        const runner = new SettingsRunner({
-            command: settingsCommand(
+        const runner = new SettingsRunner(
+            settingsCommand(
                 { isPackaged: true },
                 { resourcesPath: "/nowhere/that/exists", platform: process.platform, env: {} },
             ),
-        });
+        );
         runners.push(runner);
         await expect(runner.getSettings()).resolves.toEqual({ ok: false, error: "unavailable" });
         await expect(runner.saveRoutes(INPUT)).resolves.toEqual({
@@ -604,8 +604,37 @@ describe("how the client is started", () => {
             { isPackaged: true },
             { ...where, env: { UBC_VPN_CLI: "/tmp/evil" } },
         );
-        expect(installed).not.toContain("evil");
-        expect(installed).toMatch(/bin[\\/]ubc-vpn$/);
+        expect(installed.command).not.toContain("evil");
+        expect(installed.command).toMatch(/bin[\\/]ubc-vpn$/);
+    });
+
+    it("is told to use dev mode first of all, when the switch is on", async () => {
+        const where = { resourcesPath: "/opt/app/resources", platform: "linux" as const };
+        expect(
+            settingsCommand({ isPackaged: false }, { ...where, env: { UBC_VPN_DEV: "1" } }),
+        ).toMatchObject({ leadingArgs: ["--dev"], dev: true });
+        expect(
+            settingsCommand({ isPackaged: true }, { ...where, env: { UBC_VPN_DEV: "1" } }),
+        ).toMatchObject({ leadingArgs: [], dev: false });
+        // And that is how it is really started: the flag, then the fixed arguments.
+        const { runner, received } = client({ get: { line: VIEW, exit: 0 } });
+        const spawned = vi.mocked(spawn);
+        spawned.mockClear();
+        await runner.getSettings();
+        expect(received()[0]).toBe('args:["settings","get","--json"]');
+        const dev = new SettingsRunner({
+            command: process.execPath,
+            leadingArgs: ["--dev"],
+            dev: true,
+            env: { XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/someone" },
+            timeoutMs: 2000,
+        });
+        runners.push(dev);
+        spawned.mockClear();
+        await dev.getSettings();
+        const [, args, options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
+        expect(args).toEqual(["--dev", "settings", "get", "--json"]);
+        expect(options.env).toEqual({ XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/someone" });
     });
 });
 

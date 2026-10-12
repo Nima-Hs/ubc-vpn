@@ -29,12 +29,15 @@ export class Controller {
     constructor(
         private readonly link: ServiceLink,
         login?: LoginFactory,
+        /** Whether the client is run in dev mode; see `bridgeCommand`. */
+        private readonly development = false,
     ) {
         this.snapshot = {
             state: link.getState(),
             notice: null,
             login: this.login,
             closeHides: false,
+            development,
         };
         // A change of state makes any earlier notice out of date.
         this.unsubscribe = link.subscribe((state) => this.publish({ state, notice: null }));
@@ -113,6 +116,7 @@ export class Controller {
             notice: next.notice,
             login: this.login,
             closeHides: this.closeHides,
+            development: this.development,
         };
         this.snapshot = snapshot;
         for (const listener of this.listeners) {

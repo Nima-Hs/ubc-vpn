@@ -44,12 +44,15 @@ const running: ChildProcess[] = [];
 function launch(build: "out" | "out-demo", port: number): ChildProcess {
     const child = spawn(
         electronPath as unknown as string,
-        [
-            resolve(build, "main/index.js"),
-            `--remote-debugging-port=${port}`,
-            `--user-data-dir=${mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-"))}`,
-        ],
-        { stdio: "ignore" },
+        [resolve(build, "main/index.js"), `--remote-debugging-port=${port}`],
+        {
+            stdio: "ignore",
+            // Its own profile, never the installed product's folder.
+            env: {
+                ...process.env,
+                UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
+            },
+        },
     );
     running.push(child);
     return child;

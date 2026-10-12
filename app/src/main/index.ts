@@ -7,6 +7,7 @@ import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
+import { profileFolder } from "./profile";
 import { stopForQuit } from "./quit";
 import {
     allowsRemoteDebugging,
@@ -19,6 +20,11 @@ import {
 import { createTray, trayImage } from "./tray";
 import { closeHidesWindow, connectFromTray } from "./tray-icon";
 import { createWindow, showWindow } from "./window";
+
+// First of all, before the profile is read or anything is written to it.
+// Electron's own choice is the folder that holds the user's settings file,
+// which belongs to the command-line client.
+app.setPath("userData", profileFolder(app, process));
 
 registerAppScheme(protocol);
 // Before anything else reads the command line: no fuse turns these switches
@@ -106,11 +112,13 @@ async function start(): Promise<void> {
             onFault: (fault) => console.error(`ubc-vpn: ${fault}`),
         });
     }
-    const controller = new Controller(link, login);
+    // Shown in the window for as long as it is on, so that a session with a
+    // pretend service is never taken for a real one.
+    const controller = new Controller(link, login, bridgeCommand(app, process).dev);
     // The user's settings are read and written by the command-line client.
     // A demo build has a fake of its own, made above.
     const settings: SettingsService =
-        demoSettings ?? new SettingsRunner({ command: settingsCommand(app, process) });
+        demoSettings ?? new SettingsRunner(settingsCommand(app, process));
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.

@@ -1,5 +1,6 @@
 import { MotionConfig } from "motion/react";
 import { lazy, Suspense } from "react";
+import { DevelopmentMark } from "@/components/development-mark";
 import { TitleBar } from "@/components/title-bar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type View, ViewSwitcher } from "@/components/view-switcher";
@@ -36,6 +37,7 @@ export function App() {
                     <TitleBar crowded={views.length > 2}>
                         <ViewSwitcher views={views} current={current} onChange={show} />
                     </TitleBar>
+                    <DevelopmentMark />
                     <Suspense>{Current !== undefined && <Current show={show} />}</Suspense>
                 </div>
             </TooltipProvider>
