@@ -45,7 +45,7 @@ flowchart LR
     SVC --> OS["Routes, DNS, tunnel device"]
 ```
 
-- **Electron app.** Tray icon and window. It shows state and sends commands. It makes no security decisions.
+- **Electron app.** Tray icon and window. It shows state and sends commands. It makes no security decisions, and it never opens the channel itself: it runs the command-line client and talks to that.
 - **Command-line client.** Logs in and talks to the service. The GUI calls it to log in, so login exists in one place.
 - **Service.** Opens the tunnel, applies routes and DNS, checks they took effect, and cleans up. It outlives the GUI, so it can always clean up.
 
@@ -76,6 +76,20 @@ What a rogue program running as the same user could still do: connect, disconnec
 - **Messages:** JSON requests and responses, plus events pushed by the service when state changes.
 - **Types:** defined once in Rust. The TypeScript types are generated from them and committed; CI fails if they drift.
 - **Version handshake:** the first message each way states the protocol version, so a mismatched app and service produce a clear "please update" message.
+
+### Who opens the channel
+
+Only our Rust code opens the pipe or socket. The command-line client does it, and the app reaches the service through the client: it starts `ubc-vpn bridge` and exchanges JSON lines with it over standard input and output.
+
+The reason is what a safe client has to do, which the platform crate's `connect` does and a general-purpose networking library does not:
+
+- **Check who is listening before sending anything.** While the service is stopped, another local user could create a pipe or socket with its name. The client refuses anything not owned by the system.
+- **Not hand over its identity.** On Windows a pipe server can act as a client that connects without asking for identification-only access. Node's networking does not ask for it. This was tested: a test server opened a file as the connecting user.
+- **Connect with the least access.** The service's pipe grants ordinary users only what a client needs. Node asks for more and is refused.
+
+So the bridge keeps all of this in one tested place, and the app's TypeScript needs no knowledge of pipes, sockets or permissions.
+
+The bridge forwards everything except `connect`, which carries the session cookie; the app must never hold one. The exact lines are defined in `crates/core/src/bridge.rs`.
 
 ## Keeping OS-specific code small
 
@@ -217,7 +231,7 @@ The app never handles the cookie, and never talks to the gateway. It runs the CL
 5. When the gateway accepts the login, the CLI sends the service a `connect` request carrying the cookie, the address of the gateway that issued it, the chosen subnets and the chosen DNS domains, over the channel. The service uses that address only as a hint about where to connect: it refuses addresses that cannot be a gateway, and whatever answers must still match a pin in its own policy before the cookie is sent.
 6. The CLI ends with one final line and exits: `{"type":"done"}`, or `{"type":"error","code":"wrong_password","message":"..."}`. Error codes include `wrong_password`, `pin_mismatch`, `cancelled`, `gateway_unreachable`, `route_refused` and `service_unavailable`.
 
-From then on the app learns the connection state from the events the service pushes on the app's own channel connection. `ubc-vpn login` does steps 2 to 4 only and reports whether the credentials work, without connecting.
+From then on the app learns the connection state from the events the service pushes, which reach it through its bridge. `ubc-vpn login` does steps 2 to 4 only and reports whether the credentials work, without connecting.
 
 The exact message types live in `crates/core` and are the reference; this section describes their shape.
 

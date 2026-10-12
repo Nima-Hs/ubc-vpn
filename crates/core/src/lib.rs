@@ -3,6 +3,7 @@
 //! This crate holds everything the service, the command-line client and the
 //! app agree on. It contains no OS-specific code and no unsafe code.
 
+pub mod bridge;
 pub mod login;
 pub mod policy;
 pub mod protocol;
