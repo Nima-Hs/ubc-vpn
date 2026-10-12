@@ -720,3 +720,44 @@ fn a_username_that_could_mislead_is_used_but_not_kept() {
         assert_eq!(settings_text(&scene), before, "{odd:?}");
     }
 }
+
+// Why a login failed is in the service's log afterwards, where the app can
+// show it: the same line as was printed.
+#[test]
+fn what_a_failed_login_wrote_is_handed_to_the_service() {
+    let scene = Scene::usual();
+    scene.gateway.set_reachable(false);
+    let (code, _, err) = scene.connect(&mut Typist::default());
+    assert_eq!(code, FAILED, "{err}");
+    assert!(
+        err.contains("ubc-vpn: Failed to connect to the gateway\n"),
+        "{err}"
+    );
+    let logs = scene.service.as_ref().unwrap().logs();
+    assert_eq!(logs, ["Failed to connect to the gateway"]);
+}
+
+// No more is handed over than one connection may add: the last lines, which
+// are the nearest to how it ended. A blank line is passed over, and a line
+// too long to keep is not cut: the marker goes in its place.
+#[test]
+fn only_the_last_lines_are_handed_over_and_none_is_cut() {
+    use ubc_vpn_core::protocol::{ClientKind, LogText, MAX_ADDED_LOG_LINES};
+
+    let scene = Scene::usual();
+    let platform = scene.rig.fake.platform(&scene.rig.root);
+    let (transport, name) = (&*platform.transport, &platform.paths.channel_name);
+    let mut client =
+        crate::client::Client::connect_within(transport, name, ClientKind::Cli, brief()).unwrap();
+    client.claim_if_unowned().unwrap();
+    let mut said: Vec<String> = (0..MAX_ADDED_LOG_LINES + 3)
+        .map(|n| format!("line {n}"))
+        .collect();
+    said.extend(["  ".to_string(), "x".repeat(600)]);
+    crate::connect::hand_over(&mut client, &said);
+    let logs = scene.service.as_ref().unwrap().logs();
+    assert_eq!(logs.len(), MAX_ADDED_LOG_LINES);
+    assert_eq!(logs[0], "line 4");
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 2], "line 22");
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 1], LogText::LEFT_OUT);
+}
