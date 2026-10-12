@@ -47,6 +47,7 @@ export interface ServiceLinkOptions {
     onFault?(fault: BridgeFault): void;
     initialRetryDelayMs?: number;
     maxRetryDelayMs?: number;
+    startTimeoutMs?: number;
     replyTimeoutMs?: number;
 }
 
@@ -146,6 +147,7 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
             initialRetryDelayMs: options.initialRetryDelayMs,
         }),
         ...(options.maxRetryDelayMs !== undefined && { maxRetryDelayMs: options.maxRetryDelayMs }),
+        ...(options.startTimeoutMs !== undefined && { startTimeoutMs: options.startTimeoutMs }),
         ...(options.replyTimeoutMs !== undefined && { replyTimeoutMs: options.replyTimeoutMs }),
     });
     client.start();

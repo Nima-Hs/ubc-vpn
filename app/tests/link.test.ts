@@ -13,7 +13,12 @@ afterEach(async () => {
     }
 });
 
-function linkTo(...runs: MockRun[]): { bridge: MockBridge; link: ServiceLink; seen: LinkState[] } {
+type Linked = { bridge: MockBridge; link: ServiceLink; seen: LinkState[] };
+
+/** Generous limits: a slow start of the mock must never look like a failure. */
+const linkTo = (...runs: MockRun[]): Linked => linkWith({ replyTimeoutMs: 10_000 }, ...runs);
+
+function linkWith(limits: { replyTimeoutMs: number }, ...runs: MockRun[]): Linked {
     const bridge = mockBridge(...runs);
     const link = createServiceLink({
         command: bridge.command,
@@ -21,7 +26,8 @@ function linkTo(...runs: MockRun[]): { bridge: MockBridge; link: ServiceLink; se
         appVersion: "0.1.0",
         initialRetryDelayMs: 20,
         maxRetryDelayMs: 80,
-        replyTimeoutMs: 300,
+        startTimeoutMs: 20_000,
+        replyTimeoutMs: limits.replyTimeoutMs,
     });
     cleanups.push(() => link.dispose());
     const seen: LinkState[] = [link.getState()];
@@ -95,7 +101,9 @@ describe("the link to the service", () => {
     });
 
     it("does not wait for ever on a claim that is never answered", async () => {
-        const { link, seen } = linkTo({ ignore: ["claim"] }, {});
+        // The one test that needs an answer to be given up on quickly. Only
+        // answers: a bridge still has as long as ever to start.
+        const { link, seen } = linkWith({ replyTimeoutMs: 300 }, { ignore: ["claim"] }, {});
         await until(() => seen.some((state) => state.link === "unavailable"), "unavailable");
         expect(seen).toContainEqual({ link: "unavailable", reason: "protocol_error" });
         // The next bridge answers, and the app carries on.
