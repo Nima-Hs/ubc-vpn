@@ -42,7 +42,7 @@ impl Machine {
         let logs = self.logs.clone();
         let step = |what: &str, result: Result<()>| {
             if let Err(error) = &result {
-                logs.push(&format!("teardown: {what} failed: {error}"));
+                logs.error(&format!("teardown: {what} failed: {error}"));
             }
             result.is_ok()
         };
@@ -58,6 +58,9 @@ impl Machine {
             step("removing the gateway route", removed);
         }
         let routes_clear = step("removing all routes", self.routes.remove_all());
+        // The tunnel is closed, so the engine writes no more about it, and
+        // the service forgets the cookie here too.
+        self.hidden = None;
         dns_clear && routes_clear
     }
 }

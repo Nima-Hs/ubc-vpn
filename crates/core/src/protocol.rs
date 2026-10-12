@@ -45,8 +45,8 @@
 //!   never closes the connection for it. The gap shows in `seq`, and
 //!   `logs` fills it.
 //! - `add_log` lets the command-line client hand over what its login
-//!   wrote. The service cleans it as it cleans its own lines and keeps it
-//!   as [`LogSource::Login`]. Such lines are kept apart from the service's
+//!   wrote. The service removes secrets from it as it does from its own
+//!   lines, and keeps it as [`LogSource::Login`]. Such lines are kept apart from the service's
 //!   own, [`KEPT_ADDED_LOG_LINES`] of them, so no client can push a line
 //!   of the service's out; and one connection may add
 //!   [`MAX_ADDED_LOG_LINES`]. A line that is kept is answered with

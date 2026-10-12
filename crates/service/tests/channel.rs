@@ -88,11 +88,14 @@ fn a_non_owner_is_refused_and_disconnected() {
     }
     assert_eq!(alice.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
     assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
-    // The service does not keep a log that can be read yet. The owner is
-    // told so and keeps the connection.
-    let unready = alice.ask(RequestBody::Diagnostics);
-    assert_eq!(unready, Err(ErrorCode::BadRequest));
-    assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
+    // None of the strangers' requests did anything: nothing was added to
+    // the log, which the owner can read.
+    let Ok(ResponseBody::Logs(page)) = alice.ask(RequestBody::Logs(LogsParams { after: None }))
+    else {
+        panic!("the owner may read the log");
+    };
+    let made_up = |line: &LogLine| line.text.as_str() == "made up";
+    assert!(!page.lines.iter().any(made_up), "a stranger added a line");
     let stored = std::fs::read_to_string(rig.root.join("state/state.json")).unwrap();
     assert_eq!(stored, r#"{"owner":"alice"}"#);
 }

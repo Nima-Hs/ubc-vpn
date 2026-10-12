@@ -10,12 +10,14 @@ use std::time::Duration;
 
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::protocol::{
-    ErrorCode, ErrorInfo, Hello, HelloReply, Outcome, PROTOCOL_VERSION, Request, RequestBody,
-    Response, ResponseBody, ServerMessage, decode, encode, peek_protocol_version,
+    AddLogParams, ErrorCode, ErrorInfo, Hello, HelloReply, LogText, MAX_ADDED_LOG_LINES, Outcome,
+    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, ServerMessage, decode, encode,
+    peek_protocol_version,
 };
 use ubc_vpn_engine::TunnelEngine;
 use ubc_vpn_platform::{Connection, Error, Listener, Platform, UserId};
 
+use crate::diagnostics::About;
 use crate::hub::{Hub, send};
 use crate::session::{Session, error};
 use crate::{Logs, lock, owner, policy};
@@ -111,6 +113,7 @@ struct Shared {
     /// Requests from non-owners that could not be understood.
     unreadable: AtomicUsize,
     logs: Logs,
+    about: About,
     state_dir: PathBuf,
     timeouts: Timeouts,
 }
@@ -131,11 +134,12 @@ impl Service {
         let logs = Logs::default();
         let policy = policy::load(&platform.paths.policy_dir);
         if let Err(message) = &policy {
-            logs.push(message);
+            logs.error(message);
         }
+        let about = About::new(&policy);
         let cleaned = [platform.routes.remove_all(), platform.dns.clear_split_dns()];
         for error in cleaned.into_iter().filter_map(Result::err) {
-            logs.push(&format!("start-up cleanup failed: {error}"));
+            logs.error(&format!("start-up cleanup failed: {error}"));
         }
         let owner = owner::load(&platform.paths.state_dir)?;
         let listener = platform.transport.listen(&platform.paths.channel_name);
@@ -145,6 +149,8 @@ impl Service {
             narrowed.map_err(|e| format!("The channel could not be kept to the owner: {e}."))?;
         }
         let hub = Arc::new(Hub::new(owner));
+        let watching = hub.clone();
+        logs.tell(move |line| watching.log(line));
         let session = Session::start(&platform, engine, policy, hub.clone(), logs.clone())?;
         let shared = Arc::new(Shared {
             session,
@@ -154,6 +160,7 @@ impl Service {
             listener,
             hub,
             logs,
+            about,
             state_dir: platform.paths.state_dir,
             timeouts,
         });
@@ -223,12 +230,12 @@ impl Shared {
                     let serve = move || place.shared.serve(&place.conn, &place.user);
                     if let Err(error) = thread::Builder::new().spawn(serve) {
                         self.logs
-                            .push(&format!("a connection got no thread: {error}"));
+                            .error(&format!("a connection got no thread: {error}"));
                     }
                 }
                 Err(Error::Closed) => return,
                 Err(error) => {
-                    self.logs.push(&format!("accepting failed: {error}"));
+                    self.logs.error(&format!("accepting failed: {error}"));
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -278,7 +285,9 @@ impl Shared {
         sent && compatible
     }
 
-    fn requests(&self, conn: &Connection, user: &UserId) {
+    fn requests(&self, conn: &Arc<Connection>, user: &UserId) {
+        // How many log lines this connection has added.
+        let mut added = 0;
         loop {
             let line = match conn.read_line() {
                 Ok(Some(line)) => line,
@@ -291,7 +300,7 @@ impl Shared {
             let Ok(Request { id, body }) = decode(&line) else {
                 return self.unreadable(user);
             };
-            let (answer, keep) = self.answer(user, body);
+            let (answer, keep) = self.answer(user, conn, &mut added, body);
             let outcome = answer.map_or_else(Outcome::Error, Outcome::Ok);
             let sent = send(conn, &ServerMessage::Response(Response { id, outcome }));
             if !(sent && keep) {
@@ -302,8 +311,14 @@ impl Shared {
 
     /// Decides one request from the identity the OS reported for the caller,
     /// never from anything the caller sent. Also says whether the connection
-    /// stays open.
-    fn answer(&self, user: &UserId, body: RequestBody) -> (Result<ResponseBody, ErrorInfo>, bool) {
+    /// stays open. `added` counts the log lines this connection has added.
+    fn answer(
+        &self,
+        user: &UserId,
+        conn: &Arc<Connection>,
+        added: &mut usize,
+        body: RequestBody,
+    ) -> (Result<ResponseBody, ErrorInfo>, bool) {
         let owner = self.hub.owner();
         let accepted = |done: Result<(), ErrorInfo>| done.map(|()| ResponseBody::Accepted);
         let answer = match body {
@@ -317,19 +332,40 @@ impl Shared {
             RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
             RequestBody::Connect(params) => accepted(self.session.connect(params)),
             RequestBody::Disconnect => accepted(self.session.disconnect()),
-            // The contract for these is in the protocol; the service's side
-            // of it comes next. Until then the owner is told so, and anyone
-            // else is refused above like for any other request.
-            RequestBody::Logs(_)
-            | RequestBody::WatchLogs(_)
-            | RequestBody::Diagnostics
-            | RequestBody::AddLog(_) => {
-                let message = "This service does not keep a log that can be read yet.";
-                Err(error(ErrorCode::BadRequest, message))
+            // The log is the owner's alone: anyone else was refused above.
+            RequestBody::Logs(params) => Ok(ResponseBody::Logs(self.logs.page(params.after))),
+            RequestBody::WatchLogs(params) => {
+                self.hub.watch(conn, params.on);
+                Ok(ResponseBody::Accepted)
             }
+            RequestBody::Diagnostics => {
+                let report = self.about.report(&self.hub, &self.logs);
+                Ok(ResponseBody::Diagnostics(Box::new(report)))
+            }
+            RequestBody::AddLog(params) => accepted(self.add_log(&params, added)),
         };
         let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
         (answer, !stranger)
+    }
+
+    /// Keeps a line a client hands over, cleaned like any other. A text
+    /// that is not one plain line of a length that can be kept is refused
+    /// whole, and so is any line once this connection has added all it may.
+    ///
+    /// Nothing of the request is written anywhere on the way: not when it
+    /// is refused, and not as debug output. Its text reaches the log only
+    /// through [`Logs::add`], which removes secrets from it first.
+    fn add_log(&self, params: &AddLogParams, added: &mut usize) -> Result<(), ErrorInfo> {
+        let refused = |message: &str| Err(error(ErrorCode::BadRequest, message));
+        let Ok(text) = LogText::new(&params.text) else {
+            return refused("A log line must be one plain line of at most 512 bytes.");
+        };
+        if *added >= MAX_ADDED_LOG_LINES {
+            return refused("This connection has added all the log lines it may.");
+        }
+        *added += 1;
+        self.logs.add(params.level, &text);
+        Ok(())
     }
 
     /// Notes a request that could not be understood, without its content.
@@ -339,11 +375,11 @@ impl Shared {
     fn unreadable(&self, user: &UserId) {
         if self.hub.owner().as_ref() == Some(user) {
             self.logs
-                .push("a request from the owner could not be understood");
+                .warn("a request from the owner could not be understood");
         } else if self.unreadable.fetch_add(1, Ordering::SeqCst) == 0 {
             let line = "a request from a user who is not the owner could not be understood; \
                         later ones are only counted";
-            self.logs.push(line);
+            self.logs.warn(line);
         }
     }
 
@@ -376,7 +412,7 @@ impl Shared {
         let was_due = self.narrowing_due.swap(narrowed.is_err(), Ordering::SeqCst);
         if let (Err(error), false) = (narrowed, was_due) {
             let line = format!("the channel could not be narrowed to the owner: {error}");
-            self.logs.push(&line);
+            self.logs.error(&line);
         }
     }
 }

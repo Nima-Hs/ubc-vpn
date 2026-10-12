@@ -23,6 +23,7 @@ use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
 use ubc_vpn_platform::{Dns, PhysicalNetwork, Platform, Routes};
 
 use crate::hub::Hub;
+use crate::logs::Held;
 use crate::{Logs, lock};
 
 /// Builds the error a request is refused with.
@@ -47,7 +48,8 @@ struct Gate {
 }
 
 enum Command {
-    Connect(ConnectParams, Cancel),
+    /// With the hold that keeps its cookie out of the log.
+    Connect(ConnectParams, Cancel, Held),
     Disconnect,
     /// The tunnel with this number ended by itself.
     Ended(u64, TunnelEvent),
@@ -75,6 +77,9 @@ pub(crate) struct Machine {
     pub(crate) gateway: Option<Gateway>,
     pub(crate) logs: Logs,
     pub(crate) applied: Applied,
+    /// Keeps the cookie of the connection in hand out of the log, from the
+    /// moment its request is admitted until everything is torn down.
+    pub(crate) hidden: Option<Held>,
     /// Counts tunnels, so an ending is matched to the tunnel it came from.
     tunnels: u64,
     hub: Arc<Hub>,
@@ -89,6 +94,7 @@ pub(crate) struct Session {
     gate: Arc<Mutex<Gate>>,
     commands: Sender<Command>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    logs: Logs,
 }
 
 impl Session {
@@ -115,8 +121,9 @@ impl Session {
             dns: platform.dns.clone(),
             engine,
             gateway,
-            logs,
+            logs: logs.clone(),
             applied: Applied::default(),
+            hidden: None,
             tunnels: 0,
             hub,
             gate: gate.clone(),
@@ -129,6 +136,7 @@ impl Session {
             gate,
             commands,
             worker: Mutex::new(Some(worker)),
+            logs,
         })
     }
 
@@ -159,7 +167,10 @@ impl Session {
             phase: Phase::Connecting,
             cancel: Cancel::new(),
         };
-        self.send(Command::Connect(params, gate.cancel.clone()))
+        // Held from here on, before the request is anywhere a line could
+        // be written about it.
+        let hidden = self.logs.hold(&params.cookie);
+        self.send(Command::Connect(params, gate.cancel.clone(), hidden))
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
@@ -216,7 +227,7 @@ impl Machine {
         // one runs the steps that need no memory of what was applied.
         if panic::catch_unwind(AssertUnwindSafe(|| self.teardown())).is_err() {
             self.logs
-                .push("teardown panicked at shutdown; trying again");
+                .error("teardown panicked at shutdown; trying again");
             let _ = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
         }
     }
@@ -227,7 +238,7 @@ impl Machine {
     /// stay applied and the state would say `connecting` for ever.
     fn recover(&mut self) {
         self.logs
-            .push("the worker panicked; tearing everything down");
+            .error("the worker panicked; tearing everything down");
         let torn_down = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
         let message = match torn_down {
             Ok(true) => "Something went wrong inside the service. The connection was closed.",
@@ -240,7 +251,7 @@ impl Machine {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Connect(params, cancel) => self.connect(params, &cancel),
+            Command::Connect(params, cancel, hidden) => self.connect(params, &cancel, hidden),
             Command::Disconnect => {
                 self.hub.publish(ConnState::Disconnecting);
                 self.finish(ConnState::Disconnected);
@@ -273,9 +284,12 @@ impl Machine {
         }
     }
 
-    fn connect(&mut self, params: ConnectParams, cancel: &Cancel) {
+    fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
         self.hub.publish(ConnState::Connecting);
-        let result = match self.teardown() {
+        let clean = self.teardown();
+        // After the teardown, which lets go of the hold before this one.
+        self.hidden = Some(hidden);
+        let result = match clean {
             true => self.set_up(params, cancel),
             false => Err((ErrorCode::Internal, LEFT_BEHIND.to_string())),
         };

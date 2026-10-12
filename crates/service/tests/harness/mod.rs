@@ -26,6 +26,7 @@ use ubc_vpn_core::protocol::{
     ClientKind, ConnectParams, Event, Hello, HelloReply, Outcome, PROTOCOL_VERSION, Request,
     ServerMessage, decode, encode,
 };
+pub use ubc_vpn_core::protocol::{LogCursor, LogLine, LogsParams};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::RouteSet;
 pub use ubc_vpn_engine::fake::{FakeEngine, Script};
@@ -175,6 +176,7 @@ impl Rig {
             conn,
             hello,
             events: VecDeque::new(),
+            logged: VecDeque::new(),
             lines: Vec::new(),
             id: 0,
         }
@@ -185,6 +187,15 @@ impl Rig {
         let mut alice = self.peer("alice");
         assert_eq!(alice.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
         assert_eq!(alice.state(), ConnState::Disconnected);
+        alice
+    }
+
+    /// One more connection of `alice`'s, who is the owner already, with
+    /// the state it is told at once read.
+    pub fn owner_again(&self) -> Peer {
+        let mut alice = self.peer("alice");
+        assert!(alice.hello.owner_claimed);
+        alice.state();
         alice
     }
 }
@@ -204,6 +215,7 @@ pub struct Peer {
     pub conn: Connection,
     pub hello: HelloReply,
     events: VecDeque<ConnState>,
+    logged: VecDeque<LogLine>,
     /// Every line received after the handshake, as sent.
     pub lines: Vec<String>,
     id: u32,
@@ -225,8 +237,7 @@ impl Peer {
         loop {
             match self.read().expect("a response before the close") {
                 ServerMessage::Event(Event::StateChanged(state)) => self.events.push_back(state),
-                // Not a state. It is in `lines` for a test that wants it.
-                ServerMessage::Event(Event::Log(_)) => {}
+                ServerMessage::Event(Event::Log(line)) => self.logged.push_back(line),
                 ServerMessage::Response(response) => {
                     assert_eq!(response.id, self.id);
                     return match response.outcome {
@@ -238,14 +249,51 @@ impl Peer {
         }
     }
 
-    /// The next state event.
+    /// The next state event. Log events on the way are kept for `log`.
     pub fn state(&mut self) -> ConnState {
-        if let Some(state) = self.events.pop_front() {
-            return state;
+        loop {
+            if let Some(state) = self.events.pop_front() {
+                return state;
+            }
+            match self.read() {
+                Some(ServerMessage::Event(Event::StateChanged(state))) => return state,
+                Some(ServerMessage::Event(Event::Log(line))) => self.logged.push_back(line),
+                other => panic!("expected a state event, got {other:?}"),
+            }
         }
-        match self.read() {
-            Some(ServerMessage::Event(Event::StateChanged(state))) => state,
-            other => panic!("expected a state event, got {other:?}"),
+    }
+
+    /// The next log event. State events on the way are kept for `state`.
+    pub fn log(&mut self) -> LogLine {
+        loop {
+            if let Some(line) = self.logged.pop_front() {
+                return line;
+            }
+            match self.read() {
+                Some(ServerMessage::Event(Event::Log(line))) => return line,
+                Some(ServerMessage::Event(Event::StateChanged(state))) => {
+                    self.events.push_back(state);
+                }
+                other => panic!("expected a log event, got {other:?}"),
+            }
+        }
+    }
+
+    /// The whole log, read page by page from the start.
+    pub fn whole_log(&mut self) -> Vec<LogLine> {
+        let mut read = Vec::new();
+        let mut after = None;
+        loop {
+            let Ok(ResponseBody::Logs(page)) = self.ask(RequestBody::Logs(LogsParams { after }))
+            else {
+                panic!("the owner may read the log");
+            };
+            if page.lines.is_empty() {
+                return read;
+            }
+            let (run, seq) = (page.run, page.next);
+            after = Some(LogCursor { run, seq });
+            read.extend(page.lines);
         }
     }
 
@@ -265,7 +313,8 @@ impl Peer {
     pub fn is_quiet(&mut self) -> bool {
         let short = Some(Duration::from_millis(300));
         self.conn.set_read_timeout(short).unwrap();
-        let quiet = self.events.is_empty() && self.conn.read_line() == Err(Error::TimedOut);
+        let nothing_kept = self.events.is_empty() && self.logged.is_empty();
+        let quiet = nothing_kept && self.conn.read_line() == Err(Error::TimedOut);
         self.conn.set_read_timeout(Some(WAIT)).unwrap();
         quiet
     }
