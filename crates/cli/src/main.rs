@@ -268,8 +268,10 @@ fn run(
         _ => return say(err, HELP, USAGE),
     };
     let shown = status(platform).and_then(|state| match json {
-        // One JSON line, exactly as the service reports the state.
-        true => Ok(encode(&state)?.trim_end().to_string()),
+        // One JSON line, as the service reports the state, less any
+        // character that could mislead whoever reads it in a terminal. JSON
+        // writes control characters as escapes; the unseen ones it does not.
+        true => Ok(clean(encode(&state)?.trim_end())),
         false => Ok(describe(&state)),
     });
     match shown {

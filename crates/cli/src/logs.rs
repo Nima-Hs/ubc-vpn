@@ -56,11 +56,28 @@ type Chosen<'a> = &'a dyn Fn() -> ubc_vpn_platform::Result<Platform>;
 
 /// Why a command stopped before its end.
 enum Stopped {
-    /// Standard output is closed: whoever was reading has gone, and that is
-    /// no failure of this command.
+    /// Standard output is a pipe whose reader has gone, and that is no
+    /// failure of this command.
     NobodyReads,
+    /// Standard output could not be written for any other reason, such as
+    /// a disk that is full.
+    Unwritten(std::io::ErrorKind),
+    /// What answered did not behave as the service does. The reading
+    /// stops, so that nothing can make it go on for ever.
+    Odd(&'static str),
     Failed(ClientError),
 }
+
+/// The most pages one `logs` reads, when it is not following. The service
+/// holds 600 lines at most, and the fewest lines a page of them can hold
+/// is about 40, so its whole log is some 15 pages. This leaves room for
+/// lines written while it is read, and no more: whatever answers, one
+/// command prints a few megabytes at most.
+const MAX_PAGES: usize = 64;
+
+/// The most of a name in the diagnostics that is printed, in bytes. The
+/// service cuts them to this itself; a program in its place might not.
+const MAX_NAME_BYTES: usize = 255;
 
 impl From<ClientError> for Stopped {
     fn from(error: ClientError) -> Self {
@@ -93,10 +110,29 @@ fn failed(error: &ClientError, err: &mut dyn Write) -> u8 {
 }
 
 fn ended(done: Result<(), Stopped>, err: &mut dyn Write) -> u8 {
+    let complain = |err: &mut dyn Write, message: &str| say(err, message, FAILED);
     match done {
         Ok(()) | Err(Stopped::NobodyReads) => 0,
+        Err(Stopped::Unwritten(why)) => {
+            let message = format!("ubc-vpn: The output could not be written: {why}.");
+            complain(err, &message)
+        }
+        Err(Stopped::Odd(why)) => {
+            let message = format!("ubc-vpn: The service's log could not be read: {why}.");
+            complain(err, &message)
+        }
         Err(Stopped::Failed(error)) => failed(&error, err),
     }
+}
+
+/// Writes `text` to standard output at once. Only a pipe whose reader has
+/// gone is passed over in silence.
+fn put(out: &mut dyn Write, text: &str) -> Result<(), Stopped> {
+    let written = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+    written.map_err(|error| match error.kind() {
+        std::io::ErrorKind::BrokenPipe => Stopped::NobodyReads,
+        other => Stopped::Unwritten(other),
+    })
 }
 
 /// Runs `logs` and returns the exit status.
@@ -111,49 +147,106 @@ pub fn logs(options: Options, platform: Chosen, out: &mut dyn Write, err: &mut d
 pub fn diagnostics(json: bool, platform: Chosen, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let asked = service(platform).and_then(|mut client| {
         match client.request(RequestBody::Diagnostics)? {
-            ResponseBody::Diagnostics(report) => Ok(*report),
+            ResponseBody::Diagnostics(report) => Ok(tidy(*report)),
             other => Err(ClientError::Lost(format!("unexpected answer: {other:?}"))),
         }
     });
     let shown = asked.and_then(|report| match json {
-        true => Ok(encode(&report)?.trim_end().to_string()),
-        false => Ok(summary(&report)),
+        true => Ok(encode(&report)?),
+        false => Ok(format!("{}\n", summary(&report))),
     });
-    match shown {
-        Ok(text) => say(out, &text, 0),
-        Err(error) => failed(&error, err),
+    let done = shown
+        .map_err(Stopped::from)
+        .and_then(|text| put(out, &text));
+    ended(done, err)
+}
+
+/// The diagnostics with their names made fit to print, in either form:
+/// with no character that misleads, and no longer than a name may be.
+/// The rest of it is numbers, words from a closed list, and text the
+/// protocol has already checked.
+fn tidy(report: Diagnostics) -> Diagnostics {
+    let name = |text: String| {
+        let mut room = MAX_NAME_BYTES;
+        let fits = |c: &char| {
+            let fit = c.len_utf8() <= room;
+            room = room.saturating_sub(c.len_utf8());
+            fit
+        };
+        clean(&text).chars().take_while(fits).collect::<String>()
+    };
+    Diagnostics {
+        service_version: name(report.service_version),
+        os: name(report.os),
+        arch: name(report.arch),
+        gateway: report.gateway.map(name),
+        ..report
     }
 }
 
 /// Where the reading has got to, and how each line is written.
 struct Reading<'a> {
     json: bool,
-    /// The run the lines read so far belong to, and the last of them.
-    at: Option<LogCursor>,
+    /// The run the lines read so far belong to, once a page has said.
+    run: Option<u64>,
+    /// The number of the last line written.
+    last: u64,
+    /// Whether it has been said that earlier lines are gone.
+    said_lost: bool,
     out: &'a mut dyn Write,
     err: &'a mut dyn Write,
 }
 
 impl Reading<'_> {
-    /// Asks for every line after the last one read and writes them.
-    fn catch_up(&mut self, client: &mut Client) -> Result<(), Stopped> {
+    /// Asks for every line after the last one written and writes them,
+    /// until a page comes back empty. Returns whether an event arrived
+    /// meanwhile: there may then be more lines already.
+    ///
+    /// Nothing that answers can make this print a line twice, print lines
+    /// out of order, or, with `most` pages given, go on without end: a
+    /// page must hold only lines numbered above the last one written, in
+    /// rising order, all of one run.
+    fn catch_up(&mut self, client: &mut Client, most: Option<usize>) -> Result<bool, Stopped> {
+        let (mut came, mut pages) = (false, 0);
         loop {
-            let after = self.at;
-            let page = match client.request(RequestBody::Logs(LogsParams { after }))? {
-                ResponseBody::Logs(page) => page,
-                other => {
-                    let odd = format!("unexpected answer: {other:?}");
-                    return Err(ClientError::Lost(odd).into());
-                }
+            if most.is_some_and(|most| pages >= most) {
+                return Err(Stopped::Odd("it did not come to an end"));
+            }
+            pages += 1;
+            let after = self.run.map(|run| LogCursor {
+                run,
+                seq: self.last,
+            });
+            let asked = RequestBody::Logs(LogsParams { after });
+            // Events are not kept while a page is on its way: whatever they
+            // told of is read by its number, here or in the next reading.
+            let (answer, during) = client.request_past_events(asked)?;
+            came |= during;
+            let ResponseBody::Logs(page) = answer else {
+                let odd = format!("unexpected answer: {answer:?}");
+                return Err(ClientError::Lost(odd).into());
             };
-            if page.dropped {
+            if self.run.is_some_and(|run| run != page.run) {
+                return Err(Stopped::Odd(
+                    "the service started again part-way; run the command again",
+                ));
+            }
+            self.run = Some(page.run);
+            if page.dropped && !self.said_lost {
+                self.said_lost = true;
                 let gone = "ubc-vpn: Some earlier lines are no longer kept by the service.";
                 let _ = writeln!(self.err, "{gone}");
             }
-            let (run, seq) = (page.run, page.next);
-            self.at = Some(LogCursor { run, seq });
             if page.lines.is_empty() {
-                return Ok(());
+                return Ok(came);
+            }
+            // The whole page is judged before any of it is written.
+            let mut before = self.last;
+            for line in &page.lines {
+                if line.seq <= before {
+                    return Err(Stopped::Odd("its lines were not in order"));
+                }
+                before = line.seq;
             }
             for line in &page.lines {
                 self.write(line)?;
@@ -161,15 +254,16 @@ impl Reading<'_> {
         }
     }
 
-    /// Writes one line: as the protocol has it, or as text for a terminal.
+    /// Writes one line, as the protocol has it or as text for a terminal,
+    /// and remembers its number.
     fn write(&mut self, line: &LogLine) -> Result<(), Stopped> {
         let text = match self.json {
             true => encode(line).map_err(ClientError::from)?,
             false => format!("{}\n", shown(line)),
         };
-        let written = self.out.write_all(text.as_bytes());
-        let written = written.and_then(|()| self.out.flush());
-        written.map_err(|_| Stopped::NobodyReads)
+        put(self.out, &text)?;
+        self.last = line.seq;
+        Ok(())
     }
 }
 
@@ -184,33 +278,37 @@ fn read(
     let Options { json, follow } = options;
     let mut reading = Reading {
         json,
-        at: None,
+        run: None,
+        last: 0,
+        said_lost: false,
         out,
         err,
     };
     if !follow {
-        return reading.catch_up(client);
+        return reading.catch_up(client, Some(MAX_PAGES)).map(drop);
     }
     // Watching first, then reading, misses nothing; what then arrives twice
     // is told by its number.
     let on = WatchLogsParams { on: true };
-    client.request(RequestBody::WatchLogs(on))?;
-    reading.catch_up(client)?;
+    client.request_past_events(RequestBody::WatchLogs(on))?;
     loop {
-        let Event::Log(line) = client.next_event(None)? else {
-            continue;
-        };
-        let last = reading.at.map_or(0, |at| at.seq);
-        match line.seq {
-            seq if seq <= last => {}
-            // The next line, as expected.
-            seq if seq == last + 1 => {
-                reading.write(&line)?;
-                reading.at = reading.at.map(|at| LogCursor { seq, ..at });
+        // Read until a reading ends with no event having come meanwhile:
+        // only then is every line the service has told of written. A busy
+        // service keeps this going, and each round writes more lines.
+        while reading.catch_up(client, None)? {}
+        // Then each event as it comes, for as long as they come in order.
+        loop {
+            let Event::Log(line) = client.next_event(None)? else {
+                continue;
+            };
+            match line.seq {
+                seq if seq <= reading.last => {}
+                seq if seq == reading.last + 1 => reading.write(&line)?,
+                // The service dropped some events, as it does for a
+                // client it has too many waiting for. The lines are still
+                // in its log, and this one with them.
+                _ => break,
             }
-            // The service dropped some for being asked too slowly. They
-            // are still in its log, and this one with them.
-            _ => reading.catch_up(client)?,
         }
     }
 }
@@ -258,7 +356,8 @@ fn count(many: u32, one: &str) -> String {
     }
 }
 
-/// The diagnostics in words, a few lines for a person to read out.
+/// The diagnostics in words, a few lines for a person to read out. The
+/// report is one [`tidy`] has made fit to print.
 fn summary(report: &Diagnostics) -> String {
     let name = |value: serde_json::Result<String>| {
         let quoted = value.unwrap_or_default();
@@ -306,13 +405,7 @@ fn summary(report: &Diagnostics) -> String {
         format!("Policy: {policy}"),
         format!("Owner: {owner}"),
     ];
-    clean_lines(&lines)
-}
-
-/// Each line cleaned for the terminal, and the lines joined.
-fn clean_lines(lines: &[String]) -> String {
-    let cleaned: Vec<String> = lines.iter().map(|line| clean(line)).collect();
-    cleaned.join("\n")
+    lines.join("\n")
 }
 
 #[cfg(test)]

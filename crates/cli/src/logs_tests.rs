@@ -234,13 +234,36 @@ fn nothing_the_service_says_reaches_the_terminal_unclean() {
     report.service_version = odd.to_string();
     report.arch = odd.to_string();
     let rig = Rig::new();
-    let service = answering(&rig, ResponseBody::Diagnostics(Box::new(report)));
+    let service = answering(&rig, ResponseBody::Diagnostics(Box::new(report.clone())));
     let (status, out, err) = rig.run(&["diagnostics"]);
     service.join().unwrap();
     assert_eq!((status, err.as_str()), (0, ""));
     assert!(out.contains("gateway [2Jvpn.example.test,"), "{out:?}");
     let unclean = |c: char| c != '\n' && ubc_vpn_core::settings_cli::misleads(c);
     assert!(!out.chars().any(unclean), "{out:?}");
+
+    // The same with --json: JSON writes a control character as an escape,
+    // but not the unseen ones, so those are removed there too. And a name
+    // far longer than the service would send is cut, in both forms.
+    report.gateway = Some(format!("{odd}{}", "é".repeat(30_000)));
+    for args in [&["diagnostics"][..], &["diagnostics", "--json"]] {
+        let rig = Rig::new();
+        let service = answering(&rig, ResponseBody::Diagnostics(Box::new(report.clone())));
+        let (status, out, err) = rig.run(args);
+        service.join().unwrap();
+        assert_eq!((status, err.as_str()), (0, ""));
+        assert!(!out.chars().any(unclean), "{args:?}");
+        assert!(out.len() < 1500, "{args:?}: {} bytes", out.len());
+        assert!(out.contains("vpn.example.testééé"), "{args:?}");
+    }
+    let rig = Rig::new();
+    let service = answering(&rig, ResponseBody::Diagnostics(Box::new(report)));
+    let (_, out, _) = rig.run(&["diagnostics", "--json"]);
+    service.join().unwrap();
+    let printed: Diagnostics = decode(out.trim_end()).unwrap();
+    let gateway = printed.gateway.unwrap();
+    assert!((254..=255).contains(&gateway.len()), "{}", gateway.len());
+    assert_eq!(printed.os, "[2Jvpn.example.test");
 
     // A line of the log that is not one plain line is not a line at all:
     // nothing of it is printed.
@@ -402,6 +425,207 @@ fn follow_fetches_the_lines_whose_events_were_dropped() {
         .map(|seq| format!("  info   service  line {seq}"))
         .collect();
     assert_eq!(printed, expected);
+}
+
+/// A line of a stand-in's log.
+fn numbered(seq: u64) -> LogLine {
+    LogLine {
+        seq,
+        at_unix_ms: 1_800_000_000_000,
+        level: LogLevel::Info,
+        source: LogSource::Service,
+        text: ubc_vpn_core::protocol::LogText::new(&format!("line {seq}")).unwrap(),
+    }
+}
+
+/// Reads one request as a stand-in for the service.
+fn asked(conn: &ubc_vpn_platform::Connection) -> Option<Request> {
+    let line = conn.read_line().ok().flatten()?;
+    Some(decode(&line).unwrap())
+}
+
+/// Answers `request` with `body`.
+fn reply(conn: &ubc_vpn_platform::Connection, request: &Request, body: ResponseBody) {
+    let (id, outcome) = (request.id, Outcome::Ok(body));
+    tell(conn, &ServerMessage::Response(Response { id, outcome }));
+}
+
+/// The lines after the place `request` names, of a log that holds lines 1
+/// to `have` in run 7: what the real service would answer.
+fn page_of(request: &Request, have: u64) -> ubc_vpn_core::protocol::LogPage {
+    let RequestBody::Logs(LogsParams { after }) = &request.body else {
+        panic!("not a request for the log: {request:?}");
+    };
+    let after = after.map_or(0, |place| place.seq);
+    ubc_vpn_core::protocol::LogPage::after(7, after, false, (after + 1..=have).map(numbered))
+}
+
+// Under load the service drops events for a client it has many waiting for,
+// and that is just when many more are on their way. Those that arrive while
+// the missing lines are fetched are not kept, so no number of them is too
+// many: the lines they told of are read by their numbers afterwards. Every
+// line is printed once, in order.
+#[test]
+fn follow_survives_any_number_of_events_during_a_fetch() {
+    for burst in [70, 200] {
+        let rig = Rig::new();
+        let service = scripted(&rig, move |conn| {
+            greet(conn);
+            let event = |seq| {
+                tell(conn, &ServerMessage::Event(Event::Log(numbered(seq))));
+            };
+            let serve = |have: u64| {
+                let request = asked(conn).expect("a request");
+                let page = page_of(&request, have);
+                let empty = page.lines.is_empty();
+                reply(conn, &request, ResponseBody::Logs(page));
+                empty
+            };
+            reply(conn, &asked(conn).unwrap(), ResponseBody::Accepted);
+            assert!(!serve(1) && serve(1));
+            // Line 2 as it is written, then line 5: two events were dropped.
+            [2, 5].into_iter().for_each(event);
+            // The fetch is asked for; before it is answered, the events
+            // of many more lines are already on their way.
+            let request = asked(conn).expect("the fetch");
+            (6..=5 + burst).for_each(event);
+            reply(conn, &request, ResponseBody::Logs(page_of(&request, 5)));
+            // The rest is read by its numbers, until two readings in a row
+            // found nothing more.
+            let mut empty = 0;
+            while empty < 2 {
+                empty += u8::from(serve(5 + burst));
+            }
+            event(6 + burst);
+            // Until the client has taken it all in; then the stand-in goes.
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let (status, out, err) = rig.run(&["logs", "--follow"]);
+        service.join().unwrap();
+        assert_eq!(status, FAILED, "{burst}: {err}");
+        assert!(err.contains("Lost contact"), "{burst}: {err}");
+        let printed: Vec<&str> = out.lines().map(|line| &line[20..]).collect();
+        let expected: Vec<String> = (1..=6 + burst)
+            .map(|seq| format!("  info   service  line {seq}"))
+            .collect();
+        assert_eq!(printed, expected, "{burst}");
+    }
+}
+
+/// Runs `logs` with `args` against a stand-in that answers request number
+/// `n` for the log with `page(n)`, for as long as it is asked. Returns what
+/// the command did and how many requests it made.
+fn against_pages(
+    args: &[&str],
+    page: impl Fn(usize) -> ubc_vpn_core::protocol::LogPage + Send + 'static,
+) -> ((u8, String, String), usize) {
+    let rig = Rig::new();
+    let (counted, count) = std::sync::mpsc::channel();
+    let service = scripted(&rig, move |conn| {
+        greet(conn);
+        let mut answered = 0;
+        while let Some(request) = asked(conn) {
+            reply(conn, &request, ResponseBody::Logs(page(answered)));
+            answered += 1;
+            // Not for ever, whatever the command does: a reading without
+            // end fails its test and does not hang it.
+            if answered == 1000 {
+                break;
+            }
+        }
+        counted.send(answered).unwrap();
+    });
+    let ran = rig.run(args);
+    service.join().unwrap();
+    (ran, count.recv().unwrap())
+}
+
+// Security rule: nothing that answers in the service's place can make
+// `logs` print without end, print a line twice, or print lines out of
+// order. `ubc-vpn logs > file` must not be able to fill a disk.
+#[test]
+fn a_log_that_does_not_behave_is_given_up_not_printed_for_ever() {
+    use ubc_vpn_core::protocol::LogPage;
+    let ends =
+        |out: &str| -> Vec<String> { out.lines().map(|line| line[20..].to_string()).collect() };
+    let lines = |seqs: &[u64]| -> Vec<String> {
+        let line = |seq: &u64| format!("  info   service  line {seq}");
+        seqs.iter().map(line).collect()
+    };
+    let lost = "no longer kept by the service";
+
+    // The same page again and again, each time saying lines were lost.
+    let same = |_| LogPage::after(7, 0, true, [numbered(1), numbered(2)]);
+    let ((status, out, err), asked) = against_pages(&["logs"], same);
+    assert_eq!((status, ends(&out)), (FAILED, lines(&[1, 2])));
+    assert_eq!(asked, 2, "it went on asking");
+    assert_eq!(err.matches(lost).count(), 1, "{err}");
+    assert!(
+        err.contains("could not be read: its lines were not in order"),
+        "{err}"
+    );
+
+    // Numbers that go backwards, between pages and inside one. A page
+    // with one line out of place is not printed at all.
+    let backwards = |n| match n {
+        0 => LogPage::after(7, 0, false, [numbered(5), numbered(6)]),
+        _ => LogPage::after(7, 6, false, [numbered(3), numbered(4)]),
+    };
+    let ((status, out, _), asked) = against_pages(&["logs"], backwards);
+    assert_eq!((status, ends(&out), asked), (FAILED, lines(&[5, 6]), 2));
+    let muddled = |_| LogPage::after(7, 0, false, [numbered(2), numbered(1)]);
+    let ((status, out, _), asked) = against_pages(&["logs", "--json"], muddled);
+    assert_eq!((status, out.as_str(), asked), (FAILED, "", 1));
+
+    // A run that changes from page to page.
+    let flapping = |n: usize| {
+        let seq = n as u64 + 1;
+        LogPage::after(7 + seq % 2, seq - 1, false, [numbered(seq)])
+    };
+    let ((status, out, err), asked) = against_pages(&["logs"], flapping);
+    assert_eq!((status, ends(&out), asked), (FAILED, lines(&[1]), 2));
+    assert!(err.contains("the service started again part-way"), "{err}");
+
+    // Lines that are in order and never end: one command reads only so
+    // many pages.
+    let endless = |n: usize| LogPage::after(7, n as u64, false, [numbered(n as u64 + 1)]);
+    let ((status, out, err), asked) = against_pages(&["logs"], endless);
+    assert_eq!((status, asked), (FAILED, MAX_PAGES));
+    assert_eq!(out.lines().count(), MAX_PAGES);
+    assert!(err.contains("it did not come to an end"), "{err}");
+}
+
+/// Standard output on a disk that is full.
+struct Full;
+
+impl Write for Full {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::StorageFull.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Only a pipe whose reader has gone is passed over in silence. Output that
+// cannot be written for another reason is a failure, and is said.
+#[test]
+fn output_that_cannot_be_written_is_a_failure() {
+    let scene = connected();
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let options = Options {
+        json: false,
+        follow: false,
+    };
+    let mut err = Vec::new();
+    assert_eq!(logs(options, &platform, &mut Full, &mut err), FAILED);
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("The output could not be written"), "{err}");
+    let mut err = Vec::new();
+    assert_eq!(diagnostics(true, &platform, &mut Full, &mut err), FAILED);
+    assert!(!err.is_empty());
+    assert_eq!(diagnostics(false, &platform, &mut Gone, &mut Vec::new()), 0);
 }
 
 // `ubc-vpn logs --follow | head` ends quietly when `head` has had enough.
