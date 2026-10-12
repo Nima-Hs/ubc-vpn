@@ -1,6 +1,37 @@
-# Path-like strings in the shipped DLLs that have been examined and judged
-# harmless. Each rule is "<dll> <regular expression matching the whole string>".
-# Say above each one why it is harmless.
+# Strings in the shipped DLLs that look like a path or an environment variable
+# and have been examined. Each rule is
+# "<dll> <regular expression matching the whole string>".
+# Say above each one why it is harmless, or what the service must do about it.
+
+# Environment variables GnuTLS reads. The README tells the service to remove
+# all of them before loading the library.
+#   SSLKEYLOGFILE            names a file to which session keys are written.
+#   GNUTLS_DEBUG_LEVEL       turns on logging through the application's callback.
+#   GNUTLS_CPUID_OVERRIDE    chooses which processor-specific code is used.
+#   GNUTLS_BUFFER_RECLAIM, GNUTLS_NO_EXPLICIT_INIT, GNUTLS_NO_IMPLICIT_INIT
+#                            change memory handling and start-up.
+libgnutls-30.dll SSLKEYLOGFILE|GNUTLS_DEBUG_LEVEL|GNUTLS_CPUID_OVERRIDE|GNUTLS_BUFFER_RECLAIM|GNUTLS_NO_(EX|IM)PLICIT_INIT
+
+# The user's home folder and "<home>\.gnutls", where GnuTLS keeps a list of
+# known hosts for its trust-on-first-use functions (lib/verify-tofu.c). Nothing
+# else in GnuTLS uses them, and OpenConnect calls none of those functions.
+libgnutls-30.dll HOME|HOMEDRIVE|HOMEPATH
+libgnutls-30.dll %s%s\\\.gnutls|%s/\.gnutls
+
+# A keyword of GnuTLS's priority strings, not a variable.
+libgnutls-30.dll DISABLE_TLS13_COMPAT_MODE
+
+# Read by Nettle to print which processor-specific code it chose.
+libnettle-9.dll NETTLE_FAT_VERBOSE
+
+# A variable OpenConnect sets for the script it can run on connect. It does not
+# read it, and we give it no script.
+libopenconnect-5.dll LOG_LEVEL
+
+# libxml2's variables for catalogue files. See its catalogue path below: a
+# catalogue is only consulted for an external DTD or entity, which OpenConnect
+# never asks for. The README tells the service to remove them all the same.
+libxml2-16.dll XML_CATALOG_FILES|XML_DEBUG_CATALOG
 
 # Names of error codes and functions, and log messages of the configuration
 # parser, that mention PKCS#11. None is a file name. The PKCS#11 code itself

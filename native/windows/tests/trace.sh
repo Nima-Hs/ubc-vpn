@@ -94,10 +94,19 @@ stage_win=$(cygpath -w "$stage")
 STAGE=$stage_win awk '
     BEGIN { stage = tolower(ENVIRON["STAGE"]) "\\" }
     index(tolower($0) "\\", stage) != 1' "$tools/files.txt" >"$tools/outside.txt"
-grep -i '^C:\\Windows\\' "$tools/outside.txt" >"$tools/in-windows.txt" || true
-grep -v -i '^C:\\Windows\\' "$tools/outside.txt" >"$tools/elsewhere.txt" || true
-powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$here/tests/user-writable.ps1")" \
-    "$(cygpath -w "$tools/in-windows.txt")" | tr -d '\r' >"$tools/writable.txt"
+grep -i -E '^C:\\Windows(\\|$)' "$tools/outside.txt" >"$tools/in-windows.txt" || true
+grep -v -i -E '^C:\\Windows(\\|$)' "$tools/outside.txt" >"$tools/elsewhere.txt" || true
+
+# Which of the paths under C:\Windows could an ordinary user create or change?
+# user-writable.ps1 reads the permissions. Check first that it can tell.
+user_writable() {
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$here/tests/user-writable.ps1")" \
+        "$(cygpath -w "$1")" | tr -d '\r'
+}
+printf '%s\n' 'C:\Windows\Temp\not-there.txt' 'C:\Windows\System32\not-there.txt' >"$tools/known.txt"
+[ "$(user_writable "$tools/known.txt")" = 'C:\Windows\Temp\not-there.txt' ] ||
+    die "the permission check does not tell C:\\Windows\\Temp from C:\\Windows\\System32"
+user_writable "$tools/in-windows.txt" >"$tools/writable.txt"
 
 echo "Files: $(wc -l <"$tools/files.txt") touched, $(wc -l <"$tools/in-windows.txt") of them under C:\\Windows."
 echo "::group::Files outside $stage_win and C:\\Windows"
@@ -115,6 +124,10 @@ echo "::group::Registry, by the first four parts of the key"
 cut -d'\' -f1-4 "$tools/registry.txt" | sort | uniq -c
 echo "::endgroup::"
 bad_keys=$(unexplained <"$tools/registry.txt")
+# The rules cover Windows' own keys by subtree. A key that names one of our
+# libraries would be configuration of ours, and no rule should let it through.
+! grep -i -E 'gnutls|openconnect|nettle|libxml|iconv|zlib|p11|pkcs' "$tools/registry.txt" ||
+    die "the probe read a registry key that names one of the bundled libraries"
 
 if [ -n "$bad_files$bad_keys" ]; then
     echo "error: not covered by tests/trace-allow.txt:" >&2

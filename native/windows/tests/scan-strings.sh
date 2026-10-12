@@ -9,11 +9,11 @@ require_ucrt64
 
 # Paths: absolute ones, the words that marked the unsafe paths found in MSYS2's
 # GnuTLS, and GnuTLS's per-user folder. Matched without regard to case.
-paths='(^|[^A-Za-z0-9])[A-Za-z]:[\\/]|ucrt64|msys64|/etc/|\\etc\\|pkcs11|\.gnutls'
+paths='(^|[^A-Za-z0-9])[A-Za-z]:[\\/]|ucrt64|msys64|/etc/|\\etc\\|pkcs11|\.gnutls($|[^A-Za-z_])'
 # Environment variables: whole strings that look like a variable's name. The
 # names end the way such names do, or are the ones Windows and Unix programs
 # use to find a home or temporary folder. Matched exactly.
-variables='^[A-Za-z][A-Za-z0-9_]*(FILE|FILES|LEVEL|DIR|PATH|OVERRIDE|VERBOSE|RECLAIM|KEYLOG|DEBUG|INIT|MODE|PROXY|_proxy|CATALOG)$'
+variables='^[A-Za-z][A-Za-z0-9_]*(FILE|FILES|LEVEL|DIR|PATH|OVERRIDE|VERBOSE|RECLAIM|KEYLOG|DEBUG|INIT|MODE|PROXY|CATALOG)$|^[a-z]+_proxy$'
 variables+='|^(HOME|HOMEDRIVE|HOMEPATH|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP|TMPDIR|SSLKEYLOGFILE)$'
 
 mkdir -p "$work"

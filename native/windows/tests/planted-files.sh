@@ -51,8 +51,9 @@ control_must_fail() {
     if run "$control" probe; then
         fail "the control still passes $1, so this case shows nothing"
     fi
-    grep -q 'SSL connection failure' run.txt || fail "the control failed $1, but not in the TLS handshake"
-    echo "control: fails $1: $(grep 'SSL connection failure' run.txt | head -1 | sed 's/^ *//')"
+    grep -q -E 'SSL connection failure|Failed to set GnuTLS priority string' run.txt ||
+        fail "the control failed $1, but not while setting up TLS"
+    echo "control: fails $1: $(grep -E 'SSL connection failure|Failed to set GnuTLS priority string' run.txt | head -1 | sed 's/^ *//' | cut -c1-120)"
 }
 
 # plant <file> <line>...: writes the file, remembering what to remove afterwards.
