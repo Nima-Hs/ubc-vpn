@@ -224,7 +224,7 @@ pub(crate) fn write_partial(
         let partial = dir.join(name());
         match create_private(&partial) {
             Ok(file) => break (partial, file),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries < 4 => tries += 1,
+            Err(e) if taken(&e) && tries < 4 => tries += 1,
             Err(e) => return Err(e),
         }
     };
@@ -237,6 +237,13 @@ pub(crate) fn write_partial(
         return Err(error);
     }
     Ok(partial)
+}
+
+/// Whether creating a new file failed because something is at its name.
+/// Windows says "access is denied" when that something is a folder.
+fn taken(error: &io::Error) -> bool {
+    let denied = cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied;
+    error.kind() == io::ErrorKind::AlreadyExists || denied
 }
 
 /// Makes the finished `partial` the settings file. If that fails the
