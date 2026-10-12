@@ -4,6 +4,15 @@
 use std::net::Ipv4Addr;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+/// Longer than anything a test waits for should take. A wait that reaches
+/// it panics, so a regression fails its test and does not hang it.
+const WAIT: Duration = Duration::from_secs(10);
+
+/// As long as a held close or ending is kept back when nothing releases it.
+/// The test that forgot, or failed first, then ends instead of hanging.
+const HOLD: Duration = Duration::from_secs(30);
 
 use ubc_vpn_core::routes::Ipv4Net;
 use ubc_vpn_engine::fake::FakeEngine;
@@ -82,7 +91,8 @@ impl Spy {
     pub fn wait_for_a_held_close(&self) {
         let controls = self.controls.0.lock().unwrap();
         let none = |controls: &mut Controls| controls.closes_waiting == 0;
-        drop(self.controls.1.wait_while(controls, none).unwrap());
+        let waited = self.controls.1.wait_timeout_while(controls, WAIT, none);
+        assert!(!waited.unwrap().1.timed_out(), "no close was ever held");
     }
 
     /// Keeps every tunnel's ending from the service until [`Spy::release`].
@@ -115,7 +125,11 @@ impl TunnelEngine for Spy {
         std::thread::spawn(move || {
             let Ok(event) = ending.recv() else { return };
             let held = |controls: &mut Controls| controls.holds_endings;
-            drop(controls.1.wait_while(controls.0.lock().unwrap(), held));
+            drop(
+                controls
+                    .1
+                    .wait_timeout_while(controls.0.lock().unwrap(), HOLD, held),
+            );
             let _ = events.send(event);
         });
         let inner = self.engine.open(gateway, session, cancel, ended, logs)?;
@@ -150,7 +164,8 @@ impl Tunnel for Watched {
         controls.closes_waiting += 1;
         self.controls.1.notify_all();
         let held = |controls: &mut Controls| controls.holds_closes;
-        let mut controls = self.controls.1.wait_while(controls, held).unwrap();
+        let waited = self.controls.1.wait_timeout_while(controls, HOLD, held);
+        let mut controls = waited.unwrap().0;
         controls.closes_waiting -= 1;
         let how = match controls.keeps_sessions {
             true => CloseMode::KeepSession,
@@ -201,6 +216,7 @@ impl Routes for Faulty {
     }
 
     fn remove_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
+        self.reached(Op::RemoveGatewayRoute);
         self.fake.remove_gateway_route(gateway, via)
     }
 
@@ -210,10 +226,12 @@ impl Routes for Faulty {
     }
 
     fn remove_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()> {
+        self.reached(Op::RemoveTunnelRoutes);
         self.fake.remove_tunnel_routes(tunnel, subnets)
     }
 
     fn remove_all(&self) -> Result<()> {
+        self.reached(Op::RemoveAllRoutes);
         self.fake.remove_all()
     }
 
@@ -230,6 +248,7 @@ impl Dns for Faulty {
     }
 
     fn clear_split_dns(&self) -> Result<()> {
+        self.reached(Op::ClearSplitDns);
         self.fake.clear_split_dns()
     }
 

@@ -1,7 +1,7 @@
 //! Removing everything a connection applied. Used by disconnect, by every
 //! failure, by the tunnel's own ending, before each connect and at shutdown.
 
-use ubc_vpn_engine::CloseMode;
+use ubc_vpn_engine::{CloseMode, Tunnel};
 use ubc_vpn_platform::Result;
 
 use crate::session::Machine;
@@ -12,13 +12,33 @@ use crate::session::Machine;
 /// is the one place that decides.
 const CLOSE: CloseMode = CloseMode::LogOff;
 
+/// The tunnel while it is being torn down. However teardown ends, a panic in
+/// one of its steps included, the tunnel is closed with [`CLOSE`] and not
+/// merely dropped, which would leave the session alive at the gateway.
+struct Closing(Option<Box<dyn Tunnel>>);
+
+impl Closing {
+    fn close(&mut self) {
+        if let Some(tunnel) = self.0.take() {
+            tunnel.close(CLOSE);
+        }
+    }
+}
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 impl Machine {
     /// Runs every step, whatever earlier steps did and however far setup
     /// got, and logs each failure. Returns whether the system is known to be
     /// clean: the two catch-all steps, which need no memory of what was
     /// applied, both succeeded.
     pub(crate) fn teardown(&mut self) -> bool {
-        let applied = std::mem::take(&mut self.applied);
+        let mut applied = std::mem::take(&mut self.applied);
+        let mut tunnel = Closing(applied.tunnel.take());
         let logs = self.logs.clone();
         let step = |what: &str, result: Result<()>| {
             if let Err(error) = &result {
@@ -26,15 +46,13 @@ impl Machine {
             }
             result.is_ok()
         };
-        if let Some(tunnel) = &applied.tunnel {
+        if let Some(tunnel) = &tunnel.0 {
             let interface = &tunnel.assigned().interface;
             let removed = self.routes.remove_tunnel_routes(interface, &applied.routes);
             step("removing the tunnel routes", removed);
         }
         let dns_clear = step("clearing split DNS", self.dns.clear_split_dns());
-        if let Some(tunnel) = applied.tunnel {
-            tunnel.close(CLOSE);
-        }
+        tunnel.close();
         if let (Some(gateway), Some(physical)) = (applied.gateway_route, &applied.physical) {
             let removed = self.routes.remove_gateway_route(gateway, physical);
             step("removing the gateway route", removed);
