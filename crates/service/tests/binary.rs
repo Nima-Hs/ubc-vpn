@@ -1,9 +1,8 @@
 //! The service binary itself, run as a program.
 //!
-//! Where the OS has a real channel the binary can really start. In a default
-//! build nothing here runs it in a way that should succeed. With `dev-mode`
-//! one test may start a dev-mode service for a moment. Either way a run that
-//! does not end by itself is stopped, even if the test panics first.
+//! Where the OS has a real channel the binary can really start, so nothing
+//! here runs it in a way that should succeed. A run that does not end by
+//! itself is a failure and is stopped, even if the test panics first.
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -65,14 +64,21 @@ fn a_build_without_dev_mode_rejects_the_dev_flag() {
     );
 }
 
-// With the feature the flag is known. Where the OS has no channel yet, dev
-// mode says why it cannot run; where it has one, a dev-mode service runs on
-// the developer's own dev channel until this test stops it.
+// With the feature the flag is known: the run gets past the arguments and is
+// refused for the variable instead, at once and before anything starts.
 #[cfg(feature = "dev-mode")]
 #[test]
 fn a_build_with_dev_mode_knows_the_dev_flag() {
-    let (_, stderr) = run(&["--dev"], None);
-    assert!(!stderr.contains("unknown argument"), "{stderr}");
+    let (refused, stderr) = run(&["--dev"], Some("SSLKEYLOGFILE"));
+    assert!(
+        refused && stderr.contains("refusing to start while SSLKEYLOGFILE is set"),
+        "{stderr}"
+    );
+    let (refused, stderr) = run(&["--dev", "--more"], Some("SSLKEYLOGFILE"));
+    assert!(
+        refused && stderr.contains("unknown argument: --more"),
+        "{stderr}"
+    );
 }
 
 // Security rule: the service does not start while a variable is set that

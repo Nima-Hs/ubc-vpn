@@ -271,14 +271,21 @@ fn accepting_that_ends_by_itself_is_an_error() {
         panic_when_empty: true,
         ..Script::default()
     };
-    let panicking = Scripted(Arc::new(script));
-    let ended = start(&rig, &panicking, Timeouts::default()).wait();
+    // Waited for on another thread, so that a service which never returns
+    // fails this test and does not hang it.
+    let waited = |channel: Scripted| {
+        let service = start(&rig, &channel, Timeouts::default());
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done.send(service.wait()));
+        ended.recv_timeout(WAIT).expect("waiting never returned")
+    };
+    let ended = waited(Scripted(Arc::new(script)));
     assert!(ended.contains("stopped accepting"), "{ended}");
 
     // The same when the OS closes the channel under the service.
     let closing = Scripted::default();
     closing.close();
-    let ended = start(&rig, &closing, Timeouts::default()).wait();
+    let ended = waited(closing);
     assert!(ended.contains("stopped accepting"), "{ended}");
 
     // Shutting down on purpose is not waiting, and still works.
