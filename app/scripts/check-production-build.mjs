@@ -16,7 +16,13 @@ const out = fileURLToPath(new URL(`../${folder}/`, import.meta.url));
 
 // Strings that exist only in demo code: the fake service's scenario names,
 // its IPC channels, and the component gallery's headings.
-const markers = ["connected-crowded", "demo:set-scenario", "demo:list-scenarios", "Show a state"];
+const markers = [
+    "connected-crowded",
+    "login-password-again",
+    "demo:set-scenario",
+    "demo:list-scenarios",
+    "Show a state",
+];
 
 if (!existsSync(out)) {
     console.error(`${folder}/ does not exist: build it first`);

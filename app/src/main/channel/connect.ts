@@ -41,11 +41,31 @@ export interface ConnectOptions {
     exitGraceMs?: number;
     /** The app's own environment, from which the client's short one is taken. */
     env?: Record<string, string | undefined>;
+    /**
+     * The least time between one login starting and the next. Each start can
+     * send an MFA request to the user's phone; nothing, whether a held-down
+     * key or a page gone wrong, may send them in a stream.
+     */
+    minStartGapMs?: number;
 }
 
-/** The gateway's wording is shown to the user, so it is kept to a sensible length. */
+/** The longest a label and a message from the gateway may be when shown. */
 const MAX_LABEL = 200;
 const MAX_MESSAGE = 1000;
+
+// Control characters, including newlines and tabs; the characters that
+// reverse or override the direction text is drawn in; and the line and
+// paragraph separators.
+const UNSAFE_IN_TEXT = /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]+/gu;
+
+/**
+ * Text from the gateway or the client, made safe to show: one line of plain
+ * characters, kept to a sensible length. Without this a message could draw
+ * itself backwards, or push the real question off the screen with newlines.
+ */
+export function plainText(text: string, maxLength: number): string {
+    return text.replace(UNSAFE_IN_TEXT, " ").replace(/ {2,}/g, " ").trim().slice(0, maxLength);
+}
 
 const IDLE: LoginState = { phase: "idle" };
 const WORKING: LoginState = { phase: "working" };
@@ -65,25 +85,44 @@ export class ConnectRunner implements LoginRunner {
     private waiting: { ours: number; clients: number } | null = null;
     private lastPromptId = 0;
     private readonly leaving = new Set<ChildProcessWithoutNullStreams>();
+    /** When the client was last started, and the wait before the next start, if one is on. */
+    private lastStartAt = Number.NEGATIVE_INFINITY;
+    private startTimer: NodeJS.Timeout | null = null;
 
     constructor(options: ConnectOptions) {
-        this.options = { exitGraceMs: 2_000, env: process.env, ...options };
+        this.options = { exitGraceMs: 2_000, env: process.env, minStartGapMs: 3_000, ...options };
     }
 
     start(): boolean {
         // One login at a time: a second would mean a second MFA request.
-        if (this.child !== null) {
+        if (this.child !== null || this.startTimer !== null) {
             return false;
         }
+        // The user sees the login begin at once. The client itself is started
+        // no sooner than the gap after the last one.
+        this.options.onState(WORKING);
+        const wait = this.lastStartAt + this.options.minStartGapMs - Date.now();
+        if (wait > 0) {
+            this.startTimer = setTimeout(() => {
+                this.startTimer = null;
+                this.launch();
+            }, wait);
+        } else {
+            this.launch();
+        }
+        return true;
+    }
+
+    private launch(): void {
+        this.lastStartAt = Date.now();
         let child: ChildProcessWithoutNullStreams;
         try {
             child = startClient(this.options.command, this.options.args, this.options.env);
         } catch {
             this.options.onState(BROKEN);
-            return true;
+            return;
         }
         this.child = child;
-        this.options.onState(WORKING);
         const decoder = new LineDecoder();
 
         child.stdout.on("data", (chunk: Buffer) => {
@@ -111,7 +150,6 @@ export class ConnectRunner implements LoginRunner {
         child.stdin.on("error", () => {});
         // Leaving without a last line is a failure, not a quiet success.
         child.once("close", () => this.finish(child, BROKEN));
-        return true;
     }
 
     answer(id: number, value: string): boolean {
@@ -139,6 +177,10 @@ export class ConnectRunner implements LoginRunner {
     }
 
     cancel(): void {
+        if (this.startTimer !== null) {
+            clearTimeout(this.startTimer);
+            this.startTimer = null;
+        }
         const child = this.child;
         if (child !== null) {
             const cancel: AppMessage = { type: "cancel" };
@@ -173,9 +215,9 @@ export class ConnectRunner implements LoginRunner {
                 const prompt: LoginPrompt = {
                     id: this.lastPromptId,
                     kind: line.kind,
-                    label: line.label.slice(0, MAX_LABEL),
+                    label: plainText(line.label, MAX_LABEL),
                     ...(line.message !== undefined && {
-                        message: line.message.slice(0, MAX_MESSAGE),
+                        message: plainText(line.message, MAX_MESSAGE),
                     }),
                 };
                 this.options.onState({ phase: "prompt", prompt });
@@ -193,7 +235,7 @@ export class ConnectRunner implements LoginRunner {
                         : {
                               phase: "failed",
                               code: line.code,
-                              message: line.message.slice(0, MAX_MESSAGE),
+                              message: plainText(line.message, MAX_MESSAGE),
                           },
                 );
                 return;

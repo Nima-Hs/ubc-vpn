@@ -213,6 +213,28 @@ describe("starting the bridge", () => {
         await until(() => bridge.starts() === 2, "a second start, on request");
     });
 
+    it("treats the service's own 'not the owner' as final, though the bridge then reports it gone", async () => {
+        // The channel was not reserved for the owner, so the bridge got
+        // through. The service refuses the request and hangs up.
+        const refusing: MockRun = { requestsRefusedAsNotOwner: true, hangsUpOnNonOwner: true };
+        const { bridge, client, last, statuses } = start([refusing], {
+            initialRetryDelayMs: 10,
+            maxRetryDelayMs: 20,
+        });
+        await until(() => last() === "ready", "ready");
+        await expect(client.request({ method: "claim" })).resolves.toEqual({
+            status: "error",
+            value: { code: "not_owner", message: "only the owner may do this" },
+        });
+        expect(last()).toBe("not_owner");
+
+        // Short pauses: if it were going to try again, it would have by now.
+        await pause(300);
+        expect(bridge.starts()).toBe(1);
+        expect(last()).toBe("not_owner");
+        expect(statuses.some((status) => status.status === "unavailable")).toBe(false);
+    });
+
     it("treats a bridge that starts and says nothing as unusable", async () => {
         const { last, statuses } = start([{ first: "silent" }], { startTimeoutMs: 150 });
         await until(() => last() === "unavailable", "unavailable");

@@ -136,6 +136,16 @@ describe("the words for each state", () => {
         expect(update.body).toContain("version 0.1.0");
         expect(update.body).toContain("version 0.2.0");
         expect(update.action).toBeNull();
+        // "unknown" is the bridge's word for no version, not a version number.
+        for (const serviceVersion of ["unknown", "Unknown", " unknown ", ""]) {
+            const body = copyFor({
+                link: "update_needed",
+                appVersion: "0.1.0",
+                serviceVersion,
+            }).body;
+            expect(body, serviceVersion).not.toMatch(/version\s*unknown/i);
+            expect(body, serviceVersion).toContain("the VPN service is a different one");
+        }
         // An unknown service version is not printed as an empty one.
         expect(copyFor(STATES[4] as LinkState).body).not.toContain("version .");
     });

@@ -1,0 +1,145 @@
+import type { LoginState } from "@shared/api";
+import {
+    describeLoginFailure,
+    describePrompt,
+    LOGIN_WORKING,
+    loginAnnouncement,
+} from "@shared/copy";
+import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
+import type { PromptKind } from "@shared/protocol/PromptKind";
+import { describe, expect, it } from "vitest";
+import { createDemoLogin, DEMO_LOGIN_SCENARIOS } from "../src/main/demo/demo-login";
+
+const KINDS: PromptKind[] = ["username", "password", "code", "text"];
+const CODES: LoginErrorCode[] = [
+    "wrong_password",
+    "pin_mismatch",
+    "cancelled",
+    "gateway_unreachable",
+    "route_refused",
+    "service_unavailable",
+    "internal",
+];
+
+describe("the words around a login", () => {
+    it("gives each kind of question its own heading and one way forward", () => {
+        const copies = KINDS.map((kind) => describePrompt({ kind }));
+        expect(new Set(copies.map((copy) => copy.title)).size).toBe(KINDS.length);
+        expect(new Set(copies.map((copy) => copy.submit))).toEqual(new Set(["Continue"]));
+    });
+
+    it("says where a password goes", () => {
+        expect(describePrompt({ kind: "password" }).body).toBe(
+            "It goes to UBC and nowhere else. This app does not keep it.",
+        );
+    });
+
+    it("gives every failure its own explanation, with what to do next", () => {
+        const copies = CODES.map((code) => describeLoginFailure(code, ""));
+        expect(new Set(copies.map((copy) => copy.body)).size).toBe(CODES.length);
+        const next = /\b(try|check|install|restart|connect|message below)\b/i;
+        for (const copy of copies) {
+            expect(copy.body, copy.title).toMatch(next);
+            expect(copy.title.length, copy.title).toBeLessThanOrEqual(24);
+        }
+    });
+
+    it("does not say which of the three was wrong, because UBC does not", () => {
+        const copy = describeLoginFailure("wrong_password", "");
+        expect(copy.title).toBe("Login refused");
+        expect(copy.body).toContain("does not say which");
+    });
+
+    it("shows the client's own account beside the explanation, when there is one", () => {
+        expect(
+            describeLoginFailure("route_refused", " 198.51.100.0/4 is wider than /8 ").detail,
+        ).toBe("198.51.100.0/4 is wider than /8");
+        expect(describeLoginFailure("internal", "  ").detail).toBeUndefined();
+    });
+
+    it("follows the writing rules", () => {
+        const everything = [
+            LOGIN_WORKING.title,
+            LOGIN_WORKING.body,
+            ...KINDS.flatMap((kind) => Object.values(describePrompt({ kind }))),
+            ...CODES.flatMap((code) => {
+                const copy = describeLoginFailure(code, "");
+                return [copy.title, copy.body];
+            }),
+        ];
+        for (const text of everything) {
+            expect(text).not.toMatch(/!|\boops\b|\bplease\b|\bsuccessfully\b|\bsorry\b/i);
+            expect(text.charAt(0), text).toMatch(/[A-Z]/);
+        }
+    });
+
+    it("has something to read out for every step", () => {
+        const states: Exclude<LoginState, { phase: "idle" }>[] = [
+            { phase: "working" },
+            { phase: "prompt", prompt: { id: 1, kind: "password", label: "Password" } },
+            {
+                phase: "prompt",
+                prompt: { id: 1, kind: "password", label: "Password", message: "Login failed." },
+            },
+            { phase: "failed", code: "wrong_password", message: "" },
+        ];
+        expect(states.map(loginAnnouncement)).toEqual([
+            "Logging in. Waiting for UBC to answer. If you approve logins on your phone, check it now.",
+            "Your password. It goes to UBC and nowhere else. This app does not keep it.",
+            // The gateway's reason is what matters when a question comes back.
+            "Your password. Login failed.",
+            expect.stringContaining("Login refused. UBC did not accept"),
+        ]);
+    });
+});
+
+describe("the demo login", () => {
+    it("asks for a password, then a code, then has the fake service connect", async () => {
+        const seen: LoginState[] = [];
+        let connected = 0;
+        const login = createDemoLogin(
+            (state) => seen.push(state),
+            () => connected++,
+            5,
+        );
+        const phase = () => seen.at(-1)?.phase;
+        const until = async (wanted: string) => {
+            for (let tries = 0; phase() !== wanted && tries < 400; tries++) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            expect(phase()).toBe(wanted);
+        };
+
+        expect(login.start()).toBe(true);
+        expect(login.start()).toBe(false);
+        await until("prompt");
+        expect(login.answer(2, "anything")).toBe(false);
+        expect(login.answer(1, "anything")).toBe(true);
+        await until("prompt");
+        expect(login.answer(2, "anything")).toBe(true);
+        await until("idle");
+        expect(connected).toBe(1);
+        // It holds nothing of what it was given.
+        expect(JSON.stringify(seen)).not.toContain("anything");
+    });
+
+    it("can show every login state, and ends the login for any other name", () => {
+        const seen: LoginState[] = [];
+        const login = createDemoLogin(
+            (state) => seen.push(state),
+            () => {},
+            5,
+        );
+        for (const name of DEMO_LOGIN_SCENARIOS) {
+            login.setScenario(name);
+            expect(seen.at(-1)?.phase, name).not.toBe("idle");
+        }
+        expect(
+            DEMO_LOGIN_SCENARIOS.filter((name) => name.startsWith("login-failed-")),
+        ).toHaveLength(6);
+        for (const name of ["disconnected", "__proto__", "constructor"]) {
+            login.setScenario(name);
+            expect(seen.at(-1)).toEqual({ phase: "idle" });
+        }
+    });
+});

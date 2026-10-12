@@ -79,6 +79,19 @@ describe("the link to the service", () => {
         expect(link.getState()).toEqual({ link: "not_owner" });
     });
 
+    it("stays on 'another user' when the service refuses and then hangs up", async () => {
+        const { bridge, link, seen } = linkTo({
+            requestsRefusedAsNotOwner: true,
+            hangsUpOnNonOwner: true,
+        });
+        await until(() => link.getState().link === "not_owner", "not_owner");
+        await pause(300);
+        // Not "service not running", and no second bridge.
+        expect(link.getState()).toEqual({ link: "not_owner" });
+        expect(seen.some((state) => state.link === "unavailable")).toBe(false);
+        expect(bridge.starts()).toBe(1);
+    });
+
     it("says so when something other than the service is listening", async () => {
         const { link } = linkTo({ first: "untrusted_service" });
         await until(() => link.getState().link === "untrusted_service", "untrusted_service");

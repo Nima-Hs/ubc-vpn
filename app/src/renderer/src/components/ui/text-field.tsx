@@ -18,7 +18,7 @@ export function TextField({ label, hint, error, className, ...props }: TextField
     const note = error ?? hint;
     return (
         <div className={cn("flex flex-col gap-1.5", className)}>
-            <label htmlFor={id} className="text-label text-text-secondary">
+            <label htmlFor={id} className="wrap-anywhere text-label text-text-secondary">
                 {label}
             </label>
             <input

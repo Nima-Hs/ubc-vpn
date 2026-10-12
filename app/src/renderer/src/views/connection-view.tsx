@@ -1,5 +1,6 @@
-import { type ActionKind, describe, describeActionError } from "@shared/copy";
+import { type ActionKind, describe, describeActionError, loginAnnouncement } from "@shared/copy";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
+import { useEffect, useRef } from "react";
 import { TunnelDiagram } from "@/components/tunnel-diagram";
 import { Button } from "@/components/ui/button";
 import { List, ListRow } from "@/components/ui/list-row";
@@ -7,6 +8,7 @@ import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
 import { api, useSnapshot } from "@/lib/store";
+import { LoginView } from "./login-view";
 
 const run: Record<ActionKind, () => Promise<void>> = {
     connect: () => api.connect(),
@@ -47,12 +49,40 @@ function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
 
 /** The app's first screen: where the connection stands, and one thing to do about it. */
 export function ConnectionView() {
-    const { state, notice } = useSnapshot();
+    const { state, notice, login } = useSnapshot();
     const copy = describe(state);
     const { action } = copy;
     const tunnel =
         state.link === "ready" && state.conn.state === "connected" ? state.conn.tunnel : null;
     const noticeCopy = notice === null ? null : describeActionError(notice);
+    const loggingIn = login.phase !== "idle";
+
+    // When a login ends, the keyboard goes back to the one button, so the
+    // next key press does something and focus is never left on nothing.
+    const actionButton = useRef<HTMLButtonElement>(null);
+    const wasLoggingIn = useRef(false);
+    useEffect(() => {
+        if (wasLoggingIn.current && !loggingIn) {
+            actionButton.current?.focus();
+        }
+        wasLoggingIn.current = loggingIn;
+    }, [loggingIn]);
+
+    if (loggingIn) {
+        return (
+            <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
+                <TunnelDiagram
+                    tone={login.phase === "failed" ? "problem" : "busy"}
+                    className="shrink-0"
+                />
+                <LoginView login={login} />
+                {/* Read out, politely, as the login moves on. */}
+                <p role="status" className="sr-only">
+                    {loginAnnouncement(login)}
+                </p>
+            </main>
+        );
+    }
 
     return (
         <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
@@ -99,6 +129,7 @@ export function ConnectionView() {
 
             {action !== null && (
                 <Button
+                    ref={actionButton}
                     block
                     size="lg"
                     // Connect is the one filled button. Everything else is neutral.

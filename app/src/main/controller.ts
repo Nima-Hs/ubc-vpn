@@ -93,6 +93,9 @@ export class Controller {
 
     dispose(): void {
         this.unsubscribe();
+        // Nothing is told about what happens from here on: the window and
+        // the tray this would reach are being taken down.
+        this.listeners.clear();
         this.loginRunner?.stop();
         this.link.dispose();
     }

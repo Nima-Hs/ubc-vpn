@@ -396,7 +396,16 @@ export class BridgeClient {
         }
         this.pending.delete(message.data.id);
         clearTimeout(pending.timer);
-        pending.resolve(message.data.outcome);
+        const outcome = message.data.outcome;
+        pending.resolve(outcome);
+        // Where the system could not reserve the channel for the owner, the
+        // bridge gets through and it is the service that says "not the
+        // owner", then hangs up. That answer is as final as the bridge's own
+        // `not_owner` line: a new bridge would only be told the same, so
+        // none is started, whatever the bridge says as it goes.
+        if (outcome.status === "error" && outcome.value.code === "not_owner") {
+            this.end(child, { status: "not_owner" }, null);
+        }
     }
 
     /** Ends this bridge, reports that the service cannot be used, and tries again later. */

@@ -54,6 +54,16 @@ export function closeHidesWindow(
     return true;
 }
 
+/**
+ * Connect, chosen from the tray menu. The window is shown first: connecting
+ * starts a login, and a login's question must never wait where nobody is
+ * looking.
+ */
+export function connectFromTray(showWindow: () => void, connect: () => unknown): void {
+    showWindow();
+    void connect();
+}
+
 type Rgb = readonly [number, number, number];
 
 export interface TrayPalette {
