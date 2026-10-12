@@ -15,13 +15,16 @@
 //! for the app. It then writes exactly one first [`BridgeLine`]:
 //! [`Ready`](BridgeLine::Ready), or the reason there is no channel. Every
 //! line other than `ready` and `server` is the bridge's last: it exits after
-//! writing it.
+//! writing it. A handshake reply the bridge cannot read counts as
+//! `service_unavailable`. The bridge does not read standard input until it
+//! has written `ready`.
 //!
 //! # While running
 //!
 //! - The app writes [`Request`](crate::protocol::Request)s on the bridge's
-//!   standard input. The bridge forwards them unchanged, ids included, and
-//!   every message from the service arrives as a [`BridgeLine::Server`].
+//!   standard input. The bridge decodes each one and forwards the same
+//!   message, id included, and every message from the service arrives as a
+//!   [`BridgeLine::Server`].
 //! - The bridge sends no requests of its own. In particular it does not claim
 //!   ownership: the app sends `claim` itself.
 //! - A `connect` request is not forwarded (see [`bridge_allows`]): the app
