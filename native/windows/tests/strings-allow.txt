@@ -24,6 +24,9 @@ libgnutls-30.dll DISABLE_TLS13_COMPAT_MODE
 # Read by Nettle to print which processor-specific code it chose.
 libnettle-9.dll NETTLE_FAT_VERBOSE
 
+# The name of one of OpenConnect's functions, not a variable.
+libopenconnect-5.dll process_proxy
+
 # A variable OpenConnect sets for the script it can run on connect. It does not
 # read it, and we give it no script.
 libopenconnect-5.dll LOG_LEVEL
