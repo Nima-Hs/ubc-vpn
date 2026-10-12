@@ -723,6 +723,13 @@ fn narrowing_admits_the_owner_and_refuses_everyone_else() {
     let _owner = as_user(OWNER, || transport.connect(&name)).expect("the owner");
     let (_server, caller) = listener.accept().expect("accept the owner");
     assert_eq!(caller, id(OWNER));
+
+    // Security rule: the file is changed only once it is no longer the
+    // owner's, who could otherwise get in the way of the change.
+    assert_eq!(owner_and_mode(&name).0, OWNER);
+    let seen = || Ok(owner_and_mode(&name).0);
+    let seen = super::take_back(Path::new(&name), seen);
+    assert_eq!(seen.ok(), Some(0), "changed while still the owner's");
 }
 
 #[test]
