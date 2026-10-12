@@ -223,6 +223,47 @@ export function confineContents(
     contents.setWindowOpenHandler(() => ({ action: "deny" }));
 }
 
+/**
+ * The switches that make Chromium open a debugging port or pipe. Whoever can
+ * reach it controls the interface, and through the interface everything the
+ * interface may ask the main process to do. No Electron fuse turns them off.
+ */
+export const REMOTE_DEBUGGING_SWITCHES = [
+    "remote-debugging-port",
+    "remote-debugging-pipe",
+    "remote-debugging-address",
+] as const;
+
+/**
+ * Whether this run may be debugged from outside. Only a demo or development
+ * build that has not been packaged: that is what the end-to-end test drives,
+ * and its driver attaches through `--remote-debugging-port`. A production
+ * build never may, packaged or not, and nothing packaged ever may.
+ */
+export function allowsRemoteDebugging(build: {
+    isPackaged: boolean;
+    demo: boolean;
+    development: boolean;
+}): boolean {
+    return !build.isPackaged && (build.demo || build.development);
+}
+
+/**
+ * Takes the remote debugging switches off the command line unless this run
+ * may be debugged. Must run before anything else reads the command line.
+ */
+export function refuseRemoteDebugging(
+    commandLine: { removeSwitch(name: string): void },
+    allowed: boolean,
+): void {
+    if (allowed) {
+        return;
+    }
+    for (const name of REMOTE_DEBUGGING_SWITCHES) {
+        commandLine.removeSwitch(name);
+    }
+}
+
 /** Must run before the app is ready. */
 export function registerAppScheme(protocol: Pick<Protocol, "registerSchemesAsPrivileged">): void {
     protocol.registerSchemesAsPrivileged([APP_SCHEME]);

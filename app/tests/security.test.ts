@@ -10,6 +10,7 @@ import { isFromInterface } from "../src/main/ipc";
 import {
     APP_SCHEME,
     allowedRequestPrefixes,
+    allowsRemoteDebugging,
     applicationMenu,
     CONTENT_SECURITY_POLICY,
     confineContents,
@@ -17,6 +18,8 @@ import {
     interfaceHeaders,
     isAllowedRequest,
     isTrustedOrigin,
+    REMOTE_DEBUGGING_SWITCHES,
+    refuseRemoteDebugging,
     registerAppScheme,
     resolveInterfaceFile,
     type SessionParts,
@@ -258,6 +261,52 @@ describe("who may call the main process", () => {
         expect(isFromInterface(elsewhere, elsewhere, undefined)).toBe(false);
         // A frame that has gone away.
         expect(isFromInterface(null, frame, undefined)).toBe(false);
+    });
+});
+
+describe("remote debugging", () => {
+    const removedWhen = (allowed: boolean) => {
+        const removed: string[] = [];
+        refuseRemoteDebugging({ removeSwitch: (name) => removed.push(name) }, allowed);
+        return removed;
+    };
+
+    it("has every switch that opens a debugging port or pipe taken off the command line", () => {
+        expect(removedWhen(false)).toEqual([
+            "remote-debugging-port",
+            "remote-debugging-pipe",
+            "remote-debugging-address",
+        ]);
+        expect(removedWhen(false)).toEqual([...REMOTE_DEBUGGING_SWITCHES]);
+    });
+
+    it("leaves them only where the run may be debugged", () => {
+        expect(removedWhen(true)).toEqual([]);
+    });
+
+    it("is never allowed in a production build, packaged or not", () => {
+        for (const isPackaged of [true, false]) {
+            expect(allowsRemoteDebugging({ isPackaged, demo: false, development: false })).toBe(
+                false,
+            );
+        }
+    });
+
+    it("is never allowed in anything packaged, whatever kind of build it is", () => {
+        for (const demo of [true, false]) {
+            for (const development of [true, false]) {
+                expect(allowsRemoteDebugging({ isPackaged: true, demo, development })).toBe(false);
+            }
+        }
+    });
+
+    it("is allowed for an unpackaged demo or development build, which the tests drive", () => {
+        expect(allowsRemoteDebugging({ isPackaged: false, demo: true, development: false })).toBe(
+            true,
+        );
+        expect(allowsRemoteDebugging({ isPackaged: false, demo: false, development: true })).toBe(
+            true,
+        );
     });
 });
 
