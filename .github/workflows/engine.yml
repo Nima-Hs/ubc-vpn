@@ -1,0 +1,129 @@
+name: Engine
+
+# The real engine loads libopenconnect, which the ordinary CI does not have.
+# This workflow takes our own build of it from the newest good run of the
+# native-library workflow on main, and proves on each OS that the engine
+# crate loads it at run time from the folder it is given, and can call it.
+
+on:
+  pull_request:
+    paths:
+      - crates/engine/**
+      - crates/core/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/engine.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/engine/**
+      - crates/core/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/engine.yml
+  workflow_dispatch:
+
+# `actions: read` is for listing the native-library runs and downloading
+# their artifacts.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: engine-${{ github.ref }}
+  cancel-in-progress: true
+
+# Naming the shell turns on pipefail, and on Windows it replaces PowerShell,
+# which carries on after a failing command.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  load:
+    name: load (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The runners the native-library workflows test on.
+          - { name: windows, os: windows-latest, artifact: libopenconnect-windows-x64 }
+          - { name: macos, os: macos-14, artifact: libopenconnect-macos-arm64 }
+          - { name: linux, os: ubuntu-22.04, artifact: libopenconnect-linux-x64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Only a run started by a push to main counts. A pull request from a
+      # fork whose branch is called main also has "main" as its branch, and a
+      # run started by hand can be on any branch.
+      - name: Fetch the native library built on main
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: native-${{ matrix.name }}.yml
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$WORKFLOW" --branch main \
+            --event push --status success --limit 1 --json databaseId,headSha \
+            --jq '.[0] | "\(.databaseId) \(.headSha)"')
+          read -r id sha <<<"$run"
+          [[ $id =~ ^[0-9]+$ ]]
+          echo "Run $id of $WORKFLOW, at commit $sha"
+          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir download
+          # Windows uploads the folder itself. The others upload a tarball, to
+          # keep symbolic links; the macOS one has a top-level folder.
+          if [ -f "download/$ARTIFACT.tar.gz" ]; then
+            mkdir native
+            tar -xzf "download/$ARTIFACT.tar.gz" -C native
+            if [ -d "native/$ARTIFACT" ]; then mv "native/$ARTIFACT" unwrapped && rmdir native && mv unwrapped native; fi
+          else
+            mv download native
+          fi
+
+          # The commit of this repository the library was built from must be
+          # on main (see native/windows/README.md). The macOS manifest does
+          # not record it yet, so there the run's own commit stands in.
+          commit=$(jq -r '.recipe.commit // .build.repository_commit // empty' native/manifest.json)
+          if [ -z "$commit" ] && [ "$RUNNER_OS" = macOS ]; then commit=$sha; fi
+          [[ $commit =~ ^[0-9a-f]{40}$ ]]
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
+          echo "The library was built from $commit; main is $status of it."
+          # "behind" and "diverged" mean the commit is not part of main.
+          [ "$status" = ahead ] || [ "$status" = identical ]
+
+      - run: rustup toolchain install
+
+      - name: The build refuses to look for a library by itself
+        run: |
+          if cargo check --locked -p ubc-vpn-engine --features libopenconnect 2> refused.txt; then
+            echo "The build passed without being told where the library is."
+            exit 1
+          fi
+          cat refused.txt
+          grep -q 'set UBC_VPN_NATIVE_DIR' refused.txt
+
+      - name: No libopenconnect is installed on the system
+        if: runner.os == 'Linux'
+        run: |
+          if ldconfig -p | grep libopenconnect; then exit 1; fi
+
+      - name: Lint
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+        run: cargo clippy --locked -p ubc-vpn-engine --features libopenconnect --all-targets -- -D warnings
+
+      # The tests start themselves again with planted copies in the working
+      # directory and the loader's search path. On macOS and Linux they build
+      # a stand-in library with the runner's C compiler.
+      - name: Load and call the library
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+        run: |
+          cargo test --locked -p ubc-vpn-engine --features libopenconnect --tests -- --nocapture | tee test.log
+          # A test that is skipped passes, so prove from the log that it ran.
+          grep -E '^RAN: Ok\("v9\.21(-unknown)?"\)' test.log
