@@ -164,6 +164,28 @@
     -webkit-app-region: no-drag;
 }
 
+/* A row in a long list: not laid out or painted until it is near the screen.
+   That also clips everything a row draws outside its own box, a control's
+   focus ring included. So the row is made larger than its controls by the
+   room a ring takes, and pulled back by as much, so that nothing moves. */
+@utility row-lazy {
+    content-visibility: auto;
+    contain-intrinsic-size: auto calc(var(--size-control-md) + 2 * var(--focus-room));
+    margin: calc(-1 * var(--focus-room));
+    padding: var(--focus-room);
+}
+
+/* For a scrolling area whose controls sit against its edges. The area clips
+   at its edge too, so it is widened by the room a focus ring takes, and a
+   control brought into view by the keyboard stops that far short of the top
+   and the bottom. */
+@utility ring-room {
+    margin-inline: calc(-1 * var(--focus-room));
+    padding-inline: var(--focus-room);
+    padding-block-end: var(--focus-room);
+    scroll-padding-block: var(--focus-room);
+}
+
 /* A region that scrolls inside the window without moving anything behind it. */
 @utility scroll-region {
     overflow-x: hidden;

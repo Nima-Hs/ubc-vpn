@@ -126,6 +126,9 @@
        region's own edge cannot clip it. */
     --focus-width: 2px;
     --focus-offset: 2px;
+    /* How far the ring reaches outside a control: the room it must be given
+       wherever something would otherwise clip it. */
+    --focus-room: calc(var(--focus-width) + var(--focus-offset));
 
     /* The status mark: a dot inside a halo, in two sizes. */
     --size-mark-sm: 1rem;

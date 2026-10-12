@@ -61,8 +61,11 @@ async function start(): Promise<void> {
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
         const { createDemoLogin, DEMO_LOGIN_SCENARIOS } = await import("./demo/demo-login");
-        const { createDemoSettings } = await import("./demo/demo-settings");
-        demoSettings = createDemoSettings();
+        const { createDemoSettings, DEMO_SETTINGS_SCENARIOS } = await import(
+            "./demo/demo-settings"
+        );
+        const fakeSettings = createDemoSettings();
+        demoSettings = fakeSettings;
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
         const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
         const demo = createDemoLink(step);
@@ -76,12 +79,14 @@ async function start(): Promise<void> {
             handleFromInterface(window, devServerUrl, DEMO_IPC.listScenarios, () => [
                 ...DEMO_SCENARIOS,
                 ...DEMO_LOGIN_SCENARIOS,
+                ...DEMO_SETTINGS_SCENARIOS,
             ]);
             handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
                 if (typeof name === "string") {
                     // A login state, or a connection state with no login under way.
                     demoLogin?.setScenario(name);
                     demo.setScenario(name);
+                    fakeSettings.setScenario(name);
                 }
             });
         };

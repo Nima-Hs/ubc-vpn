@@ -34,7 +34,7 @@ function classNames(text: string): string[] {
 describe("screens", () => {
     // Layout only: how components are arranged, in steps of the spacing scale.
     const layout =
-        /^(flex(-(1|col|row|wrap))?|grid(-cols-\d)?|(min-|max-)?[hw]-(0|full|\d+)|shrink(-0)?|items-(start|center|end|baseline)|justify-(start|center|end|between)|(gap|gap-x|gap-y|p|px|py|pt|pb)-\d(\.5)?|scroll-region|overflow-hidden|animate-arrive|sr-only)$/;
+        /^(flex(-(1|col|row|wrap))?|grid(-cols-\d)?|(min-|max-)?[hw]-(0|full|\d+)|shrink(-0)?|items-(start|center|end|baseline)|justify-(start|center|end|between)|(gap|gap-x|gap-y|p|px|py|pt|pb)-\d(\.5)?|scroll-region|row-lazy|ring-room|overflow-hidden|animate-arrive|sr-only)$/;
 
     it.each(sources("views"))("$file uses components for everything but layout", ({ text }) => {
         const classes = [...text.matchAll(/className="([^"]*)"/g)].flatMap(([, value = ""]) =>

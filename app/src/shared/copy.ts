@@ -388,7 +388,7 @@ export function describeRouteLimits(
         "policy_readable" | "allowed_routes" | "min_prefix_len" | "max_routes"
     >,
 ): { limits: string; allowed?: string; noPolicy?: string } {
-    const limits = `A subnet can be /${view.min_prefix_len} or narrower. You can list up to ${view.max_routes} subnets and ${view.max_routes} domains.`;
+    const limits = `A subnet can be no larger than /${view.min_prefix_len}: the number after the slash must be ${view.min_prefix_len} or more. You can list up to ${view.max_routes} subnets and ${view.max_routes} domains.`;
     if (!view.policy_readable) {
         return {
             limits,
@@ -417,9 +417,9 @@ export function describeRouteProblem(
         case "bad_subnet":
             return "Write a network as address/length with no spaces, such as 203.0.113.0/24. The address must be the first one in the network.";
         case "too_wide":
-            return `Use /${limits.min_prefix_len} or a longer prefix. A wider subnet is not allowed.`;
+            return `This subnet is too large. Use /${limits.min_prefix_len} or a larger number after the slash.`;
         case "reserved":
-            return "This range is loopback, link-local, multicast or reserved, and cannot go through the VPN.";
+            return "This range is reserved for special uses, such as this computer itself or the local network, and cannot go through the VPN.";
         case "not_allowed":
             return "This subnet is outside the networks this installation allows.";
         case "bad_domain":
@@ -427,14 +427,17 @@ export function describeRouteProblem(
     }
 }
 
-/** Why settings could not be read, checked or saved, and what to do. */
+/**
+ * Why settings could not be read, checked or saved, and what to do. Empty
+ * for the one case that is not a failure the user should hear about.
+ */
 export function describeSettingsError(
     error: SettingsError,
     doing: "read" | "check" | "save",
 ): string {
     switch (error) {
         case "unreadable":
-            return "Your settings file could not be read, so it has been left as it is. If you edited it by hand, undo the change; otherwise install UBC VPN again.";
+            return "Your settings file is damaged, so it has been left as it is and your routes cannot be shown. If you edited it by hand, undo the change.";
         case "unwritable":
             return "Your settings could not be saved, and the old ones are unchanged. Check that your disk is not full, then save again.";
         case "bad_input":
@@ -444,6 +447,8 @@ export function describeSettingsError(
         case "busy":
             return "A save is already under way. Wait for it to finish.";
         case "superseded":
+            // A newer check took this one's place. There is nothing to tell.
+            return "";
         case "unavailable":
             return doing === "read"
                 ? "UBC VPN could not read your settings. Try again. If it keeps happening, install UBC VPN again."
