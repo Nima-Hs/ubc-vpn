@@ -132,8 +132,11 @@ fn the_app_is_asked_and_told_done_once_the_service_accepts() {
     scene.service = None;
     scene.service = Some(scene.rig.service_on(slow.clone()));
     let let_go = slow.clone();
+    // Let go in the end whatever happens, so nothing is left waiting. Long
+    // after the command should have ended: a command that waited for the
+    // outcome instead gives up first, at its own limit, and fails below.
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(8));
         let_go.release();
     });
 
