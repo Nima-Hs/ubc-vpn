@@ -129,8 +129,7 @@ mod tests {
 
     use super::*;
     use crate::protocol::{
-        AddLogParams, ConnectParams, Event, LogLevel, LogText, LogsParams, WatchLogsParams, decode,
-        encode,
+        AddLogParams, ConnectParams, Event, LogLevel, LogsParams, WatchLogsParams, decode, encode,
     };
     use crate::redact::Secret;
     use crate::routes::RouteSet;
@@ -188,7 +187,7 @@ mod tests {
         // Nor may the app write into the log it shows the user.
         let add_log = RequestBody::AddLog(AddLogParams {
             level: LogLevel::Info,
-            text: LogText::new("made up").unwrap(),
+            text: "made up".to_string(),
         });
         assert!(!bridge_allows(&add_log));
         for allowed in [

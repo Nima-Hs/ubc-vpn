@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use harness::*;
 use ubc_vpn_core::protocol::{
-    AddLogParams, HelloReply, LogLevel, LogText, LogsParams, PROTOCOL_VERSION, WatchLogsParams,
-    decode,
+    AddLogParams, HelloReply, LogLevel, LogsParams, PROTOCOL_VERSION, WatchLogsParams, decode,
 };
 use ubc_vpn_platform::fake::Applied;
 use ubc_vpn_platform::{Dns, Routes, SplitDns};
@@ -77,7 +76,7 @@ fn a_non_owner_is_refused_and_disconnected() {
         RequestBody::Diagnostics,
         RequestBody::AddLog(AddLogParams {
             level: LogLevel::Info,
-            text: LogText::new("made up").unwrap(),
+            text: "made up".to_string(),
         }),
     ];
     for (n, body) in requests.into_iter().enumerate() {

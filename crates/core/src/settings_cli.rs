@@ -295,10 +295,17 @@ pub fn replace_routes(
 /// The zero-width joiner and non-joiner (U+200C, U+200D) are not among
 /// them: they are ordinary in Persian, Arabic and Indic text and in emoji,
 /// and neither reorder nor hide anything.
+///
+/// The line and paragraph separators (U+2028, U+2029) are among them: they
+/// are not control characters, but they break a line wherever white space
+/// is kept, so one line could be made to look like two. So are the tag
+/// characters (U+E0000 to U+E007F), which are not seen at all.
 pub fn misleads(c: char) -> bool {
     let unseen = matches!(c, '\u{061c}' | '\u{200b}' | '\u{200e}' | '\u{200f}')
-        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}');
-    c.is_control() || unseen
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+        || matches!(c, '\u{e0000}'..='\u{e007f}');
+    let breaks = matches!(c, '\u{2028}' | '\u{2029}');
+    c.is_control() || unseen || breaks
 }
 
 /// The longest username that is saved, in bytes.
@@ -736,6 +743,9 @@ mod tests {
             "j\u{200b}doe",
             "\u{feff}jdoe",
             "jdoe\u{2066}",
+            "jdoe\u{2028}admin",
+            "jdoe\u{2029}admin",
+            "jdoe\u{e0061}",
         ];
         for odd in odd_names {
             let refused = replace_username(Some("{}"), Some(odd));
@@ -757,10 +767,15 @@ mod tests {
     // what is saved. This holds it to the list.
     #[test]
     fn the_characters_that_mislead_are_these() {
-        let misleading = "\u{0}\u{1b}\u{7f}\u{85}\u{061c}\u{200b}\u{200e}\u{200f}\u{202a}\u{202e}\u{2060}\u{2069}\u{feff}";
-        assert!(misleading.chars().all(misleads));
-        let ordinary = "a Zé\u{200c}\u{200d}\u{2029}\u{202f}\u{206a}\u{fefe}\u{1f512}";
-        assert!(!ordinary.chars().any(misleads));
+        let misleading = "\u{0}\u{1b}\u{7f}\u{85}\u{061c}\u{200b}\u{200e}\u{200f}\u{202a}\u{202e}\u{2060}\u{2069}\u{feff}\u{2028}\u{2029}\u{e0000}\u{e0041}\u{e007f}";
+        for c in misleading.chars() {
+            assert!(misleads(c), "{c:?}");
+        }
+        let ordinary =
+            "a Zé\u{200c}\u{200d}\u{2027}\u{202f}\u{206a}\u{fefe}\u{1f512}\u{dffff}\u{e0080}";
+        for c in ordinary.chars() {
+            assert!(!misleads(c), "{c:?}");
+        }
     }
 
     // The input comes from the app. An unknown field means the app and the

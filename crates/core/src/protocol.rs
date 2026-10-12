@@ -36,9 +36,10 @@
 //! - Every number here stays below 2^53, so it is exact as a JavaScript
 //!   `number`, which is how the generated TypeScript carries it. A count
 //!   of milliseconds or of lines does not reach that in any real run.
-//! - `watch_logs` turns [`Event::Log`] on or off for one connection. To
-//!   miss nothing, turn it on first, then fetch with `logs`, and drop
-//!   whatever arrives twice, by `seq`.
+//! - `watch_logs` turns [`Event::Log`] on or off for one connection, and
+//!   is answered with `accepted` ([`ResponseBody::Accepted`]). To miss
+//!   nothing, turn it on first, then fetch with `logs`, and drop whatever
+//!   arrives twice, by `seq`.
 //! - A log event is not a promise. When a client is slow to take its
 //!   events the service drops log events for it, never state changes, and
 //!   never closes the connection for it. The gap shows in `seq`, and
@@ -48,9 +49,16 @@
 //!   as [`LogSource::Login`]. Such lines are kept apart from the service's
 //!   own, [`KEPT_ADDED_LOG_LINES`] of them, so no client can push a line
 //!   of the service's out; and one connection may add
-//!   [`MAX_ADDED_LOG_LINES`].
+//!   [`MAX_ADDED_LOG_LINES`]. A line that is kept is answered with
+//!   `accepted` ([`ResponseBody::Accepted`]). A text that is not a
+//!   [`LogText`], because it is too long or is not one plain line, and
+//!   any line from a connection that has added all it may, is answered
+//!   with the error `bad_request` ([`ErrorCode::BadRequest`]); nothing of
+//!   it is kept and the connection stays open.
 //! - `diagnostics` answers with a [`Diagnostics`]: what a person helping
-//!   the user would ask first, with no path and no user name in it.
+//!   the user would ask first, with no path and no user name in it. It is
+//!   small whatever the state: it counts what the tunnel carries and does
+//!   not list it.
 //!
 //! All of these are for the owner only.
 //!
@@ -63,6 +71,12 @@
 //! cannot read a message that uses anything new. Any change to these types,
 //! including adding a variant or a field, must bump [`PROTOCOL_VERSION`]. That
 //! is cheap, because the app and the service are installed together.
+//!
+//! The app passes over an event of a kind it does not know, and still
+//! refuses a response of a kind it does not know. That is a second line of
+//! defence for the app, not a way to add an event without a new version:
+//! the rule above holds for events as for everything else, and the Rust
+//! peers here refuse an unknown event.
 //!
 //! So that a mismatch gives a clear "please update" and not a dropped
 //! connection, the service reads only the version from the first line with
@@ -202,9 +216,11 @@ pub struct WatchLogsParams {
 pub struct AddLogParams {
     /// How serious the line is.
     pub level: LogLevel,
-    /// The line. One that is too long, or is not one plain line, is not a
-    /// valid request: it is refused, not cut.
-    pub text: LogText,
+    /// The line. It must be a [`LogText`]: the service answers one that is
+    /// too long, or is not one plain line, with `bad_request`, and keeps
+    /// nothing of it. It is a plain string here so that such a request can
+    /// be answered and not merely fail to be read.
+    pub text: String,
 }
 
 /// What the service needs to open a tunnel.
@@ -508,8 +524,55 @@ impl LogPage {
     }
 }
 
+/// Where the connection stands, without what a [`ConnState`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum StateKind {
+    /// See [`ConnState::Disconnected`].
+    Disconnected,
+    /// See [`ConnState::Connecting`].
+    Connecting,
+    /// See [`ConnState::Connected`].
+    Connected,
+    /// See [`ConnState::Disconnecting`].
+    Disconnecting,
+    /// See [`ConnState::LoginNeeded`].
+    LoginNeeded,
+    /// See [`ConnState::Failed`].
+    Failed,
+}
+
+impl From<&ConnState> for StateKind {
+    fn from(state: &ConnState) -> Self {
+        match state {
+            ConnState::Disconnected => Self::Disconnected,
+            ConnState::Connecting => Self::Connecting,
+            ConnState::Connected { .. } => Self::Connected,
+            ConnState::Disconnecting => Self::Disconnecting,
+            ConnState::LoginNeeded => Self::LoginNeeded,
+            ConnState::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
+/// A failure of a connection, as [`Diagnostics`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct LastError {
+    /// What went wrong, for a program to act on.
+    pub code: ErrorCode,
+    /// What went wrong, for a person to read: cleaned by the service as a
+    /// log line is, and checked like one when it is read.
+    pub message: LogText,
+}
+
 /// The service and its state, for someone helping the user. It names no
 /// path and no user.
+///
+/// Nothing in it grows with what is connected: the tunnel's subnets and
+/// domains are counted, not listed, and every text has a limit. So it
+/// always fits in one line, whatever the state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Diagnostics {
@@ -521,16 +584,20 @@ pub struct Diagnostics {
     pub os: String,
     /// The kind of processor the service was built for, such as `x86_64`.
     pub arch: String,
-    /// The operating system's version, when the service can tell.
-    pub os_version: Option<String>,
+    /// The operating system's version, when the service can tell. One
+    /// plain line, like a log line's text.
+    pub os_version: Option<LogText>,
     /// How long the service has been running, in seconds.
     #[cfg_attr(test, ts(type = "number"))]
     pub uptime_s: u64,
-    /// The connection state.
-    pub state: ConnState,
+    /// Where the connection stands. `status` gives the whole state.
+    pub state: StateKind,
+    /// How many subnets are routed through the tunnel; 0 with no tunnel.
+    pub subnets: u32,
+    /// How many DNS domains are resolved through it; 0 with no tunnel.
+    pub dns_domains: u32,
     /// The last failure of a connection, if there has been one in this run.
-    /// Its message is cleaned as a log line is.
-    pub last_error: Option<ErrorInfo>,
+    pub last_error: Option<LastError>,
     /// Whether the service's policy file could be read and is valid.
     pub policy_readable: bool,
     /// How many certificate pins the policy holds.
@@ -928,7 +995,7 @@ mod tests {
         let after = Some(LogCursor { run: 7, seq: 41 });
         let add = AddLogParams {
             level: LogLevel::Error,
-            text: LogText::new("Login failed.").unwrap(),
+            text: "Login failed.".to_string(),
         };
         let requests = [
             (
@@ -993,10 +1060,12 @@ mod tests {
             arch: "x86_64".to_string(),
             os_version: None,
             uptime_s: 90,
-            state: ConnState::Disconnected,
-            last_error: Some(ErrorInfo {
+            state: StateKind::Connected,
+            subnets: 2,
+            dns_domains: 1,
+            last_error: Some(LastError {
                 code: ErrorCode::GatewayUnreachable,
-                message: "The gateway could not be reached.".to_string(),
+                message: LogText::new("The gateway could not be reached.").unwrap(),
             }),
             policy_readable: true,
             pins: 2,
@@ -1006,19 +1075,80 @@ mod tests {
         let wire = concat!(
             r#"{"kind":"diagnostics","value":{"service_version":"0.1.0","protocol_version":3,"#,
             r#""os":"linux","arch":"x86_64","os_version":null,"uptime_s":90,"#,
-            r#""state":{"state":"disconnected"},"#,
+            r#""state":"connected","subnets":2,"dns_domains":1,"#,
             r#""last_error":{"code":"gateway_unreachable","message":"The gateway could not be reached."},"#,
             r#""policy_readable":true,"pins":2,"gateway":"vpn.example.test","owner_claimed":true}}"#,
         );
-        let body = ResponseBody::Diagnostics(Box::new(diagnostics));
+        let body = ResponseBody::Diagnostics(Box::new(diagnostics.clone()));
         assert_eq!(encode(&body).unwrap(), format!("{wire}\n"));
         assert_eq!(decode::<ResponseBody>(wire).unwrap(), body);
+
+        // Security rule: the message of the last failure is checked like a
+        // log line when it is read, as is the system's version.
+        for odd in ["two\\nlines", "escape\\u001b[2J", ""] {
+            let message = wire.replace("The gateway could not be reached.", odd);
+            assert!(decode::<ResponseBody>(&message).is_err(), "{odd}");
+            let version = wire.replace(r#""os_version":null"#, &format!(r#""os_version":"{odd}""#));
+            assert!(decode::<ResponseBody>(&version).is_err(), "{odd}");
+        }
+
+        // The largest there can be: the worst text wherever there is text
+        // with a limit, the largest numbers, and the longest name a gateway
+        // can have. The largest state a connect can carry (256 subnets and
+        // as many domains as fit in a request) adds nothing to it, because
+        // those are counted, not listed.
+        let worst = LogText::new(&"\"".repeat(MAX_LOG_TEXT_BYTES)).unwrap();
+        let largest = Diagnostics {
+            os_version: Some(worst.clone()),
+            uptime_s: u64::MAX,
+            state: StateKind::Disconnecting,
+            subnets: u32::MAX,
+            dns_domains: u32::MAX,
+            last_error: Some(LastError {
+                code: ErrorCode::VerificationFailed,
+                message: worst,
+            }),
+            pins: u32::MAX,
+            gateway: Some("x".repeat(253)),
+            ..diagnostics
+        };
+        let line = encode(&ResponseBody::Diagnostics(Box::new(largest))).unwrap();
+        assert!(line.len() < 4096, "{}", line.len());
+    }
+
+    // What `diagnostics` says of each state.
+    #[test]
+    fn every_state_has_its_kind() {
+        let tunnel = crate::state::TunnelInfo {
+            interface: "fake0".to_string(),
+            address: "10.255.0.2".to_string(),
+            subnets: Vec::new(),
+            dns_domains: Vec::new(),
+        };
+        let (code, message) = (ErrorCode::Internal, String::new());
+        let kinds = [
+            (ConnState::Disconnected, "disconnected"),
+            (ConnState::Connecting, "connecting"),
+            (ConnState::Connected { tunnel }, "connected"),
+            (ConnState::Disconnecting, "disconnecting"),
+            (ConnState::LoginNeeded, "login_needed"),
+            (ConnState::Failed { code, message }, "failed"),
+        ];
+        for (state, kind) in kinds {
+            let said = serde_json::to_string(&StateKind::from(&state)).unwrap();
+            assert_eq!(said, format!("{kind:?}"));
+            // The same word as the state itself uses.
+            let whole = serde_json::to_string(&state).unwrap();
+            assert!(whole.contains(&format!(r#""state":{said}"#)), "{whole}");
+        }
     }
 
     // Security rule: a log line is one plain line of bounded length, however
     // it comes to be: made here, or read off the wire from a peer.
     #[test]
     fn a_log_text_is_one_plain_line_or_it_is_nothing() {
+        // The number is part of the contract: the app sizes its rows by it.
+        assert_eq!(MAX_LOG_TEXT_BYTES, 512);
         let longest = "x".repeat(MAX_LOG_TEXT_BYTES);
         assert_eq!(LogText::new(&longest).unwrap().as_str(), longest);
         // Counted in bytes, not characters.
@@ -1034,11 +1164,15 @@ mod tests {
             "tab\there".to_string(),
             "reordered\u{202e}txet".to_string(),
             "hid\u{200b}den".to_string(),
+            // Not control characters, but each breaks a line.
+            "two\u{2028}lines".to_string(),
+            "two\u{2029}paragraphs".to_string(),
+            "tagged\u{e0041}".to_string(),
         ];
         for text in &not_lines {
             assert_eq!(LogText::new(text), Err(NotLogText), "{text:?}");
-            // The same text off the wire is refused, in a line and in a
-            // request to add one.
+            // The same text off the wire is refused in a line. A request to
+            // add it can be read, so that the service can answer it.
             let quoted = serde_json::to_string(text).unwrap();
             let shape = Err(InvalidKind::Shape);
             let kind = |found: Result<(), FrameError>| match found {
@@ -1061,9 +1195,13 @@ mod tests {
             let add = format!(
                 r#"{{"id":1,"body":{{"method":"add_log","params":{{"level":"info","text":{quoted}}}}}}}"#
             );
-            if add.len() <= MAX_LINE_BYTES {
-                assert_eq!(kind(decode::<Request>(&add).map(drop)), shape, "{text:?}");
-            }
+            let Ok(Request { body, .. }) = decode::<Request>(&add) else {
+                panic!("{text:?} must be readable, to be answered");
+            };
+            let RequestBody::AddLog(params) = body else {
+                panic!("not an add_log: {body:?}");
+            };
+            assert_eq!(LogText::new(&params.text), Err(NotLogText));
         }
         // The error does not repeat the text.
         assert!(!NotLogText.to_string().contains("escape"));
