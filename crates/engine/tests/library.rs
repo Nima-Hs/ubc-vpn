@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::{env, fs};
 
-use ubc_vpn_engine::ffi::{self, Handle, Library, LoadError};
+use ubc_vpn_engine::ffi::{self, Callbacks, Handle, Library, LoadError};
 use ubc_vpn_engine::{Role, prepare_environment};
 
 const LIBS: &str = env!("UBC_VPN_NATIVE_LIBS");
@@ -194,15 +194,13 @@ fn child() {
     if let Ok(library) = loaded {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let lines = Arc::clone(&seen);
-        let handle = Handle::new(
-            library,
-            Box::new(move |level, line, state| {
-                let (length, line) = (line.to_bytes().len(), line.to_string_lossy());
-                let start: String = line.chars().take(48).collect();
-                lines.lock().unwrap().push((level, state, length, start));
-            }),
-        )
-        .expect("the library makes a handle");
+        let lines: ffi::Lines = Box::new(move |level, line, state| {
+            let (length, line) = (line.to_bytes().len(), line.to_string_lossy());
+            let start: String = line.chars().take(48).collect();
+            lines.lock().unwrap().push((level, state, length, start));
+        });
+        let handle =
+            Handle::new(library, Callbacks::refusing(lines)).expect("the library makes a handle");
         let long = std::ffi::CString::new(format!("ftp://{}", "h".repeat(9000))).unwrap();
         let results = [
             handle.parse_url(c"ftp://vpn.example.test"),
@@ -234,6 +232,7 @@ fn the_declared_functions_are_the_reviewed_ones() {
         "get_cookie",
         "set_cookie",
         "mainloop",
+        "set_option_value",
     ];
     let names: Vec<String> = reviewed
         .iter()

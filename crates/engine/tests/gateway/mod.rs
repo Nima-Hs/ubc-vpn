@@ -22,6 +22,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, fs};
 
+/// How long a gateway may take to start and print its ports.
+const START_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A running gateway. Dropping it stops it, also when a test panics.
 pub struct Gateway {
     child: Child,
@@ -56,8 +59,21 @@ impl Gateway {
     /// Starts the gateway in `scenario` on ports the system chooses, or
     /// returns `None` when the test is to be skipped.
     pub fn start(scenario: &str) -> Option<Self> {
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
         let (python, dir) = tools()?;
+        Some(Self::start_with(scenario, &python, &dir))
+    }
+
+    /// The same, with the certificate and key in `keys` in place of the
+    /// usual ones. For a certificate the system's own store trusts, which
+    /// only the CI workflow makes: `None` everywhere else.
+    pub fn start_trusted(scenario: &str) -> Option<Self> {
+        let keys = env::var_os("UBC_VPN_TEST_TRUSTED_GATEWAY_DIR")?;
+        let (python, _) = tools()?;
+        Some(Self::start_with(scenario, &python, Path::new(&keys)))
+    }
+
+    fn start_with(scenario: &str, python: &Path, dir: &Path) -> Self {
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
         // One log per gateway: tests run side by side.
         let number = COUNT.fetch_add(1, Ordering::SeqCst);
         let log = dir.join(format!(
@@ -71,7 +87,10 @@ impl Gateway {
             .args([dir.join("cert.pem"), dir.join("key.pem")])
             .arg(scenario)
             .arg(&log)
-            .stdin(Stdio::null())
+            // The gateway stops when this pipe closes. The child keeps our
+            // end of it, so that is when this process ends, however it ends:
+            // an abort runs no `Drop`.
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .expect("the Python for the gateway starts");
@@ -83,15 +102,39 @@ impl Gateway {
             other_port: 0,
             log,
         };
-        let mut first = String::new();
-        BufReader::new(stdout).read_line(&mut first).unwrap();
+        // Read on a thread of its own, so that a gateway that starts and
+        // never says where it listens fails the test and does not hold it.
+        // When the test gives up, dropping `gateway` kills the child, which
+        // ends the read.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut first = String::new();
+            let _ = BufReader::new(stdout).read_line(&mut first);
+            let _ = sender.send(first);
+        });
+        let first = receiver
+            .recv_timeout(START_LIMIT)
+            .expect("the gateway said where it listens in time");
         let ports = first.strip_prefix("PORTS ").unwrap_or_default();
         let mut ports = ports.split_whitespace().map(str::parse);
         let (Some(Ok(port)), Some(Ok(other))) = (ports.next(), ports.next()) else {
             panic!("the gateway did not say where it listens: {first:?}");
         };
         (gateway.port, gateway.other_port) = (port, other);
-        Some(gateway)
+        gateway
+    }
+
+    /// Closes the gateway's standard input, as the end of this process
+    /// would, and says whether the gateway then stopped by itself.
+    pub fn stops_without_its_parent(mut self) -> bool {
+        drop(self.child.stdin.take());
+        for _ in 0..100 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
     }
 
     /// Every request received so far, one JSON object per line, each saying

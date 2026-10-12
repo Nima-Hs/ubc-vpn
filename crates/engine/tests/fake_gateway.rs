@@ -139,3 +139,39 @@ fn redirect_action_and_csd_point_at_the_other_listener() {
         "{first}"
     );
 }
+
+// A client that connects and then says nothing, as one does that stops at
+// the certificate, must not keep the gateway from serving the next one.
+#[test]
+fn a_client_that_stalls_in_the_handshake_does_not_block_the_gateway() {
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    let stalled = std::net::TcpStream::connect(("127.0.0.1", gateway.port)).unwrap();
+    let line = post(gateway.port, "/", "");
+    let reply: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
+    assert!(is_login_form(&reply), "{reply}");
+    drop(stalled);
+}
+
+// The gateway does not outlive the test that started it, however that test
+// ends: it watches its standard input, which closes with the test process.
+#[test]
+fn the_gateway_stops_when_its_parent_is_gone() {
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    assert!(gateway.stops_without_its_parent());
+}
+
+#[test]
+fn fields_shows_a_hidden_field_one_for_a_second_login_and_a_group() {
+    let Some((first, _, _gateway)) = login("fields") else {
+        return;
+    };
+    let body = text(&first, "body");
+    assert!(is_login_form(&first), "{first}");
+    assert!(body.contains(r#"name="secondary_password" label="Second:" second-auth="1""#));
+    assert!(body.contains(r#"<input type="hidden" name="token""#));
+    assert!(body.contains(r#"<select name="group_list""#));
+}

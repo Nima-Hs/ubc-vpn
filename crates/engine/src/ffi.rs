@@ -42,10 +42,18 @@
 #![allow(dead_code)]
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use crate::environment::{EnvironmentError, Role, check_environment};
+
+mod handle;
+
+// For the tests now, and for the engines when they come.
+#[allow(unused_imports)]
+pub use handle::{
+    Callbacks, CommandPipe, Context, Field, FieldKind, Fill, Form, FormAnswer, Handle, Judge,
+    LineState, Lines, Resolve,
+};
 
 /// The version string of the one release this binding is written for.
 const PINNED: &str = "v9.21";
@@ -66,16 +74,53 @@ pub(crate) struct VpnInfo {
     _opaque: [u8; 0],
 }
 
-/// `struct oc_auth_form`. Its fields are declared with the login code.
+/// `struct oc_form_opt`: one field of a login form. The strings belong to
+/// the library; a value is set with `openconnect_set_option_value` only.
 #[repr(C)]
-pub(crate) struct AuthForm {
-    _opaque: [u8; 0],
+pub(crate) struct FormOpt {
+    pub(crate) next: *mut FormOpt,
+    /// An `OC_FORM_OPT_*` type: 1 text, 2 password, 3 select, 4 hidden.
+    pub(crate) kind: c_int,
+    pub(crate) name: *mut c_char,
+    pub(crate) label: *mut c_char,
+    value: *mut c_char,
+    pub(crate) flags: c_uint,
+    reserved: *mut c_void,
 }
 
-/// The C library's `struct addrinfo`, declared with the code that fills it.
+/// `struct oc_auth_form`: a login form. The strings belong to the library.
+#[repr(C)]
+pub(crate) struct AuthForm {
+    banner: *mut c_char,
+    pub(crate) message: *mut c_char,
+    pub(crate) error: *mut c_char,
+    auth_id: *mut c_char,
+    method: *mut c_char,
+    action: *mut c_char,
+    pub(crate) opts: *mut FormOpt,
+    /// Not null when the form asks for a choice of group.
+    pub(crate) authgroup_opt: *mut c_void,
+    authgroup_selection: c_int,
+}
+
+/// The C library's `struct addrinfo`. Its first four fields are the same
+/// everywhere; the rest differ in width and order between the three systems.
+/// Only the first four are ever set here, in the hints for a lookup, and a
+/// result is passed on untouched.
 #[repr(C)]
 pub(crate) struct AddrInfo {
-    _opaque: [u8; 0],
+    pub(crate) flags: c_int,
+    pub(crate) family: c_int,
+    pub(crate) socktype: c_int,
+    pub(crate) protocol: c_int,
+    #[cfg(windows)]
+    addrlen: usize,
+    #[cfg(not(windows))]
+    addrlen: u32,
+    // `ai_canonname` and `ai_addr`, in the order this system has them.
+    first: *mut c_void,
+    second: *mut c_void,
+    next: *mut AddrInfo,
 }
 
 /// `openconnect_validate_peer_cert_vfn`: zero accepts the certificate. The
@@ -126,6 +171,8 @@ pub enum LoadError {
     MissingFunction,
     /// The library is not the pinned version.
     WrongVersion,
+    /// The library could not set itself up.
+    InitFailed,
 }
 
 impl std::fmt::Display for LoadError {
@@ -139,6 +186,7 @@ impl std::fmt::Display for LoadError {
             Self::LoadedEarly => f.write_str("A VPN library was already loaded."),
             Self::NotFound => f.write_str("The VPN library could not be loaded."),
             Self::WrongFolder => f.write_str("The VPN library came from the wrong folder."),
+            Self::InitFailed => f.write_str("The VPN library could not start."),
             Self::MissingFunction | Self::WrongVersion => {
                 f.write_str("The VPN library is not the expected version.")
             }
@@ -211,6 +259,7 @@ library! {
     fn get_cookie(*mut VpnInfo) -> *const c_char;
     fn set_cookie(*mut VpnInfo, *const c_char) -> c_int;
     fn mainloop(*mut VpnInfo, c_int, c_int) -> c_int;
+    fn set_option_value(*mut FormOpt, *const c_char) -> c_int;
 }
 
 impl Library {
@@ -233,6 +282,13 @@ impl Library {
         if !is_pinned(&library.version()) {
             return Err(LoadError::WrongVersion);
         }
+        // Once, before the first handle. It sets up TLS, and on Windows the
+        // system's networking as well.
+        // SAFETY: `resolve` filled the pointer in, the version is the pinned
+        // one, and the function takes no arguments.
+        if unsafe { (library.init_ssl)() } != 0 {
+            return Err(LoadError::InitFailed);
+        }
         Ok(library)
     }
 
@@ -247,117 +303,6 @@ impl Library {
     }
 }
 
-#[link(name = "ubc_vpn_shim", kind = "static")]
-unsafe extern "C" {
-    /// In `shim.c`: formats a progress line and calls
-    /// [`ubc_vpn_progress_line`] with it.
-    fn ubc_vpn_progress(privdata: *mut c_void, level: c_int, fmt: *const c_char, ...);
-}
-
-/// Whether a log line is all of what the library logged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineState {
-    /// The whole line.
-    Whole,
-    /// The line did not fit the shim's buffer and was cut. A secret in it
-    /// may be cut too, and a cut secret matches no registered one: treat
-    /// the line as holding part of one.
-    Cut,
-    /// The line could not be formatted. What arrives may be its beginning,
-    /// or nothing.
-    Failed,
-}
-
-/// Receives each line the library logs, with its `PRG_*` level. A line may
-/// hold a secret: an engine passes it to `LogSink::log` and nowhere else.
-pub type Lines = Box<dyn Fn(c_int, &CStr, LineState) + Send + Sync>;
-
-/// Called by `shim.c` with one formatted log line. `state` is one of the
-/// `UBC_VPN_LINE_*` values there.
-///
-/// # Safety
-///
-/// `privdata` must be null or the pointer [`Handle::new`] gave the library,
-/// and `line` null or a NUL-terminated string valid for the call.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ubc_vpn_progress_line(
-    privdata: *mut c_void,
-    level: c_int,
-    line: *const c_char,
-    state: c_int,
-) {
-    if privdata.is_null() || line.is_null() {
-        return;
-    }
-    // A value the shim does not send is read as the cautious one.
-    let state = match state {
-        0 => LineState::Whole,
-        2 => LineState::Failed,
-        _ => LineState::Cut,
-    };
-    // SAFETY: by the contract above `privdata` points to the `Lines` a live
-    // `Handle` owns, and `line` is a NUL-terminated string for this call.
-    let (lines, line) = unsafe { (&*privdata.cast::<Lines>(), CStr::from_ptr(line)) };
-    // A panic must not unwind into C.
-    let _ = catch_unwind(AssertUnwindSafe(|| lines(level, line, state)));
-}
-
-/// One `openconnect_info`, freed on drop. It is not `Send`: the thread that
-/// makes it makes every library call on it.
-pub struct Handle {
-    library: Library,
-    raw: *mut VpnInfo,
-    /// What the library holds as `privdata`. Freed after the handle.
-    lines: *mut Lines,
-}
-
-impl Handle {
-    /// Makes a handle that logs to `lines`. The certificate and form
-    /// callbacks are not set yet, so it cannot log in.
-    pub fn new(library: Library, lines: Lines) -> Option<Self> {
-        let lines = Box::into_raw(Box::new(lines));
-        // SAFETY: the library is loaded. The user agent is a NUL-terminated
-        // string the library copies; absent callbacks may be null; `lines`
-        // stays valid until `drop` has freed the handle.
-        let raw = unsafe {
-            (library.vpninfo_new)(
-                c"UBC VPN".as_ptr(),
-                None,
-                None,
-                None,
-                Some(ubc_vpn_progress),
-                lines.cast(),
-            )
-        };
-        let handle = Self {
-            library,
-            raw,
-            lines,
-        };
-        (!raw.is_null()).then_some(handle)
-    }
-
-    /// `openconnect_parse_url`: zero, or a negative errno.
-    pub fn parse_url(&self, url: &CStr) -> c_int {
-        // SAFETY: `raw` is a live handle used on its own thread, and `url`
-        // is a NUL-terminated string the library copies.
-        unsafe { (self.library.parse_url)(self.raw, url.as_ptr()) }
-    }
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        if !self.raw.is_null() {
-            // SAFETY: `raw` came from `openconnect_vpninfo_new` and is freed
-            // once. The library may log while freeing, so `lines` goes last.
-            unsafe { (self.library.vpninfo_free)(self.raw) };
-        }
-        // SAFETY: `lines` came from `Box::into_raw` in `new`, and nothing
-        // can reach it now that the handle is gone.
-        drop(unsafe { Box::from_raw(self.lines) });
-    }
-}
-
 /// Proof that [`prepare_environment`] ran and found the environment safe.
 /// [`Library::load`] takes one, so the two cannot be called in the wrong
 /// order. Nothing else can make one.
@@ -366,7 +311,9 @@ pub struct Prepared(());
 
 /// Makes the process's environment safe for the library. Call it once, first
 /// thing in `main`, before any thread exists and before [`Library::load`]. A
-/// second call in the same process is an error.
+/// second call in the same process is an error, and that includes a call
+/// after one that failed: the one chance is used up whatever comes of it,
+/// so a program whose first call fails must stop.
 ///
 /// - **Windows:** removes every one of
 ///   [`DANGEROUS_VARIABLES`](crate::environment::DANGEROUS_VARIABLES). With

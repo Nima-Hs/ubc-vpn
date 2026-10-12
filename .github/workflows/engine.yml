@@ -45,6 +45,9 @@ jobs:
   load:
     name: load (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # A run takes about two minutes. This stops one that hangs, such as on
+    # a stand-in gateway that never answers.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -141,6 +144,31 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn.example.test" \
             -keyout gateway/key.pem -out gateway/cert.pem
 
+      # One test needs a gateway whose certificate this machine's own store
+      # trusts, to show that the engine asks its judge all the same. So a
+      # throwaway authority is added to the store of this runner, which is
+      # thrown away after the job. Its key never leaves runner.temp. Linux
+      # only: it is the one runner where this is a single command. Never do
+      # this on a machine that is kept; the test is skipped without the
+      # variable set here. The step runs on GitHub's own runners only, so a
+      # machine someone registers as a runner is never touched; the check of
+      # the log below then fails there, which is the right answer.
+      - name: Trust a throwaway authority on this runner
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir gateway-trusted && cd gateway-trusted
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=UBC VPN throwaway test authority" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" \
+            -keyout authority-key.pem -out authority.pem
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=vpn.example.test" -keyout key.pem -out request.pem
+          printf 'subjectAltName=DNS:vpn.example.test\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' > extensions
+          openssl x509 -req -in request.pem -CA authority.pem -CAkey authority-key.pem -CAcreateserial \
+            -days 2 -extfile extensions -out cert.pem
+          sudo cp authority.pem /usr/local/share/ca-certificates/ubc-vpn-throwaway-test-authority.crt
+          sudo update-ca-certificates
+          echo "UBC_VPN_TEST_TRUSTED_GATEWAY_DIR=$PWD" >> "$GITHUB_ENV"
+
       # The tests start themselves again with planted copies in the working
       # directory and the loader's search path. On macOS and Linux they build
       # a stand-in library with the runner's C compiler.
@@ -153,8 +181,14 @@ jobs:
           UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: |
           cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests -- --nocapture | tee test.log
-          # Each of the gateway's eight scenarios ran.
-          [ "$(grep -c '^RAN: gateway ' test.log)" = 8 ]
+          # Each of the gateway's nine scenarios ran.
+          [ "$(grep -c '^RAN: gateway ' test.log)" = 9 ]
+          # The real library logged in to it, and was refused by it.
+          grep -q '^RAN: handle logs in' test.log
+          grep -q '^RAN: handle rejects' test.log
+          if [ "$RUNNER_OS" = Linux ]; then
+            grep -q '^RAN: handle judges a trusted certificate' test.log
+          fi
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
           # that need no binding run in it too.
