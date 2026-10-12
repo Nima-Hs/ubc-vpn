@@ -291,10 +291,62 @@ test("another window cannot use the interface's functions", async () => {
     expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toHaveProperty("state");
 });
 
-test("connect and disconnect, by keyboard", async () => {
+/** Obviously fake. Typed at the login prompts, then looked for where it must not be. */
+const FAKE_PASSWORD = "not-a-real-password-0123456789";
+
+test("log in, connect and disconnect, by keyboard", async () => {
     await scenario("disconnected");
     await action().focus();
 
+    // Connect starts a login. The first question takes the keyboard.
+    await page.keyboard.press("Enter");
+    await expect(heading()).toHaveText("Logging in");
+    await expect(heading()).toHaveText("Your password");
+    const password = page.getByLabel("Password");
+    await expect(password).toBeFocused();
+    await expect(password).toHaveAttribute("type", "password");
+    await expect(password).toHaveAttribute("autocomplete", "off");
+    // Nothing to send yet.
+    const next = page.getByRole("button", { name: "Continue" });
+    await expect(next).toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Enter");
+    await expect(heading()).toHaveText("Your password");
+
+    // Pasting is allowed; typing and Enter sends it.
+    await password.evaluate((field, text) => {
+        const data = new DataTransfer();
+        data.setData("text/plain", text);
+        field.dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }),
+        );
+    }, "pasted");
+    await password.fill("");
+    await page.keyboard.type(FAKE_PASSWORD);
+    await expect(next).not.toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Enter");
+
+    // The second question, a one-time code, with a field of its own.
+    await expect(heading()).toHaveText("Your one-time code");
+    const code = page.getByLabel("Enter the code from your authenticator");
+    await expect(code).toBeFocused();
+    await expect(code).toHaveValue("");
+    await expect(code).toHaveAttribute("type", "password");
+    await expect(code).toHaveAttribute("inputmode", "numeric");
+
+    // What was typed is gone from the page and was never in the app's state.
+    const kept = await page.evaluate(async (secret) => {
+        const snapshot = JSON.stringify(await window.ubcVpn.getSnapshot());
+        return {
+            inPage: document.documentElement.outerHTML.includes(secret),
+            inFields: [...document.querySelectorAll("input")].some((field) =>
+                field.value.includes(secret),
+            ),
+            inState: snapshot.includes(secret),
+        };
+    }, FAKE_PASSWORD);
+    expect(kept).toEqual({ inPage: false, inFields: false, inState: false });
+
+    await page.keyboard.type("000000");
     await page.keyboard.press("Enter");
     await expect(heading()).toHaveText("Connecting");
     await expect(action()).toHaveAttribute("aria-busy", "true");
@@ -311,6 +363,71 @@ test("connect and disconnect, by keyboard", async () => {
     await page.keyboard.press("Space");
     await expect(heading()).toHaveText("Disconnecting");
     await expect(heading()).toHaveText("Not connected");
+});
+
+test("a login can be given up, and the keyboard goes back to Connect", async () => {
+    await scenario("disconnected");
+    await action().focus();
+    await page.keyboard.press("Enter");
+    await expect(heading()).toHaveText("Your password");
+    await page.keyboard.type("half an ans");
+    await page.keyboard.press("Escape");
+    await expect(heading()).toHaveText("Not connected");
+    await expect(action()).toBeFocused();
+
+    // The Cancel button does the same, also while the app is waiting.
+    await page.keyboard.press("Enter");
+    await expect(heading()).toHaveText("Logging in");
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(heading()).toHaveText("Not connected");
+});
+
+test("putting the window away gives a login up", async () => {
+    await scenario("disconnected");
+    await action().click();
+    await expect(heading()).toHaveText("Your password");
+    await page.evaluate(() => window.ubcVpn.closeWindow());
+    await expect
+        .poll(() =>
+            app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible()),
+        )
+        .toBe(false);
+    // Nobody is there to answer, so the login does not carry on behind it.
+    await expect
+        .poll(() => page.evaluate(async () => (await window.ubcVpn.getSnapshot()).login.phase))
+        .toBe("idle");
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.show());
+    await expect(heading()).toHaveText("Not connected");
+});
+
+test("a failed login says why, and can be tried again or closed", async () => {
+    await scenario("login-failed-wrong-password");
+    await expect(heading()).toHaveText("Login refused");
+    await expect(page.getByRole("status")).toContainText("UBC did not accept");
+    await page.getByRole("button", { name: "Back" }).click();
+    await expect(heading()).toHaveText("Not connected");
+
+    await scenario("login-failed-gateway-unreachable");
+    await page.getByRole("button", { name: "Try again" }).click();
+    await expect(heading()).toHaveText("Your password");
+    await page.keyboard.press("Escape");
+
+    // When the VPN is already in use there is nothing to try again, only the way back.
+    await scenario("login-failed-busy");
+    await expect(heading()).toHaveText("VPN is busy");
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Back" }).click();
+    await expect(heading()).toHaveText("Not connected");
+    await scenario("login-failed-not-owner");
+    await expect(heading()).toHaveText("Managed by another user");
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+
+    // A notice from the gateway is shown as text, never as markup.
+    await scenario("login-password-again");
+    await expect(page.getByRole("group", { name: "Message from UBC" })).toHaveText(
+        "Login failed. Enter your password again.",
+    );
+    await scenario("disconnected");
 });
 
 test("every state, photographed", async () => {

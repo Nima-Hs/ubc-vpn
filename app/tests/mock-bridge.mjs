@@ -127,6 +127,10 @@ function answer(request) {
             status: "error",
             value: { code: "not_owner", message: "only the owner may do this" },
         });
+        // The real service then hangs up on a caller that is not its owner.
+        if (run.hangsUpOnNonOwner) {
+            finish({ type: "service_unavailable" });
+        }
         return;
     }
     if (run.answerWithWrongId) {

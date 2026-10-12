@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
     COLOUR_PALETTE,
     closeHidesWindow,
+    connectFromTray,
     drawTrayIcon,
     TEMPLATE_PALETTE,
     type TrayKind,
@@ -33,7 +34,7 @@ function classNames(text: string): string[] {
 describe("screens", () => {
     // Layout only: how components are arranged, in steps of the spacing scale.
     const layout =
-        /^(flex(-(1|col|row|wrap))?|grid(-cols-\d)?|(min-|max-)?[hw]-(0|full|\d+)|shrink-0|items-(start|center|end|baseline)|justify-(start|center|end|between)|(gap|gap-x|gap-y|p|px|py|pt|pb)-\d(\.5)?|scroll-region|overflow-hidden|animate-arrive|sr-only)$/;
+        /^(flex(-(1|col|row|wrap))?|grid(-cols-\d)?|(min-|max-)?[hw]-(0|full|\d+)|shrink(-0)?|items-(start|center|end|baseline)|justify-(start|center|end|between)|(gap|gap-x|gap-y|p|px|py|pt|pb)-\d(\.5)?|scroll-region|overflow-hidden|animate-arrive|sr-only)$/;
 
     it.each(sources("views"))("$file uses components for everything but layout", ({ text }) => {
         const classes = [...text.matchAll(/className="([^"]*)"/g)].flatMap(([, value = ""]) =>
@@ -123,6 +124,17 @@ describe("the tray icon", () => {
     it("uses colour as well as shape where the OS allows it", () => {
         expect(COLOUR_PALETTE.on).not.toEqual(COLOUR_PALETTE.ink);
         expect(COLOUR_PALETTE.attention).not.toEqual(COLOUR_PALETTE.ink);
+    });
+});
+
+describe("Connect, from the tray menu", () => {
+    it("shows the window before a login can ask anything", () => {
+        const order: string[] = [];
+        connectFromTray(
+            () => order.push("window shown"),
+            () => order.push("login started"),
+        );
+        expect(order).toEqual(["window shown", "login started"]);
     });
 });
 

@@ -25,6 +25,7 @@ export interface MockRun {
     firstEvent?: boolean;
     ignore?: string[];
     requestsRefusedAsNotOwner?: boolean;
+    hangsUpOnNonOwner?: boolean;
     answerWithWrongId?: boolean;
     watchEarlyInput?: boolean;
     reportStart?: boolean;

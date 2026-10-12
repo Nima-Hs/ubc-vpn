@@ -10,7 +10,7 @@ import type { LoginState, Snapshot } from "@shared/api";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { connectCommand } from "../src/main/channel/cli";
-import { ConnectRunner } from "../src/main/channel/connect";
+import { ConnectRunner, plainText } from "../src/main/channel/connect";
 import { MAX_LINE_BYTES } from "../src/main/channel/framing";
 import { isCliMessage } from "../src/main/channel/validate";
 import { Controller } from "../src/main/controller";
@@ -88,15 +88,21 @@ interface Harness {
 
 function login(
     steps: CliStep[],
-    options: Parameters<typeof mockCli>[1] & { exitGraceMs?: number; env?: NodeJS.ProcessEnv } = {},
+    options: Parameters<typeof mockCli>[1] & {
+        exitGraceMs?: number;
+        env?: NodeJS.ProcessEnv;
+        minStartGapMs?: number;
+    } = {},
 ): Harness {
-    const { exitGraceMs, env, ...mock } = options;
+    // No gap between logins unless a test is about the gap.
+    const { exitGraceMs, env, minStartGapMs = 0, ...mock } = options;
     const cli = mockCli(steps, mock);
     const states: LoginState[] = [];
     const runner = new ConnectRunner({
         command: cli.command,
         args: cli.args,
         onState: (state) => states.push(state),
+        minStartGapMs,
         ...(exitGraceMs !== undefined && { exitGraceMs }),
         ...(env !== undefined && { env }),
     });
@@ -174,6 +180,8 @@ describe("how a login ends badly", () => {
         "gateway_unreachable",
         "route_refused",
         "service_unavailable",
+        "busy",
+        "not_owner",
         "internal",
     ];
 
@@ -238,7 +246,10 @@ describe("how a login ends badly", () => {
         });
         const { runner, states } = login([{ done: true }]);
         expect(() => runner.start()).not.toThrow();
-        expect(states).toEqual([{ phase: "failed", code: "internal", message: "" }]);
+        expect(states).toEqual([
+            { phase: "working" },
+            { phase: "failed", code: "internal", message: "" },
+        ]);
         // Nothing is left half-started.
         expect(runner.start()).toBe(true);
     });
@@ -291,6 +302,199 @@ describe("how a login ends badly", () => {
         expect(isCliMessage({ type: "error", code: "toString", message: "" })).toBe(false);
         expect(isCliMessage(null)).toBe(false);
         expect(isCliMessage([])).toBe(false);
+    });
+});
+
+describe("text from the gateway and the client", () => {
+    const BEL = String.fromCharCode(7);
+    const ESC = String.fromCharCode(27);
+    // "Right-to-left override": everything after it is drawn backwards.
+    const RLO = String.fromCharCode(0x202e);
+    const LRI = String.fromCharCode(0x2066);
+    const LINE_SEPARATOR = String.fromCharCode(0x2028);
+
+    it("is made one line of plain characters before it is shown", () => {
+        expect(plainText("Password", 200)).toBe("Password");
+        expect(plainText("  Enter\tyour\r\n\r\npassword  ", 200)).toBe("Enter your password");
+        expect(plainText(`Pass${BEL}word${ESC}[31m`, 200)).toBe("Pass word [31m");
+        expect(plainText(`Enter your ${RLO}drowssap`, 200)).toBe("Enter your drowssap");
+        expect(plainText(`one${LINE_SEPARATOR}two${LRI}three`, 200)).toBe("one two three");
+        // Other languages, accents and emoji are left alone.
+        expect(plainText("Mot de passe é 密码 🔑", 200)).toBe("Mot de passe é 密码 🔑");
+    });
+
+    it("keeps the joiners that Persian and joined emoji are written with", () => {
+        const ZWNJ = String.fromCharCode(0x200c);
+        const ZWJ = String.fromCharCode(0x200d);
+        // "می‌خواهم": the non-joiner keeps two parts of one word apart.
+        const persian = `می${ZWNJ}خواهم`;
+        // A family: three people joined into one picture.
+        const family = `👨${ZWJ}👩${ZWJ}👧`;
+        expect(plainText(persian, 200)).toBe(persian);
+        expect(plainText(family, 200)).toBe(family);
+    });
+
+    it("is cut between whole characters, never through one", () => {
+        const ZWJ = String.fromCharCode(0x200d);
+        const family = `👨${ZWJ}👩${ZWJ}👧`;
+        // The limit falls inside the emoji: none of it is kept, not a piece.
+        expect(plainText(`ab${family}`, 4)).toBe("ab");
+        expect(plainText(`ab${family}`, 2 + family.length)).toBe(`ab${family}`);
+        // The same for a single character stored as two units, and an accent on a letter.
+        expect(plainText("ab🔑", 3)).toBe("ab");
+        expect(plainText(`abe${String.fromCharCode(0x301)}`, 3)).toBe("ab");
+        for (const limit of [1, 2, 3, 5, 7, 9]) {
+            const cut = plainText(`a🔑${family}é`, limit);
+            expect(cut.length).toBeLessThanOrEqual(limit);
+            // Half of a two-unit character cannot be encoded: this throws on one.
+            expect(() => encodeURIComponent(cut)).not.toThrow();
+        }
+    });
+
+    it("is cut to length after it is cleaned, not before", () => {
+        expect(plainText(`${"\n".repeat(500)}abcdef`, 3)).toBe("abc");
+    });
+
+    it("is cleaned in a question's label and message", async () => {
+        const { states } = await atPrompt([
+            {
+                prompt: {
+                    id: 1,
+                    kind: "text",
+                    label: `Code\n\n\n${RLO}:`,
+                    message: `First line\nSecond${BEL} line`,
+                },
+            },
+        ]);
+        expect(states.at(-1)).toEqual({
+            phase: "prompt",
+            prompt: { id: 1, kind: "text", label: "Code :", message: "First line Second line" },
+        });
+    });
+
+    it("is cleaned and shortened in a failure's message", async () => {
+        const { runner, states, phase } = login([
+            { error: { code: "internal", message: `bad\nthing${RLO} ${"m".repeat(5000)}` } },
+        ]);
+        runner.start();
+        await until(() => phase() === "failed", "the failure");
+        const state = states.at(-1);
+        const message = state?.phase === "failed" ? state.message : "";
+        expect(message.startsWith("bad thing m")).toBe(true);
+        expect(message).toHaveLength(1000);
+    });
+});
+
+describe("a client that has been let go", () => {
+    it("is not listened to any more, even for lines that arrived with its last", async () => {
+        // A line that ends the login and a question, written together.
+        const question = JSON.stringify({ type: "prompt", ...PASSWORD_PROMPT });
+        for (const ending of ["this is not json", JSON.stringify({ type: "done" })]) {
+            const { runner, states, phase } = login([
+                { raw: `${ending}\n${question}\n` },
+                { hang: true },
+            ]);
+            runner.start();
+            await until(() => phase() !== "working", "the login ending");
+            await pause(150);
+            expect(
+                states.some((state) => state.phase === "prompt"),
+                ending,
+            ).toBe(false);
+            expect(runner.answer(1, PASSWORD)).toBe(false);
+        }
+    });
+
+    it("cannot end the login that came after it", async () => {
+        // Login A will not stop when told and is killed a moment later. By
+        // then login B is at its question, and must still be.
+        const { cli, runner, states, phase } = login(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            {
+                ignoresCancel: true,
+                exitGraceMs: 200,
+                laterLogins: [[{ prompt: CODE_PROMPT }, { hang: true }]],
+            },
+        );
+        runner.start();
+        await until(() => phase() === "prompt", "login A's prompt");
+        runner.cancel();
+        runner.start();
+        await until(() => phase() === "prompt", "login B's prompt");
+
+        const [first = 0] = cli.pids();
+        await until(() => !alive(first), "login A's client being killed");
+        await pause(150);
+        expect(states.at(-1)).toMatchObject({ phase: "prompt", prompt: { kind: "code" } });
+        // And B can still be answered.
+        const state = states.at(-1);
+        expect(runner.answer(state?.phase === "prompt" ? state.prompt.id : -1, CODE)).toBe(true);
+    });
+});
+
+describe("how often a login can start", () => {
+    it("starts the first at once, and shows the user it has begun", async () => {
+        const spawned = vi.mocked(spawn);
+        spawned.mockClear();
+        const { runner, states } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
+            minStartGapMs: 60_000,
+        });
+        expect(runner.start()).toBe(true);
+        expect(spawned).toHaveBeenCalledTimes(1);
+        expect(states).toEqual([{ phase: "working" }]);
+    });
+
+    it("holds the next one back until the gap has passed", async () => {
+        const spawned = vi.mocked(spawn);
+        const { runner, phase } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
+            minStartGapMs: 600,
+        });
+        spawned.mockClear();
+        runner.start();
+        const firstStart = Date.now();
+        await until(() => phase() === "prompt", "the first prompt");
+        runner.cancel();
+
+        // The user sees it begin straight away; the client is not started yet.
+        expect(runner.start()).toBe(true);
+        expect(phase()).toBe("working");
+        expect(spawned).toHaveBeenCalledTimes(1);
+        // Pressing again while it waits changes nothing.
+        expect(runner.start()).toBe(false);
+
+        await until(() => spawned.mock.calls.length === 2, "the second start");
+        expect(Date.now() - firstStart).toBeGreaterThanOrEqual(590);
+        await until(() => phase() === "prompt", "the second prompt");
+    });
+
+    it("cannot be made to start clients in a stream", async () => {
+        const spawned = vi.mocked(spawn);
+        const { runner } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
+            minStartGapMs: 60_000,
+        });
+        spawned.mockClear();
+        // Forty presses of Connect and Cancel, as fast as they can be made.
+        for (let round = 0; round < 40; round++) {
+            runner.start();
+            runner.cancel();
+        }
+        await pause(200);
+        expect(spawned).toHaveBeenCalledTimes(1);
+    });
+
+    it("forgets a held-back start that is cancelled", async () => {
+        const spawned = vi.mocked(spawn);
+        const { runner, phase } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
+            minStartGapMs: 300,
+        });
+        runner.start();
+        runner.cancel();
+        spawned.mockClear();
+        runner.start();
+        runner.cancel();
+        expect(phase()).toBe("idle");
+        await pause(450);
+        expect(spawned).not.toHaveBeenCalled();
     });
 });
 
@@ -631,6 +835,29 @@ describe("a password", () => {
         expect(writes).toEqual([]);
     });
 
+    it("is wiped even when the client was already gone and the write failed", async () => {
+        const { runner } = await atPrompt([{ prompt: PASSWORD_PROMPT }, { hang: true }]);
+        const child = vi.mocked(spawn).mock.results.at(-1)?.value as {
+            stdin: { write(...args: unknown[]): boolean; destroy(): void };
+        };
+        const written: Buffer[] = [];
+        const write = child.stdin.write.bind(child.stdin);
+        child.stdin.write = (...args: unknown[]) => {
+            if (Buffer.isBuffer(args[0])) {
+                written.push(args[0]);
+            }
+            return write(...args);
+        };
+        // The client's input is gone, so the write can only fail.
+        child.stdin.destroy();
+        expect(runner.answer(1, PASSWORD)).toBe(true);
+
+        expect(written).toHaveLength(1);
+        expect(written[0]?.includes(Buffer.from(PASSWORD))).toBe(true);
+        // Failed or not, the bytes do not stay.
+        await until(() => written[0]?.every((byte) => byte === 0) === true, "the line being wiped");
+    });
+
     it("never becomes part of what the interface is sent", async () => {
         const cli = mockCli([{ prompt: PASSWORD_PROMPT, expect: PASSWORD }, { hang: true }]);
         const demo = createDemoLink(10);
@@ -690,6 +917,12 @@ describe("the controller", () => {
         await until(() => controller.getSnapshot().login.phase === "prompt", "the prompt");
         expect(cli.pids()).toHaveLength(1);
         const [pid = 0] = cli.pids();
+        // Stopping tells nobody: by then the window and the tray are going,
+        // and a listener that touched them would stop the app from quitting.
+        let told = 0;
+        controller.subscribe(() => told++);
+        controller.dispose();
+        expect(told).toBe(0);
         controller.dispose();
         await until(() => !alive(pid), "the client ending", 3000);
     });

@@ -4,9 +4,11 @@
 // The rules: sentence case, plain words, no exclamation marks. A message about
 // a problem says what happened, then what to do next.
 
-import type { ActionError, LinkState } from "./api";
+import type { ActionError, LinkState, LoginPrompt, LoginState } from "./api";
 import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
+import type { LoginErrorCode } from "./protocol/LoginErrorCode";
+import type { PromptKind } from "./protocol/PromptKind";
 
 /** Picks the colour and motion of the status indicator. */
 export type Tone = "idle" | "busy" | "on" | "attention" | "problem";
@@ -210,10 +212,12 @@ export function describe(state: LinkState): StateCopy {
                       working: false,
                   };
         case "update_needed": {
-            const versions =
-                state.serviceVersion === ""
-                    ? `This app is version ${state.appVersion} and the VPN service is a different one`
-                    : `This app is version ${state.appVersion} and the VPN service is version ${state.serviceVersion}`;
+            // The bridge writes "unknown" when the service's reply showed
+            // no version. That is not a version number, and is not shown as one.
+            const unknown = /^(unknown)?$/i.test(state.serviceVersion.trim());
+            const versions = unknown
+                ? `This app is version ${state.appVersion} and the VPN service is a different one`
+                : `This app is version ${state.appVersion} and the VPN service is version ${state.serviceVersion}`;
             return {
                 tone: "attention",
                 title: "Update needed",
@@ -240,6 +244,100 @@ export function describe(state: LinkState): StateCopy {
             };
         case "ready":
             return describeConn(state.conn);
+    }
+}
+
+/** While the command-line client is busy with the gateway. */
+export const LOGIN_WORKING = {
+    title: "Logging in",
+    body: "Waiting for UBC to answer. If you approve logins on your phone, check it now.",
+} as const;
+
+const PROMPTS: Record<PromptKind, { title: string; body: string }> = {
+    username: {
+        title: "Your CWL username",
+        body: "UBC is asking who you are.",
+    },
+    password: {
+        title: "Your password",
+        body: "It is sent to UBC and nowhere else.",
+    },
+    code: {
+        title: "Your one-time code",
+        body: "Enter the code from your authenticator app or device.",
+    },
+    text: {
+        title: "UBC has a question",
+        body: "Answer in the field below to carry on logging in.",
+    },
+};
+
+/** The words around a question the gateway asks. The field's label is the gateway's own. */
+export function describePrompt(prompt: Pick<LoginPrompt, "kind">): {
+    title: string;
+    body: string;
+    submit: string;
+} {
+    return { ...PROMPTS[prompt.kind], submit: "Continue" };
+}
+
+const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
+    wrong_password: {
+        title: "Login refused",
+        body: "UBC did not accept the username, the password or the code, and does not say which. Check them, then try again.",
+        retry: true,
+    },
+    pin_mismatch: FAILURES.pin_mismatch,
+    cancelled: {
+        title: "Login cancelled",
+        body: "You stopped the login. Connect to start again.",
+        retry: true,
+    },
+    gateway_unreachable: FAILURES.gateway_unreachable,
+    route_refused: FAILURES.route_refused,
+    service_unavailable: {
+        title: "Service not running",
+        body: "UBC VPN’s background service did not answer, so nothing was connected. Restart your computer, then try again.",
+        retry: true,
+    },
+    // Nothing to try again: the VPN is in use, and the way on is to go back.
+    busy: {
+        title: "VPN is busy",
+        body: "The VPN is already connected, or is part-way through connecting or disconnecting. Go back and disconnect first, then connect again.",
+        retry: false,
+    },
+    // The same words as when the service itself says so.
+    not_owner: FAILURES.not_owner,
+    internal: {
+        title: "Login did not finish",
+        body: "Something went wrong while logging in, and nothing was connected. Try again. If it keeps happening, install UBC VPN again.",
+        retry: true,
+    },
+};
+
+/** The words for a login that failed. `message` is the client's own account of it. */
+export function describeLoginFailure(
+    code: LoginErrorCode,
+    message: string,
+): { title: string; body: string; detail?: string; retry: boolean } {
+    const failure = LOGIN_FAILURES[code];
+    const detail = message.trim();
+    return { ...failure, ...(detail !== "" && { detail }) };
+}
+
+/** A login under way, in one sentence or two, for a screen reader. */
+export function loginAnnouncement(login: Exclude<LoginState, { phase: "idle" }>): string {
+    switch (login.phase) {
+        case "working":
+            return `${LOGIN_WORKING.title}. ${LOGIN_WORKING.body}`;
+        case "prompt": {
+            const copy = describePrompt(login.prompt);
+            return `${copy.title}. ${login.prompt.message ?? copy.body}`;
+        }
+        case "failed": {
+            const copy = describeLoginFailure(login.code, login.message);
+            return `${copy.title}. ${copy.body}`;
+        }
     }
 }
 

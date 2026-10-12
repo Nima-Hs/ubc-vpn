@@ -15,7 +15,7 @@ import {
     secureSession,
 } from "./security";
 import { createTray, trayImage } from "./tray";
-import { closeHidesWindow } from "./tray-icon";
+import { closeHidesWindow, connectFromTray } from "./tray-icon";
 import { createWindow, showWindow } from "./window";
 
 registerAppScheme(protocol);
@@ -38,9 +38,6 @@ if (app.requestSingleInstanceLock()) {
     app.quit();
 }
 
-/** Whether the interface can show a login's questions yet. */
-const LOGIN_SCREENS_READY = false;
-
 async function start(): Promise<void> {
     // Set only by `electron-vite dev`, and read only in development builds.
     // Decided once, here. Everything that differs in development takes
@@ -53,20 +50,32 @@ async function start(): Promise<void> {
         devServerUrl,
     );
 
+    // Whichever kind of build this is, it has a service to follow and a way
+    // to log in, and both go to the one controller below.
     let link: ServiceLink;
-    let login: LoginFactory | undefined;
+    let login: LoginFactory;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
+        const { createDemoLogin, DEMO_LOGIN_SCENARIOS } = await import("./demo/demo-login");
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
-        const demo = createDemoLink(Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined);
+        const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
+        const demo = createDemoLink(step);
         link = demo;
+        let demoLogin: ReturnType<typeof createDemoLogin> | undefined;
+        login = (onState) => {
+            demoLogin = createDemoLogin(onState, () => void demo.connect(), step);
+            return demoLogin;
+        };
         registerDemo = (window) => {
             handleFromInterface(window, devServerUrl, DEMO_IPC.listScenarios, () => [
                 ...DEMO_SCENARIOS,
+                ...DEMO_LOGIN_SCENARIOS,
             ]);
             handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
                 if (typeof name === "string") {
+                    // A login state, or a connection state with no login under way.
+                    demoLogin?.setScenario(name);
                     demo.setScenario(name);
                 }
             });
@@ -81,11 +90,7 @@ async function start(): Promise<void> {
             onFault: (fault) => console.error(`ubc-vpn: ${fault}`),
         });
     }
-    // The command-line client does the logging in. The screens that show its
-    // questions come in the next change; until they are there, Connect says
-    // that this build cannot log in, so nobody is left at a prompt they
-    // cannot see.
-    const controller = new Controller(link, LOGIN_SCREENS_READY ? login : undefined);
+    const controller = new Controller(link, login);
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.
@@ -108,8 +113,8 @@ async function start(): Promise<void> {
     const tray = createTray(
         {
             showWindow: show,
+            connect: () => connectFromTray(show, () => controller.connect()),
             // An action that does not start explains itself in the window.
-            connect: () => void controller.connect().then(showIfNotice),
             disconnect: () => void controller.disconnect().then(showIfNotice),
             retry: () => controller.retry(),
             quit,
@@ -143,8 +148,8 @@ async function start(): Promise<void> {
     app.on("activate", show);
     app.on("window-all-closed", () => app.quit());
     app.on("will-quit", () => {
-        tray?.destroy();
         controller.dispose();
+        tray?.destroy();
     });
 
     // If the interface's process dies, start it again, but not in a loop.
