@@ -92,6 +92,11 @@ pub enum LoginErrorCode {
     RouteRefused,
     /// The service is not running or refused the connection.
     ServiceUnavailable,
+    /// The service is already connecting, connected or disconnecting.
+    /// Disconnect first.
+    Busy,
+    /// The service belongs to another user of this computer.
+    NotOwner,
     /// Something unexpected went wrong.
     Internal,
 }
@@ -152,5 +157,26 @@ mod tests {
         let line = encode(&error).unwrap();
         assert!(line.contains(r#""code":"wrong_password""#));
         assert_eq!(decode::<CliMessage>(&line).unwrap(), error);
+    }
+
+    // The app matches on these names, so each is pinned here.
+    #[test]
+    fn every_error_code_has_a_stable_name() {
+        use LoginErrorCode::*;
+        let names = [
+            (WrongPassword, "wrong_password"),
+            (PinMismatch, "pin_mismatch"),
+            (Cancelled, "cancelled"),
+            (GatewayUnreachable, "gateway_unreachable"),
+            (RouteRefused, "route_refused"),
+            (ServiceUnavailable, "service_unavailable"),
+            (Busy, "busy"),
+            (NotOwner, "not_owner"),
+            (Internal, "internal"),
+        ];
+        for (code, name) in names {
+            assert_eq!(encode(&code).unwrap(), format!("\"{name}\"\n"));
+        }
+        assert!(decode::<LoginErrorCode>("\"anything_else\"").is_err());
     }
 }

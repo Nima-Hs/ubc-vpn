@@ -169,6 +169,8 @@ const LOGIN_ERROR_CODES: Record<LoginErrorCode, true> = {
     gateway_unreachable: true,
     route_refused: true,
     service_unavailable: true,
+    busy: true,
+    not_owner: true,
     internal: true,
 };
 
