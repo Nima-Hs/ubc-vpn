@@ -3,9 +3,11 @@
 // none of these functions takes a channel name or passes arguments through.
 
 import { DEMO_IPC, IPC, type Snapshot, type VpnApi } from "@shared/api";
+import { LOGS_IPC, type LogUpdate } from "@shared/logs";
 import { contextBridge, ipcRenderer } from "electron";
 
 declare const __DEMO__: boolean;
+declare const __LOGS__: boolean;
 
 const api: VpnApi = {
     platform: process.platform,
@@ -27,6 +29,20 @@ const api: VpnApi = {
     retry: () => ipcRenderer.invoke(IPC.retry),
     minimizeWindow: () => ipcRenderer.invoke(IPC.minimizeWindow),
     closeWindow: () => ipcRenderer.invoke(IPC.closeWindow),
+    ...(__LOGS__ && {
+        logs: {
+            open: () => ipcRenderer.invoke(LOGS_IPC.open),
+            close: () => ipcRenderer.invoke(LOGS_IPC.close),
+            onUpdate: (listener: (update: LogUpdate) => void) => {
+                const handler = (_event: unknown, update: LogUpdate) => listener(update);
+                ipcRenderer.on(LOGS_IPC.update, handler);
+                return () => {
+                    ipcRenderer.off(LOGS_IPC.update, handler);
+                };
+            },
+            copyReport: () => ipcRenderer.invoke(LOGS_IPC.copyReport),
+        },
+    }),
     ...(__DEMO__ && {
         demo: {
             listScenarios: () => ipcRenderer.invoke(DEMO_IPC.listScenarios),

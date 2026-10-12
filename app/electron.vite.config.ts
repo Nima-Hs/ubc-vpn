@@ -9,7 +9,16 @@ const shared = resolve(__dirname, "src/shared");
 // `__DEMO__` is the literal `false`, so the bundler drops the demo code and
 // `scripts/check-production-build.mjs` confirms none of it was emitted.
 export default defineConfig(({ mode }) => {
-    const define = { __DEMO__: JSON.stringify(mode === "demo") };
+    const define = {
+        __DEMO__: JSON.stringify(mode === "demo"),
+        // The log screen and everything that carries lines to it. Its contract
+        // (protocol version 3) is not on main yet, so for now only the demo
+        // build has it, against a fake. Everywhere else this is the literal
+        // `false`, the bundler drops the code, and the same check confirms it.
+        // Turning it on for production is one change, here, once the real
+        // service can be asked.
+        __LOGS__: JSON.stringify(mode === "demo"),
+    };
     return {
         main: {
             define,

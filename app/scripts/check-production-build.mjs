@@ -23,6 +23,11 @@ const markers = [
     "demo:set-scenario",
     "demo:list-scenarios",
     "Show a state",
+    // The log screen, which no production build has yet (`__LOGS__`): its
+    // IPC, its words, and the main-process code that carries lines to it.
+    "logs:copy-report",
+    "UBC VPN diagnostics report",
+    "logs-new-run",
 ];
 
 if (!existsSync(out)) {

@@ -2,3 +2,6 @@
 
 /** `true` only in builds made with `--mode demo`. */
 declare const __DEMO__: boolean;
+
+/** `true` only in builds that have the log screen. See `electron.vite.config.ts`. */
+declare const __LOGS__: boolean;

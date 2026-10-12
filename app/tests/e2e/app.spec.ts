@@ -315,6 +315,7 @@ test("the window renders, locked down", async () => {
         "disconnect",
         "getSettings",
         "getSnapshot",
+        "logs",
         "minimizeWindow",
         "onSnapshot",
         "platform",
@@ -494,6 +495,9 @@ test("another window cannot use the interface's functions", async () => {
                     saveRoutes: () => api.saveRoutes({ subnets: [], dns_domains: [] }),
                     minimizeWindow: () => api.minimizeWindow(),
                     closeWindow: () => api.closeWindow(),
+                    openLogs: () => api.logs.open(),
+                    closeLogs: () => api.logs.close(),
+                    copyReport: () => api.logs.copyReport(),
                     listScenarios: () => api.demo.listScenarios(),
                     setScenario: () => api.demo.setScenario("connected"),
                 };
@@ -519,6 +523,9 @@ test("another window cannot use the interface's functions", async () => {
         saveRoutes: "refused",
         minimizeWindow: "refused",
         closeWindow: "refused",
+        openLogs: "refused",
+        closeLogs: "refused",
+        copyReport: "refused",
         listScenarios: "refused",
         setScenario: "refused",
     });
