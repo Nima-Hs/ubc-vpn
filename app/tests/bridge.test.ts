@@ -600,7 +600,13 @@ describe("where the command-line client is", () => {
 
 describe("where the app keeps its own profile", () => {
     const CONFIG = join("/home/someone/.config");
-    const electron = (isPackaged: boolean) => ({ isPackaged, getPath: () => CONFIG });
+    const HOME = join("/home/someone");
+    // Electron's own answer for the settings parent; on Linux the app works
+    // it out by the client's rule and does not ask.
+    const electron = (isPackaged: boolean, appData = CONFIG) => ({
+        isPackaged,
+        getPath: (name: "appData" | "home") => (name === "home" ? HOME : appData),
+    });
     const on = (platform: NodeJS.Platform, env: Record<string, string | undefined> = {}) => ({
         platform,
         env,
@@ -612,6 +618,44 @@ describe("where the app keeps its own profile", () => {
         expect(profileFolder(electron(true), on("win32"))).toBe(join(CONFIG, "UBC VPN", "app"));
         expect(profileFolder(electron(true), on("darwin"))).toBe(join(CONFIG, "UBC VPN", "app"));
         expect(profileFolder(electron(true), on("linux"))).toBe(join(CONFIG, "ubc-vpn", "app"));
+    });
+
+    it("follows the client's rule for XDG_CONFIG_HOME on Linux, whatever Electron makes of it", () => {
+        const packaged = (env: Record<string, string | undefined>, appData?: string) =>
+            profileFolder(electron(true, appData), on("linux", env));
+        // An absolute value is used.
+        expect(packaged({ XDG_CONFIG_HOME: join("/srv/config") })).toBe(
+            join("/srv/config", "ubc-vpn", "app"),
+        );
+        // A relative one is ignored, as the client ignores it, even where
+        // Electron has taken it as given.
+        for (const relative of ["config/here", "./config", "config", ""]) {
+            expect(packaged({ XDG_CONFIG_HOME: relative }, relative), relative).toBe(
+                join(HOME, ".config", "ubc-vpn", "app"),
+            );
+        }
+        expect(packaged({})).toBe(join(HOME, ".config", "ubc-vpn", "app"));
+        // The variable means nothing on the other two.
+        expect(
+            profileFolder(electron(true), on("darwin", { XDG_CONFIG_HOME: join("/srv/config") })),
+        ).toBe(join(CONFIG, "UBC VPN", "app"));
+    });
+
+    it("is chosen before anything can use the profile: before the single-instance lock, and before the app is ready", () => {
+        // On macOS and Linux the lock is a file in the profile folder. Set
+        // after it, the lock would sit in the folder the app must keep out of.
+        const source = readFileSync(join(__dirname, "..", "src", "main", "index.ts"), "utf8");
+        const at = (text: string) => {
+            const index = source.indexOf(text);
+            expect(index, text).toBeGreaterThan(-1);
+            return index;
+        };
+        const set = at('app.setPath("userData", profileFolder(app, process));');
+        for (const later of ["requestSingleInstanceLock", "whenReady", "registerAppScheme("]) {
+            expect(set, later).toBeLessThan(at(later));
+        }
+        // Nothing before it asks Electron for a path or its command line.
+        expect(source.slice(0, set)).not.toMatch(/app\.(getPath|commandLine|on)\(/);
     });
 
     it("is never the folder that holds the user's settings file, on any OS, installed or not", () => {

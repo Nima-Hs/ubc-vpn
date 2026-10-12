@@ -1,10 +1,19 @@
 import { type SpawnOptions, spawn } from "node:child_process";
-import type { LinkState, Snapshot } from "@shared/api";
+import type { LinkState, LoginState, Snapshot } from "@shared/api";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
 import { createServiceLink, type ServiceLink } from "../src/main/link";
-import { type MockBridge, type MockRun, mockBridge, pause, TUNNEL, until } from "./bridge-harness";
+import { clientLogin, disconnectForCancel } from "../src/main/login";
+import {
+    type MockBridge,
+    type MockRun,
+    mockBridge,
+    mockCli,
+    pause,
+    TUNNEL,
+    until,
+} from "./bridge-harness";
 
 // The real `spawn`, watched: one test reads how the bridge was started.
 vi.mock("node:child_process", async (original) => {
@@ -41,6 +50,119 @@ function linkWith(limits: { replyTimeoutMs: number }, ...runs: MockRun[]): Linke
     link.subscribe((state) => seen.push(state));
     return { bridge, link, seen };
 }
+
+describe("a login given up after the service had taken it", () => {
+    const PROMPT = { id: 1, kind: "password", label: "Password" } as const;
+
+    // The real link over the mock bridge, and the real runner over the mock
+    // client, joined the way the app joins them.
+    async function cancelledLogin(afterCancel: Parameters<typeof mockCli>[0]) {
+        const { bridge, link } = linkTo({});
+        await until(() => link.getState().link === "ready", "ready");
+        const cli = mockCli([{ prompt: PROMPT }, { hang: true }], { afterCancel });
+        const states: LoginState[] = [];
+        const runner = clientLogin(
+            link,
+            { command: cli.command, args: cli.args, dev: false },
+            { minStartGapMs: 0 },
+        )((state) => states.push(state));
+        cleanups.push(() => runner.stop());
+        runner.start();
+        await until(() => states.at(-1)?.phase === "prompt", "the prompt");
+        runner.cancel();
+        await until(() => states.at(-1)?.phase === "idle", "the login being given up");
+        return bridge;
+    }
+
+    it("is undone: the disconnect really goes through the bridge to the service", async () => {
+        const bridge = await cancelledLogin([{ done: true }]);
+        expect(bridge.received().filter((entry) => entry === "disconnect")).toHaveLength(1);
+    });
+
+    it("is left alone when the client says nothing reached the service", async () => {
+        const bridge = await cancelledLogin([
+            { error: { code: "cancelled", message: "cancelled" } },
+        ]);
+        await pause(100);
+        expect(bridge.received()).not.toContain("disconnect");
+    });
+
+    // A link the test steers by hand.
+    function fakeLink(answers: ("ok" | "service_unavailable" | "refused")[]) {
+        let state: LinkState = { link: "unavailable", reason: "not_running" };
+        const listeners = new Set<(state: LinkState) => void>();
+        const link = {
+            asked: 0,
+            disconnect: async () => {
+                const answer = answers[link.asked] ?? "ok";
+                link.asked += 1;
+                return answer === "ok"
+                    ? ({ ok: true } as const)
+                    : answer === "refused"
+                      ? ({
+                            ok: false,
+                            error: { kind: "refused", code: "busy", message: "" },
+                        } as const)
+                      : ({ ok: false, error: { kind: "service_unavailable" } } as const);
+            },
+            getState: () => state,
+            subscribe: (listener: (state: LinkState) => void) => {
+                listeners.add(listener);
+                return () => listeners.delete(listener);
+            },
+            becomes: (next: LinkState) => {
+                state = next;
+                for (const listener of [...listeners]) {
+                    listener(next);
+                }
+            },
+            listening: () => listeners.size,
+        };
+        return link;
+    }
+    const READY: LinkState = { link: "ready", conn: { state: "disconnected" } };
+
+    it("is sent once more, when the bridge is next ready, if the service could not be reached", async () => {
+        const link = fakeLink(["service_unavailable", "ok"]);
+        let sent = false;
+        void disconnectForCancel(link).then(() => {
+            sent = true;
+        });
+        await pause(50);
+        // Not sent yet, so the login is not yet shown as given up.
+        expect(link.asked).toBe(1);
+        expect(sent).toBe(false);
+        // Other changes of state are not the bridge being ready.
+        link.becomes({ link: "starting" });
+        await pause(20);
+        expect(link.asked).toBe(1);
+        link.becomes(READY);
+        await until(() => sent, "the disconnect being sent");
+        expect(link.asked).toBe(2);
+        // Once, not in a loop: later changes send nothing more.
+        expect(link.listening()).toBe(0);
+        link.becomes({ link: "starting" });
+        link.becomes(READY);
+        await pause(20);
+        expect(link.asked).toBe(2);
+    });
+
+    it("is not sent a third time, whatever the second answer", async () => {
+        const link = fakeLink(["service_unavailable", "service_unavailable", "ok"]);
+        link.becomes(READY);
+        await disconnectForCancel(link);
+        expect(link.asked).toBe(2);
+    });
+
+    it("is not sent again when the service answered, yes or no", async () => {
+        for (const answer of ["ok", "refused"] as const) {
+            const link = fakeLink([answer]);
+            await disconnectForCancel(link);
+            expect(link.asked, answer).toBe(1);
+            expect(link.listening()).toBe(0);
+        }
+    });
+});
 
 describe("the link to the service", () => {
     it("starts the bridge in dev mode when it is told to, and not otherwise", async () => {

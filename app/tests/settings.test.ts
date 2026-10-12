@@ -14,7 +14,7 @@ import { MAX_LINE_BYTES } from "../src/main/channel/framing";
 import { MAX_SHOWN_LENGTH, SETTINGS_ARGS, SettingsRunner } from "../src/main/channel/settings";
 import { isRoutesReply, isSettingsFailure, isSettingsView } from "../src/main/channel/validate";
 import { MAX_ROUTE_ENTRIES, MAX_ROUTE_ENTRY_LENGTH, takeRouteInput } from "../src/main/ipc";
-import { stopForQuit } from "../src/main/quit";
+import { holdQuitForCancel, stopForQuit } from "../src/main/quit";
 import { alive, pause, until } from "./bridge-harness";
 
 // The real `spawn`, watched: some tests read how the client was started.
@@ -491,6 +491,63 @@ describe("a client that does not behave", () => {
 });
 
 describe("when the app quits", () => {
+    const event = () => {
+        const seen = {
+            prevented: 0,
+            preventDefault: () => {
+                seen.prevented += 1;
+            },
+        };
+        return seen;
+    };
+
+    it("goes straight through when no login was cancelled", () => {
+        let quits = 0;
+        const hold = holdQuitForCancel({ windDown: () => null }, () => void quits++);
+        const asked = event();
+        hold(asked);
+        expect(asked.prevented).toBe(0);
+        expect(quits).toBe(0);
+    });
+
+    it("waits for a cancelled login to be wound up, then quits, once", async () => {
+        let quits = 0;
+        let limit = 0;
+        let finish = () => {};
+        const woundUp = new Promise<void>((resolve) => {
+            finish = resolve;
+        });
+        const hold = holdQuitForCancel(
+            {
+                windDown: (limitMs) => {
+                    limit = limitMs;
+                    return woundUp;
+                },
+            },
+            () => void quits++,
+        );
+        const first = event();
+        hold(first);
+        expect(first.prevented).toBe(1);
+        // A short limit, so a quit can never hang.
+        expect(limit).toBeGreaterThan(0);
+        expect(limit).toBeLessThanOrEqual(5000);
+        // Asked again while it waits: still held, and nothing is started twice.
+        const second = event();
+        hold(second);
+        expect(second.prevented).toBe(1);
+        expect(quits).toBe(0);
+        finish();
+        await woundUp;
+        await pause(0);
+        expect(quits).toBe(1);
+        // The quit it then asks for is let through.
+        const last = event();
+        hold(last);
+        expect(last.prevented).toBe(0);
+        expect(quits).toBe(1);
+    });
+
     it("stops the controller, then the settings clients, then the tray", () => {
         const order: string[] = [];
         const part = (name: string) => () => void order.push(name);

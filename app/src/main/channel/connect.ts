@@ -35,6 +35,15 @@ export interface LoginRunner {
     cancel(): void;
     /** Ends everything at once, for when the app quits. */
     stop(): void;
+    /**
+     * For when the app quits while a login the user gave up is still being
+     * wound up. The user did cancel, so the service must still be told if
+     * the login reached it. Returns a promise that ends when that is done,
+     * or when `limitMs` has passed, by which time the disconnect has been
+     * sent whatever the client said. `null` when no cancel is under way: a
+     * login simply interrupted by quitting sends nothing.
+     */
+    windDown(limitMs: number): Promise<void> | null;
 }
 
 export interface ConnectOptions {
@@ -118,6 +127,7 @@ export const FALLBACK_LABEL = "Answer";
 
 const IDLE: LoginState = { phase: "idle" };
 const WORKING: LoginState = { phase: "working" };
+const CANCELLING: LoginState = { phase: "cancelling" };
 const CANCEL: AppMessage = { type: "cancel" };
 /** For everything that is the client misbehaving and not the gateway answering. */
 const BROKEN: LoginState = { phase: "failed", code: "internal", message: "" };
@@ -142,6 +152,8 @@ export class ConnectRunner implements LoginRunner {
     private cancelling: NodeJS.Timeout | null = null;
     /** A disconnect after a cancel is on its way to the service. */
     private settling = false;
+    /** Told when a cancel has been wound up, if a quit is waiting for that. */
+    private onWoundUp: (() => void) | null = null;
     private readonly leaving = new Set<ChildProcessWithoutNullStreams>();
     /** When the client was last started, and the wait before the next start, if one is on. */
     private lastStartAt = Number.NEGATIVE_INFINITY;
@@ -270,7 +282,30 @@ export class ConnectRunner implements LoginRunner {
             child.kill();
             this.finish(child, BROKEN, true);
         }, this.options.exitGraceMs);
-        this.options.onState(WORKING);
+        this.options.onState(CANCELLING);
+    }
+
+    windDown(limitMs: number): Promise<void> | null {
+        if (this.cancelling === null && !this.settling) {
+            return null;
+        }
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                this.onWoundUp = null;
+                // No last line yet: the app cannot know, so it disconnects.
+                // The request is on its way before this returns; its answer
+                // is not waited for.
+                const child = this.child;
+                if (child !== null && this.cancelling !== null) {
+                    this.finish(child, BROKEN, true);
+                }
+                resolve();
+            }, limitMs);
+            this.onWoundUp = () => {
+                clearTimeout(timer);
+                resolve();
+            };
+        });
     }
 
     stop(): void {
@@ -381,15 +416,20 @@ export class ConnectRunner implements LoginRunner {
                 this.leaving.delete(child);
             });
         }
+        const woundUp = () => {
+            this.options.onState(IDLE);
+            this.onWoundUp?.();
+            this.onWoundUp = null;
+        };
         if (!cancelled) {
             this.options.onState(state);
         } else if (!reached) {
-            this.options.onState(IDLE);
+            woundUp();
         } else {
             this.settling = true;
             const settled = () => {
                 this.settling = false;
-                this.options.onState(IDLE);
+                woundUp();
             };
             // Whatever the answer, the service's own state says what is so.
             Promise.resolve()

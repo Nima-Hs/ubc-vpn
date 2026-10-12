@@ -58,6 +58,12 @@ export type LoginState =
     /** The client is busy: starting, or acting on the last answer. */
     | { phase: "working" }
     | { phase: "prompt"; prompt: LoginPrompt }
+    /**
+     * The user gave the login up, and it is being wound up: the client's
+     * last line is awaited, and the service is told to disconnect if the
+     * login had already reached it.
+     */
+    | { phase: "cancelling" }
     /** `message` is the client's own account, and may be empty. */
     | { phase: "failed"; code: LoginErrorCode; message: string };
 
