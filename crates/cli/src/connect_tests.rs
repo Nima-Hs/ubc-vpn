@@ -526,6 +526,57 @@ fn the_wait_for_the_outcome_has_an_end() {
     assert!(waited < std::time::Duration::from_secs(3), "{waited:?}");
 }
 
+// Security rule: the login's lines are handed over after the connect
+// request, never before it. By then the service holds the cookie, so its
+// own removal covers these lines as well as the client's does.
+#[test]
+fn the_logins_lines_follow_the_connect_request() {
+    use std::sync::{Arc, Mutex};
+    use ubc_vpn_core::protocol::{
+        Event, Outcome, Request, RequestBody, Response, ResponseBody, ServerMessage, decode,
+    };
+
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    script.leaks = true;
+    scene.gateway = FakeEngine::new(script);
+    scene.service = None;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let service = crate::tests::scripted(&scene.rig, move |conn| {
+        crate::tests::greet(conn);
+        while let Ok(Some(line)) = conn.read_line() {
+            let Request { id, body } = decode(&line).unwrap();
+            let (name, answer, then) = match body {
+                RequestBody::Status => {
+                    let idle = ResponseBody::Status(ConnState::Disconnected);
+                    ("status", idle, None)
+                }
+                // Accepted, and it ends at once, so the client is done soon.
+                RequestBody::Connect(_) => {
+                    let ends = [ConnState::Connecting, ConnState::LoginNeeded];
+                    ("connect", ResponseBody::Accepted, Some(ends))
+                }
+                RequestBody::AddLog(_) => ("add_log", ResponseBody::Accepted, None),
+                _ => ("another", ResponseBody::Accepted, None),
+            };
+            seen.lock().unwrap().push(name);
+            let outcome = Outcome::Ok(answer);
+            crate::tests::tell(conn, &ServerMessage::Response(Response { id, outcome }));
+            for state in then.into_iter().flatten() {
+                crate::tests::tell(conn, &ServerMessage::Event(Event::StateChanged(state)));
+            }
+        }
+    });
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    service.join().unwrap();
+    assert_eq!(code, LOGIN_REFUSED, "{err}");
+    // Two answers and the cookie, each in a line of its own.
+    let order = ["status", "connect", "add_log", "add_log", "add_log"];
+    assert_eq!(*asked.lock().unwrap(), order);
+}
+
 /// A scene whose service takes a new login after a log-off, with these
 /// settings saved.
 fn returning(settings: &str) -> Scene {
