@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod redact;
 pub mod routes;
 pub mod settings;
+pub mod settings_cli;
 pub mod state;
 
 /// The product version, taken from the workspace.
