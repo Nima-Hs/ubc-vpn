@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::policy::Policy;
-use ubc_vpn_core::protocol::{Diagnostics, ErrorInfo, LastError, PROTOCOL_VERSION, StateKind};
+use ubc_vpn_core::protocol::{Diagnostics, LastError, PROTOCOL_VERSION, StateKind};
 use ubc_vpn_core::settings_cli::misleads;
 use ubc_vpn_core::state::ConnState;
 
@@ -44,6 +44,18 @@ fn name(text: &str) -> String {
     seen.take_while(fits).collect()
 }
 
+/// What is remembered of `state` if it is a failure. The message can quote
+/// the engine or the OS, so it is cleaned as a log line is, and at once:
+/// the secrets held when a connection fails are the ones its message could
+/// show, and they are not held for long afterwards.
+pub(crate) fn failure(state: &ConnState, logs: &Logs) -> Option<LastError> {
+    let ConnState::Failed { code, message } = state else {
+        return None;
+    };
+    let (code, message) = (*code, logs.shown(message));
+    Some(LastError { code, message })
+}
+
 impl About {
     pub(crate) fn new(policy: &Result<Policy, String>) -> Self {
         let policy = policy.as_ref().ok();
@@ -54,13 +66,7 @@ impl About {
     }
 
     /// The service and its state, as they are now.
-    pub(crate) fn report(&self, hub: &Hub, logs: &Logs) -> Diagnostics {
-        // The message of a failure can quote the engine or the OS, so it is
-        // cleaned as a log line is.
-        let cleaned = |error: ErrorInfo| LastError {
-            code: error.code,
-            message: logs.shown(&error.message),
-        };
+    pub(crate) fn report(&self, hub: &Hub) -> Diagnostics {
         let state = hub.state();
         // What the tunnel carries is counted, not listed, so that this
         // always fits in one line.
@@ -79,7 +85,7 @@ impl About {
             state: StateKind::from(&state),
             subnets: count(subnets),
             dns_domains: count(dns_domains),
-            last_error: hub.last_error().map(cleaned),
+            last_error: hub.last_error(),
             policy_readable: self.policy.is_some(),
             pins: self.policy.as_ref().map_or(0, |(_, pins)| *pins),
             gateway: self.policy.as_ref().map(|(gateway, _)| name(gateway)),
@@ -107,8 +113,10 @@ mod tests {
         let about = About::new(&Ok(policy));
         let hub = Hub::new(None);
         let (code, message) = (ErrorCode::EngineFailed, "\"".repeat(70_000));
-        hub.publish(ConnState::Failed { code, message });
-        let report = about.report(&hub, &Logs::default());
+        let state = ConnState::Failed { code, message };
+        let failure = failure(&state, &Logs::default());
+        hub.publish(state, failure);
+        let report = about.report(&hub);
         let gateway = report.gateway.clone().unwrap();
         assert!(gateway.starts_with("vpn.é") && gateway.len() <= MAX_NAME_BYTES);
         // Cut between characters, as near the limit as that allows.
@@ -120,17 +128,25 @@ mod tests {
         assert_eq!(name("vpn.example.test"), "vpn.example.test");
     }
 
-    // Security rule: the message of a failure is shown as a log line would
-    // be, with a secret the service holds removed from it.
+    // Security rule: the message of a failure is cleaned as a log line
+    // would be, with a secret the service holds removed from it, and when
+    // the failure happens: by the time it is read the secret is no longer
+    // held, and the message must not show it then either.
     #[test]
     fn the_last_failure_loses_what_a_log_line_would() {
         let about = About::new(&Err("no policy".to_string()));
         let (hub, logs) = (Hub::new(None), Logs::default());
-        let _held = logs.hold(&ubc_vpn_core::redact::Secret::new("Zq7-made-up-0123456789"));
+        let held = logs.hold(&ubc_vpn_core::redact::Secret::new("Zq7-made-up-0123456789"));
         let code = ErrorCode::EngineFailed;
         let message = "The engine\u{1b} said Zq7-made-up-0123456789.".to_string();
-        hub.publish(ConnState::Failed { code, message });
-        let last = about.report(&hub, &logs).last_error.unwrap();
+        let state = ConnState::Failed { code, message };
+        let failure = failure(&state, &logs);
+        hub.publish(state, failure);
+        drop(held);
+        // A state that is no failure leaves the last one remembered.
+        assert_eq!(super::failure(&ConnState::Disconnected, &logs), None);
+        hub.publish(ConnState::Disconnected, None);
+        let last = about.report(&hub).last_error.unwrap();
         assert_eq!(last.code, code);
         assert_eq!(last.message.as_str(), "The engine said [redacted].");
     }

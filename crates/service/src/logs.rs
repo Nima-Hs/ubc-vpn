@@ -5,11 +5,36 @@
 //! the service's own, the engine's, and those a client hands over. A line is
 //! kept whole or not at all. There is no way to keep a line of protocol
 //! detail: the level does not exist here.
+//!
+//! # What the removal of secrets does not do
+//!
+//! A secret the service holds is removed where it stands whole, as it was
+//! given. That is all. It is not found when it is split over two lines,
+//! when it is written with something between its characters, or in another
+//! form such as percent-encoding or base64. Nobody should assume more: the
+//! first defence is that nothing writes a secret, and this is the second.
+//!
+//! # How long the cookie is held
+//!
+//! From the moment a connect is admitted until [`LINGER`] after everything
+//! for it has been torn down, or until the next connect is admitted if
+//! that is sooner. It is held that little longer because a client hands
+//! over what its login wrote just after a connect has failed, and those
+//! lines are the likeliest to name it. In that time it is used for
+//! nothing but this, and then it is wiped.
+//!
+//! # What cannot fill the log
+//!
+//! A line that the same cause can produce again and again, such as a
+//! request that cannot be read, goes through [`Logs::error_about`] or
+//! [`Logs::warn_about`]: it is kept when it differs from the last line
+//! about the same thing, and not otherwise. So nothing a client sends, and
+//! no fault that persists, can push the earlier lines out.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ubc_vpn_core::protocol::{
     KEPT_ADDED_LOG_LINES, LogCursor, LogLevel, LogLine, LogPage, LogSource, LogText,
@@ -24,8 +49,15 @@ use crate::lock;
 /// Older lines are dropped first.
 pub const CAPACITY: usize = 500;
 
+/// How long the cookie is still held, for cleaning only, after everything
+/// for its connection has been torn down.
+pub const LINGER: Duration = Duration::from_secs(30);
+
 /// Who hears of each line as it is kept.
 type Tell = Box<dyn Fn(&LogLine) + Send>;
+
+/// What the time is. Tests put their own in.
+type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
 
 /// The log. Clones share it.
 #[derive(Clone)]
@@ -34,7 +66,17 @@ pub struct Logs(Arc<Shared>);
 struct Shared {
     /// Which run of the service this is.
     run: u64,
+    clock: Clock,
     inner: Mutex<Inner>,
+}
+
+/// A secret the service holds.
+struct Hidden {
+    /// The number of its hold.
+    hold: u64,
+    secret: Secret,
+    /// When it is to be wiped, once nothing needs it but the cleaning.
+    until: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -48,20 +90,51 @@ struct Inner {
     added: VecDeque<LogLine>,
     /// The highest number of a line that is no longer held, or 0.
     lost: u64,
-    /// The secrets the service holds now, each with the number of its hold.
-    hidden: Vec<(u64, Secret)>,
+    /// The secrets the service holds now.
+    hidden: Vec<Hidden>,
     holds: u64,
+    /// The last line kept about each thing that can happen again and again.
+    about: Vec<(&'static str, LogText)>,
     tell: Option<Tell>,
 }
 
-/// Keeps a secret out of every line for as long as this lives.
-pub(crate) struct Held(Logs, u64);
+impl Inner {
+    /// Wipes every secret whose time is up.
+    fn wipe(&mut self, now: Instant) {
+        let due = |hidden: &Hidden| hidden.until.is_some_and(|until| until <= now);
+        self.hidden.retain(|hidden| !due(hidden));
+    }
+}
+
+/// Keeps a secret out of every line for as long as this lives, and for
+/// [`LINGER`] longer if it is ended with [`Held::linger`].
+pub(crate) struct Held {
+    logs: Logs,
+    hold: u64,
+    lingers: bool,
+}
+
+impl Held {
+    /// Ends the hold, but leaves the secret to the cleaning for [`LINGER`]
+    /// more, or until the next secret is held if that is sooner.
+    pub(crate) fn linger(mut self) {
+        let until = (self.logs.0.clock)() + LINGER;
+        let mut inner = lock(&self.logs.0.inner);
+        let this = |hidden: &&mut Hidden| hidden.hold == self.hold;
+        if let Some(hidden) = inner.hidden.iter_mut().find(this) {
+            hidden.until = Some(until);
+        }
+        drop(inner);
+        self.lingers = true;
+    }
+}
 
 impl Drop for Held {
     fn drop(&mut self) {
-        lock(&self.0.0.inner)
-            .hidden
-            .retain(|(hold, _)| *hold != self.1);
+        if !self.lingers {
+            let mut inner = lock(&self.logs.0.inner);
+            inner.hidden.retain(|hidden| hidden.hold != self.hold);
+        }
     }
 }
 
@@ -90,12 +163,12 @@ fn new_run() -> u64 {
 /// 3. Everything from a word that marks a secret onward is removed.
 ///
 /// A line that fails any step is replaced whole by the marker.
-fn safe(text: &str, hidden: &[(u64, Secret)]) -> LogText {
+fn safe(text: &str, hidden: &[Hidden]) -> LogText {
     let Ok(plain) = LogText::cleaned(text) else {
         return LogText::left_out();
     };
     let mut line = String::from(plain);
-    for (_, secret) in hidden {
+    for Hidden { secret, .. } in hidden {
         // The line no longer holds what misleads, so neither does the form
         // of the secret that could be in it.
         let shown: String = secret.expose().chars().filter(|c| !misleads(*c)).collect();
@@ -118,42 +191,69 @@ fn kept(level: ubc_vpn_engine::LogLevel) -> Option<LogLevel> {
 
 impl Default for Logs {
     fn default() -> Self {
-        let (run, inner) = (new_run(), Mutex::default());
-        Self(Arc::new(Shared { run, inner }))
+        Self::with_clock(Instant::now)
     }
 }
 
 impl Logs {
-    /// Keeps a line about something that failed.
-    pub fn error(&self, text: &str) {
-        self.keep(LogLevel::Error, LogSource::Service, text);
+    /// A log that takes the time from `clock`.
+    fn with_clock(clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        let (run, clock, inner) = (new_run(), Box::new(clock), Mutex::default());
+        Self(Arc::new(Shared { run, clock, inner }))
     }
 
-    /// Keeps a line about something wrong that was dealt with.
+    /// Keeps a line about something that failed and happens once.
+    pub fn error(&self, text: &str) {
+        self.keep(LogLevel::Error, LogSource::Service, None, text);
+    }
+
+    /// Keeps a line about something wrong that was dealt with, once.
     pub fn warn(&self, text: &str) {
-        self.keep(LogLevel::Warn, LogSource::Service, text);
+        self.keep(LogLevel::Warn, LogSource::Service, None, text);
+    }
+
+    /// Keeps a line about a failure that can happen again and again, named
+    /// by `what`: only when it differs from the last line kept about it.
+    pub fn error_about(&self, what: &'static str, text: &str) {
+        self.keep(LogLevel::Error, LogSource::Service, Some(what), text);
+    }
+
+    /// The same, for something wrong that was dealt with.
+    pub fn warn_about(&self, what: &'static str, text: &str) {
+        self.keep(LogLevel::Warn, LogSource::Service, Some(what), text);
     }
 
     /// Keeps a line a client handed over.
     pub(crate) fn add(&self, level: LogLevel, text: &LogText) {
-        self.keep(level, LogSource::Login, text.as_str());
+        self.keep(level, LogSource::Login, None, text.as_str());
     }
 
     /// Cleans `text`, numbers it and keeps it, dropping the oldest line of
-    /// its kind when that is full. A blank text is not a line.
-    fn keep(&self, level: LogLevel, source: LogSource, text: &str) {
+    /// its kind when that is full. A blank text is not a line, and neither
+    /// is one that only repeats the last line about `what`.
+    fn keep(&self, level: LogLevel, source: LogSource, what: Option<&'static str>, text: &str) {
         if text.trim().is_empty() {
             return;
         }
         let mut inner = lock(&self.0.inner);
         let inner = &mut *inner;
+        inner.wipe((self.0.clock)());
+        let text = safe(text, &inner.hidden);
+        if let Some(what) = what {
+            let last = inner.about.iter_mut().find(|(about, _)| *about == what);
+            match last {
+                Some((_, last)) if *last == text => return,
+                Some((_, last)) => *last = text.clone(),
+                None => inner.about.push((what, text.clone())),
+            }
+        }
         inner.newest += 1;
         let line = LogLine {
             seq: inner.newest,
             at_unix_ms: now_ms(),
             level,
             source,
-            text: safe(text, &inner.hidden),
+            text,
         };
         let (ring, most) = match source {
             LogSource::Login => (&mut inner.added, KEPT_ADDED_LOG_LINES),
@@ -177,17 +277,41 @@ impl Logs {
     }
 
     /// Keeps `secret` out of every line until what is returned is dropped.
+    /// A secret that only lingered is wiped now: the next one has come.
     pub(crate) fn hold(&self, secret: &Secret) -> Held {
         let mut inner = lock(&self.0.inner);
+        inner.hidden.retain(|hidden| hidden.until.is_none());
         inner.holds += 1;
         let hold = inner.holds;
-        inner.hidden.push((hold, secret.clone()));
-        Held(self.clone(), hold)
+        inner.hidden.push(Hidden {
+            hold,
+            secret: secret.clone(),
+            until: None,
+        });
+        Held {
+            logs: self.clone(),
+            hold,
+            lingers: false,
+        }
+    }
+
+    /// Wipes every secret whose time is up, and says how long it is until
+    /// the next one's is, if any is waiting for that.
+    pub(crate) fn wipe(&self) -> Option<Duration> {
+        let now = (self.0.clock)();
+        let mut inner = lock(&self.0.inner);
+        inner.wipe(now);
+        let waits = inner.hidden.iter().filter_map(|hidden| hidden.until);
+        waits
+            .min()
+            .map(|until| until.saturating_duration_since(now))
     }
 
     /// `text` as a log line would show it, for text that is shown elsewhere.
     pub(crate) fn shown(&self, text: &str) -> LogText {
-        safe(text, &lock(&self.0.inner).hidden)
+        let mut inner = lock(&self.0.inner);
+        inner.wipe((self.0.clock)());
+        safe(text, &inner.hidden)
     }
 
     /// The lines after `after`, oldest first, as many as fit in one answer.
@@ -220,7 +344,7 @@ impl Logs {
         let logs = self.clone();
         let keep = move |level, line: &str| {
             if let Some(level) = kept(level) {
-                logs.keep(level, LogSource::Engine, line);
+                logs.keep(level, LogSource::Engine, None, line);
             }
         };
         let sink = LogSink::new(ubc_vpn_engine::LogLevel::Info, keep);

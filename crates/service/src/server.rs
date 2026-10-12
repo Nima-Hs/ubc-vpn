@@ -112,6 +112,8 @@ struct Shared {
     narrowing_due: AtomicBool,
     /// Requests from non-owners that could not be understood.
     unreadable: AtomicUsize,
+    /// The same, from the owner.
+    unreadable_from_owner: AtomicUsize,
     logs: Logs,
     about: About,
     state_dir: PathBuf,
@@ -157,6 +159,7 @@ impl Service {
             serving: Mutex::default(),
             narrowing_due: AtomicBool::new(false),
             unreadable: AtomicUsize::new(0),
+            unreadable_from_owner: AtomicUsize::new(0),
             listener,
             hub,
             logs,
@@ -229,13 +232,14 @@ impl Shared {
                     // the connection closed; accepting carries on.
                     let serve = move || place.shared.serve(&place.conn, &place.user);
                     if let Err(error) = thread::Builder::new().spawn(serve) {
-                        self.logs
-                            .error(&format!("a connection got no thread: {error}"));
+                        let line = format!("a connection got no thread: {error}");
+                        self.logs.error_about("no thread", &line);
                     }
                 }
                 Err(Error::Closed) => return,
                 Err(error) => {
-                    self.logs.error(&format!("accepting failed: {error}"));
+                    let line = format!("accepting failed: {error}");
+                    self.logs.error_about("accepting", &line);
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -339,7 +343,7 @@ impl Shared {
                 Ok(ResponseBody::Accepted)
             }
             RequestBody::Diagnostics => {
-                let report = self.about.report(&self.hub, &self.logs);
+                let report = self.about.report(&self.hub);
                 Ok(ResponseBody::Diagnostics(Box::new(report)))
             }
             RequestBody::AddLog(params) => accepted(self.add_log(&params, added)),
@@ -369,17 +373,19 @@ impl Shared {
     }
 
     /// Notes a request that could not be understood, without its content.
-    /// The owner's gets a line each. Anyone else's are counted, with one line
-    /// for the first, so a stranger cannot push everything else out of the
-    /// log.
+    /// They are counted, the owner's and everyone else's apart, with one
+    /// line for the first of each: no number of them, from anyone, can push
+    /// everything else out of the log.
     fn unreadable(&self, user: &UserId) {
-        if self.hub.owner().as_ref() == Some(user) {
-            self.logs
-                .warn("a request from the owner could not be understood");
-        } else if self.unreadable.fetch_add(1, Ordering::SeqCst) == 0 {
-            let line = "a request from a user who is not the owner could not be understood; \
-                        later ones are only counted";
-            self.logs.warn(line);
+        let (count, who) = match self.hub.owner().as_ref() == Some(user) {
+            true => (&self.unreadable_from_owner, "the owner"),
+            false => (&self.unreadable, "a user who is not the owner"),
+        };
+        if count.fetch_add(1, Ordering::SeqCst) == 0 {
+            let line = format!(
+                "a request from {who} could not be understood; later ones are only counted"
+            );
+            self.logs.warn(&line);
         }
     }
 
@@ -412,7 +418,7 @@ impl Shared {
         let was_due = self.narrowing_due.swap(narrowed.is_err(), Ordering::SeqCst);
         if let (Err(error), false) = (narrowed, was_due) {
             let line = format!("the channel could not be narrowed to the owner: {error}");
-            self.logs.error(&line);
+            self.logs.error_about("narrowing", &line);
         }
     }
 }

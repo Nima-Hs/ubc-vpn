@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use ubc_vpn_core::protocol::{ErrorInfo, LogLine, ServerMessage, encode};
+use ubc_vpn_core::protocol::{LastError, LogLine, ServerMessage, encode};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::{Connection, UserId};
 
@@ -26,7 +26,7 @@ struct Inner {
     owner: Option<UserId>,
     state: ConnState,
     /// The last failure of a connection in this run.
-    last_error: Option<ErrorInfo>,
+    last_error: Option<LastError>,
     clients: Vec<Client>,
 }
 
@@ -89,7 +89,7 @@ impl Hub {
     }
 
     /// The last failure of a connection in this run, if there was one.
-    pub(crate) fn last_error(&self) -> Option<ErrorInfo> {
+    pub(crate) fn last_error(&self) -> Option<LastError> {
         lock(&self.0).last_error.clone()
     }
 
@@ -143,8 +143,9 @@ impl Hub {
 
     /// Records the new state and queues it for every connection of the
     /// owner, in the order states are published. A connection whose queue
-    /// is full is closed.
-    pub(crate) fn publish(&self, state: ConnState) {
+    /// is full is closed. `failure` is what to remember of a state that is
+    /// a failure, already cleaned.
+    pub(crate) fn publish(&self, state: ConnState, failure: Option<LastError>) {
         let mut inner = lock(&self.0);
         for client in &mut inner.clients {
             let queued = client
@@ -156,9 +157,8 @@ impl Hub {
                 client.conn.close();
             }
         }
-        if let ConnState::Failed { code, message } = &state {
-            let (code, message) = (*code, message.clone());
-            inner.last_error = Some(ErrorInfo { code, message });
+        if failure.is_some() {
+            inner.last_error = failure;
         }
         inner.state = state;
     }
@@ -280,13 +280,13 @@ mod tests {
         far.until("a write", |far| far.holding_a_write);
         let started = Instant::now();
         for _ in 0..EVENT_QUEUE {
-            hub.publish(ConnState::Connecting);
+            hub.publish(ConnState::Connecting, None);
         }
         assert!(
             !far.state().closed,
             "a full queue is still within the limit"
         );
-        hub.publish(ConnState::Disconnected);
+        hub.publish(ConnState::Disconnected, None);
         assert!(far.state().closed, "one state too many closes it");
         assert_eq!(hub.state(), ConnState::Disconnected);
         let took = started.elapsed();
@@ -320,7 +320,7 @@ mod tests {
         assert!(!far.state().closed, "log lines closed the connection");
         // Every state still has its place.
         for _ in 0..EVENT_QUEUE {
-            hub.publish(ConnState::Connecting);
+            hub.publish(ConnState::Connecting, None);
         }
         assert!(!far.state().closed, "log lines took the states' room");
         let took = started.elapsed();
@@ -334,7 +334,7 @@ mod tests {
         let far = Far::default();
         let hub = owned(&far);
         let (code, message) = (ErrorCode::Internal, "x".repeat(70_000));
-        hub.publish(ConnState::Failed { code, message });
+        hub.publish(ConnState::Failed { code, message }, None);
         far.until("the connection is closed", |far| far.closed);
     }
 

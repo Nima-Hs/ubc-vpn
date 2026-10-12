@@ -11,9 +11,10 @@
 
 use std::net::Ipv4Addr;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{ConnectParams, ErrorCode, ErrorInfo, is_plausible_gateway_addr};
@@ -22,6 +23,7 @@ use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
 use ubc_vpn_platform::{Dns, PhysicalNetwork, Platform, Routes};
 
+use crate::diagnostics::failure;
 use crate::hub::Hub;
 use crate::logs::Held;
 use crate::{Logs, lock};
@@ -213,7 +215,17 @@ fn failed(code: ErrorCode, message: &str) -> ConnState {
 
 impl Machine {
     fn run(mut self, inbox: &Receiver<Command>) {
-        for command in inbox {
+        loop {
+            // While a cookie waits to be wiped, the wait for a command ends
+            // when its time is up, so that it is wiped with nothing asked.
+            let command = match self.logs.wipe() {
+                None => inbox.recv().ok(),
+                Some(wait) => match inbox.recv_timeout(wait + Duration::from_millis(1)) {
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    command => command.ok(),
+                },
+            };
+            let Some(command) = command else { break };
             if matches!(command, Command::Shutdown) {
                 break;
             }
@@ -237,8 +249,9 @@ impl Machine {
     /// the failure and takes requests again. Without this the routes would
     /// stay applied and the state would say `connecting` for ever.
     fn recover(&mut self) {
-        self.logs
-            .error("the worker panicked; tearing everything down");
+        // A bug that panics on every request is logged once, not every time.
+        let line = "the worker panicked; tearing everything down";
+        self.logs.error_about("panic", line);
         let torn_down = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
         let message = match torn_down {
             Ok(true) => "Something went wrong inside the service. The connection was closed.",
@@ -246,14 +259,22 @@ impl Machine {
         };
         // The gate first: a client that hears `failed` may ask again at once.
         lock(&self.gate).phase = Phase::Idle;
-        self.hub.publish(failed(ErrorCode::Internal, message));
+        self.publish(failed(ErrorCode::Internal, message));
+    }
+
+    /// Tells the owner's connections the new state. A failure is also kept
+    /// for the diagnostics, cleaned here and now, while the service still
+    /// holds what the failed connection's lines must not show.
+    fn publish(&self, state: ConnState) {
+        let failure = failure(&state, &self.logs);
+        self.hub.publish(state, failure);
     }
 
     fn handle(&mut self, command: Command) {
         match command {
             Command::Connect(params, cancel, hidden) => self.connect(params, &cancel, hidden),
             Command::Disconnect => {
-                self.hub.publish(ConnState::Disconnecting);
+                self.publish(ConnState::Disconnecting);
                 self.finish(ConnState::Disconnected);
                 lock(&self.gate).phase = Phase::Idle;
             }
@@ -285,7 +306,7 @@ impl Machine {
     }
 
     fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
-        self.hub.publish(ConnState::Connecting);
+        self.publish(ConnState::Connecting);
         let clean = self.teardown();
         // After the teardown, which lets go of the hold before this one.
         self.hidden = Some(hidden);
@@ -311,7 +332,7 @@ impl Machine {
                 self.teardown();
             }
             // Reached only after `set_up` verified everything.
-            Ok(tunnel) => self.hub.publish(ConnState::Connected { tunnel }),
+            Ok(tunnel) => self.publish(ConnState::Connected { tunnel }),
             Err((ErrorCode::LoginNeeded, _)) => self.finish(ConnState::LoginNeeded),
             Err((code, message)) => self.finish(ConnState::Failed { code, message }),
         }
@@ -326,7 +347,7 @@ impl Machine {
         } else {
             failed(ErrorCode::Internal, LEFT_BEHIND)
         };
-        self.hub.publish(state);
+        self.publish(state);
     }
 
     /// Passes the tunnel's one ending on to the worker.

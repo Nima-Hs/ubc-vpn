@@ -1,6 +1,8 @@
 //! The log's rules, one test each. All values are made up.
 
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ubc_vpn_core::protocol::MAX_LOG_TEXT_BYTES;
 
@@ -238,4 +240,92 @@ fn each_line_is_told_as_it_is_kept() {
     let heard: Vec<_> = heard.try_iter().collect();
     let expected = [(2, "first".to_string()), (3, "second".to_string())];
     assert_eq!(heard, expected);
+}
+
+/// A log whose clock stands still until the test moves it on.
+fn with_a_clock() -> (Logs, impl Fn(Duration)) {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let read = now.clone();
+    let logs = Logs::with_clock(move || *read.lock().unwrap());
+    (logs, move |by| *now.lock().unwrap() += by)
+}
+
+fn holds(logs: &Logs) -> usize {
+    lock(&logs.0.inner).hidden.len()
+}
+
+// Security rule: when everything for a connection has been torn down its
+// cookie is still held for the cleaning of the log, for a short time and no
+// longer. A client's lines about a connect that failed arrive just then.
+#[test]
+fn a_cookie_lingers_for_the_cleaning_and_is_then_wiped() {
+    let said = LogText::new(&format!("the client says {COOKIE}")).unwrap();
+    let (logs, pass) = with_a_clock();
+    logs.hold(&Secret::new(COOKIE)).linger();
+    pass(Duration::from_secs(1));
+    logs.add(LogLevel::Error, &said);
+    let tick = Duration::from_millis(1);
+    pass(LINGER - Duration::from_secs(1) - tick);
+    logs.add(LogLevel::Error, &said);
+    // Just before its time is up it is still there, and that is how long.
+    assert_eq!((logs.wipe(), holds(&logs)), (Some(tick), 1));
+    pass(tick);
+    assert_eq!((logs.wipe(), holds(&logs)), (None, 0), "it was not wiped");
+    logs.add(LogLevel::Error, &said);
+    let cleaned = "the client says [redacted]";
+    assert_eq!(texts(&logs), [cleaned, cleaned, said.as_str()]);
+
+    // It is wiped when its time is up even if nobody asks: the next line
+    // kept does it.
+    let (logs, pass) = with_a_clock();
+    logs.hold(&Secret::new(COOKIE)).linger();
+    pass(LINGER);
+    logs.error("something else");
+    assert_eq!(holds(&logs), 0, "it was not wiped");
+
+    // A hold that is simply dropped does not linger.
+    drop(logs.hold(&Secret::new(COOKIE)));
+    assert_eq!((logs.wipe(), holds(&logs)), (None, 0));
+}
+
+// Security rule: a cookie that lingers is wiped as soon as the next connect
+// is admitted, which is when the next one is held.
+#[test]
+fn the_next_secret_held_wipes_one_that_lingered() {
+    let (logs, _pass) = with_a_clock();
+    logs.hold(&Secret::new(COOKIE)).linger();
+    let _next = logs.hold(&Secret::new("another-made-up-value"));
+    assert_eq!(holds(&logs), 1);
+    logs.error(&format!("{COOKIE} another-made-up-value"));
+    assert_eq!(texts(&logs), [format!("{COOKIE} [redacted]")]);
+}
+
+// Security rule: nothing that can happen again and again can push the
+// earlier lines out of the log. A line about such a thing is kept only when
+// it differs from the last one about the same thing.
+#[test]
+fn a_line_that_only_repeats_is_not_kept_again() {
+    let logs = Logs::default();
+    logs.error("what happened first");
+    for _ in 0..2 * CAPACITY {
+        logs.error_about("accepting", "accepting failed: denied");
+        logs.warn_about("a step", "a step failed: denied");
+    }
+    let once = [
+        "what happened first",
+        "accepting failed: denied",
+        "a step failed: denied",
+    ];
+    assert_eq!(texts(&logs), once);
+    // News about the same thing is kept, and then that is the last line.
+    logs.error_about("accepting", "accepting failed: no memory");
+    logs.error_about("accepting", "accepting failed: no memory");
+    logs.error_about("accepting", "accepting failed: denied");
+    let lines = texts(&logs);
+    assert_eq!(lines.len(), 5);
+    assert_eq!(
+        lines[3..],
+        ["accepting failed: no memory", "accepting failed: denied"]
+    );
+    assert_eq!(logs.page(None).lines[2].level, LogLevel::Warn);
 }

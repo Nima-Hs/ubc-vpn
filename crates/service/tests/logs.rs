@@ -187,7 +187,7 @@ fn nothing_of_a_line_that_is_not_kept_is_logged() {
     // That a request could not be read is noted, and nothing of it.
     assert_eq!(
         texts(&read),
-        ["a request from the owner could not be understood"]
+        ["a request from the owner could not be understood; later ones are only counted"]
     );
     let sent = [alice.lines, again.lines, rig.logs()].concat();
     assert!(!sent.join("\n").contains(VALUE), "{sent:?}");
@@ -308,23 +308,62 @@ fn diagnostics_describe_the_service_and_name_no_path_or_user() {
     }
 }
 
-// Security rule: the service holds the cookie only while the tunnel needs
-// it. With the tunnel gone nothing in the service knows it any more, which
-// shows here as a made-up line no longer being recognised.
+// Security rule: a client hands over what its login wrote just after a
+// connect has failed, so the service still removes that connect's cookie
+// from a line then, though the tunnel is gone. It stops as soon as the next
+// connect is admitted: by then it knows only the next one's.
 #[test]
-fn the_cookie_is_forgotten_when_the_tunnel_is_gone() {
+fn a_line_added_just_after_a_connect_failed_still_loses_its_cookie() {
     let rig = rig();
     let mut alice = rig.owner();
-    connected(&mut alice);
+    rig.engine.set_reachable(false);
+    let failed = alice.connect_ends(good());
+    assert!(matches!(failed, ConnState::Failed { .. }), "{failed:?}");
     let line = format!("the client says {COOKIE}");
     assert_eq!(alice.ask(add(&line)), ACCEPTED);
-    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
-    assert_eq!(alice.state(), ConnState::Disconnecting);
-    assert_eq!(alice.state(), ConnState::Disconnected);
-    assert_eq!(alice.ask(add(&line)), ACCEPTED);
+
+    let other = "another-made-up-cookie-000";
+    let subnets = ["10.255.0.0/24", "192.0.2.0/24"];
+    let next = connect(other, GATEWAY, &subnets, &[]);
+    let failed = alice.connect_ends(next);
+    assert!(matches!(failed, ConnState::Failed { .. }), "{failed:?}");
+    assert_eq!(alice.ask(add(&format!("{line} and {other}"))), ACCEPTED);
     let read = alice.whole_log();
-    let last = &texts(&read)[read.len() - 2..];
-    assert_eq!(last, ["the client says [redacted]", line.as_str()]);
+    let added = |line: &&LogLine| line.source == LogSource::Login;
+    let added: Vec<&str> = read.iter().filter(added).map(|l| l.text.as_str()).collect();
+    let now = format!("{line} and [redacted]");
+    assert_eq!(added, ["the client says [redacted]", now.as_str()]);
+}
+
+// Security rule: nothing a client can do again and again pushes the earlier
+// lines out of the log. Here the log holds one line of the service's own.
+// More requests that cannot be read than the log has room for come from the
+// owner, one to a connection; then the owner asks for a disconnect, which
+// fails the same way each time, more often than the log has room for.
+#[test]
+fn no_number_of_requests_pushes_the_earlier_lines_out() {
+    let mut rig = Rig::stopped(None);
+    rig.start().unwrap();
+    let mut alice = rig.owner();
+    for _ in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
+        let mut noisy = rig.owner_again();
+        noisy.conn.write_line("this is not a request").unwrap();
+        assert!(noisy.is_closed());
+    }
+    let denied = Some(Error::PermissionDenied);
+    rig.fake.set_failure(Op::ClearSplitDns, denied);
+    for _ in 0..ubc_vpn_service::LOG_CAPACITY / 2 + 20 {
+        assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+        assert_eq!(alice.state(), ConnState::Disconnecting);
+        assert!(matches!(alice.state(), ConnState::Failed { .. }));
+    }
+    let read = alice.whole_log();
+    let lines = texts(&read);
+    assert!(lines[0].contains("policy file"), "the first line is gone");
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[1].contains("from the owner could not be understood"));
+    assert!(lines[2].contains("clearing split DNS failed"));
+    assert!(!page(&mut alice, None).dropped);
 }
 
 // With no policy the service still answers, and says so.
