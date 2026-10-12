@@ -5,7 +5,9 @@
 //   `done` or `error`, after which it exits;
 // - it reads one `AppMessage` per line: an `answer` carrying the id of the
 //   prompt it is waiting on, or `cancel`;
-// - on `cancel` it stops at once, with `error` and the code `cancelled`;
+// - on `cancel` it stops at once, with `error` and the code `cancelled`,
+//   unless the login had already gone to the service: then its last line is
+//   `done` (`afterCancel` in the config says what a cancel is answered with);
 // - it never writes an answer back out.
 //
 // Usage: node mock-cli.mjs connect --json <config.json>
@@ -115,8 +117,16 @@ process.stdin.on("data", (chunk) => {
         }
         if (message.type === "cancel") {
             log("cancel");
-            if (!config.ignoresCancel) {
+            if (config.afterCancel !== undefined) {
+                // The cancel came too late, or the client misbehaves.
+                waiting = null;
+                steps.splice(0, steps.length, ...config.afterCancel);
+                next();
+            } else if (!config.ignoresCancel) {
                 last({ type: "error", code: "cancelled", message: "cancelled" }, 1);
+            } else {
+                // Still here, so still reading: every line sent is logged.
+                continue;
             }
             return;
         }

@@ -91,7 +91,13 @@ async function start(): Promise<void> {
             });
         };
     } else {
-        login = (onState) => new ConnectRunner({ ...connectCommand(app, process), onState });
+        login = (onState) =>
+            new ConnectRunner({
+                ...connectCommand(app, process),
+                onState,
+                // A login given up after the service accepted it is undone.
+                disconnect: () => link.disconnect(),
+            });
         link = createServiceLink({
             ...bridgeCommand(app, process),
             appVersion: app.getVersion(),

@@ -203,8 +203,11 @@ describe("text from the user's own files", () => {
     // is cleaned before the interface sees it, as text from a login is.
     const BACKWARDS = "\u202e";
     const dirty = (text: string) => `${BACKWARDS}${text}\n\tmore\u0007`;
+    // Routes are edited and sent back, so what is removed leaves a mark.
+    const MARK = "\ufffd";
+    const marked = (text: string) => `${MARK}${text}${MARK}more${MARK}`;
 
-    it("is made plain in a view: the username, the routes and the allowed routes", async () => {
+    it("is made safe in a view: the username, the routes and the allowed routes", async () => {
         const view = {
             ...VIEW,
             settings: {
@@ -222,22 +225,53 @@ describe("text from the user's own files", () => {
                 settings: {
                     ...VIEW.settings,
                     username: "someone more",
-                    routes: { subnets: ["203.0.113.0/24 more"], dns_domains: ["a.example more"] },
+                    routes: {
+                        subnets: [marked("203.0.113.0/24")],
+                        dns_domains: [marked("a.example")],
+                    },
                 },
                 allowed_routes: ["198.51.100.0/24 more", "x".repeat(MAX_SHOWN_LENGTH)],
             },
         });
     });
 
-    it("is made plain in the routes a check or a save answers with", async () => {
+    it("is made safe in the routes a check or a save answers with", async () => {
         const reply = { type: "ok", routes: { subnets: [dirty("a")], dns_domains: [dirty("b")] } };
-        const plain = { type: "ok", routes: { subnets: ["a more"], dns_domains: ["b more"] } };
+        const plain = {
+            type: "ok",
+            routes: { subnets: [marked("a")], dns_domains: [marked("b")] },
+        };
         const { runner } = client({
             check: { line: reply, exit: 0 },
             save: { line: reply, exit: 0 },
         });
         await expect(runner.checkRoutes(INPUT)).resolves.toEqual({ ok: true, value: plain });
         await expect(runner.saveRoutes(INPUT)).resolves.toEqual({ ok: true, value: plain });
+    });
+
+    it.each([
+        ["a direction override", "\u202e"],
+        ["a newline", "\n"],
+        ["a control character", "\u0007"],
+        ["a space", " "],
+    ])("a stored route followed by %s does not pass for the route alone", async (_name, extra) => {
+        const GOOD = "203.0.113.0/24";
+        const view = {
+            ...VIEW,
+            settings: {
+                ...VIEW.settings,
+                routes: { subnets: [GOOD + extra], dns_domains: [`campus.example${extra}`] },
+            },
+        };
+        const { runner } = client({ get: { line: view, exit: 0 } });
+        const result = await runner.getSettings();
+        const routes = result.ok ? result.value.settings.routes : undefined;
+        // What could not be shown is marked; a space is simply kept.
+        const shown = extra === " " ? " " : MARK;
+        expect(routes?.subnets).toEqual([GOOD + shown]);
+        expect(routes?.dns_domains).toEqual([`campus.example${shown}`]);
+        expect(routes?.subnets[0]).not.toBe(GOOD);
+        expect(JSON.stringify(routes)).not.toMatch(/\\u202e|\\n|\\u0007/);
     });
 
     it("keeps every entry in its place, so a problem still points at the right one", async () => {
@@ -250,7 +284,7 @@ describe("text from the user's own files", () => {
         };
         const { runner } = client({ get: { line: view, exit: 0 } });
         const result = await runner.getSettings();
-        expect(result.ok && result.value.settings.routes.subnets).toEqual(["", "203.0.113.0/24"]);
+        expect(result.ok && result.value.settings.routes.subnets).toEqual([MARK, "203.0.113.0/24"]);
         // No username stays no username.
         const none = client({
             get: { line: { ...VIEW, settings: { ...VIEW.settings, username: null } }, exit: 0 },

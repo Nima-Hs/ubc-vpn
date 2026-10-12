@@ -8,6 +8,12 @@
 // once and kept nowhere: not in a field of this class, not in the state the
 // interface is shown, not in an error, and never in a log. This file logs
 // nothing at all.
+//
+// The client's last line is the truth about a login, not what the app last
+// sent. A cancel can arrive after the service has already been asked to
+// connect; the client then ends with `done`. So after sending a cancel the
+// app keeps reading until the last line, and if the request reached the
+// service, or may have, it asks the service to disconnect.
 
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { LoginPrompt, LoginState } from "@shared/api";
@@ -37,7 +43,16 @@ export interface ConnectOptions {
     /** Its arguments: `["connect", "--json"]`. The app passes no routes. */
     args: readonly string[];
     onState(state: LoginState): void;
-    /** How long a client that was told to stop has to leave before it is killed. */
+    /**
+     * Asks the service, through the bridge, to disconnect. Called when a
+     * login the user gave up was accepted by the service all the same, or
+     * may have been. Asking is harmless when nothing is connected.
+     */
+    disconnect(): Promise<unknown>;
+    /**
+     * How long a client has to give its last line after a cancel, and to
+     * leave once the app has let go of it, before it is killed.
+     */
     exitGraceMs?: number;
     /** The app's own environment, from which the client's short one is taken. */
     env?: Record<string, string | undefined>;
@@ -65,7 +80,20 @@ const UNSAFE_IN_TEXT = /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u202
  * itself backwards, or push the real question off the screen with newlines.
  */
 export function plainText(text: string, maxLength: number): string {
-    const clean = text.replace(UNSAFE_IN_TEXT, " ").replace(/ {2,}/g, " ").trim();
+    return cut(text.replace(UNSAFE_IN_TEXT, " ").replace(/ {2,}/g, " ").trim(), maxLength);
+}
+
+/**
+ * Text the user will edit and send back, such as a stored route. What
+ * cannot be shown is not taken away quietly: U+FFFD stands in its place, and
+ * nothing is trimmed. An entry that is not what it seems then looks wrong,
+ * and is refused when it is checked, instead of passing for a good one.
+ */
+export function markedText(text: string, maxLength: number): string {
+    return cut(text.replace(UNSAFE_IN_TEXT, "\ufffd"), maxLength);
+}
+
+function cut(clean: string, maxLength: number): string {
     if (clean.length <= maxLength) {
         return clean;
     }
@@ -88,6 +116,7 @@ export const FALLBACK_LABEL = "Answer";
 
 const IDLE: LoginState = { phase: "idle" };
 const WORKING: LoginState = { phase: "working" };
+const CANCEL: AppMessage = { type: "cancel" };
 /** For everything that is the client misbehaving and not the gateway answering. */
 const BROKEN: LoginState = { phase: "failed", code: "internal", message: "" };
 
@@ -103,6 +132,14 @@ export class ConnectRunner implements LoginRunner {
      */
     private waiting: { ours: number; clients: number } | null = null;
     private lastPromptId = 0;
+    /**
+     * Running from the moment the client is told to cancel until its last
+     * line: how long it has to give one. While this is set the app does not
+     * know whether the service was asked to connect.
+     */
+    private cancelling: NodeJS.Timeout | null = null;
+    /** A disconnect after a cancel is on its way to the service. */
+    private settling = false;
     private readonly leaving = new Set<ChildProcessWithoutNullStreams>();
     /** When the client was last started, and the wait before the next start, if one is on. */
     private lastStartAt = Number.NEGATIVE_INFINITY;
@@ -114,7 +151,8 @@ export class ConnectRunner implements LoginRunner {
 
     start(): boolean {
         // One login at a time: a second would mean a second MFA request.
-        if (this.child !== null || this.startTimer !== null) {
+        // Nor does one start while the last is still being wound up.
+        if (this.child !== null || this.startTimer !== null || this.settling) {
             return false;
         }
         // The user sees the login begin at once. The client itself is started
@@ -149,7 +187,7 @@ export class ConnectRunner implements LoginRunner {
             try {
                 lines = decoder.push(chunk);
             } catch {
-                this.finish(child, BROKEN);
+                this.finish(child, BROKEN, true);
                 return;
             }
             for (const text of lines) {
@@ -168,7 +206,7 @@ export class ConnectRunner implements LoginRunner {
         child.on("error", () => {});
         child.stdin.on("error", () => {});
         // Leaving without a last line is a failure, not a quiet success.
-        child.once("close", () => this.finish(child, BROKEN));
+        child.once("close", () => this.finish(child, BROKEN, true));
     }
 
     answer(id: number, value: string): boolean {
@@ -201,15 +239,43 @@ export class ConnectRunner implements LoginRunner {
             this.startTimer = null;
         }
         const child = this.child;
-        if (child !== null) {
-            const cancel: AppMessage = { type: "cancel" };
-            child.stdin.write(encodeLine(cancel));
+        if (child === null) {
+            // Nothing is running: a failure is dismissed, or a start called off.
+            if (!this.settling) {
+                this.options.onState(IDLE);
+            }
+            return;
         }
-        this.finish(child, IDLE);
+        if (this.cancelling !== null) {
+            return;
+        }
+        this.waiting = null;
+        child.stdin.write(encodeLine(CANCEL));
+        // Its input stays open: the client takes a closed input as a cancel
+        // too, and its last line is still to come.
+        this.cancelling = setTimeout(() => {
+            child.kill();
+            this.finish(child, BROKEN, true);
+        }, this.options.exitGraceMs);
+        this.options.onState(WORKING);
     }
 
     stop(): void {
-        this.cancel();
+        if (this.startTimer !== null) {
+            clearTimeout(this.startTimer);
+            this.startTimer = null;
+        }
+        const child = this.child;
+        if (child !== null) {
+            // The app is quitting: there is no time to wait for a last line.
+            if (this.cancelling === null) {
+                child.stdin.write(encodeLine(CANCEL));
+            } else {
+                clearTimeout(this.cancelling);
+                this.cancelling = null;
+            }
+            this.finish(child, IDLE);
+        }
         for (const child of this.leaving) {
             child.kill();
         }
@@ -218,11 +284,15 @@ export class ConnectRunner implements LoginRunner {
 
     private onLine(child: ChildProcessWithoutNullStreams, line: unknown): void {
         if (!isCliMessage(line)) {
-            this.finish(child, BROKEN);
+            this.finish(child, BROKEN, true);
             return;
         }
         switch (line.type) {
             case "prompt": {
+                // Asked before the client read the cancel. Nobody will answer.
+                if (this.cancelling !== null) {
+                    return;
+                }
                 // A second question while the first still waits is not something
                 // the client does; the answer could go to the wrong one.
                 if (this.waiting !== null) {
@@ -246,7 +316,7 @@ export class ConnectRunner implements LoginRunner {
             }
             case "done":
                 // The connection's progress now arrives from the service.
-                this.finish(child, IDLE);
+                this.finish(child, IDLE, true);
                 return;
             case "error":
                 this.finish(
@@ -267,24 +337,51 @@ export class ConnectRunner implements LoginRunner {
      * Lets go of the client and reports where that leaves the login. Closing
      * its input tells the client the app has gone; one that has not left
      * after the grace period is killed.
+     *
+     * `reached` says the service was asked to connect, or that the app cannot
+     * tell: every ending but an `error` line. It matters only for a login
+     * the user gave up, which then ends with a disconnect, and shows as
+     * given up only once that has been sent.
      */
-    private finish(child: ChildProcessWithoutNullStreams | null, state: LoginState): void {
-        if (child !== null) {
-            if (this.child !== child) {
-                return;
-            }
-            this.child = null;
-            this.waiting = null;
-            child.stdin.end();
-            if (child.exitCode === null && child.signalCode === null) {
-                this.leaving.add(child);
-                const timer = setTimeout(() => child.kill(), this.options.exitGraceMs);
-                child.once("close", () => {
-                    clearTimeout(timer);
-                    this.leaving.delete(child);
-                });
-            }
+    private finish(
+        child: ChildProcessWithoutNullStreams,
+        state: LoginState,
+        reached = false,
+    ): void {
+        let cancelled = false;
+        if (this.child !== child) {
+            return;
         }
-        this.options.onState(state);
+        this.child = null;
+        this.waiting = null;
+        if (this.cancelling !== null) {
+            clearTimeout(this.cancelling);
+            this.cancelling = null;
+            cancelled = true;
+        }
+        child.stdin.end();
+        if (child.exitCode === null && child.signalCode === null) {
+            this.leaving.add(child);
+            const timer = setTimeout(() => child.kill(), this.options.exitGraceMs);
+            child.once("close", () => {
+                clearTimeout(timer);
+                this.leaving.delete(child);
+            });
+        }
+        if (!cancelled) {
+            this.options.onState(state);
+        } else if (!reached) {
+            this.options.onState(IDLE);
+        } else {
+            this.settling = true;
+            const settled = () => {
+                this.settling = false;
+                this.options.onState(IDLE);
+            };
+            // Whatever the answer, the service's own state says what is so.
+            Promise.resolve()
+                .then(() => this.options.disconnect())
+                .then(settled, settled);
+        }
     }
 }

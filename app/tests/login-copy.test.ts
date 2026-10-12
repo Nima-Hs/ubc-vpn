@@ -81,6 +81,14 @@ describe("the words around a login", () => {
         expect(describeLoginFailure("internal", "  ").detail).toBeUndefined();
     });
 
+    it("sends a refused route to the Routes screen, and does not blame the service", () => {
+        // The saved routes are refused by the check made as a login starts,
+        // before anything is sent to the service.
+        const { body } = describeLoginFailure("route_refused", "");
+        expect(body).toContain("Fix it on the Routes screen");
+        expect(body).not.toMatch(/service/i);
+    });
+
     it("follows the writing rules", () => {
         const everything = [
             LOGIN_WORKING.title,
