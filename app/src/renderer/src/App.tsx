@@ -8,8 +8,8 @@ import { show, useNavigation } from "@/lib/navigation";
 import { ConnectionView } from "@/views/connection-view";
 import { RoutesView } from "@/views/routes-view";
 
-// The app's screens, in the order the switcher in the title bar shows them.
-// Settings and the log will be added here.
+// The app's screens, in the order the switcher shows them. The log and the
+// settings will be added here; the switcher's row has room for four.
 const views: View[] = [
     { id: "connection", label: "Connection", Component: ConnectionView },
     { id: "routes", label: "Routes", Component: RoutesView },
@@ -34,10 +34,10 @@ export function App() {
         <MotionConfig reducedMotion="user">
             <TooltipProvider>
                 <div className="flex h-full flex-col">
-                    <TitleBar crowded={views.length > 2}>
-                        <ViewSwitcher views={views} current={current} onChange={show} />
-                    </TitleBar>
+                    <TitleBar />
+                    {/* Directly under the title bar, above everything else. */}
                     <DevelopmentMark />
+                    <ViewSwitcher views={views} current={current} onChange={show} />
                     <Suspense>{Current !== undefined && <Current show={show} />}</Suspense>
                 </div>
             </TooltipProvider>

@@ -209,7 +209,7 @@ async function ringDrawn(field: Locator): Promise<Record<Side, number>> {
     };
 }
 
-/** A screen's button in the title bar's switcher. */
+/** A screen's button in the switcher under the title bar. */
 const tab = (name: string) =>
     page.getByRole("navigation", { name: "Screens" }).getByRole("button", { name, exact: true });
 /** The one button on the connection screen. */
@@ -243,6 +243,54 @@ test("a second copy with a profile of its own runs beside the first", async () =
     } finally {
         await other.close();
     }
+});
+
+test("the screens are switched from a row of their own, with every one named", async () => {
+    const nav = page.getByRole("navigation", { name: "Screens" });
+    const layout = await nav.evaluate((row) => {
+        const box = (element: Element) => element.getBoundingClientRect();
+        const buttons = [...row.querySelectorAll("button")];
+        const header = document.querySelector("header");
+        const main = document.querySelector("main");
+        return {
+            names: buttons.map((button) => button.textContent),
+            widths: buttons.map((button) => Math.round(box(button).width)),
+            // How wide each name is when nothing limits it.
+            natural: buttons.map((button) => {
+                const range = document.createRange();
+                range.selectNodeContents(button);
+                return Math.ceil(range.getBoundingClientRect().width);
+            }),
+            cut: buttons.some((button) => button.scrollWidth > button.clientWidth),
+            inner: buttons.reduce((sum, button) => sum + box(button).width, 0),
+            underTitleBar: header !== null && box(header).bottom <= box(row).top + 0.5,
+            aboveScreen: main !== null && box(row).bottom <= box(main).top + 0.5,
+            current: buttons.filter((button) => button.getAttribute("aria-current") === "page")
+                .length,
+        };
+    });
+    expect(layout.names.slice(0, 2)).toEqual(["Connection", "Routes"]);
+    expect(layout.underTitleBar).toBe(true);
+    expect(layout.aboveScreen).toBe(true);
+    expect(layout.current).toBe(1);
+    // The screens share the row equally, and no name is cut short.
+    expect(new Set(layout.widths).size).toBe(1);
+    expect(layout.cut).toBe(false);
+    // Room for four: a quarter of the row holds the longest name whole.
+    expect(layout.inner / 4).toBeGreaterThan(Math.max(...layout.natural) + 8);
+    // With the switcher out of it, the title bar always has room for the name.
+    await expect(page.locator("header").getByText("UBC VPN", { exact: true })).toBeVisible();
+    // The keyboard reaches each screen's button and switches with it.
+    await tab("Connection").focus();
+    await page.keyboard.press("Tab");
+    await expect(tab("Routes")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(heading()).toHaveText("Routes");
+    await expect(tab("Routes")).toHaveAttribute("aria-current", "page");
+    await shoot("switcher-row-routes");
+    await tab("Connection").click();
+    await expect(heading()).not.toHaveText("Routes");
+    await shoot("switcher-row-connection");
 });
 
 test("the window renders, locked down", async () => {
@@ -1078,6 +1126,21 @@ test("says on every screen that it is in development mode, when it is", async ()
         await window.evaluate(() => document.fonts.ready);
         const mark = window.getByText("Development mode. This is not the real VPN.");
         await expect(mark).toBeInViewport({ ratio: 1 });
+        // Directly under the title bar, above the row of screens.
+        const order = await window.evaluate(() => {
+            const top = (selector: string) =>
+                document.querySelector(selector)?.getBoundingClientRect().top ?? -1;
+            const strip = [...document.querySelectorAll("p")].find((p) =>
+                p.textContent?.startsWith("Development mode"),
+            );
+            return {
+                header: top("header"),
+                strip: strip?.getBoundingClientRect().top ?? -1,
+                row: top('nav[aria-label="Screens"]'),
+            };
+        });
+        expect(order.header).toBeLessThan(order.strip);
+        expect(order.strip).toBeLessThan(order.row);
         await window.screenshot({ path: join(screenshotDir, "development-mode.png") });
         await window
             .getByRole("navigation", { name: "Screens" })

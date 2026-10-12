@@ -1,5 +1,4 @@
 import { Minus, X } from "lucide-react";
-import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { api, useSnapshot } from "@/lib/store";
 import { IconButton } from "./ui/icon-button";
@@ -25,14 +24,7 @@ function Mark() {
  * OS. It drags the window. macOS places its window buttons at the left, so
  * there the bar leaves room for them and shows none of its own.
  */
-export function TitleBar({
-    children,
-    crowded = false,
-}: {
-    children?: ReactNode;
-    /** With many screens to switch between, the name gives way to the mark alone. */
-    crowded?: boolean;
-}) {
+export function TitleBar() {
     const mac = api.platform === "darwin";
     const closeHides = useSnapshot((snapshot) => snapshot.closeHides);
     return (
@@ -43,16 +35,10 @@ export function TitleBar({
             )}
         >
             <Mark />
-            <span
-                className={cn(
-                    "shrink-0 whitespace-nowrap font-strong text-label text-text",
-                    crowded && "sr-only",
-                )}
-            >
+            <span className="shrink-0 whitespace-nowrap font-strong text-label text-text">
                 UBC VPN
             </span>
             <div className="ms-auto flex items-center gap-1">
-                {children}
                 {!mac && (
                     <>
                         <IconButton label="Minimize" onClick={() => void api.minimizeWindow()}>

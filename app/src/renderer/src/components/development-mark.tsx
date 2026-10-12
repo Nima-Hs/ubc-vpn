@@ -12,7 +12,7 @@ export function DevelopmentMark() {
         return null;
     }
     return (
-        <p className="flex shrink-0 items-center justify-center gap-1.5 bg-attention-subtle px-4 py-1 text-caption text-text">
+        <p className="mb-2 flex shrink-0 items-center justify-center gap-1.5 bg-attention-subtle px-4 py-1 text-caption text-text">
             <FlaskConical aria-hidden className="size-3 shrink-0 text-attention" />
             {DEVELOPMENT_MODE}
         </p>
