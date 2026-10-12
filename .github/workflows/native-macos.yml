@@ -109,7 +109,7 @@ jobs:
           # The run must pass, report the version we built, load every one of
           # our libraries from the unpacked folder, and load nothing from Homebrew.
           check() {
-            grep -qxE 'version  = v9\.21(-unknown)?' "$1"
+            grep -qx 'version  = v9.21-unknown' "$1"
             grep -qx 'RESULT: PASS' "$1"
             for lib in "$APP"/lib/*.*.dylib; do
               grep -qF " $lib" "$1"
