@@ -165,6 +165,11 @@ fn fill(
             message: message.clone(),
         };
         let answer = prompts.ask(&prompt)?;
+        // The sink does not register an answer shorter than `MIN_HIDDEN_LEN`
+        // (4 bytes), so such an answer is not taken out of log lines. That is
+        // decided, not overlooked: an answer that short is a choice, such as
+        // `1` for a way to confirm, not a secret, and hiding every `1` would
+        // shred the log. A four-byte choice such as `push` is registered.
         logs.hide(&answer);
         if !form.answer(index, &answer) {
             return Err(LoginError::Failed);
