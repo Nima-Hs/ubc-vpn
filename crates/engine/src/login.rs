@@ -301,6 +301,13 @@ fn finish(
     })
 }
 
+// The stand-in gateway, for the one unit test that needs a real handle. It
+// is named here and not inside `tests`: a path given inside an inline module
+// is looked up through a folder that does not exist.
+#[cfg(test)]
+#[path = "../tests/gateway/mod.rs"]
+mod stand_in;
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -321,9 +328,6 @@ mod tests {
         };
         Gateway::from_policy(&policy).expect("a valid policy")
     }
-
-    #[path = "../../../tests/gateway/mod.rs"]
-    mod stand_in;
 
     // Security rule: what a login returns depends on the handle's own record
     // that a certificate was accepted on this connection, not only on the
@@ -425,7 +429,9 @@ mod tests {
         deliver(&logs, 1, c"progress", LineState::Whole);
         deliver(&logs, 3, c"detail", LineState::Whole);
         let levels: Vec<LogLevel> = lines.lock().unwrap().iter().map(|line| line.0).collect();
-        assert_eq!(levels, [LogLevel::Error, LogLevel::Info, LogLevel::Debug]);
+        // The sink itself drops the library's detail where a build has none.
+        let expected = [LogLevel::Error, LogLevel::Info, LogLevel::Debug];
+        assert_eq!(levels, expected[..if crate::DEBUG_LINES { 3 } else { 2 }]);
     }
 
     // Security rule: a success the pin check did not accept on this
