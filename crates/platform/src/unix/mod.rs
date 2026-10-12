@@ -8,7 +8,13 @@
 //!   for as long as it lives. The lock dies with its process, so whoever holds
 //!   it knows a socket file already there is a leftover and may replace it,
 //!   and nobody ever removes the socket of a listener that is alive. The lock
-//!   file itself is never removed.
+//!   file itself is never removed. The lock is given up outright when the
+//!   listener closes and on every way out of a `listen` that fails, because
+//!   a process started meanwhile holds a copy of the open file and would
+//!   keep the lock alive. A child made by `fork` that does not go on to run
+//!   another program holds a copy of the listener itself: it must leave with
+//!   `_exit`, never by returning or unwinding, or it would give up its
+//!   parent's lock and remove its parent's socket file.
 //! - **Local callers only**: a Unix socket has no remote callers.
 //! - **A folder nobody else can change.** Installed: the socket's folder and
 //!   every folder above it are real folders (no symlinks) owned by root and
@@ -236,6 +242,38 @@ fn open_lock(path: &Path) -> io::Result<File> {
     }
 }
 
+/// The lock on a channel's name, held from the moment it is taken until this
+/// is dropped.
+///
+/// Dropping gives the lock up outright; closing the file would not be
+/// enough. A process started while the lock was held has a copy of every
+/// open file until it runs its own program, and the lock would last as long
+/// as that copy: the name would stay taken after a close, or after a `listen`
+/// that failed part-way.
+struct Claim(File);
+
+impl Claim {
+    /// Takes the lock on the file at `path`, or reports
+    /// [`Error::AlreadyExists`] when a live listener holds it.
+    fn take(path: &Path) -> Result<Self> {
+        let file = open_lock(path)?;
+        // Security rule: one listener. A live one holds this lock.
+        match file.try_lock() {
+            // Wrapped only now: giving up a lock that was never taken has
+            // no place here.
+            Ok(()) => Ok(Self(file)),
+            Err(TryLockError::WouldBlock) => Err(Error::AlreadyExists),
+            Err(TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// How long [`take_back`] keeps trying against an owner who keeps marking the
 /// file. One try takes microseconds, and one win is enough.
 const TAKE_BACK_WAIT: Duration = Duration::from_secs(1);
@@ -321,13 +359,8 @@ impl Transport for SocketTransport {
 
         let mut lock_path = path.as_os_str().to_owned();
         lock_path.push(".lock");
-        let claim = open_lock(Path::new(&lock_path))?;
-        // Security rule: one listener. A live one holds this lock.
-        match claim.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(Error::AlreadyExists),
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
+        // Given up again on every way out below that is not a listener.
+        let claim = Claim::take(Path::new(&lock_path))?;
         // Holding the lock, a socket file here belongs to no one.
         match fs::symlink_metadata(path) {
             Ok(stale) if stale.file_type().is_socket() => remove_socket(path)?,
@@ -384,7 +417,7 @@ struct SocketListener {
     wake: UnixStream,
     path: PathBuf,
     /// The lock file and the other end of `wake`. `None` once closed.
-    claim: Mutex<Option<(File, UnixStream)>>,
+    claim: Mutex<Option<(Claim, UnixStream)>>,
 }
 
 impl SocketListener {
@@ -451,13 +484,8 @@ impl Listener for SocketListener {
         // Dropping the claim then frees the name and wakes `accept`. There
         // is nobody to tell if removing fails: the next `listen` removes the
         // leftover the same way, and reports a failure.
-        if let Some((claim, _waker)) = lock(&self.claim).take() {
+        if let Some(_claim) = lock(&self.claim).take() {
             let _ = remove_socket(&self.path);
-            // Given up outright, not left to closing the file. A process
-            // started while the listener was open has a copy of every open
-            // file until it runs its own program, and the lock would last as
-            // long as that copy: the name would stay taken after the close.
-            let _ = claim.unlock();
         }
     }
 }

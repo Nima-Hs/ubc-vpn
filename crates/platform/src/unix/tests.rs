@@ -280,6 +280,25 @@ fn closing_frees_the_name_whatever_a_started_process_still_holds() {
     assert_eq!(again.err(), None, "the name stayed taken after the close");
 }
 
+// A `listen` that fails after taking the name gives it back: the next one
+// succeeds once what stood in the way is gone.
+#[test]
+fn a_listen_that_fails_gives_the_name_back() {
+    let Some(sandbox) = Sandbox::any("failed listen") else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    drop(transport.listen(&name).expect("make the folder"));
+    // Something that is not a socket where the socket goes.
+    fs::create_dir(&name).expect("put a folder in the way");
+    let taken = failed("the channel's path is taken");
+    assert_eq!(transport.listen(&name).err(), taken);
+    assert_eq!(transport.listen(&name).err(), taken, "the second try");
+    fs::remove_dir(&name).expect("clear the way");
+    let listener = transport.listen(&name);
+    assert_eq!(listener.err(), None, "the name stayed taken");
+}
+
 // A crashed run leaves its socket file behind. It must not block the next
 // run, and nothing but a socket is ever removed to make room.
 #[test]
