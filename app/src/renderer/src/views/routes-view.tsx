@@ -229,9 +229,11 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
 
     return (
         <>
-            <div className="scroll-region flex min-h-0 flex-1 flex-col gap-6">
+            {/* Every child keeps its own height: the area scrolls, and nothing
+                in it may be squeezed to make it fit. */}
+            <div className="scroll-region ring-room flex min-h-0 flex-1 flex-col gap-6">
                 {limits.noPolicy !== undefined && (
-                    <Panel tone="attention">
+                    <Panel tone="attention" className="shrink-0">
                         <Text>{limits.noPolicy}</Text>
                     </Panel>
                 )}
@@ -253,7 +255,7 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
                     </div>
                 </Panel>
 
-                <section className="flex flex-col gap-3">
+                <section className="flex shrink-0 flex-col gap-3">
                     <Subheading>{ROUTES.subnets}</Subheading>
                     {rows.subnets.length === 0 && <Text tone="tertiary">{ROUTES.noSubnets}</Text>}
                     <Entries
@@ -264,7 +266,7 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
                     />
                 </section>
 
-                <section className="flex flex-col gap-3">
+                <section className="flex shrink-0 flex-col gap-3">
                     <Subheading>{ROUTES.domains}</Subheading>
                     <Text size="label" tone="secondary">
                         {rows.dns_domains.length === 0 ? ROUTES.noDomains : ROUTES.domainsBody}
@@ -324,6 +326,13 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
                 >
                     {saving ? "Saving…" : "Save routes"}
                 </Button>
+                {/* Why Save is not available just now, or that it worked. The
+                    line is always there, so the button does not move. */}
+                <div aria-hidden className="flex min-h-5 justify-center">
+                    <Text size="label" tone="tertiary">
+                        {changed || justSaved ? status : null}
+                    </Text>
+                </div>
                 {/* Read out, politely: checking, saved, and anything that went wrong. */}
                 <p role="status" className="sr-only">
                     {status} {whole.join(" ")}{" "}
@@ -373,8 +382,8 @@ export function RoutesView() {
             )}
             {loaded.state === "failed" && (
                 <>
-                    <div className="flex min-h-0 flex-1 flex-col">
-                        <Panel tone="problem">
+                    <div className="scroll-region flex min-h-0 flex-1 flex-col">
+                        <Panel tone="problem" className="shrink-0">
                             <Text>{describeSettingsError(loaded.error, "read")}</Text>
                         </Panel>
                     </div>

@@ -437,7 +437,7 @@ export function describeSettingsError(
 ): string {
     switch (error) {
         case "unreadable":
-            return "Your settings file could not be read, so it has been left as it is. If you edited it by hand, undo the change.";
+            return "Your settings file is damaged, so it has been left as it is and your routes cannot be shown. If you edited it by hand, undo the change.";
         case "unwritable":
             return "Your settings could not be saved, and the old ones are unchanged. Check that your disk is not full, then save again.";
         case "bad_input":
