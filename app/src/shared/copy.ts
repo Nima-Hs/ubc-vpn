@@ -260,7 +260,7 @@ const PROMPTS: Record<PromptKind, { title: string; body: string }> = {
     },
     password: {
         title: "Your password",
-        body: "It goes to UBC and nowhere else. This app does not keep it.",
+        body: "It is sent to UBC and nowhere else.",
     },
     code: {
         title: "Your one-time code",
@@ -297,9 +297,17 @@ const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
     route_refused: FAILURES.route_refused,
     service_unavailable: {
         title: "Service not running",
-        body: "You were logged in, but UBC VPN’s background service did not answer, so nothing was connected. Restart your computer, then try again.",
+        body: "UBC VPN’s background service did not answer, so nothing was connected. Restart your computer, then try again.",
         retry: true,
     },
+    // Nothing to try again: the VPN is in use, and the way on is to go back.
+    busy: {
+        title: "VPN is busy",
+        body: "The VPN is already connected, or is part-way through connecting or disconnecting. Go back and disconnect first, then connect again.",
+        retry: false,
+    },
+    // The same words as when the service itself says so.
+    not_owner: FAILURES.not_owner,
     internal: {
         title: "Login did not finish",
         body: "Something went wrong while logging in, and nothing was connected. Try again. If it keeps happening, install UBC VPN again.",

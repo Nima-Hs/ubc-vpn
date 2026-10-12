@@ -16,6 +16,8 @@ const FAILURES: Record<Exclude<LoginErrorCode, "cancelled">, string> = {
     gateway_unreachable: "timed out connecting to the gateway",
     route_refused: "198.51.100.0/4 is wider than /8",
     service_unavailable: "the service did not answer",
+    busy: "the service is already connected",
+    not_owner: "only the owner may do this",
     internal: "",
 };
 

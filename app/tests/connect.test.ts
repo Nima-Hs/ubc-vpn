@@ -180,6 +180,8 @@ describe("how a login ends badly", () => {
         "gateway_unreachable",
         "route_refused",
         "service_unavailable",
+        "busy",
+        "not_owner",
         "internal",
     ];
 
@@ -319,6 +321,34 @@ describe("text from the gateway and the client", () => {
         expect(plainText(`one${LINE_SEPARATOR}two${LRI}three`, 200)).toBe("one two three");
         // Other languages, accents and emoji are left alone.
         expect(plainText("Mot de passe é 密码 🔑", 200)).toBe("Mot de passe é 密码 🔑");
+    });
+
+    it("keeps the joiners that Persian and joined emoji are written with", () => {
+        const ZWNJ = String.fromCharCode(0x200c);
+        const ZWJ = String.fromCharCode(0x200d);
+        // "می‌خواهم": the non-joiner keeps two parts of one word apart.
+        const persian = `می${ZWNJ}خواهم`;
+        // A family: three people joined into one picture.
+        const family = `👨${ZWJ}👩${ZWJ}👧`;
+        expect(plainText(persian, 200)).toBe(persian);
+        expect(plainText(family, 200)).toBe(family);
+    });
+
+    it("is cut between whole characters, never through one", () => {
+        const ZWJ = String.fromCharCode(0x200d);
+        const family = `👨${ZWJ}👩${ZWJ}👧`;
+        // The limit falls inside the emoji: none of it is kept, not a piece.
+        expect(plainText(`ab${family}`, 4)).toBe("ab");
+        expect(plainText(`ab${family}`, 2 + family.length)).toBe(`ab${family}`);
+        // The same for a single character stored as two units, and an accent on a letter.
+        expect(plainText("ab🔑", 3)).toBe("ab");
+        expect(plainText(`abe${String.fromCharCode(0x301)}`, 3)).toBe("ab");
+        for (const limit of [1, 2, 3, 5, 7, 9]) {
+            const cut = plainText(`a🔑${family}é`, limit);
+            expect(cut.length).toBeLessThanOrEqual(limit);
+            // Half of a two-unit character cannot be encoded: this throws on one.
+            expect(() => encodeURIComponent(cut)).not.toThrow();
+        }
     });
 
     it("is cut to length after it is cleaned, not before", () => {

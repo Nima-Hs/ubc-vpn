@@ -1,5 +1,6 @@
 import type { LoginState } from "@shared/api";
 import {
+    describe as describe_,
     describeLoginFailure,
     describePrompt,
     LOGIN_WORKING,
@@ -18,6 +19,8 @@ const CODES: LoginErrorCode[] = [
     "gateway_unreachable",
     "route_refused",
     "service_unavailable",
+    "busy",
+    "not_owner",
     "internal",
 ];
 
@@ -30,14 +33,14 @@ describe("the words around a login", () => {
 
     it("says where a password goes", () => {
         expect(describePrompt({ kind: "password" }).body).toBe(
-            "It goes to UBC and nowhere else. This app does not keep it.",
+            "It is sent to UBC and nowhere else.",
         );
     });
 
     it("gives every failure its own explanation, with what to do next", () => {
         const copies = CODES.map((code) => describeLoginFailure(code, ""));
         expect(new Set(copies.map((copy) => copy.body)).size).toBe(CODES.length);
-        const next = /\b(try|check|install|restart|connect|message below)\b/i;
+        const next = /\b(try|check|install|restart|connect|reset|message below)\b/i;
         for (const copy of copies) {
             expect(copy.body, copy.title).toMatch(next);
             expect(copy.title.length, copy.title).toBeLessThanOrEqual(24);
@@ -48,6 +51,27 @@ describe("the words around a login", () => {
         const copy = describeLoginFailure("wrong_password", "");
         expect(copy.title).toBe("Login refused");
         expect(copy.body).toContain("does not say which");
+    });
+
+    it("offers no second try when the VPN is already in use, only the way back", () => {
+        const copy = describeLoginFailure("busy", "");
+        expect(copy.title).toBe("VPN is busy");
+        expect(copy.body).toContain("disconnect first");
+        expect(copy.retry).toBe(false);
+    });
+
+    it("says the same as the rest of the app when another user owns the service", () => {
+        const copy = describeLoginFailure("not_owner", "");
+        const link = describe_({ link: "not_owner" });
+        expect(copy.title).toBe(link.title);
+        expect(copy.body).toBe(link.body);
+        expect(copy.retry).toBe(false);
+    });
+
+    it("says nothing was connected when the service did not answer", () => {
+        expect(describeLoginFailure("service_unavailable", "").body).toBe(
+            "UBC VPN’s background service did not answer, so nothing was connected. Restart your computer, then try again.",
+        );
     });
 
     it("shows the client's own account beside the explanation, when there is one", () => {
@@ -85,7 +109,7 @@ describe("the words around a login", () => {
         ];
         expect(states.map(loginAnnouncement)).toEqual([
             "Logging in. Waiting for UBC to answer. If you approve logins on your phone, check it now.",
-            "Your password. It goes to UBC and nowhere else. This app does not keep it.",
+            "Your password. It is sent to UBC and nowhere else.",
             // The gateway's reason is what matters when a question comes back.
             "Your password. Login failed.",
             expect.stringContaining("Login refused. UBC did not accept"),
@@ -136,7 +160,7 @@ describe("the demo login", () => {
         }
         expect(
             DEMO_LOGIN_SCENARIOS.filter((name) => name.startsWith("login-failed-")),
-        ).toHaveLength(6);
+        ).toHaveLength(8);
         for (const name of ["disconnected", "__proto__", "constructor"]) {
             login.setScenario(name);
             expect(seen.at(-1)).toEqual({ phase: "idle" });

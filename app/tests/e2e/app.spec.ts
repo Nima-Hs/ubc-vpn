@@ -412,6 +412,16 @@ test("a failed login says why, and can be tried again or closed", async () => {
     await expect(heading()).toHaveText("Your password");
     await page.keyboard.press("Escape");
 
+    // When the VPN is already in use there is nothing to try again, only the way back.
+    await scenario("login-failed-busy");
+    await expect(heading()).toHaveText("VPN is busy");
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Back" }).click();
+    await expect(heading()).toHaveText("Not connected");
+    await scenario("login-failed-not-owner");
+    await expect(heading()).toHaveText("Managed by another user");
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+
     // A notice from the gateway is shown as text, never as markup.
     await scenario("login-password-again");
     await expect(page.getByRole("group", { name: "Message from UBC" })).toHaveText(

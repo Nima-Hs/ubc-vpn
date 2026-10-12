@@ -55,7 +55,8 @@ const MAX_MESSAGE = 1000;
 
 // Control characters, including newlines and tabs; the characters that
 // reverse or override the direction text is drawn in; and the line and
-// paragraph separators.
+// paragraph separators. The zero-width joiner and non-joiner are not here:
+// Persian needs the one and joined emoji the other.
 const UNSAFE_IN_TEXT = /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]+/gu;
 
 /**
@@ -64,7 +65,22 @@ const UNSAFE_IN_TEXT = /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u202
  * itself backwards, or push the real question off the screen with newlines.
  */
 export function plainText(text: string, maxLength: number): string {
-    return text.replace(UNSAFE_IN_TEXT, " ").replace(/ {2,}/g, " ").trim().slice(0, maxLength);
+    const clean = text.replace(UNSAFE_IN_TEXT, " ").replace(/ {2,}/g, " ").trim();
+    if (clean.length <= maxLength) {
+        return clean;
+    }
+    // Cut between whole characters as a reader sees them, so the limit never
+    // leaves half of a two-part character or half of a joined emoji.
+    let kept = "";
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+        clean,
+    )) {
+        if (kept.length + segment.length > maxLength) {
+            break;
+        }
+        kept += segment;
+    }
+    return kept;
 }
 
 const IDLE: LoginState = { phase: "idle" };

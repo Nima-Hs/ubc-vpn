@@ -150,7 +150,12 @@ export function LoginView({ login }: { login: Active }) {
                         Try again
                     </Button>
                 )}
-                <Button block variant="quiet" onClick={() => void api.cancelLogin()}>
+                {/* With nothing to try again, going back is the one thing to do. */}
+                <Button
+                    block
+                    {...(copy.retry ? { variant: "quiet" as const } : { size: "lg" as const })}
+                    onClick={() => void api.cancelLogin()}
+                >
                     Back
                 </Button>
             </div>
