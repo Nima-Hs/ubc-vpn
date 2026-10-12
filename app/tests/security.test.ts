@@ -284,29 +284,32 @@ describe("remote debugging", () => {
         expect(removedWhen(true)).toEqual([]);
     });
 
-    it("is never allowed in a production build, packaged or not", () => {
+    const plain = { demo: false, development: false, devMode: false };
+
+    it("is never allowed in a production build that talks to the real service, packaged or not", () => {
         for (const isPackaged of [true, false]) {
-            expect(allowsRemoteDebugging({ isPackaged, demo: false, development: false })).toBe(
-                false,
-            );
+            expect(allowsRemoteDebugging({ ...plain, isPackaged })).toBe(false);
         }
     });
 
     it("is never allowed in anything packaged, whatever kind of build it is", () => {
         for (const demo of [true, false]) {
             for (const development of [true, false]) {
-                expect(allowsRemoteDebugging({ isPackaged: true, demo, development })).toBe(false);
+                for (const devMode of [true, false]) {
+                    expect(
+                        allowsRemoteDebugging({ isPackaged: true, demo, development, devMode }),
+                    ).toBe(false);
+                }
             }
         }
     });
 
-    it("is allowed for an unpackaged demo or development build, which the tests drive", () => {
-        expect(allowsRemoteDebugging({ isPackaged: false, demo: true, development: false })).toBe(
-            true,
-        );
-        expect(allowsRemoteDebugging({ isPackaged: false, demo: false, development: true })).toBe(
-            true,
-        );
+    it("is allowed for an unpackaged demo or development build, or one in dev mode, which the tests drive", () => {
+        for (const kind of ["demo", "development", "devMode"] as const) {
+            expect(allowsRemoteDebugging({ ...plain, isPackaged: false, [kind]: true }), kind).toBe(
+                true,
+            );
+        }
     });
 });
 

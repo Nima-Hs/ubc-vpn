@@ -74,7 +74,7 @@ Each of these protections has a test in `tests/security.test.ts` that fails when
 
 ### Remote debugging
 
-Chromium's `--remote-debugging-port`, `--remote-debugging-pipe` and `--remote-debugging-address` let anything on the computer take over the interface, and no Electron fuse turns them off. The app removes them from its own command line before anything reads it. A production build always does, packaged or not, and so does anything packaged. Only an unpackaged demo or development build keeps them, because Playwright drives the app through that port. `tests/e2e/remote-debugging.spec.ts` starts the production build with the switch and checks that nothing answers.
+Chromium's `--remote-debugging-port`, `--remote-debugging-pipe` and `--remote-debugging-address` let anything on the computer take over the interface, and no Electron fuse turns them off. The app removes them from its own command line before anything reads it. A production build always does, packaged or not, and so does anything packaged. Only a run that is not packaged and is a demo build, a development build, or in dev mode (`UBC_VPN_DEV=1`) keeps them, because Playwright drives the app through that port. Whether a run is in dev mode is decided once, so a run that keeps the port is never one whose client talks to the real service. `tests/e2e/remote-debugging.spec.ts` starts the production build with the switch and checks that nothing answers, whatever else the dev switch is set to, and that in dev mode something does.
 
 ### The tray
 

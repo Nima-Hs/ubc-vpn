@@ -41,7 +41,11 @@ async function debuggerAnswers(port: number): Promise<boolean> {
 
 const running: ChildProcess[] = [];
 
-function launch(build: "out" | "out-demo", port: number): ChildProcess {
+function launch(
+    build: "out" | "out-demo",
+    port: number,
+    env: Record<string, string> = {},
+): ChildProcess {
     const child = spawn(
         electronPath as unknown as string,
         [resolve(build, "main/index.js"), `--remote-debugging-port=${port}`],
@@ -51,6 +55,7 @@ function launch(build: "out" | "out-demo", port: number): ChildProcess {
             env: {
                 ...process.env,
                 UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
+                ...env,
             },
         },
     );
@@ -65,7 +70,7 @@ test.afterEach(() => {
 });
 
 test("a production build cannot be debugged from outside", async () => {
-    test.setTimeout(120_000);
+    test.setTimeout(180_000);
 
     // The control: with the switch kept, a debugger answers. How long that
     // takes on this machine sets how long the real check waits.
@@ -75,17 +80,42 @@ test("a production build cannot be debugged from outside", async () => {
     await expect.poll(() => debuggerAnswers(controlPort), { timeout: 60_000 }).toBe(true);
     const startUp = Date.now() - started;
 
-    // The same switch, on the build people install. Give it several times as
-    // long as the control needed, and look the whole while.
-    const port = await freePort();
-    const app = launch("out", port);
+    // The same switch, on the build people install, with the dev switch off
+    // in every way it can be off. Only exactly "1" is dev mode: any other
+    // value leaves the client talking to the real service, and a build that
+    // does that must never be open to a debugger.
+    const off = ["", "0", "true", " 1", "1 ", "yes"];
+    const probes = await Promise.all(
+        off.map(async (value) => {
+            const port = await freePort();
+            return { value, port, app: launch("out", port, { UBC_VPN_DEV: value }) };
+        }),
+    );
+    // Give them several times as long as the control needed, and look the
+    // whole while.
     const deadline = Date.now() + Math.max(5000, startUp * 4);
-    let answered = false;
-    while (!answered && Date.now() < deadline) {
-        answered = await debuggerAnswers(port);
+    const answered = new Set<string>();
+    while (Date.now() < deadline) {
+        for (const probe of probes) {
+            if (await debuggerAnswers(probe.port)) {
+                answered.add(JSON.stringify(probe.value));
+            }
+        }
         await new Promise((tick) => setTimeout(tick, 100));
     }
-    expect(answered).toBe(false);
-    // It was running all that time, not gone: a dead app answers nothing either.
-    expect(app.exitCode).toBeNull();
+    expect([...answered]).toEqual([]);
+    // They were running all that time, not gone: a dead app answers nothing either.
+    for (const probe of probes) {
+        expect(probe.app.exitCode, JSON.stringify(probe.value)).toBeNull();
+    }
+});
+
+test("an unpackaged build in dev mode can be driven by the tests", async () => {
+    test.setTimeout(120_000);
+    // The run against the real client and a dev-mode service drives this very
+    // build through the port. It talks to a pretend service and says so on
+    // every screen; packaged, the dev switch is ignored and so is this.
+    const port = await freePort();
+    launch("out", port, { UBC_VPN_DEV: "1" });
+    await expect.poll(() => debuggerAnswers(port), { timeout: 60_000 }).toBe(true);
 });

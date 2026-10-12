@@ -26,6 +26,13 @@ import { createWindow, showWindow } from "./window";
 // which belongs to the command-line client.
 app.setPath("userData", profileFolder(app, process));
 
+// How the client is started, and with it whether this run is in dev mode.
+// Decided once, and everything that depends on dev mode takes it from here:
+// what the client is told, the mark in the window, and whether the run may
+// be debugged. They cannot then disagree, and a run that may be debugged is
+// never one whose client talks to the real service.
+const bridge = bridgeCommand(app, process);
+
 registerAppScheme(protocol);
 // Before anything else reads the command line: no fuse turns these switches
 // off, so the app takes them off itself.
@@ -35,6 +42,7 @@ refuseRemoteDebugging(
         isPackaged: app.isPackaged,
         demo: __DEMO__,
         development: import.meta.env.DEV,
+        devMode: bridge.dev,
     }),
 );
 
@@ -105,7 +113,7 @@ async function start(): Promise<void> {
                 disconnect: () => link.disconnect(),
             });
         link = createServiceLink({
-            ...bridgeCommand(app, process),
+            ...bridge,
             appVersion: app.getVersion(),
             // The text is fixed and holds nothing that was sent or received.
             // biome-ignore lint/suspicious/noConsole: the app's only log line, for a bug in the app itself.
@@ -114,7 +122,7 @@ async function start(): Promise<void> {
     }
     // Shown in the window for as long as it is on, so that a session with a
     // pretend service is never taken for a real one.
-    const controller = new Controller(link, login, bridgeCommand(app, process).dev);
+    const controller = new Controller(link, login, bridge.dev);
     // The user's settings are read and written by the command-line client.
     // A demo build has a fake of its own, made above.
     const settings: SettingsService =
