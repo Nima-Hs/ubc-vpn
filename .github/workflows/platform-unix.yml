@@ -11,12 +11,16 @@ on:
     paths:
       - crates/platform/**
       - crates/core/**
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/platform-unix.yml
   push:
     branches: [main]
     paths:
       - crates/platform/**
       - crates/core/**
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/platform-unix.yml
   workflow_dispatch:
 
@@ -44,6 +48,8 @@ jobs:
         profile: [debug, release]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: rustup toolchain install
       - name: Dev-mode code is free of warnings
         if: matrix.profile == 'debug'
@@ -84,8 +90,11 @@ jobs:
       # needing root really ran.
       - name: The root-only tests really ran
         run: |
-          for test in "squatted socket" narrowing suite dev; do
-            if ! grep -q "RAN AS ROOT: $test" root.log; then
+          tests=("squatted socket" narrowing suite dev)
+          # macOS alone lets a file's owner mark it unchangeable.
+          if [ "$RUNNER_OS" = macOS ]; then tests+=(flags); fi
+          for test in "${tests[@]}"; do
+            if ! grep -qx "RAN AS ROOT: $test" root.log; then
               echo "The root-only test '$test' did not run."
               exit 1
             fi

@@ -2,10 +2,12 @@
 //! system's and the user's `Application Support`. Routes, DNS and network
 //! events are not implemented yet and report that they are unsupported.
 
+use std::ffi::CString;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rustix::net::SendFlags;
 
@@ -18,6 +20,25 @@ const SYSTEM: &str = "/Library/Application Support/UBC VPN";
 /// way to it. `/var/run` is not used: `/var` is a link, and the folder behind
 /// it is writable by a group. The app must use this exact path.
 const CHANNEL: &str = "/Library/Application Support/UBC VPN/service.sock";
+
+/// The longest path a socket address holds here.
+pub(crate) const LONGEST_PATH: usize = 103;
+
+/// Clears the file's flags, of the file itself and not of what a link points
+/// to.
+///
+/// Security rule: the owner a socket was narrowed to must not be able to
+/// stop the service. On macOS a file's owner can mark it unchangeable
+/// (`chflags uchg`), and then even root can neither remove it nor change its
+/// owner or mode until the mark is cleared.
+pub(crate) fn clear_flags(path: &Path) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    match unsafe { libc::lchflags(path.as_ptr(), 0) } {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
 
 /// Where a test running as root can make folders only root can change.
 #[cfg(test)]

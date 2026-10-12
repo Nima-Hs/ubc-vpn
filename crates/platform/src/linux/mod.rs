@@ -4,7 +4,7 @@
 
 use std::io;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rustix::net::{SendFlags, sockopt};
 
@@ -18,6 +18,14 @@ const STATE: &str = "/var/lib/ubc-vpn";
 /// `/run` is root's, is emptied at boot, and holds no links on the way. The
 /// app must use this exact path.
 const CHANNEL: &str = "/run/ubc-vpn/service.sock";
+
+/// The longest path a socket address holds here.
+pub(crate) const LONGEST_PATH: usize = 107;
+
+/// Nothing to do: on Linux a file's owner cannot make it unchangeable.
+pub(crate) fn clear_flags(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Where a test running as root can make folders only root can change.
 #[cfg(test)]

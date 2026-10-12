@@ -14,12 +14,17 @@
 //!   every folder above it are real folders (no symlinks) owned by root and
 //!   writable by root alone. Dev: the folder is the current user's, mode
 //!   0700. `listen` creates the last folder when it is missing, and both
-//!   `listen` and `connect` refuse a folder that breaks the rule.
+//!   `listen` and `connect` refuse a folder that breaks the rule. The lock
+//!   file is the listener's alone (0600), so no other user can hold the lock.
 //! - **The caller is who the kernel says**: the peer's effective user ID,
 //!   recorded by the kernel when the connection was made.
 //! - **Narrowing** hands the socket file to the owner with mode 0600. The
 //!   kernel checks that when a client connects, so it only affects later
-//!   connections.
+//!   connections. Root is still let in. The file is then the owner's, so the
+//!   owner can open it to others again: narrowing is a first line only, and
+//!   the service's check of the caller on every request is the guard. On
+//!   macOS the owner can also mark the file unchangeable, so its flags are
+//!   cleared before the file is changed or removed.
 //! - **A client checks the server**: the folder rule above, a socket file
 //!   that belongs to the service or to the caller, and a peer that is the
 //!   service (root when installed, the current user in dev mode). The peer
@@ -28,6 +33,20 @@
 //!   [`Error::NotTheService`] and has sent nothing. The one exception is a
 //!   socket file handed to another user, which only narrowing does in a
 //!   folder like that: it reports [`Error::PermissionDenied`].
+//!
+//! What the installer and the service's start-up must guarantee, because
+//! `listen` refuses otherwise:
+//!
+//! - macOS: `/Library/Application Support/UBC VPN` is root's with mode 0755.
+//!   A folder left 0775, as some installers make it, is refused.
+//! - Linux: `/run/ubc-vpn` is root's with mode 0755. systemd's
+//!   `RuntimeDirectory=ubc-vpn` makes it so on every start; `listen` makes it
+//!   too when it is missing.
+//!
+//! A client inside a user namespace (Flatpak, snap, a rootless container)
+//! sees root's files and root's processes as user 65534, so it reports
+//! [`Error::NotTheService`]. That fails closed, and packaging has to keep the
+//! clients outside such a sandbox.
 
 #[cfg(test)]
 mod tests;
@@ -42,10 +61,12 @@ use std::os::unix::fs::{
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::OFlags;
 use rustix::io::Errno;
 use rustix::net::{RecvFlags, recv};
 use rustix::process::geteuid;
@@ -160,14 +181,71 @@ fn check_one(folder: &Path, owner: u32, forbidden: u32) -> Result<()> {
     Err(Error::Failed(broken.to_string()))
 }
 
-/// A channel name is the socket's absolute path.
+/// A channel name is the socket's absolute path, short enough for a socket
+/// address. Anything else is refused before a folder or file is made for it.
 fn split(name: &str) -> Result<(&Path, &Path)> {
     let path = Path::new(name);
+    let fits = name.len() <= os::LONGEST_PATH && !name.contains('\0');
     match path.parent() {
-        Some(folder) if path.is_absolute() && path.file_name().is_some() => Ok((path, folder)),
-        _ => Err(Error::Failed(
-            "a channel name must be an absolute path".to_string(),
-        )),
+        Some(folder) if fits && path.is_absolute() && path.file_name().is_some() => {
+            Ok((path, folder))
+        }
+        _ => Err(Error::Failed("not a channel name".to_string())),
+    }
+}
+
+/// The lock file is the listener's alone.
+const LOCK_MODE: u32 = 0o600;
+/// How long a client waits for a service too busy to take the connection.
+const CONNECT_WAIT: Duration = Duration::from_secs(5);
+
+/// Opens the lock file, making it when it is missing.
+///
+/// Security rule: no other user can open it, or they could hold the lock and
+/// keep the service from ever listening. A new file is made closed, and one
+/// left open by an earlier run is closed before the lock is tried. A link in
+/// its place is refused, not followed.
+fn open_lock(path: &Path) -> io::Result<File> {
+    let no_follow = OFlags::NOFOLLOW.bits() as i32;
+    let mut new = OpenOptions::new();
+    new.write(true).create_new(true).mode(LOCK_MODE);
+    match new.open(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let mut existing = OpenOptions::new();
+            let lock = existing.read(true).custom_flags(no_follow).open(path)?;
+            lock.set_permissions(Permissions::from_mode(LOCK_MODE))?;
+            Ok(lock)
+        }
+        opened => opened,
+    }
+}
+
+/// Removes a socket file. Only for the holder of its lock.
+fn remove_socket(path: &Path) -> io::Result<()> {
+    os::clear_flags(path)?;
+    fs::remove_file(path)
+}
+
+/// Connects, giving up after [`CONNECT_WAIT`]: a service that has stopped
+/// accepting would otherwise hold a client for ever. The attempt runs on its
+/// own thread, because connecting a socket has no time limit of its own.
+fn connect_within(path: &Path) -> Result<UnixStream> {
+    let (done, wait) = mpsc::channel();
+    let path = path.to_path_buf();
+    thread::Builder::new().spawn(move || {
+        let connected = loop {
+            match UnixStream::connect(&path) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                connected => break connected,
+            }
+        };
+        let _ = done.send(connected);
+    })?;
+    match wait.recv_timeout(CONNECT_WAIT) {
+        // A leftover socket file with no listener behind it.
+        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => Err(Error::NotFound),
+        Ok(connected) => Ok(connected?),
+        Err(_) => Err(Error::TimedOut),
     }
 }
 
@@ -193,9 +271,7 @@ impl Transport for SocketTransport {
 
         let mut lock_path = path.as_os_str().to_owned();
         lock_path.push(".lock");
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(false).mode(0o600);
-        let claim = options.open(lock_path)?;
+        let claim = open_lock(Path::new(&lock_path))?;
         // Security rule: one listener. A live one holds this lock.
         match claim.try_lock() {
             Ok(()) => {}
@@ -204,7 +280,7 @@ impl Transport for SocketTransport {
         }
         // Holding the lock, a socket file here belongs to no one.
         match fs::symlink_metadata(path) {
-            Ok(stale) if stale.file_type().is_socket() => fs::remove_file(path)?,
+            Ok(stale) if stale.file_type().is_socket() => remove_socket(path)?,
             Ok(_) => return Err(Error::Failed("the channel's path is taken".to_string())),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -238,17 +314,12 @@ impl Transport for SocketTransport {
             return Err(Error::NotTheService);
         }
         // Security rule: the socket is the service's, or was handed to this
-        // user by narrowing. Anyone else's is narrowed to them.
-        if file.uid() != service && file.uid() != me {
+        // user by narrowing. Anyone else's is narrowed to them. Root is let
+        // through, as the OS itself lets it through.
+        if file.uid() != service && file.uid() != me && me != 0 {
             return Err(Error::PermissionDenied);
         }
-        let stream = match UnixStream::connect(path) {
-            // A leftover socket file with no listener behind it.
-            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                return Err(Error::NotFound);
-            }
-            connected => connected?,
-        };
+        let stream = connect_within(path)?;
         // Security rule: whoever answers must be the service itself.
         if os::peer_user(&stream)? != service {
             return Err(Error::NotTheService);
@@ -308,22 +379,28 @@ impl Listener for SocketListener {
         let text = owner.to_string();
         let user = text.parse::<u32>().ok();
         let user = user.filter(|user| user.to_string() == text);
+        // The one value that would mean "leave the owner as it is".
+        let user = user.filter(|user| *user != u32::MAX);
         let user = user.ok_or_else(|| Error::Failed("not a user ID".to_string()))?;
         // Held so the path cannot stop being this listener's meanwhile.
         let claim = lock(&self.claim);
         if claim.is_none() {
             return Err(Error::Closed);
         }
-        // Closed to everyone but root first, then handed over.
+        // Closed to everyone but root first, then handed over. An earlier
+        // owner may have marked the file unchangeable.
+        os::clear_flags(&self.path)?;
         set_mode(&self.path, 0o600)?;
         Ok(chown(&self.path, Some(user), None)?)
     }
 
     fn close(&self) {
         // Removed while the lock is still held, so it is ours to remove.
-        // Dropping the claim then frees the name and wakes `accept`.
+        // Dropping the claim then frees the name and wakes `accept`. There
+        // is nobody to tell if removing fails: the next `listen` removes the
+        // leftover the same way, and reports a failure.
         if let Some(_claim) = lock(&self.claim).take() {
-            let _ = fs::remove_file(&self.path);
+            let _ = remove_socket(&self.path);
         }
     }
 }

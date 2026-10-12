@@ -9,7 +9,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::net::Ipv4Addr;
 use std::os::unix::fs::{MetadataExt, chown, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -129,7 +129,7 @@ impl Sandbox {
             DEV
         };
         if mode.is_none() {
-            eprintln!("SKIPPED, needs dev mode or root: {test}");
+            say(&format!("SKIPPED, needs dev mode or root: {test}"));
         }
         mode.map(|mode| Self::make(turn, mode))
     }
@@ -139,12 +139,12 @@ impl Sandbox {
     fn root(test: &str, mode: Mode) -> Option<Self> {
         let turn = turn();
         if me() == 0 {
-            eprintln!("RAN AS ROOT: {test}");
+            say(&format!("RAN AS ROOT: {test}"));
             return Some(Self::make(turn, mode));
         }
         let required = std::env::var_os("UBC_VPN_REQUIRE_ROOT").is_some();
         assert!(!required, "{test} needs root");
-        eprintln!("SKIPPED, needs root: {test}");
+        say(&format!("SKIPPED, needs root: {test}"));
         None
     }
 
@@ -176,6 +176,24 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Writes one whole line in one call, so that nothing another thread prints
+/// can land inside it: CI looks for these lines.
+fn say(line: &str) {
+    let line = format!("\n{line}\n");
+    std::io::stderr().write_all(line.as_bytes()).expect("say");
+}
+
+/// Runs `act` with the process's umask set to `mask`. Tests that create
+/// files take turns, so no other one sees it.
+fn with_umask<T>(mask: u32, act: impl FnOnce() -> T) -> T {
+    // SAFETY: the call has no memory-safety conditions.
+    let before = unsafe { libc::umask(mask as libc::mode_t) };
+    let result = act();
+    // SAFETY: as above.
+    unsafe { libc::umask(before) };
+    result
 }
 
 fn socket_in(folder: &Path) -> String {
@@ -243,6 +261,126 @@ fn a_stale_socket_file_is_recovered() {
     );
 }
 
+// Security rule: no other user can open the lock file, or they could hold
+// the lock and keep the service from listening.
+#[test]
+fn the_lock_file_is_closed_to_other_users() {
+    let Some(sandbox) = Sandbox::any("lock file") else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    let lock = PathBuf::from(format!("{name}.lock"));
+    // An ordinary umask, under which a file made carelessly is readable.
+    drop(with_umask(0o022, || transport.listen(&name)).expect("listen"));
+    assert_eq!(owner_and_mode(&lock), (me(), 0o600), "as made");
+    // One left open by an earlier run is closed again.
+    set_mode(&lock, 0o644).expect("open it");
+    let listener = transport.listen(&name).expect("listen again");
+    assert_eq!(owner_and_mode(&lock), (me(), 0o600), "as found");
+    if me() == 0 {
+        let opened = as_user(STRANGER, || fs::File::open(&lock));
+        let refused = opened.err().map(|error| error.kind());
+        assert_eq!(refused, Some(ErrorKind::PermissionDenied));
+    }
+    drop(listener);
+
+    // A link in its place is refused, and what it points to is left alone.
+    let target = sandbox.dir.join("target");
+    fs::write(&target, "").expect("a file");
+    set_mode(&target, 0o644).expect("set its mode");
+    fs::remove_file(&lock).expect("remove the lock file");
+    symlink(&target, &lock).expect("link");
+    assert!(transport.listen(&name).is_err(), "followed a link");
+    assert_eq!(owner_and_mode(&target), (me(), 0o644));
+}
+
+// A bad name is refused before anything is made for it.
+#[test]
+fn a_channel_name_is_a_short_absolute_path() {
+    let Some(sandbox) = Sandbox::any("channel name") else {
+        return;
+    };
+    let transport = sandbox.transport();
+    let bad = failed("not a channel name");
+    assert_eq!(transport.connect("relative/s.sock").err(), bad);
+    assert_eq!(transport.connect("").err(), bad);
+    let long = sandbox.dir.join("a".repeat(os::LONGEST_PATH));
+    assert_eq!(transport.listen(&socket_in(&long)).err(), bad);
+    assert_eq!(transport.connect(&socket_in(&long)).err(), bad);
+    assert!(!long.exists(), "made a folder for a name it refused");
+    // The longest that fits is taken.
+    let fits = sandbox.folder("fits", 0o700);
+    let room = os::LONGEST_PATH - fits.as_os_str().len() - 1;
+    let name = fits.join("s".repeat(room));
+    let listener = transport.listen(name.to_str().expect("UTF-8"));
+    listener.expect("listen on the longest name");
+}
+
+// A service that stopped accepting must not hold its clients for ever.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_client_gives_up_on_a_service_that_stopped_accepting() {
+    let Some(sandbox) = Sandbox::any("connect wait") else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    drop(transport.listen(&name).expect("make the folder"));
+    let stalled = UnixListener::bind(&name).expect("bind");
+    rustix::net::listen(&stalled, 1).expect("shorten the queue");
+    let started = Instant::now();
+    let outcome = within("connecting", move || {
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            match transport.connect(&name) {
+                Ok(connection) => held.push(connection),
+                Err(error) => return Some(error),
+            }
+        }
+        None
+    });
+    assert_eq!(outcome, Some(Error::TimedOut));
+    assert!(started.elapsed() >= super::CONNECT_WAIT, "gave up early");
+}
+
+// Security rule: the owner a socket was narrowed to cannot stop the service.
+// On macOS a file's owner can mark it unchangeable, which holds off even
+// root until the mark is cleared.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_cannot_pin_the_socket_file() {
+    let Some(sandbox) = Sandbox::root("flags", Mode::Installed) else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    let pin = || {
+        let path = std::ffi::CString::new(name.as_str()).expect("no NUL");
+        // SAFETY: `path` is a NUL-terminated string that outlives the call.
+        let status = as_user(OWNER, || unsafe {
+            libc::chflags(path.as_ptr(), libc::UF_IMMUTABLE)
+        });
+        assert_eq!(status, 0, "the owner could not set the flag");
+    };
+    let listener = transport.listen(&name).expect("listen");
+    listener.restrict_to(&id(OWNER)).expect("narrow");
+    pin();
+    assert!(fs::remove_file(&name).is_err(), "the flag holds nobody off");
+    listener.restrict_to(&id(STRANGER)).expect("narrow again");
+    assert_eq!(owner_and_mode(&name), (STRANGER, 0o600));
+
+    listener.restrict_to(&id(OWNER)).expect("narrow back");
+    pin();
+    listener.close();
+    assert!(!Path::new(&name).exists(), "close left the socket behind");
+
+    // The leftover of a run that crashed.
+    drop(UnixListener::bind(&name).expect("leave a socket file behind"));
+    chown(&name, Some(OWNER), None).expect("hand over");
+    pin();
+    transport
+        .listen(&name)
+        .expect("listen over a pinned leftover");
+}
+
 // Security rule: the socket's folder cannot be changed by anyone else.
 #[test]
 fn listen_refuses_a_folder_others_could_change() {
@@ -256,6 +394,14 @@ fn listen_refuses_a_folder_others_could_change() {
         let open = sandbox.folder(name, 0o700 | bit);
         assert_eq!(listen(&open), failed(TOO_OPEN), "{name}-writable");
         assert_eq!(fs::read_dir(&open).expect("list").count(), 0, "left a file");
+    }
+
+    // Dev mode's folder is the user's alone: not even readable by others.
+    if !installed {
+        for (name, bit) in [("group-read", 0o040), ("world-search", 0o001)] {
+            let open = sandbox.folder(name, 0o700 | bit);
+            assert_eq!(listen(&open), failed(TOO_OPEN), "{name}");
+        }
     }
 
     let real = sandbox.folder("real", 0o700);
@@ -297,17 +443,13 @@ fn the_folder_and_socket_have_exactly_the_intended_owner_and_mode() {
         Mode::Dev => (0o700, 0o600),
     };
     let name = sandbox.name();
-    // SAFETY: the call has no memory-safety conditions. Tests that create
-    // files take turns, so no other one sees this umask.
-    let umask = unsafe { libc::umask(0o277) };
-    let listener = sandbox.transport().listen(&name);
-    // SAFETY: as above.
-    unsafe { libc::umask(umask) };
+    let listener = with_umask(0o277, || sandbox.transport().listen(&name));
     let listener = listener.expect("listen");
     assert_eq!(owner_and_mode(sandbox.dir.join("ch")), (me(), folder_mode));
     assert_eq!(owner_and_mode(&name), (me(), socket_mode));
 
-    for odd in ["01", "+1", "0x1", "S-1-5"] {
+    // The last one is the value that tells the OS to leave the owner alone.
+    for odd in ["01", "+1", "0x1", "S-1-5", "4294967295"] {
         let odd = odd.parse().expect("an identity");
         assert!(listener.restrict_to(&odd).is_err(), "{odd}");
     }
@@ -504,15 +646,14 @@ fn narrowing_admits_the_owner_and_refuses_everyone_else() {
     assert_eq!(kernel_connect(STRANGER, &name).err(), denied, "the kernel");
     let stranger = as_user(STRANGER, || transport.connect(&name));
     assert_eq!(stranger.err(), Some(Error::PermissionDenied));
-    // Root is not the owner either: the OS would let it in, the client
-    // itself declines.
-    assert_eq!(
-        transport.connect(&name).err(),
-        Some(Error::PermissionDenied)
-    );
 
     let (_server, caller) = listener.accept().expect("the queued caller");
     assert_eq!(caller, id(STRANGER), "a queued caller was dropped");
+    // Narrowing never shuts root out, here or in the OS. The service still
+    // learns that it is root and not the owner.
+    let _root = transport.connect(&name).expect("root is let through");
+    let (_server, caller) = listener.accept().expect("accept root");
+    assert_eq!(caller, id(0));
     let _owner = as_user(OWNER, || transport.connect(&name)).expect("the owner");
     let (_server, caller) = listener.accept().expect("accept the owner");
     assert_eq!(caller, id(OWNER));
@@ -650,7 +791,13 @@ fn dev_paths_never_collide_with_the_installed_ones() {
     let dev = os::paths(Mode::Dev, &env(HOSTILE)).expect("paths");
     let per_user = format!("/evil/{runtime}/ubc-vpn-dev-{}/service.sock", me());
     assert_eq!(dev.channel_name, per_user);
-    let dev = os::paths(Mode::Dev, &env(&[("HOME", "/h"), ("TMPDIR", "tmp")]));
+    // Relative, in the variable each system reads.
+    const RELATIVE: &[(&str, &str)] = &[
+        ("HOME", "/h"),
+        ("TMPDIR", "tmp"),
+        ("XDG_RUNTIME_DIR", "run"),
+    ];
+    let dev = os::paths(Mode::Dev, &env(RELATIVE));
     let fallback = format!("/tmp/ubc-vpn-dev-{}/service.sock", me());
     assert_eq!(dev.expect("paths").channel_name, fallback);
 }
