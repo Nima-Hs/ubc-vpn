@@ -204,8 +204,8 @@ export function describe(state: LinkState): StateCopy {
                   }
                 : {
                       tone: "problem",
-                      title: "Service not understood",
-                      body: `UBC VPN’s background service answered, but not in a way this app understands. ${UPDATE_BOTH}`,
+                      title: "Unexpected reply",
+                      body: `UBC VPN’s background service answered, but the app could not understand its reply. ${UPDATE_BOTH}`,
                       action: { kind: "retry", label: "Check again" },
                       working: false,
                   };

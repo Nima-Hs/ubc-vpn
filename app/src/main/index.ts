@@ -22,7 +22,10 @@ if (app.requestSingleInstanceLock()) {
 
 async function start(): Promise<void> {
     // Set only by `electron-vite dev`, and read only in development builds.
-    const devServerUrl = devServerUrlFor(import.meta.env.DEV, process.env);
+    // Decided once, here. Everything that differs in development takes
+    // this one value: the dev server, the menu and developer tools.
+    const developmentBuild = import.meta.env.DEV;
+    const devServerUrl = devServerUrlFor(developmentBuild, process.env);
     const entryUrl = secureSession(
         { app, protocol, session: session.defaultSession },
         join(__dirname, "../renderer"),
@@ -53,12 +56,12 @@ async function start(): Promise<void> {
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.
-    const menu = applicationMenu(process.platform, import.meta.env.DEV);
+    const menu = applicationMenu(process.platform, developmentBuild);
     if (menu !== undefined) {
         Menu.setApplicationMenu(menu === null ? null : Menu.buildFromTemplate(menu));
     }
 
-    const window = createWindow(entryUrl, trayImage("on", 64));
+    const window = createWindow(entryUrl, trayImage("on", 64), developmentBuild);
     registerIpc(window, controller, devServerUrl);
     registerDemo?.(window);
 

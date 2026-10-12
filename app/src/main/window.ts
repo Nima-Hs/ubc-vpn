@@ -7,7 +7,11 @@ import { webPreferences } from "./security";
 const WIDTH = 380;
 const HEIGHT = 620;
 
-export function createWindow(entryUrl: string, icon: Electron.NativeImage): BrowserWindow {
+export function createWindow(
+    entryUrl: string,
+    icon: Electron.NativeImage,
+    developmentBuild: boolean,
+): BrowserWindow {
     const mac = process.platform === "darwin";
     const window = new BrowserWindow({
         width: WIDTH,
@@ -23,7 +27,7 @@ export function createWindow(entryUrl: string, icon: Electron.NativeImage): Brow
         // The interface draws its own title bar so it looks the same on every
         // OS. macOS keeps its own window buttons, placed inside that bar.
         ...(mac ? { titleBarStyle: "hiddenInset" as const } : { frame: false }),
-        webPreferences: webPreferences(join(__dirname, "../preload/index.js"), import.meta.env.DEV),
+        webPreferences: webPreferences(join(__dirname, "../preload/index.js"), developmentBuild),
     });
     enableKeyboardZoom(window);
     window.once("ready-to-show", () => window.show());

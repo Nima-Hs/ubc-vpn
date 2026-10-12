@@ -167,7 +167,7 @@ describe("the words for each state", () => {
         const silent = copyFor({ link: "unavailable", reason: "not_running" });
         const garbled = copyFor({ link: "unavailable", reason: "protocol_error" });
         expect(silent.title).toBe("Service not running");
-        expect(garbled.title).not.toBe(silent.title);
+        expect(garbled.title).toBe("Unexpected reply");
         expect(garbled.body).toContain("answered");
     });
 });
