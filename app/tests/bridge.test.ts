@@ -67,7 +67,12 @@ function start(
     options: Partial<
         Pick<
             BridgeOptions,
-            "replyTimeoutMs" | "maxRetryDelayMs" | "initialRetryDelayMs" | "exitGraceMs" | "env"
+            | "startTimeoutMs"
+            | "replyTimeoutMs"
+            | "maxRetryDelayMs"
+            | "initialRetryDelayMs"
+            | "exitGraceMs"
+            | "env"
         >
     > = {},
 ): Harness {
@@ -83,7 +88,9 @@ function start(
         onFault: (fault) => faults.push(fault),
         initialRetryDelayMs: 20,
         maxRetryDelayMs: 80,
-        replyTimeoutMs: 3000,
+        // Generous: a slow start of the mock must never look like a failure.
+        startTimeoutMs: 20_000,
+        replyTimeoutMs: 10_000,
         ...options,
     });
     cleanups.push(() => client.stop());
@@ -207,7 +214,7 @@ describe("starting the bridge", () => {
     });
 
     it("treats a bridge that starts and says nothing as unusable", async () => {
-        const { last, statuses } = start([{ first: "silent" }], { replyTimeoutMs: 150 });
+        const { last, statuses } = start([{ first: "silent" }], { startTimeoutMs: 150 });
         await until(() => last() === "unavailable", "unavailable");
         expect(statuses.at(-1)).toEqual({ status: "unavailable", reason: "protocol_error" });
     });
@@ -693,6 +700,21 @@ describe("the bridge process does not outlive its use", () => {
         await until(() => !alive(pid), "the bridge being killed");
     });
 
+    it("is ended when the app stops even if it was let go a moment before", async () => {
+        // Dropped, and given a minute to leave, which it will not do. The
+        // timer that would kill it would die with the app, so stopping must.
+        const { bridge, client, last } = start(
+            [{ staysAfterInputCloses: true, later: [{ afterMs: 30, raw: "not json\n" }] }],
+            { initialRetryDelayMs: 60_000, exitGraceMs: 60_000 },
+        );
+        await until(() => last() === "unavailable", "the bridge being dropped");
+        await until(() => bridge.received().includes("input closed"), "its input closing");
+        const [pid = 0] = bridge.pids();
+        expect(alive(pid)).toBe(true);
+        client.stop();
+        await until(() => !alive(pid), "the bridge ending", 3000);
+    });
+
     it("is ended at once when the app stops, even one that would not leave", async () => {
         const { bridge, client, last } = start([{ staysAfterInputCloses: true }], {
             exitGraceMs: 60_000,
@@ -715,6 +737,21 @@ describe("no bridge is started without its pause", () => {
         await pause(200);
         expect(bridge.starts()).toBe(1);
         await until(() => bridge.starts() === 2, "the second start");
+    });
+
+    it("waits before trying again when the client could not be started at all", async () => {
+        const spawned = vi.mocked(spawn);
+        spawned.mockClear();
+        // What Windows does for a file that is there but is not a program.
+        spawned.mockImplementationOnce(() => {
+            throw new Error("spawn UNKNOWN");
+        });
+        const { last, statuses } = start([{}], { initialRetryDelayMs: 500, maxRetryDelayMs: 500 });
+        expect(statuses.at(-1)).toEqual({ status: "unavailable", reason: "not_running" });
+        await pause(200);
+        expect(spawned).toHaveBeenCalledTimes(1);
+        await until(() => spawned.mock.calls.length === 2, "the second attempt");
+        await until(() => last() === "ready", "ready");
     });
 
     it("waits the longest pause before checking again on something that is not the service", async () => {

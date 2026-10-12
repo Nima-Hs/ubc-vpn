@@ -69,7 +69,9 @@ export interface BridgeOptions {
     /** Delay before the first restart; doubles up to `maxRetryDelayMs`. */
     initialRetryDelayMs?: number;
     maxRetryDelayMs?: number;
-    /** How long to wait for the bridge's first line, or for a response. */
+    /** How long a new bridge has to write its first line. */
+    startTimeoutMs?: number;
+    /** How long to wait for the answer to a request. */
     replyTimeoutMs?: number;
     /** How long a bridge whose input was closed has to leave before it is killed. */
     exitGraceMs?: number;
@@ -155,6 +157,8 @@ export class BridgeClient {
     private child: ChildProcessWithoutNullStreams | null = null;
     private ready = false;
     private stopped = true;
+    /** Bridges that were let go and have not yet left. */
+    private readonly leaving = new Set<ChildProcessWithoutNullStreams>();
     private retryTimer: NodeJS.Timeout | null = null;
     private nextId = 1;
     private readonly pending = new Map<number, Pending>();
@@ -164,6 +168,7 @@ export class BridgeClient {
             onFault: () => {},
             initialRetryDelayMs: 250,
             maxRetryDelayMs: 5_000,
+            startTimeoutMs: 10_000,
             replyTimeoutMs: 10_000,
             exitGraceMs: 2_000,
             env: process.env,
@@ -182,11 +187,19 @@ export class BridgeClient {
         this.launch();
     }
 
-    /** Stops for good. The bridge is ended at once: nothing may outlive the app. */
+    /**
+     * Stops for good. Every bridge is ended at once, including any that were
+     * let go a moment ago and are still being given time to leave: the timer
+     * that would kill them dies with the app, and nothing may outlive it.
+     */
     stop(): void {
         this.stopped = true;
         this.clearRetry();
         this.drop(0);
+        for (const child of this.leaving) {
+            child.kill();
+        }
+        this.leaving.clear();
     }
 
     /** Skips the wait before the next attempt. Does nothing while a bridge is running. */
@@ -265,7 +278,7 @@ export class BridgeClient {
         // A bridge that starts and then says nothing is as unusable as none.
         const firstLineTimer = setTimeout(() => {
             this.fail(child, "protocol_error");
-        }, this.options.replyTimeoutMs);
+        }, this.options.startTimeoutMs);
 
         child.stdout.on("data", (chunk: Buffer) => {
             let lines: string[];
@@ -425,8 +438,12 @@ export class BridgeClient {
             if (graceMs <= 0) {
                 child.kill();
             } else if (child.exitCode === null && child.signalCode === null) {
+                this.leaving.add(child);
                 const timer = setTimeout(() => child.kill(), graceMs);
-                child.once("close", () => clearTimeout(timer));
+                child.once("close", () => {
+                    clearTimeout(timer);
+                    this.leaving.delete(child);
+                });
             }
         }
         for (const pending of this.pending.values()) {
