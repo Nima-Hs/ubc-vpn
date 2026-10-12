@@ -7,6 +7,7 @@ use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use rustix::fs::{Mode, OFlags, open};
+use rustix::io::Errno;
 use rustix::termios::{
     LocalModes, OptionalActions, QueueSelector, SpecialCodeIndex, Termios, tcflush, tcgetattr,
     tcsetattr,
@@ -101,7 +102,13 @@ pub(crate) fn read_hidden_from(terminal: &File, prompt: &str) -> Result<Secret> 
     // Security rule: keys typed before the prompt are thrown away with the
     // change of mode. They were typed blind, and shown, and are no secret's
     // beginning.
-    tcsetattr(terminal, OptionalActions::Flush, &quiet).map_err(io::Error::from)?;
+    loop {
+        match tcsetattr(terminal, OptionalActions::Flush, &quiet) {
+            // A signal arrived first: nothing was changed, so again.
+            Err(Errno::INTR) => {}
+            changed => break changed.map_err(io::Error::from)?,
+        }
+    }
 
     let mut terminal = terminal;
     let prompted = terminal.write_all(prompt.as_bytes());
@@ -272,7 +279,9 @@ mod tests {
     #[test]
     fn only_an_entered_line_leaves_keys_for_the_next_reader() {
         let long = [vec![b'a'; MAX_HIDDEN_LINE_BYTES + 40], b"\rNEXT\r".to_vec()].concat();
-        let cases: [(&[u8], Result<&str>, &str); 4] = [
+        let not_text = Error::Failed("the line is not text".to_string());
+        let cases: [(&[u8], Result<&str>, &str); 5] = [
+            (b"\xff\rNEXT\r", Err(not_text), ""),
             (b"half\x03REST-OF-FAKE-SECRET\r", Err(Error::Closed), ""),
             (b"\x04REST\r", Err(Error::Closed), ""),
             (&long, Err(Error::LineTooLong), ""),
