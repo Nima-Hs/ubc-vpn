@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
-# Installs what build.sh needs. Run in an MSYS2 UCRT64 shell. See README.md.
-#
-# Build tools come from the MSYS2 repository at whatever version it offers.
-# The compiler and every library come from the exact files in packages.lock.
+# Installs what build.sh needs, from the exact package files in tools.lock
+# (build tools) and packages.lock (compiler and libraries). It also downloads
+# the files in control.lock, which the tests unpack but nothing installs.
+# Run in an MSYS2 UCRT64 shell. See README.md.
 set -euo pipefail
+. "$(dirname "$0")/common.sh"
+require_ucrt64
 
-PACKAGES=https://repo.msys2.org/mingw/ucrt64
+mkdir -p "$here/cache/packages"
+cd "$here/cache/packages"
 
-[ "${MSYSTEM:-}" = UCRT64 ] || {
-    echo "error: run this in an MSYS2 UCRT64 shell" >&2
-    exit 1
+# fetch <lock file> <repository>
+fetch() {
+    local file
+    while read -r _ file; do
+        if [ ! -f "$file" ]; then
+            curl -fsSL -o "$file.part" "$2/$file"
+            mv "$file.part" "$file"
+        fi
+    done <"$here/$1"
+    sha256sum --check --quiet "$here/$1"
 }
 
-here=$(cd "$(dirname "$0")" && pwd)
-mkdir -p "$here/cache"
-cd "$here/cache"
+fetch tools.lock "$MSYS_PACKAGES"
+fetch packages.lock "$MINGW_PACKAGES"
+fetch control.lock "$MINGW_PACKAGES"
 
-pacman -S --needed --noconfirm - <"$here/build-tools.txt"
-
-files=()
-while read -r _ file; do
-    if [ ! -f "$file" ]; then
-        curl -fsSL -o "$file.part" "$PACKAGES/$file"
-        mv "$file.part" "$file"
-    fi
-    files+=("$file")
-done <"$here/packages.lock"
-sha256sum --check --quiet "$here/packages.lock"
-
-pacman -U --needed --noconfirm "${files[@]}"
+# shellcheck disable=SC2046 # one argument per file name
+pacman -U --needed --noconfirm $(cut -d' ' -f3 "$here/tools.lock" "$here/packages.lock")

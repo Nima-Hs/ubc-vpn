@@ -1,0 +1,41 @@
+# What the probe and the processes it starts may touch. One regular expression
+# per line, matched anywhere in the path without regard to case, so anchor with
+# ^ and $. Say above each group why it is harmless.
+#
+# Files need a rule only when they are outside the probe's folder and either
+# outside C:\Windows or somewhere under it that ordinary users can write.
+# None are touched today, so there are no file rules.
+#
+# Every registry key needs a rule. trace.sh separately refuses any key that
+# names one of the bundled libraries, whatever the rules say.
+
+# The roots of the registry, opened by Windows on the way to a key.
+^(HKLM|HKCU|HKU|HKU\\\.DEFAULT|HKU\\S-1-5-(18|19|20))$
+
+# Windows' device, driver and network configuration. Read by Windows itself, by
+# Wintun while it creates its adapter, by OpenConnect looking for that adapter,
+# and by netsh, which the probe runs to check the adapter exists. Only
+# administrators can write here.
+^HKLM\\(SYSTEM|DRIVERS)\\DriverDatabase(\\|$)
+^HKLM\\SYSTEM\\CurrentControlSet\\(Control|Enum|Hardware Profiles|Services)(\\|$)
+^HKLM\\SYSTEM\\Setup(\\|$)
+
+# Settings of Windows components: COM, RPC, language and locale, netsh, and
+# group policy. Only administrators can write here.
+^HKLM\\SOFTWARE\\Microsoft\\(AppModel|LanguageOverlay|NetSh|OLE|OLEAUT|Rpc|Windows|Windows NT|Wow64)(\\|$)
+^HKLM\\SOFTWARE\\Policies\\Microsoft(\\|$)
+^HKLM\\OSDATA\\Software\\Microsoft(\\|$)
+
+# The current user's own settings, which that user can write: display language
+# and scaling, COM classes, Windows and policy settings, and the per-user
+# hardware profile that Windows' device installer consults. Windows components
+# read these; none is configuration of the bundled libraries. For the service
+# the current user is SYSTEM, whose settings only administrators can write.
+^HKCU\\Control Panel\\Desktop(\\|$)
+^HKCU\\Software\\Classes(\\|$)
+^HKCU\\Software\\Microsoft\\Windows( NT)?(\\|$)
+^HKCU\\Software\\Policies\\Microsoft(\\|$)
+^HKCU\\System\\CurrentControlSet\\(Control|Enum|Hardware Profiles)(\\|$)
+
+# The same hardware profile lookup in the settings of the system accounts.
+^HKU\\(\.DEFAULT|S-1-5-19|S-1-5-20)\\System\\CurrentControlSet(\\|$)
