@@ -186,8 +186,12 @@ jobs:
           # The real library logged in to it, and was refused by it.
           grep -q '^RAN: handle logs in' test.log
           grep -q '^RAN: handle rejects' test.log
+          # So did the engine.
+          grep -q '^RAN: engine logs in' test.log
+          grep -q '^RAN: engine refuses a wrong pin' test.log
           if [ "$RUNNER_OS" = Linux ]; then
             grep -q '^RAN: handle judges a trusted certificate' test.log
+            grep -q '^RAN: engine refuses a trusted certificate' test.log
           fi
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
