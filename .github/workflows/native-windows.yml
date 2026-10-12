@@ -140,6 +140,16 @@ jobs:
         timeout-minutes: 10
         run: native/windows/tests/trace.sh
 
+      # Kept when the job fails, so that a path the trace refuses can be traced
+      # to the program that touched it. It holds the events of the probe and
+      # the programs it started, without command lines or environments.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: native-windows-trace
+          path: native/windows/work/procmon/probe-trace.tsv
+          if-no-files-found: ignore
+
       # Reached only if every step above passed on this output. An output whose
       # GnuTLS was reused is uploaded too, but it is not shippable and its name
       # says so.
