@@ -13,6 +13,10 @@ import { RoutesView } from "@/views/routes-view";
 const views: View[] = [
     { id: "connection", label: "Connection", Component: ConnectionView },
     { id: "routes", label: "Routes", Component: RoutesView },
+    // The service's log. Not in a production build yet: see `__LOGS__`.
+    ...(__LOGS__
+        ? [{ id: "logs", label: "Logs", Component: lazy(() => import("@/views/logs-view")) }]
+        : []),
     // Demo builds only: a screen showing every component.
     ...(__DEMO__
         ? [
