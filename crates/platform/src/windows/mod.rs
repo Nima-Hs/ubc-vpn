@@ -17,10 +17,10 @@
 //!   a client opens the pipe, so a client that already opened it stays
 //!   attached, and one still waiting for a free instance is refused.
 //! - **Callers must open the pipe as [`Transport::connect`] does.** One that
-//!   asks for generic write access is refused, because that includes the
-//!   right to create instances; one that does not state how far the server
-//!   may impersonate it cannot be identified before it has sent data, and is
-//!   dropped.
+//!   asks for generic write access is refused, because that includes rights
+//!   to write attributes which the access list does not grant; one that does
+//!   not state how far the server may impersonate it cannot be identified
+//!   before it has sent data, and is dropped.
 //! - **A client checks the server** by the pipe's owner, and lends it no more
 //!   than its name (identification-level impersonation).
 //!
@@ -229,9 +229,9 @@ impl Transport for PipeTransport {
     /// what the caller sends. See [`security::is_the_service`].
     fn connect(&self, name: &str) -> Result<Connection> {
         let path = pipe_path(name)?;
-        // Read and write data, and read the owner. Asking for generic write
-        // would also ask for the right to create instances, which the
-        // service grants to nobody.
+        // Read and write data, and read the owner: exactly what the access
+        // list grants a caller. Generic write would be refused, because it
+        // also asks for the rights to write attributes.
         let access = security::CONNECT_RIGHTS;
         let deadline = Instant::now() + BUSY_WAIT;
         let handle = loop {

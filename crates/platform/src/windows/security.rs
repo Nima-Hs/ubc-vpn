@@ -27,9 +27,17 @@ use crate::{Error, Mode, Result, UserId};
 const PRIVILEGED: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
 
 /// What a client needs to connect, read and write: `FILE_GENERIC_READ` plus
-/// `FILE_WRITE_DATA`. Deliberately not `FILE_GENERIC_WRITE`, which contains
-/// `FILE_CREATE_PIPE_INSTANCE` and would let a client serve the pipe itself.
+/// `FILE_WRITE_DATA`. It leaves out the rest of `FILE_GENERIC_WRITE`: the
+/// rights to write attributes, which a caller does not need and whose absence
+/// is what refuses an open asking for generic write, and
+/// `FILE_CREATE_PIPE_INSTANCE`, which would let a caller serve the pipe itself.
 pub(super) const CONNECT_RIGHTS: u32 = 0x0012_008b;
+
+/// The integrity label on the pipe: medium, with reading as well as writing
+/// closed to anything lower. Without it Windows only stops a low-integrity
+/// process (a sandboxed program of an admitted user) from writing, so it
+/// could still attach and read what the service sends.
+const LABEL: &str = "S:(ML;;NWNR;;;ME)";
 
 /// The error for the last failed call on this thread, by its Windows code.
 pub(super) fn last_error() -> u32 {
@@ -120,6 +128,8 @@ impl Descriptor {
 ///
 /// Dev: owned by the current user, who has full control; an owner other than
 /// that user may connect once named. Nobody else.
+///
+/// Both carry [`LABEL`].
 pub(super) fn sddl(mode: Mode, me: &str, owner: Option<&UserId>) -> Result<String> {
     let owner = owner.map(ToString::to_string);
     // The owner is pasted into SDDL, so it must be a SID and nothing else.
@@ -138,13 +148,13 @@ pub(super) fn sddl(mode: Mode, me: &str, owner: Option<&UserId>) -> Result<Strin
         Mode::Installed => {
             let _ = me;
             let caller = owner.as_deref().unwrap_or("IU");
-            format!("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA){}", connect(caller))
+            format!("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA){}{LABEL}", connect(caller))
         }
         #[cfg(feature = "dev-mode")]
         Mode::Dev => {
             let other = owner.filter(|owner| owner != me);
             let other = other.map(|sid| connect(&sid)).unwrap_or_default();
-            format!("O:{me}D:P(A;;FA;;;{me}){other}")
+            format!("O:{me}D:P(A;;FA;;;{me}){other}{LABEL}")
         }
     })
 }

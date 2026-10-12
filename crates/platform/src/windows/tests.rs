@@ -12,24 +12,30 @@ use std::thread;
 
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 use windows_sys::Win32::Foundation::{ERROR_BAD_IMPERSONATION_LEVEL, ERROR_NO_TOKEN, HANDLE};
+use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
     SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, ImpersonateLoggedOnUser, LOGON32_LOGON_INTERACTIVE,
-    LOGON32_PROVIDER_DEFAULT, LogonUserW, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    RevertToSelf, TOKEN_QUERY,
+    DACL_SECURITY_INFORMATION, DuplicateTokenEx, ImpersonateLoggedOnUser,
+    LABEL_SECURITY_INFORMATION, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LogonUserW,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, RevertToSelf, SetTokenInformation,
+    TOKEN_ALL_ACCESS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
-use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+};
 
 use super::security::{CONNECT_RIGHTS, is_the_service, process_user, sddl, token_user};
 use super::*;
 use crate::suite;
 
 const SHORT: Duration = Duration::from_millis(100);
-const WHAT: u32 = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+const WHAT: u32 =
+    OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+const LABEL: &str = "S:(ML;;NWNR;;;ME)";
 const OTHER: &str = "S-1-5-21-1-2-3-1001";
 
 /// Runs `work` on its own thread and fails if it has not ended in time.
@@ -222,6 +228,72 @@ impl Stranger {
     }
 }
 
+/// This process's own user, at low integrity: what a sandboxed program of
+/// that user runs as. Lowering one's own level needs no privilege.
+fn low_integrity() -> Stranger {
+    let (mut own, mut copy, mut low) = (null_mut(), null_mut(), null_mut());
+    let level = wide("S-1-16-4096");
+    // SAFETY: the pseudo-handle is always valid, the out pointers are valid,
+    // and `level` is NUL-terminated.
+    let ok = unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut own) != 0
+            && DuplicateTokenEx(
+                own,
+                TOKEN_ALL_ACCESS,
+                null(),
+                2,
+                TokenImpersonation,
+                &mut copy,
+            ) != 0
+            && ConvertStringSidToSidW(level.as_ptr(), &mut low) != 0
+    };
+    assert!(ok, "copying the process token failed: {}", last_error());
+    let (_own, token) = (Handle(own), Handle(copy));
+    let mut label = TOKEN_MANDATORY_LABEL::default();
+    label.Label.Sid = low;
+    label.Label.Attributes = 0x20; // SE_GROUP_INTEGRITY
+    let size = size_of::<TOKEN_MANDATORY_LABEL>() as u32 + 12;
+    // SAFETY: `label` and the SID it points to are valid for the call.
+    let ok = unsafe {
+        SetTokenInformation(
+            token.0,
+            TokenIntegrityLevel,
+            (&raw const label).cast(),
+            size,
+        )
+    };
+    assert_ne!(
+        ok,
+        0,
+        "lowering the integrity level failed: {}",
+        last_error()
+    );
+    // SAFETY: the API allocated the SID for the caller to free this way.
+    unsafe { windows_sys::Win32::Foundation::LocalFree(low) };
+    let sid = token_user(&token).unwrap();
+    Stranger { token, sid }
+}
+
+// Security rule: a low-integrity program of an admitted user cannot attach,
+// not even to listen to what the service sends. Windows alone would only stop
+// it writing.
+#[test]
+fn a_low_integrity_program_cannot_even_read() {
+    each(|transport| {
+        let listener = transport.listener(&unique("low")).unwrap();
+        let path = format!(r"\\.\pipe\{}", listener.name());
+        let low = low_integrity();
+        let read_only = 0x0012_0089; // FILE_GENERIC_READ
+        for access in [read_only, CONNECT_RIGHTS] {
+            let attached = low.run(|| open(&path, access, CLIENT_FLAGS).map(drop));
+            assert_eq!(attached, Err(5), "{access:#x}");
+        }
+        // The same open at this process's own level gets in, so it was the
+        // integrity level that refused.
+        open(&path, read_only, CLIENT_FLAGS).expect("the same user, not lowered");
+    });
+}
+
 /// CI searches the log for these lines to prove that the tests which can
 /// be skipped ran.
 fn ran(test: &str) {
@@ -262,6 +334,10 @@ fn each_user_is_reported_by_their_own_sid_and_narrowing_follows_the_owner() {
         assert_eq!(caller.to_string(), stranger.sid);
         assert_ne!(stranger.sid, service.me);
         assert_eq!(pair(&service, &listener).2.to_string(), service.me);
+        // A user who may connect may still not serve the pipe.
+        let open_to_all = "D:P(A;;FA;;;WD)";
+        let serving = stranger.run(|| create_instance(&listener.path, open_to_all, false).err());
+        assert_eq!(serving, Some(Error::PermissionDenied));
 
         listener
             .restrict_to(&stranger.sid.parse().unwrap())
@@ -369,14 +445,14 @@ fn the_descriptors_are_exactly_these() {
     let owner: UserId = OTHER.parse().unwrap();
     let text = |mode, owner| sddl(mode, "S-1-5-21-9-9-9-500", owner).unwrap();
     let open = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12008b;;;IU)";
-    assert_eq!(text(Mode::Installed, None), open);
-    let narrowed = format!("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12008b;;;{OTHER})");
+    assert_eq!(text(Mode::Installed, None), format!("{open}{LABEL}"));
+    let narrowed = format!("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x12008b;;;{OTHER}){LABEL}");
     assert_eq!(text(Mode::Installed, Some(&owner)), narrowed);
     #[cfg(feature = "dev-mode")]
     {
         let dev = "O:S-1-5-21-9-9-9-500D:P(A;;FA;;;S-1-5-21-9-9-9-500)";
-        assert_eq!(text(Mode::Dev, None), dev);
-        let narrowed = format!("{dev}(A;;0x12008b;;;{OTHER})");
+        assert_eq!(text(Mode::Dev, None), format!("{dev}{LABEL}"));
+        let narrowed = format!("{dev}(A;;0x12008b;;;{OTHER}){LABEL}");
         assert_eq!(text(Mode::Dev, Some(&owner)), narrowed);
     }
     let (create_instance, write_dac, write_owner) = (0x4, 0x4_0000, 0x8_0000);
@@ -400,12 +476,11 @@ fn the_descriptors_are_exactly_these() {
 fn the_pipe_carries_its_descriptor_before_and_after_narrowing() {
     each(|transport| {
         let listener = transport.listener(&unique("descriptor")).unwrap();
+        // Windows marks the label "auto-inherited" (AI) when it stores it,
+        // which says nothing about who may do what.
         let actual = || {
-            lock(&listener.free)
-                .clone()
-                .unwrap()
-                .with_handle(on_pipe)
-                .unwrap()
+            let free = lock(&listener.free).clone().unwrap();
+            free.with_handle(on_pipe).unwrap().replace("S:AI(", "S:(")
         };
         let intended = |owner| {
             let text = sddl(transport.mode, &transport.me, owner).unwrap();
@@ -440,6 +515,19 @@ fn a_caller_from_the_network_is_refused() {
         let (ours, _pipe) = reach(&unique("lan"), PIPE_MODE);
         assert_eq!(ours, Err(5), "a remote caller got in");
         ran("remote");
+    });
+    // The listener's own instances: the first, and one created by an accept.
+    each(|transport| {
+        let listener = transport.listener(&unique("lan")).unwrap();
+        let remote = format!(r"\\localhost\pipe\{}", listener.name());
+        let reach = || open(&remote, CONNECT_RIGHTS, CLIENT_FLAGS).map(drop);
+        assert_eq!(
+            reach(),
+            Err(5),
+            "a remote caller reached the first instance"
+        );
+        let _attached = pair(&transport, &listener);
+        assert_eq!(reach(), Err(5), "a remote caller reached a later instance");
     });
 }
 
@@ -572,9 +660,16 @@ fn a_caller_who_hides_is_dropped_and_the_next_is_served() {
         let anonymous = FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT;
         let _hidden = open(&path, CONNECT_RIGHTS, anonymous).expect("open anonymously");
         thread::scope(|scope| {
-            let accepted = scope.spawn(|| listener.accept().map(|(_, caller)| caller));
-            let _client = transport.connect(&listener.name()).unwrap();
-            assert_eq!(accepted.join().unwrap().unwrap().to_string(), transport.me);
+            let accepted = scope.spawn(|| listener.accept());
+            let client = transport.connect(&listener.name()).unwrap();
+            let (server, caller) = accepted.join().unwrap().unwrap();
+            assert_eq!(caller.to_string(), transport.me);
+            // The connection handed out is the real caller's, not the hidden
+            // one's under somebody's name.
+            client.write_line("from the real caller").unwrap();
+            server.set_read_timeout(Some(SHORT * 10)).unwrap();
+            let line = server.read_line();
+            assert_eq!(line, Ok(Some("from the real caller".to_string())));
         });
     });
 }

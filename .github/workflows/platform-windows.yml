@@ -11,12 +11,16 @@ on:
     paths:
       - crates/platform/**
       - crates/core/**
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/platform-windows.yml
   push:
     branches: [main]
     paths:
       - crates/platform/**
       - crates/core/**
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/platform-windows.yml
   workflow_dispatch:
 
@@ -41,6 +45,8 @@ jobs:
       TEST_USER: ubc-vpn-stranger
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: rustup toolchain install
       - name: Dev-mode code is free of warnings on Windows
         if: matrix.profile == 'debug'
