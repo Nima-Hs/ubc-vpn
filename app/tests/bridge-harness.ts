@@ -125,6 +125,8 @@ export function mockCli(
     steps: CliStep[],
     options: {
         ignoresCancel?: boolean;
+        /** What the client does on a cancel, in place of ending with "cancelled". */
+        afterCancel?: CliStep[];
         stderr?: string;
         reportStart?: boolean;
         /** The steps for the second login, the third, and so on. */

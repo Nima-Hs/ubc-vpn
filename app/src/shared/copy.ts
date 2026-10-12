@@ -296,7 +296,13 @@ const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
         retry: true,
     },
     gateway_unreachable: FAILURES.gateway_unreachable,
-    route_refused: FAILURES.route_refused,
+    // Refused before anything was sent: the saved routes did not pass the
+    // check that is made when a login starts.
+    route_refused: {
+        title: "Route refused",
+        body: "One of your subnets or domains is not allowed, so nothing was connected. The message below says which one. Fix it on the Routes screen, then connect again.",
+        retry: true,
+    },
     service_unavailable: {
         title: "Service not running",
         body: "UBC VPN’s background service did not answer, so nothing was connected. Restart your computer, then try again.",

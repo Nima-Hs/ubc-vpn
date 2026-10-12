@@ -20,7 +20,7 @@ import type { RouteSet } from "@shared/protocol/RouteSet";
 import type { RoutesReply } from "@shared/protocol/RoutesReply";
 import type { SettingsView } from "@shared/protocol/SettingsView";
 import { startClient } from "./bridge";
-import { plainText } from "./connect";
+import { markedText, plainText } from "./connect";
 import { encodeLine, LineDecoder } from "./framing";
 import { isRoutesReply, isSettingsFailure, isSettingsView } from "./validate";
 
@@ -60,11 +60,14 @@ export const MAX_SHOWN_LENGTH = 512;
 
 const shown = (text: string): string => plainText(text, MAX_SHOWN_LENGTH);
 
-// Entries are cleaned in place and never dropped: a problem names an entry
-// by where it is in its list.
+// The user edits these and sends them back, so what is removed leaves a
+// mark: a stored entry that is not what it seems must not pass for a good
+// one. Entries are never dropped: a problem names an entry by where it is
+// in its list.
+const marked = (text: string): string => markedText(text, MAX_SHOWN_LENGTH);
 const shownRoutes = (routes: RouteSet): RouteSet => ({
-    subnets: routes.subnets.map(shown),
-    dns_domains: routes.dns_domains.map(shown),
+    subnets: routes.subnets.map(marked),
+    dns_domains: routes.dns_domains.map(marked),
 });
 
 function shownView(view: SettingsView): SettingsView {

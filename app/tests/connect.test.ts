@@ -10,7 +10,7 @@ import type { LoginState, Snapshot } from "@shared/api";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { connectCommand } from "../src/main/channel/cli";
-import { ConnectRunner, FALLBACK_LABEL, plainText } from "../src/main/channel/connect";
+import { ConnectRunner, FALLBACK_LABEL, markedText, plainText } from "../src/main/channel/connect";
 import { MAX_LINE_BYTES } from "../src/main/channel/framing";
 import { isCliMessage } from "../src/main/channel/validate";
 import { Controller } from "../src/main/controller";
@@ -84,6 +84,8 @@ interface Harness {
     runner: ConnectRunner;
     states: LoginState[];
     phase(): LoginState["phase"] | undefined;
+    /** The disconnects asked of the service. Each waits for `release` when `hold` is set. */
+    disconnects: { asked: number; hold: boolean; fail: boolean; release(): void };
 }
 
 function login(
@@ -98,16 +100,40 @@ function login(
     const { exitGraceMs, env, minStartGapMs = 0, ...mock } = options;
     const cli = mockCli(steps, mock);
     const states: LoginState[] = [];
+    const waiting: (() => void)[] = [];
+    const disconnects = {
+        asked: 0,
+        hold: false,
+        fail: false,
+        release: () => {
+            for (const answer of waiting.splice(0)) {
+                answer();
+            }
+        },
+    };
     const runner = new ConnectRunner({
         command: cli.command,
         args: cli.args,
         onState: (state) => states.push(state),
+        disconnect: () => {
+            disconnects.asked += 1;
+            if (disconnects.fail) {
+                return Promise.reject(new Error("no service"));
+            }
+            return new Promise<void>((resolve) => {
+                if (disconnects.hold) {
+                    waiting.push(resolve);
+                } else {
+                    resolve();
+                }
+            });
+        },
         minStartGapMs,
         ...(exitGraceMs !== undefined && { exitGraceMs }),
         ...(env !== undefined && { env }),
     });
     cleanups.push(() => runner.stop());
-    return { cli, runner, states, phase: () => states.at(-1)?.phase };
+    return { cli, runner, states, phase: () => states.at(-1)?.phase, disconnects };
 }
 
 /** Starts a login and waits for the client's first question. */
@@ -231,6 +257,7 @@ describe("how a login ends badly", () => {
                 { resourcesPath: "/nowhere/that/exists", platform: process.platform, env: {} },
             ),
             onState: (state) => states.push(state),
+            disconnect: async () => {},
         });
         cleanups.push(() => runner.stop());
         expect(() => runner.start()).not.toThrow();
@@ -321,6 +348,14 @@ describe("text from the gateway and the client", () => {
         expect(plainText(`one${LINE_SEPARATOR}two${LRI}three`, 200)).toBe("one two three");
         // Other languages, accents and emoji are left alone.
         expect(plainText("Mot de passe é 密码 🔑", 200)).toBe("Mot de passe é 密码 🔑");
+    });
+
+    it("is marked, not quietly mended, where the user will edit it and send it back", () => {
+        expect(markedText("203.0.113.0/24\u202e", 100)).toBe("203.0.113.0/24\ufffd");
+        expect(markedText(" a\r\nb ", 100)).toBe(" a\ufffdb ");
+        expect(markedText("x".repeat(20), 10)).toBe("x".repeat(10));
+        // Text from a login is not marked: it is only ever read.
+        expect(plainText("Enter\u202e your\npassword", 100)).toBe("Enter your password");
     });
 
     it("keeps the joiners that Persian and joined emoji are written with", () => {
@@ -428,6 +463,7 @@ describe("a client that has been let go", () => {
         runner.start();
         await until(() => phase() === "prompt", "login A's prompt");
         runner.cancel();
+        await until(() => phase() === "idle", "login A being given up");
         runner.start();
         await until(() => phase() === "prompt", "login B's prompt");
 
@@ -465,6 +501,7 @@ describe("how often a login can start", () => {
         runner.start();
         await until(() => phase() === "prompt", "the first prompt");
         runner.cancel();
+        await until(() => phase() === "idle", "the first being given up");
 
         // The user sees it begin straight away; the client is not started yet.
         expect(runner.start()).toBe(true);
@@ -500,6 +537,7 @@ describe("how often a login can start", () => {
         });
         runner.start();
         runner.cancel();
+        await until(() => phase() === "idle", "the first being given up");
         spawned.mockClear();
         runner.start();
         runner.cancel();
@@ -621,6 +659,7 @@ describe("an answer meant for one login", () => {
         await until(() => phase() === "prompt", "login A's prompt");
         const passwordPrompt = promptIn(states);
         runner.cancel();
+        await until(() => phase() === "idle", "login A being given up");
 
         runner.start();
         await until(() => phase() === "prompt", "login B's prompt");
@@ -664,6 +703,7 @@ describe("an answer meant for one login", () => {
             );
             ids.push(promptIn(states)?.id ?? -1);
             runner.cancel();
+            await until(() => phase() === "idle", "the login being given up");
         }
         expect(new Set(ids).size).toBe(6);
     });
@@ -671,13 +711,17 @@ describe("an answer meant for one login", () => {
 
 describe("cancelling", () => {
     it("tells the client, which stops, and goes back to the start", async () => {
-        const { cli, runner, phase } = await atPrompt([
+        const { cli, runner, phase, disconnects } = await atPrompt([
             { prompt: PASSWORD_PROMPT },
             { hang: true },
         ]);
         runner.cancel();
-        expect(phase()).toBe("idle");
-        await until(() => cli.received().includes("cancel"), "the client hearing of it");
+        // Not given up yet: the client's last line says whether it was in time.
+        expect(phase()).toBe("working");
+        await until(() => phase() === "idle", "the login being given up");
+        expect(cli.received()).toContain("cancel");
+        // The client said "cancelled": nothing reached the service.
+        expect(disconnects.asked).toBe(0);
         const [pid = 0] = cli.pids();
         await until(() => !alive(pid), "the client ending");
         // An answer that arrives late goes nowhere.
@@ -685,35 +729,157 @@ describe("cancelling", () => {
         expect(cli.received()).not.toContain("answer:1:as expected");
     });
 
-    it("closes the client's input as well, as the bridge's is closed", async () => {
-        const { cli, runner } = await atPrompt([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
-            ignoresCancel: true,
-            exitGraceMs: 60_000,
-        });
+    it("keeps the client's input open until its last line: closing it would be a cancel too", async () => {
+        const { cli, runner, phase } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { ignoresCancel: true, exitGraceMs: 600 },
+        );
         runner.cancel();
+        await until(() => cli.received().includes("cancel"), "the client hearing of it");
+        await pause(200);
+        expect(cli.received()).not.toContain("input closed");
+        expect(phase()).toBe("working");
+    });
+
+    it("closes the client's input once its last line has come", async () => {
+        const { cli, runner, phase } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ raw: '{"type":"done"}\n' }, { hang: true }], exitGraceMs: 60_000 },
+        );
+        runner.cancel();
+        await until(() => phase() === "idle", "the login being given up");
         await until(() => cli.received().includes("input closed"), "its input closing");
     });
 
-    it("kills a client that will not stop", async () => {
-        const { cli, runner } = await atPrompt([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
-            ignoresCancel: true,
-            exitGraceMs: 150,
-        });
-        const [pid = 0] = cli.pids();
+    it("asks the service to disconnect when the cancel came too late, and only then shows it given up", async () => {
+        const { runner, phase, states, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ done: true }] },
+        );
+        disconnects.hold = true;
         runner.cancel();
-        await until(() => cli.received().includes("input closed"), "its input closing");
-        expect(alive(pid)).toBe(true);
-        await until(() => !alive(pid), "the client being killed");
+        await until(() => disconnects.asked === 1, "the disconnect being asked for");
+        // Until the service has been told, the login is not shown as given up,
+        // and another cannot begin.
+        await pause(100);
+        expect(phase()).toBe("working");
+        expect(runner.start()).toBe(false);
+        runner.cancel();
+        expect(phase()).toBe("working");
+        disconnects.release();
+        await until(() => phase() === "idle", "the login being given up");
+        expect(disconnects.asked).toBe(1);
+        expect(states.some((state) => state.phase === "failed")).toBe(false);
+        expect(runner.start()).toBe(true);
     });
 
-    it("ends the client at once when the app stops", async () => {
-        const { cli, runner } = await atPrompt([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
-            ignoresCancel: true,
-            exitGraceMs: 60_000,
-        });
+    it("shows the login given up even when the disconnect could not be sent", async () => {
+        const { runner, phase, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ done: true }] },
+        );
+        disconnects.fail = true;
+        runner.cancel();
+        await until(() => phase() === "idle", "the login being given up");
+        expect(disconnects.asked).toBe(1);
+    });
+
+    it("sends no disconnect when the client ends with an error: nothing reached the service", async () => {
+        for (const code of ["cancelled", "wrong_password", "gateway_unreachable"]) {
+            const { runner, phase, states, disconnects } = await atPrompt(
+                [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+                { afterCancel: [{ error: { code, message: "the client's words" } }] },
+            );
+            runner.cancel();
+            await until(() => phase() === "idle", "the login being given up");
+            await pause(50);
+            expect(disconnects.asked, code).toBe(0);
+            // The user gave up: a failure that came after is not shown.
+            expect(states.some((state) => state.phase === "failed")).toBe(false);
+        }
+    });
+
+    it("kills a client that gives no last line in time, and disconnects because it cannot know", async () => {
+        const { cli, runner, phase, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { ignoresCancel: true, exitGraceMs: 1000 },
+        );
         const [pid = 0] = cli.pids();
-        runner.stop();
-        await until(() => !alive(pid), "the client ending", 3000);
+        const asked = Date.now();
+        runner.cancel();
+        await until(() => phase() === "idle", "the login being given up");
+        expect(Date.now() - asked).toBeGreaterThanOrEqual(990);
+        expect(disconnects.asked).toBe(1);
+        // Killed at the limit itself, not a second limit later.
+        await until(() => !alive(pid), "the client being killed", 600);
+    });
+
+    it.each([
+        ["leaves without a last line", [{ exit: 0 }]],
+        ["writes something unreadable", [{ raw: "this is not json\n" }, { hang: true }]],
+        ["writes a line that is not a message", [{ raw: '{"type":"finished"}\n' }, { hang: true }]],
+    ] as [string, CliStep[]][])(
+        "disconnects when a cancelled client %s: it cannot know",
+        async (_name, afterCancel) => {
+            const { runner, phase, disconnects } = await atPrompt(
+                [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+                { afterCancel, exitGraceMs: 60_000 },
+            );
+            runner.cancel();
+            await until(() => phase() === "idle", "the login being given up");
+            expect(disconnects.asked).toBe(1);
+        },
+    );
+
+    it("shows no question that was asked after the cancel, and still reads the last line", async () => {
+        const question = JSON.stringify({ type: "prompt", ...CODE_PROMPT });
+        const { runner, phase, states, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ raw: `${question}\n` }, { done: true }] },
+        );
+        const before = states.length;
+        runner.cancel();
+        await until(() => phase() === "idle", "the login being given up");
+        expect(states.slice(before).some((state) => state.phase === "prompt")).toBe(false);
+        expect(disconnects.asked).toBe(1);
+    });
+
+    it("tells the client to cancel once, however often it is pressed", async () => {
+        const { cli, runner, phase } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { ignoresCancel: true, exitGraceMs: 300 },
+        );
+        runner.cancel();
+        runner.cancel();
+        runner.cancel();
+        await until(() => phase() === "idle", "the login being given up");
+        expect(cli.received().filter((entry) => entry === "cancel")).toHaveLength(1);
+    });
+
+    it("sends no disconnect for a login that simply succeeds", async () => {
+        const { runner, phase, disconnects } = await atPrompt([
+            { prompt: PASSWORD_PROMPT },
+            { done: true },
+        ]);
+        runner.answer(1, PASSWORD);
+        await until(() => phase() === "idle", "the login ending");
+        await pause(50);
+        expect(disconnects.asked).toBe(0);
+    });
+
+    it("ends the client at once when the app stops, cancelled already or not", async () => {
+        for (const cancelFirst of [false, true]) {
+            const { cli, runner } = await atPrompt([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
+                ignoresCancel: true,
+                exitGraceMs: 60_000,
+            });
+            const [pid = 0] = cli.pids();
+            if (cancelFirst) {
+                runner.cancel();
+            }
+            runner.stop();
+            await until(() => !alive(pid), "the client ending", 3000);
+        }
     });
 
     it("does nothing when there is nothing to cancel", () => {
@@ -874,7 +1040,13 @@ describe("a password", () => {
         const demo = createDemoLink(10);
         const controller = new Controller(
             demo,
-            (onState) => new ConnectRunner({ command: cli.command, args: cli.args, onState }),
+            (onState) =>
+                new ConnectRunner({
+                    command: cli.command,
+                    args: cli.args,
+                    onState,
+                    disconnect: () => demo.disconnect(),
+                }),
         );
         cleanups.push(() => controller.dispose());
         const sent: Snapshot[] = [];
@@ -896,8 +1068,8 @@ describe("a password", () => {
 
         // Putting the window away gives the login up.
         controller.cancelLogin();
-        expect(controller.getSnapshot().login).toEqual({ phase: "idle" });
-        await until(() => cli.received().includes("cancel"), "the client hearing of it");
+        await until(() => controller.getSnapshot().login.phase === "idle", "the login given up");
+        expect(cli.received()).toContain("cancel");
     });
 });
 
@@ -920,6 +1092,7 @@ describe("the controller", () => {
                     command: cli.command,
                     args: cli.args,
                     onState,
+                    disconnect: async () => {},
                     exitGraceMs: 60_000,
                 }),
         );
