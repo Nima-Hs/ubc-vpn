@@ -3,15 +3,16 @@
 
 use std::collections::VecDeque;
 use std::io::BufReader;
-use std::sync::Mutex;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ubc_vpn_core::protocol::{Event, Hello, HelloReply, PROTOCOL_VERSION, ResponseBody};
 use ubc_vpn_core::state::ConnState;
-use ubc_vpn_platform::Transport;
 use ubc_vpn_platform::fake::{Op, paths};
+use ubc_vpn_platform::{Listener, RawConnection, Transport};
 
 use super::*;
 use crate::client::Limits;
@@ -112,11 +113,27 @@ impl Bridge {
     /// Waits for the bridge to end. Returns its exit status, every line it
     /// wrote, and everything it wrote anywhere.
     fn end(self) -> (u8, Vec<BridgeLine>, String) {
-        let status = self.exit.join().unwrap();
+        let status = finish(self.exit, &self.out);
         let out = self.out.text();
         let lines = out.lines().map(|line| decode(line).unwrap()).collect();
         (status, lines, out + &self.err.text())
     }
+}
+
+/// Waits for a bridge to end, but not for ever: one that does not end fails
+/// the test and does not hang it.
+fn finish(exit: JoinHandle<u8>, out: &Captured) -> u8 {
+    let started = Instant::now();
+    while !exit.is_finished() {
+        let waited = started.elapsed();
+        let wrote = out.text();
+        assert!(
+            waited < Duration::from_secs(10),
+            "no end; it wrote: {wrote}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    exit.join().unwrap()
 }
 
 /// Whether a line is the response to request `id` with this outcome.
@@ -300,7 +317,7 @@ fn no_more_than_the_limit_is_read_for_one_line() {
         }
     }
     let mut input = BufReader::new(Endless(0));
-    let (to, arrivals) = mpsc::channel();
+    let (to, arrivals) = mpsc::sync_channel(WAITING);
     read_app(&mut input, &to);
     assert!(matches!(arrivals.try_recv(), Ok(Arrival::App(Err(())))));
     assert!(
@@ -425,4 +442,293 @@ fn any_number_of_events_is_passed_on_and_none_is_kept() {
         1 + REQUESTS * (EVENTS_EACH + 1),
         "every line, once"
     );
+}
+
+const STATE_EVENT: ServerMessage = ServerMessage::Event(Event::StateChanged(ConnState::Connecting));
+
+fn greeting() -> String {
+    let reply = HelloReply {
+        protocol_version: PROTOCOL_VERSION,
+        service_version: "0.1.0".to_string(),
+        owner_claimed: true,
+    };
+    encode(&reply).unwrap().trim_end().to_string()
+}
+
+// Events are not answers. A service that takes a request and then only
+// sends events is as stuck as a silent one, and the events do not put the
+// deadline off.
+#[test]
+fn events_do_not_put_off_the_deadline_for_an_answer() {
+    let brief = Limits {
+        answer: Duration::from_millis(600),
+        ..Limits::default()
+    };
+    let rig = Rig::new();
+    let listener = rig.fake.listen(&paths(&rig.root).channel_name).unwrap();
+    let chatty = thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        conn.read_line().unwrap();
+        conn.write_line(&greeting()).unwrap();
+        let asked = conn.read_line().ok().flatten();
+        // An event every so often and never an answer, until the bridge
+        // goes. Not for ever, so that a bridge that never goes fails.
+        let event = encode(&STATE_EVENT).unwrap();
+        let patience = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < patience && conn.write_line(event.trim_end()).is_ok() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        asked
+    });
+    let bridge = start_with(&rig, brief);
+    bridge.lines(1);
+    let started = Instant::now();
+    bridge.say(r#"{"id":1,"body":{"method":"status"}}"#);
+    let (status, lines, everything) = bridge.end();
+    let waited = started.elapsed();
+    assert!(waited < Duration::from_secs(4), "it waited {waited:?}");
+    assert_eq!(status, 1);
+    let (last, events) = lines[1..].split_last().unwrap();
+    assert_eq!(*last, BridgeLine::ServiceUnavailable);
+    let event = BridgeLine::Server {
+        message: STATE_EVENT,
+    };
+    assert!(events.len() >= 2 && events.iter().all(|line| *line == event));
+    assert!(everything.contains("did not answer a request in time"));
+    assert!(chatty.join().unwrap().is_some(), "the request was sent on");
+}
+
+// A connect is answered by the bridge itself, so no answer to it is owed by
+// the service. The bridge is still there long after.
+#[test]
+fn a_refused_connect_leaves_nothing_to_wait_for() {
+    let brief = Limits {
+        answer: Duration::from_millis(400),
+        ..Limits::default()
+    };
+    let rig = Rig::new();
+    let _service = rig.service();
+    let mut bridge = start_with(&rig, brief);
+    let routes = r#"{"subnets":["10.255.0.0/24"]}"#;
+    let params = format!(r#"{{"cookie":"{COOKIE}","gateway_addr":"192.0.2.1","routes":{routes}}}"#);
+    bridge.say(&format!(
+        r#"{{"id":1,"body":{{"method":"connect","params":{params}}}}}"#
+    ));
+    assert!(is_response(
+        &bridge.lines(2)[1],
+        1,
+        Err(ErrorCode::BadRequest)
+    ));
+    thread::sleep(3 * brief.answer);
+    bridge.say(r#"{"id":2,"body":{"method":"status"}}"#);
+    assert!(is_response(
+        &bridge.lines(3)[2],
+        2,
+        Err(ErrorCode::NotClaimed)
+    ));
+    bridge.app = None;
+    let (status, lines, _) = bridge.end();
+    assert_eq!((status, lines.len()), (0, 3));
+}
+
+/// Standard output that breaks after a number of lines.
+struct Breaking(usize);
+
+impl Write for Breaking {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.0 == 0 {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        self.0 -= 1;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// The app can go without closing standard input first. The bridge then
+// cannot write, and ends with status 1 at whichever line that happens,
+// without a panic.
+#[test]
+fn an_output_that_breaks_ends_the_bridge() {
+    for lines_taken in 0..4 {
+        let rig = Rig::new();
+        let _service = rig.service();
+        let (app, lines): (Sender<Vec<u8>>, _) = mpsc::channel();
+        let (fake, root) = (rig.fake.clone(), rig.root.clone());
+        let exit = thread::spawn(move || {
+            let platform = || Ok(fake.platform(&root));
+            let input = BufReader::new(Feed(lines, VecDeque::new()));
+            let (mut out, mut err) = (Breaking(lines_taken), Captured::default());
+            run(&platform, input, Limits::default(), &mut out, &mut err)
+        });
+        // A connect, which the bridge answers itself, and then two requests
+        // the service answers: three lines the app may not take.
+        let routes = r#"{"subnets":["10.255.0.0/24"]}"#;
+        let params =
+            format!(r#"{{"cookie":"{COOKIE}","gateway_addr":"192.0.2.1","routes":{routes}}}"#);
+        let connect = format!(r#"{{"id":1,"body":{{"method":"connect","params":{params}}}}}"#);
+        let status = |id: u32| format!(r#"{{"id":{id},"body":{{"method":"status"}}}}"#);
+        let started = Instant::now();
+        for request in [connect, status(2), status(3)] {
+            let _ = app.send(format!("{request}\n").into_bytes());
+        }
+        let status = finish(exit, &Captured::default());
+        assert_eq!(status, 1, "after {lines_taken} lines");
+        // At that line, and not later when the service tires of the app.
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_secs(2), "{lines_taken}: {waited:?}");
+        drop(app);
+    }
+}
+
+/// Notes, in order, each time something is read or written.
+#[derive(Clone, Default)]
+struct Noted(Arc<Mutex<Vec<&'static str>>>);
+
+impl Read for Noted {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().push("input read");
+        Ok(0)
+    }
+}
+
+impl Write for Noted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().push("line written");
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Standard input is not read before the app has been told the channel is
+// ready, and not at all when there is no channel.
+#[test]
+fn nothing_is_read_from_the_app_before_it_is_told_ready() {
+    let rig = Rig::new();
+    let runs = |noted: &Noted| {
+        let platform = || Ok(rig.fake.platform(&rig.root));
+        let input = BufReader::new(noted.clone());
+        let (mut out, mut err) = (noted.clone(), Captured::default());
+        run(&platform, input, Limits::default(), &mut out, &mut err)
+    };
+    let noted = Noted::default();
+    assert_eq!(runs(&noted), 1);
+    assert_eq!(*noted.0.lock().unwrap(), ["line written"]);
+
+    let _service = rig.service();
+    let noted = Noted::default();
+    assert_eq!(runs(&noted), 0);
+    assert_eq!(*noted.0.lock().unwrap(), ["line written", "input read"]);
+}
+
+/// A service that greets and then sends events as fast as they are read,
+/// counting them, until told to stop.
+#[derive(Clone, Default)]
+struct Flood {
+    sent: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    pending: Arc<Mutex<VecDeque<u8>>>,
+}
+
+impl RawConnection for Flood {
+    fn read(&self, buf: &mut [u8]) -> ubc_vpn_platform::Result<usize> {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            if self.stop.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            let line = match self.sent.fetch_add(1, Ordering::SeqCst) {
+                0 => greeting() + "\n",
+                _ => encode(&STATE_EVENT).unwrap(),
+            };
+            pending.extend(line.bytes());
+        }
+        let n = buf.len().min(pending.len());
+        let taken = pending.drain(..n);
+        buf.iter_mut()
+            .zip(taken)
+            .for_each(|(slot, byte)| *slot = byte);
+        Ok(n)
+    }
+    fn write_all(&self, _: &[u8]) -> ubc_vpn_platform::Result<()> {
+        Ok(())
+    }
+    fn set_read_timeout(&self, _: Option<Duration>) -> ubc_vpn_platform::Result<()> {
+        Ok(())
+    }
+    fn set_write_timeout(&self, _: Option<Duration>) -> ubc_vpn_platform::Result<()> {
+        Ok(())
+    }
+    fn close(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Transport for Flood {
+    fn listen(&self, _: &str) -> ubc_vpn_platform::Result<Box<dyn Listener>> {
+        Err(Error::Unsupported)
+    }
+    fn connect(&self, _: &str) -> ubc_vpn_platform::Result<Connection> {
+        Ok(Connection::new(Box::new(self.clone())))
+    }
+}
+
+/// Standard output that takes one line and then waits to be let go.
+struct Stuck(Arc<(Mutex<bool>, Condvar)>, usize);
+
+impl Write for Stuck {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.1 += 1;
+        let (free, freed) = &*self.0;
+        let mut free = free.lock().unwrap();
+        while self.1 > 1 && !*free {
+            // Not for ever, so that a test that forgot it cannot hang.
+            let patience = Duration::from_secs(10);
+            free = freed.wait_timeout(free, patience).unwrap().0;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Security rule: a service that talks faster than the app listens cannot
+// fill memory. While the app takes no lines the bridge stops reading the
+// service after a handful of messages.
+#[test]
+fn messages_are_not_read_faster_than_the_app_takes_them() {
+    let rig = Rig::new();
+    let flood = Flood::default();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (app, lines): (Sender<Vec<u8>>, _) = mpsc::channel();
+    let (fake, root) = (rig.fake.clone(), rig.root.clone());
+    let (service, held) = (flood.clone(), gate.clone());
+    let exit = thread::spawn(move || {
+        let platform = || {
+            let mut platform = fake.platform(&root);
+            platform.transport = Arc::new(service.clone());
+            Ok(platform)
+        };
+        let input = BufReader::new(Feed(lines, VecDeque::new()));
+        let (mut out, mut err) = (Stuck(held, 0), Captured::default());
+        run(&platform, input, Limits::default(), &mut out, &mut err)
+    });
+    // Time enough to read a great many messages, were nothing in the way.
+    thread::sleep(Duration::from_millis(300));
+    let read = flood.sent.load(Ordering::SeqCst);
+    flood.stop.store(true, Ordering::SeqCst);
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let status = finish(exit, &Captured::default());
+    drop(app);
+    assert!((2..100).contains(&read), "{read} messages were read");
+    assert_eq!(status, 1, "the service went away");
 }

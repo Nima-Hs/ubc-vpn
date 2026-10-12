@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 use std::time::Instant;
 
@@ -38,6 +38,11 @@ enum Arrival {
     Service(ServerMessage),
     ServiceGone,
 }
+
+/// How many arrivals may wait for the bridge's loop. While the app is slow
+/// to take lines the loop is busy writing, and the two readers then wait
+/// here; they do not go on reading and pile up what they read.
+const WAITING: usize = 16;
 
 /// Why there is no channel: the one line to write, and the reason for
 /// standard error.
@@ -73,7 +78,7 @@ pub fn run(
     }
     // Only now is standard input read: nothing the app wrote early is acted
     // on before it has been told the channel is ready.
-    let (arrivals, inbox) = mpsc::channel();
+    let (arrivals, inbox) = mpsc::sync_channel(WAITING);
     let (from_app, from_service) = (arrivals.clone(), arrivals);
     thread::spawn(move || read_app(input, &from_app));
     let service = conn.clone();
@@ -193,7 +198,7 @@ fn forward(conn: &Connection, request: Request, out: &mut dyn Write) -> bool {
 /// Reads the app's lines until standard input closes or a line is bad. No
 /// more than the line limit is ever taken in for one line, and a bad line is
 /// dropped here: it is never echoed or logged.
-fn read_app(mut input: impl BufRead, to: &Sender<Arrival>) {
+fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>) {
     loop {
         let mut line = Vec::new();
         let limit = MAX_LINE_BYTES as u64 + 1;
@@ -214,7 +219,7 @@ fn read_app(mut input: impl BufRead, to: &Sender<Arrival>) {
 
 /// Reads the service's messages until the channel closes or sends something
 /// that is not a message.
-fn read_service(conn: &Connection, to: &Sender<Arrival>) {
+fn read_service(conn: &Connection, to: &SyncSender<Arrival>) {
     loop {
         let line = conn.read_line().ok().flatten();
         let message = line.and_then(|line| decode::<ServerMessage>(&line).ok());
