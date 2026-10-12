@@ -293,6 +293,17 @@ pub struct Form<'a> {
     life: PhantomData<&'a mut AuthForm>,
 }
 
+/// Overwrites `bytes` with zeros in a way the compiler must keep, though
+/// nothing reads them afterwards.
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
+        // SAFETY: `byte` is a valid, aligned reference to one byte that
+        // nothing else can reach during the write.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Copies one of the library's strings, or `None` if it has none.
 ///
 /// # Safety
@@ -371,16 +382,25 @@ impl Form<'_> {
         self.options().into_iter().map(field).collect()
     }
 
-    /// Fills in the field at `index` of [`fields`](Self::fields). The
-    /// library takes its own copy of `value`. False if there is no such
-    /// field or the library refuses.
-    pub fn answer(&mut self, index: usize, value: &CStr) -> bool {
+    /// Fills in the field at `index` of [`fields`](Self::fields). False if
+    /// there is no such field, the value has a NUL in it, or the library
+    /// refuses.
+    ///
+    /// The library takes its own copy of the value and keeps it until it
+    /// frees the form. The copy made here to hand it over is wiped.
+    pub fn answer(&mut self, index: usize, value: &Secret) -> bool {
         let Some(option) = self.options().get(index).copied() else {
             return false;
         };
-        // SAFETY: `option` is a live field of this form, and `value` is a
+        let Ok(text) = CString::new(value.expose()) else {
+            return false;
+        };
+        let mut text = text.into_bytes_with_nul();
+        // SAFETY: `option` is a live field of this form, and `text` is a
         // NUL-terminated string the library copies.
-        unsafe { (self.library.set_option_value)(option, value.as_ptr()) == 0 }
+        let taken = unsafe { (self.library.set_option_value)(option, text.as_ptr().cast()) == 0 };
+        wipe(&mut text);
+        taken
     }
 }
 
@@ -396,6 +416,8 @@ pub struct Handle {
     raw: *mut VpnInfo,
     /// What the library holds as `privdata`. Freed after the handle.
     context: *mut Context,
+    /// Whether the command pipe has been made.
+    piped: Cell<bool>,
 }
 
 impl Handle {
@@ -421,6 +443,7 @@ impl Handle {
             library,
             raw,
             context,
+            piped: Cell::new(false),
         };
         if raw.is_null() {
             return None;
@@ -476,7 +499,14 @@ impl Handle {
     /// Makes the command pipe and returns its write end, or `None` if the
     /// library could not make one. The handle closes both ends when it is
     /// dropped.
+    ///
+    /// Once per handle; a second call is `None`. The library would make a
+    /// new pipe over the first without closing it, and a cancel written to
+    /// the first would then be lost.
     pub fn command_pipe(&self) -> Option<CommandPipe> {
+        if self.piped.replace(true) {
+            return None;
+        }
         // SAFETY: `raw` is a live handle used on its own thread.
         let pipe = unsafe { (self.library.setup_cmd_pipe)(self.raw) };
         #[cfg(windows)]
@@ -519,6 +549,21 @@ impl CommandPipe {
         // SAFETY: by the contract above the pipe is open, and one byte is
         // read from `command`.
         unsafe { system::write_byte(self.0, command) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Security rule: the copy of an answer made to hand it to the library
+    // does not stay in memory. This shows that `wipe` zeroes what it is
+    // given. It cannot show that a compiler may not remove the writes, since
+    // reading the buffer back is itself a reason to keep them: that is what
+    // the volatile writes are for.
+    #[test]
+    fn wipe_leaves_only_zeros() {
+        let mut text = b"NOT-A-REAL-PASSWORD\0".to_vec();
+        super::wipe(&mut text);
+        assert_eq!(text, [0; 20]);
     }
 }
 

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use gateway::Gateway;
+use ubc_vpn_core::redact::Secret;
 use ubc_vpn_engine::ffi::{
     Callbacks, Field, FieldKind, Fill, Form, FormAnswer, Handle, Judge, Library,
 };
@@ -47,6 +48,8 @@ struct Seen {
     resolved: Vec<(String, u16)>,
     hashes: Vec<String>,
     fields: Vec<Vec<Field>>,
+    /// Each form's message, its error, and whether it asks for a group.
+    forms: Vec<(Option<String>, Option<String>, bool)>,
     lines: usize,
 }
 
@@ -70,7 +73,11 @@ fn handle(
             judge(hash)
         }),
         form: Box::new(move |form| {
-            fields.lock().unwrap().fields.push(form.fields());
+            let shown = (form.message(), form.error(), form.asks_for_group());
+            let mut seen = fields.lock().unwrap();
+            seen.fields.push(form.fields());
+            seen.forms.push(shown);
+            drop(seen);
             fill(form)
         }),
         resolve: Box::new(move |host, port| {
@@ -95,7 +102,8 @@ fn yes() -> Arc<AtomicBool> {
 
 /// Answers the stand-in gateway's login form.
 fn answer(form: &mut Form<'_>) -> FormAnswer {
-    let filled = form.answer(0, c"someone") && form.answer(1, c"not-a-real-password");
+    let (name, password) = (Secret::new("someone"), Secret::new("not-a-real-password"));
+    let filled = form.answer(0, &name) && form.answer(1, &password);
     if filled {
         FormAnswer::Submit
     } else {
@@ -302,6 +310,9 @@ fn a_cancel_on_the_command_pipe_stops_the_login() {
     assert!(unsafe { pipe.send(b'x') });
     assert_ne!(handle.obtain_cookie(), 0);
     assert!(handle.cookie().is_none());
+    // Security rule: one pipe per handle. A second would replace the first
+    // inside the library, and a cancel sent to the first would be lost.
+    assert!(handle.command_pipe().is_none());
 }
 
 // The callbacks are freed when the handle is, and not before: the library
@@ -313,4 +324,116 @@ fn dropping_the_handle_frees_the_callbacks() {
     assert!(Arc::strong_count(&seen) > 1);
     drop(handle);
     assert_eq!(Arc::strong_count(&seen), 1);
+}
+
+// Security rule: the system's certificate store is not trusted, so the judge
+// is asked about every certificate. This is what keeps the password from a
+// gateway that some authority vouches for but no pin matches: with the
+// store trusted, the library accepts such a certificate itself, never asks,
+// and sends the password.
+//
+// It needs a certificate the machine's own store trusts. Only the CI
+// workflow makes one, on a Linux runner that is thrown away afterwards, by
+// adding a throwaway authority to that store. Never do that anywhere else:
+// without the workflow's variable this test is skipped.
+#[test]
+fn a_certificate_the_system_trusts_is_still_judged_and_nothing_is_sent() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start_trusted("accept") else {
+        return;
+    };
+    let (handle, seen) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| false),
+        Box::new(answer),
+    );
+    assert_ne!(handle.obtain_cookie(), 0);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.hashes.len(), 1, "the judge was not asked");
+    assert!(seen.fields.is_empty() && handle.cookie().is_none());
+    assert_eq!(gateway.requests(), Vec::<String>::new());
+    println!("RAN: handle judges a trusted certificate");
+}
+
+// What a form says reaches the callback as the gateway sent it: its message,
+// and its error when the gateway shows the form again after a refusal.
+#[test]
+fn a_form_shown_again_carries_the_gateways_error() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("reject") else {
+        return;
+    };
+    // Answer the first form; give up on the one that comes back.
+    let mut shown = 0;
+    let fill: Fill = Box::new(move |form| {
+        shown += 1;
+        if shown == 1 {
+            answer(form)
+        } else {
+            FormAnswer::Cancel
+        }
+    });
+    let (handle, seen) = handle(library, gateway.port, &yes(), Box::new(|_| true), fill);
+    assert_ne!(handle.obtain_cookie(), 0);
+    let seen = seen.lock().unwrap();
+    let said = |text: &str| Some(text.to_string());
+    assert_eq!(seen.forms[0], (said("Please log in."), None, false));
+    assert_eq!(
+        seen.forms[1],
+        (said("Please log in."), said("Login failed."), false)
+    );
+}
+
+// A form that asks for a choice of group says so, and one that does not,
+// does not (the test above).
+#[test]
+fn a_form_with_a_choice_of_group_says_so() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("group") else {
+        return;
+    };
+    let (handle, seen) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    assert_ne!(handle.obtain_cookie(), 0);
+    assert!(seen.lock().unwrap().forms[0].2);
+}
+
+// The fields reach the callback with their type, and with the library's
+// mark on one that is not to be shown or filled. An engine skips hidden and
+// ignored fields, so it must be able to tell.
+#[test]
+fn hidden_and_ignored_fields_are_told_apart() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("fields") else {
+        return;
+    };
+    let (handle, seen) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    assert_ne!(handle.obtain_cookie(), 0);
+    let seen = seen.lock().unwrap();
+    let fields: Vec<(FieldKind, &str, bool)> = seen.fields[0]
+        .iter()
+        .map(|field| (field.kind, field.name.as_str(), field.ignored))
+        .collect();
+    // The library puts the choice of group first, whatever the form's order.
+    let expected = [
+        (FieldKind::Select, "group_list", false),
+        (FieldKind::Text, "username", false),
+        (FieldKind::Password, "password", false),
+        (FieldKind::Password, "secondary_password", true),
+        (FieldKind::Hidden, "token", false),
+    ];
+    assert_eq!(fields, expected);
 }

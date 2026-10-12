@@ -18,17 +18,23 @@ Scenarios, by what the gateway does after showing the login form:
   redirect  answers the first request with a redirect to the other port
   action    shows a form whose action is a URL on the other port
   csd       offers a host-scan program to download and run
+  fields    shows a form that also has a hidden field and one to ignore
+
+It stops when its standard input closes, which is when the test that started
+it ends, however that test ends. Started by hand with no input, it stops at
+once: give it a terminal, or a pipe that stays open.
 """
 
 import http.server
 import json
+import os
 import ssl
 import sys
 import threading
 import time
 
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
-SCENARIOS = ("accept", "reject", "code", "group", "hang", "redirect", "action", "csd")
+SCENARIOS = ("accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields")
 
 
 def form(action, fields, message="Please log in.", error=None, extra=""):
@@ -51,6 +57,13 @@ CODE = (("password", "secondary_password", "Code:"),)
 GROUP = (
     '<select name="group_list" label="Group:">'
     '<option selected="true">Staff</option><option>Students</option></select>'
+)
+# A field the library is to ignore, because the group chosen by default has no
+# second login, and a hidden one. A field can only be ignored on a form with
+# a choice of group.
+EXTRA = (
+    '<input type="password" name="secondary_password" label="Second:" second-auth="1" />'
+    '<input type="hidden" name="token" value="FAKE-HIDDEN-VALUE" />' + GROUP
 )
 SUCCESS = (
     b'<?xml version="1.0" encoding="UTF-8"?>'
@@ -140,6 +153,8 @@ class Gateway(http.server.BaseHTTPRequestHandler):
             self.reply(form("/auth", LOGIN).replace(b"</form>", GROUP.encode() + b"</form>"))
         elif scenario == "csd":
             self.reply(form("/auth", LOGIN, extra=host_scan(elsewhere)))
+        elif scenario == "fields":
+            self.reply(form("/auth", LOGIN).replace(b"</form>", EXTRA.encode() + b"</form>"))
         else:
             self.reply(form("/auth", LOGIN))
 
@@ -172,7 +187,10 @@ def main(cert, key, scenario, log_path):
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     print("PORTS %d %d" % tuple(s.server_address[1] for s in servers), flush=True)
-    threading.Event().wait()
+    # Whoever started this holds the other end of standard input. When they
+    # are gone, however they went, so is this.
+    sys.stdin.buffer.read()
+    os._exit(0)
 
 
 if __name__ == "__main__":
