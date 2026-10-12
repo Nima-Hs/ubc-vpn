@@ -5,14 +5,19 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use ubc_vpn_core::VERSION;
+use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{ClientKind, RequestBody, ResponseBody, encode};
 use ubc_vpn_core::state::ConnState;
+use ubc_vpn_engine::LoginEngine;
 use ubc_vpn_platform::{Mode, Platform};
 
 use client::{Client, ClientError};
 
 mod bridge;
 mod client;
+mod connect;
+#[cfg(test)]
+mod connect_tests;
 mod settings;
 #[cfg(test)]
 mod settings_tests;
@@ -31,6 +36,8 @@ const HELP: &str = "\
 Usage: ubc-vpn <command>
 
 Commands:
+  connect           Log in and connect the VPN, using the saved routes
+  disconnect        Disconnect the VPN
   status [--json]   Show whether the VPN is connected
   bridge            Carry messages between the app and the service
   settings get --json            Print the settings and the route limits
@@ -39,10 +46,13 @@ Commands:
   help              Show this text
   version           Show the version
 
-The first user to run status becomes the owner of the service, and from then
-on only that user can control UBC VPN on this computer. The bridge claims
-nothing itself; it leaves that to the app. The settings commands do not talk
-to the service at all.
+The first user to run connect, disconnect or status becomes the owner of the
+service, and from then on only that user can control UBC VPN on this computer.
+The bridge claims nothing itself; it leaves that to the app. The settings
+commands do not talk to the service at all.
+
+connect asks for the password and the one-time code in the terminal. They are
+never taken from an argument, a variable or a file.
 
 With --json, status prints the connection state as one line of JSON. Each
 settings command prints one line of JSON, and exits with status 1 only when
@@ -55,10 +65,75 @@ Exit status:
   3  the service is not running
   4  version mismatch: update UBC VPN
   5  you are not the owner
-  6  another program is answering in place of the service";
+  6  another program is answering in place of the service
+  7  the VPN is connected already, or is connecting or disconnecting
+  8  the login was refused, or the session has ended
+  9  cancelled";
+
+/// Whether the arguments start with `--dev`, and the arguments after it. The
+/// flag exists only in a build with the `dev-mode` feature; in any other it
+/// is an argument like any unknown one.
+fn dev_flag<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+    #[cfg(feature = "dev-mode")]
+    if let ["--dev", rest @ ..] = args {
+        return (true, rest);
+    }
+    (false, args)
+}
+
+/// The platform for this run: the installed product's, or with `--dev` the
+/// dev-mode service's channel and files.
+fn platform(dev: bool) -> ubc_vpn_platform::Result<Platform> {
+    #[cfg(feature = "dev-mode")]
+    if dev {
+        return Platform::native(Mode::Dev);
+    }
+    let _ = dev;
+    Platform::native(Mode::Installed)
+}
+
+/// The engine that logs in. There is no real one yet. With `--dev` it is a
+/// pretend gateway that presents the dev policy's first pin and asks for a
+/// username, a password and a one-time code.
+fn login_engine(dev: bool, policy: &Policy) -> Option<Box<dyn LoginEngine>> {
+    #[cfg(feature = "dev-mode")]
+    if dev {
+        use ubc_vpn_engine::fake::{FakeEngine, Script};
+        let mut script = Script::new(policy.pins.first()?.clone());
+        let mut code = script.form[1].clone();
+        code.0.kind = ubc_vpn_core::login::PromptKind::Code;
+        code.0.label = "One-time code".to_string();
+        code.1 = ubc_vpn_core::redact::Secret::new(DEV_CODE);
+        script.form.push(code);
+        return Some(Box::new(FakeEngine::new(script)));
+    }
+    let _ = (dev, policy);
+    None
+}
+
+/// The one-time code the pretend gateway of dev mode accepts. Made up, and
+/// compiled only into a dev-mode build.
+#[cfg(feature = "dev-mode")]
+const DEV_CODE: &str = "123456";
+
+/// Stands where the terminal will be. Reading a line with nothing shown
+/// needs an OS call this crate may not make; the platform crate is getting
+/// an operation for it. Until then `connect` says so and asks nothing.
+struct NoTerminalYet;
+
+impl connect::Ask for NoTerminalYet {
+    fn unusable(&self) -> Option<String> {
+        let why = "This build cannot yet ask for a password in a terminal. \
+                   Use the app to connect.";
+        Some(why.to_string())
+    }
+
+    fn ask(&mut self, _prompt: &ubc_vpn_engine::Prompt) -> Option<ubc_vpn_core::redact::Secret> {
+        None
+    }
+}
 
 fn main() -> ExitCode {
-    let installed = || Platform::native(Mode::Installed);
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     // An argument that is not Unicode is no command this program has.
     let args: Option<Vec<String>> = std::env::args_os()
@@ -69,23 +144,30 @@ fn main() -> ExitCode {
         return ExitCode::from(say(&mut err, HELP, USAGE));
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (dev, args) = dev_flag(&args);
+    let chosen = || platform(dev);
     // The commands that read standard input are started here. The bridge
     // only for exactly this spelling.
     if args == ["bridge"] {
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
-        let status = bridge::run(&installed, input, limits, &mut out, &mut err);
+        let status = bridge::run(&chosen, input, limits, &mut out, &mut err);
         return ExitCode::from(status);
     }
     // The settings commands read standard input too.
-    if let ["settings", rest @ ..] = args.as_slice() {
+    if let ["settings", rest @ ..] = args {
         let Some(command) = settings::Command::parse(rest) else {
             return ExitCode::from(say(&mut err, HELP, USAGE));
         };
         let mut input = std::io::stdin().lock();
-        return ExitCode::from(settings::run(command, &installed, &mut input, &mut out));
+        return ExitCode::from(settings::run(command, &chosen, &mut input, &mut out));
     }
-    ExitCode::from(run(&args, &installed, &mut out, &mut err))
+    if args == ["connect"] {
+        let engines = |policy: &Policy| login_engine(dev, policy);
+        let status = connect::connect(&chosen, &engines, &mut NoTerminalYet, &mut out, &mut err);
+        return ExitCode::from(status);
+    }
+    ExitCode::from(run(args, &chosen, &mut out, &mut err))
 }
 
 /// Runs one command and returns the exit code. `platform` is asked for only
@@ -99,6 +181,7 @@ fn run(
     let json = match args {
         ["help" | "--help" | "-h"] => return say(out, HELP, 0),
         ["version" | "--version" | "-V"] => return say(out, &format!("ubc-vpn {VERSION}"), 0),
+        ["disconnect"] => return connect::disconnect(platform, out, err),
         ["status"] => false,
         ["status", "--json"] => true,
         _ => return say(err, HELP, USAGE),

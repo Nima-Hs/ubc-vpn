@@ -41,7 +41,7 @@ impl Rig {
     }
 
     /// Runs the command line as the fake's own user, `fake-user`.
-    fn run(&self, args: &[&str]) -> (u8, String, String) {
+    pub(crate) fn run(&self, args: &[&str]) -> (u8, String, String) {
         let platform = || Ok(self.fake.platform(&self.root));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run(args, &platform, &mut out, &mut err);
@@ -149,8 +149,10 @@ fn each_failure_has_its_own_exit_code_and_message() {
     for line in [
         "3  the service is not running",
         "6  another program",
-        "status becomes the owner of the service",
-        "The bridge claims\nnothing itself",
+        "9  cancelled",
+        "connect, disconnect or status becomes the owner",
+        "The bridge claims nothing itself",
+        "never taken from an argument, a variable or a file",
         "bridge            Carry messages",
     ] {
         assert!(help.contains(line), "{help}");

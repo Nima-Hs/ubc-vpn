@@ -196,10 +196,6 @@ impl Client {
 
     /// The next event: one kept while an answer was awaited, or else the
     /// next to arrive, waited for as long as it takes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for `connect`, which comes next")
-    )]
     pub fn next_event(&mut self) -> Result<Event, ClientError> {
         loop {
             if let Some(event) = self.events.pop_front() {
