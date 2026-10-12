@@ -115,7 +115,7 @@ What that test did not cover: sending traffic through the tunnel, a real UBC log
 Consequences we accept:
 
 - **We build the library ourselves** on every OS, from a pinned tag. Windows has no packaged build, and Ubuntu ships a version with known bugs.
-- **Many libraries are bundled.** About twenty DLLs on Windows, plus Wintun.
+- **Many libraries are bundled.** Nine DLLs on Windows, plus Wintun.
 - **Wintun support is marked experimental** by the library, with the older TAP driver as the fallback.
 
 ## GUI
@@ -184,7 +184,7 @@ Only IPv4 subnets are routed. IPv6 routes are refused, and the system's IPv6 set
 | `state.json` | The owner | The service; admin only | Admin only |
 | `settings.json` | Username, chosen subnets and DNS domains, preferences | The user | The user |
 
-All three are JSON. The app and the CLI read and write settings through `crates/core`, so they always agree.
+All three are JSON. Only the CLI reads and writes settings, through `crates/core`; the app asks the CLI.
 
 | | Policy | State | Settings |
 | --- | --- | --- | --- |
@@ -193,6 +193,8 @@ All three are JSON. The app and the CLI read and write settings through `crates/
 | Linux | `/etc/ubc-vpn/` | `/var/lib/ubc-vpn/` | `$XDG_CONFIG_HOME/ubc-vpn/`, or `~/.config/ubc-vpn/` |
 
 An update replaces `policy.json` and never touches `state.json` or `settings.json`. Uninstalling removes the policy and the state.
+
+The app does not open `settings.json` or `policy.json` itself. It runs `ubc-vpn settings`, which reads the settings, checks routes the user typed, and saves them, so the rules for routes exist once, in `crates/core`, and are the ones the service applies when connecting. The lines exchanged are defined in `crates/core/src/settings_cli.rs`. Saved routes are used by the next connection; a connection that is already up keeps the routes it started with.
 
 ### Which routes the service accepts
 
