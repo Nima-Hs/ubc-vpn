@@ -249,14 +249,44 @@ test("another window cannot use the interface's functions", async () => {
         });
         try {
             await other.loadURL("app://ui/index.html");
-            return await other.webContents.executeJavaScript(
-                "window.ubcVpn.getSnapshot().then(() => 'answered', () => 'refused')",
-            );
+            // Every function the interface has, each with arguments its own
+            // check would accept, so that only the sender can be the reason.
+            return await other.webContents.executeJavaScript(`(async () => {
+                const api = window.ubcVpn;
+                const calls = {
+                    getSnapshot: () => api.getSnapshot(),
+                    connect: () => api.connect(),
+                    disconnect: () => api.disconnect(),
+                    retry: () => api.retry(),
+                    answerPrompt: () => api.answerPrompt(1, "an answer"),
+                    cancelLogin: () => api.cancelLogin(),
+                    minimizeWindow: () => api.minimizeWindow(),
+                    closeWindow: () => api.closeWindow(),
+                    listScenarios: () => api.demo.listScenarios(),
+                    setScenario: () => api.demo.setScenario("connected"),
+                };
+                const out = {};
+                for (const [name, call] of Object.entries(calls)) {
+                    out[name] = await call().then(() => "answered", () => "refused");
+                }
+                return out;
+            })()`);
         } finally {
             other.destroy();
         }
     }, resolve("out-demo/preload/index.js"));
-    expect(answer).toBe("refused");
+    expect(answer).toEqual({
+        getSnapshot: "refused",
+        connect: "refused",
+        disconnect: "refused",
+        retry: "refused",
+        answerPrompt: "refused",
+        cancelLogin: "refused",
+        minimizeWindow: "refused",
+        closeWindow: "refused",
+        listScenarios: "refused",
+        setScenario: "refused",
+    });
     // The interface's own window is still served.
     expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toHaveProperty("state");
 });

@@ -21,7 +21,7 @@
 // `log` is a file that gets one entry per thing received. An answer is logged
 // as its id and whether it equals `expect`, never as its text.
 
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 
 if (process.argv[2] !== "connect" || process.argv[3] !== "--json" || process.argv.length !== 5) {
     // Started the wrong way, or handed something extra such as a route.
@@ -38,7 +38,14 @@ if (config.reportStart) {
     log(`env:${Object.keys(process.env).sort().join(",")}`);
 }
 
-const steps = [...config.steps];
+// With `laterLogins`, each start after the first takes the next list of
+// steps, so a test can script one login and then a different one.
+const earlier = existsSync(config.pids)
+    ? readFileSync(config.pids, "utf8").split("\n").length - 2
+    : 0;
+const steps = [
+    ...(earlier > 0 ? (config.laterLogins?.[earlier - 1] ?? config.steps) : config.steps),
+];
 /** The step whose prompt is waiting for its answer. */
 let waiting = null;
 

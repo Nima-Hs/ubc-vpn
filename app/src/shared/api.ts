@@ -32,7 +32,10 @@ export type LinkState =
 
 /** A question the command-line client is asking the user while logging in. */
 export interface LoginPrompt {
-    /** Sent back with the answer. */
+    /**
+     * Sent back with the answer. Made by the app, and never the same for two
+     * prompts, even across logins.
+     */
     id: number;
     /** Which field to show. `password` and `code` are hidden as they are typed. */
     kind: PromptKind;

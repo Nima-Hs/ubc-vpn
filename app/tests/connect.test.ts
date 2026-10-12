@@ -15,7 +15,7 @@ import { MAX_LINE_BYTES } from "../src/main/channel/framing";
 import { isCliMessage } from "../src/main/channel/validate";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
-import { isPromptAnswer, MAX_ANSWER_LENGTH } from "../src/main/ipc";
+import { isPromptAnswer, MAX_ANSWER_LENGTH, takePromptAnswer } from "../src/main/ipc";
 import { alive, type CliStep, type MockCli, mockCli, pause, until } from "./bridge-harness";
 
 // The real `spawn`, watched: some tests read how the client was started.
@@ -23,6 +23,46 @@ vi.mock("node:child_process", async (original) => {
     const actual = await original<typeof import("node:child_process")>();
     return { ...actual, spawn: vi.fn(actual.spawn) };
 });
+
+/**
+ * Every place under `root` that holds `secret`, as text or as the bytes of
+ * text. Printing an object would miss a buffer, which prints as numbers.
+ */
+function holdsBytes(root: unknown, secret: string): string[] {
+    const needle = Buffer.from(secret, "utf8");
+    const found: string[] = [];
+    const seen = new Set<unknown>();
+    const walk = (value: unknown, path: string, depth: number) => {
+        if (typeof value === "string") {
+            if (value.includes(secret)) {
+                found.push(path);
+            }
+            return;
+        }
+        if (typeof value !== "object" || value === null || seen.has(value) || depth > 6) {
+            return;
+        }
+        seen.add(value);
+        if (ArrayBuffer.isView(value)) {
+            const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+            if (bytes.includes(needle)) {
+                found.push(path);
+            }
+            return;
+        }
+        for (const key of Reflect.ownKeys(value)) {
+            let child: unknown;
+            try {
+                child = (value as Record<PropertyKey, unknown>)[key];
+            } catch {
+                continue;
+            }
+            walk(child, `${path}.${String(key)}`, depth + 1);
+        }
+    };
+    walk(root, "runner", 0);
+    return found;
+}
 
 /** Obviously fake. Searched for wherever a password must not turn up. */
 const PASSWORD = "not-a-real-password-0123456789";
@@ -105,8 +145,16 @@ describe("a login", () => {
     });
 
     it.each(["username", "password", "code", "text"])("can ask for a %s", async (kind) => {
-        const { states } = await atPrompt([{ prompt: { id: 9, kind, label: "A question" } }]);
-        expect(states.at(-1)).toMatchObject({ phase: "prompt", prompt: { id: 9, kind } });
+        const { cli, runner, states } = await atPrompt([
+            { prompt: { id: 9, kind, label: "A question" } },
+            { hang: true },
+        ]);
+        // The interface sees the app's own id for the prompt, not the client's.
+        expect(states.at(-1)).toMatchObject({ phase: "prompt", prompt: { id: 1, kind } });
+        // The answer goes back to the client under the client's id.
+        expect(runner.answer(1, "an answer")).toBe(true);
+        await until(() => cli.received().length > 0, "the answer arriving");
+        expect(cli.received()).toEqual(["answer:9:as expected"]);
     });
 
     it("keeps the gateway's wording to a sensible length", async () => {
@@ -283,6 +331,38 @@ describe("answers", () => {
         expect(cli.received()).toEqual(["answer:1:as expected"]);
     });
 
+    it("are refused without a word about what was sent", () => {
+        const taken: unknown[][] = [];
+        const controller = { answerPrompt: (...args: unknown[]) => void taken.push(args) };
+        // A proper answer is handed on, whole.
+        takePromptAnswer(controller, [1, PASSWORD]);
+        expect(taken).toEqual([[1, PASSWORD]]);
+
+        // Electron prints a handler's error to the app's standard error. A
+        // refusal must therefore carry nothing of what it refused.
+        const tooLong = PASSWORD.repeat(100);
+        for (const args of [
+            [1, tooLong],
+            [PASSWORD, PASSWORD],
+            [1, { secret: PASSWORD }],
+            [1, PASSWORD, PASSWORD],
+        ]) {
+            let thrown: unknown;
+            try {
+                takePromptAnswer(controller, args);
+            } catch (error) {
+                thrown = error;
+            }
+            expect(thrown).toBeInstanceOf(Error);
+            const error = thrown as Error;
+            expect(error.message).toBe("refused");
+            expect(
+                `${error.stack} ${JSON.stringify(error)} ${inspect(error, { depth: 8 })}`,
+            ).not.toContain(PASSWORD);
+        }
+        expect(taken).toHaveLength(1);
+    });
+
     it("are checked before they leave the interface's hands", () => {
         expect(isPromptAnswer([1, PASSWORD])).toBe(true);
         expect(isPromptAnswer([0, ""])).toBe(true);
@@ -302,6 +382,75 @@ describe("answers", () => {
         ]) {
             expect(isPromptAnswer(args), JSON.stringify(args).slice(0, 40)).toBe(false);
         }
+    });
+});
+
+describe("an answer meant for one login", () => {
+    const promptIn = (states: LoginState[]) => {
+        const state = states.at(-1);
+        return state?.phase === "prompt" ? state.prompt : undefined;
+    };
+
+    it("cannot reach the prompt of another, though the client numbers both the same", async () => {
+        // Login A asks for a password as its prompt 1 and is cancelled.
+        // Login B asks for a username, also as its prompt 1.
+        const { cli, runner, states, phase } = login(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            {
+                laterLogins: [
+                    [{ prompt: { id: 1, kind: "username", label: "Username" } }, { hang: true }],
+                ],
+            },
+        );
+        runner.start();
+        await until(() => phase() === "prompt", "login A's prompt");
+        const passwordPrompt = promptIn(states);
+        runner.cancel();
+
+        runner.start();
+        await until(() => phase() === "prompt", "login B's prompt");
+        const usernamePrompt = promptIn(states);
+        expect(usernamePrompt?.kind).toBe("username");
+        expect(usernamePrompt?.id).not.toBe(passwordPrompt?.id);
+
+        // The interface, a step behind, sends the password for A's prompt.
+        expect(runner.answer(passwordPrompt?.id ?? -1, PASSWORD)).toBe(false);
+        expect(phase()).toBe("prompt");
+        await pause(150);
+        // Nothing was written to B: the password was not sent as a username.
+        expect(cli.received().filter((entry) => entry.startsWith("answer"))).toEqual([]);
+
+        // B's own prompt still takes its own answer.
+        expect(runner.answer(usernamePrompt?.id ?? -1, "someone")).toBe(true);
+        await until(
+            () => cli.received().some((entry) => entry.startsWith("answer")),
+            "B's answer arriving",
+        );
+        expect(cli.received().filter((entry) => entry.startsWith("answer"))).toEqual([
+            "answer:1:as expected",
+        ]);
+    });
+
+    it("is matched by an id the app makes, never used twice", async () => {
+        const ids: number[] = [];
+        const { runner, states, phase } = login([
+            { prompt: { id: 1, kind: "password", label: "Password" } },
+            { prompt: { id: 1, kind: "code", label: "Code" } },
+            { hang: true },
+        ]);
+        for (let round = 0; round < 3; round++) {
+            runner.start();
+            await until(() => phase() === "prompt", "a prompt");
+            ids.push(promptIn(states)?.id ?? -1);
+            runner.answer(ids.at(-1) ?? -1, "x");
+            await until(
+                () => phase() === "prompt" && promptIn(states)?.kind === "code",
+                "the next",
+            );
+            ids.push(promptIn(states)?.id ?? -1);
+            runner.cancel();
+        }
+        expect(new Set(ids).size).toBe(6);
     });
 });
 
@@ -453,10 +602,28 @@ describe("a password", () => {
             ],
             { stderr: PASSWORD },
         );
+        // Watch what is handed to the client's standard input.
+        const child = vi.mocked(spawn).mock.results.at(-1)?.value as {
+            stdin: { write(...args: unknown[]): boolean };
+        };
+        const written: Buffer[] = [];
+        const write = child.stdin.write.bind(child.stdin);
+        child.stdin.write = (...args: unknown[]) => {
+            if (Buffer.isBuffer(args[0])) {
+                written.push(args[0]);
+            }
+            return write(...args);
+        };
+
         runner.answer(1, PASSWORD);
         await until(() => phase() === "failed", "the failure");
 
         expect(cli.received()).toContain("answer:1:as expected");
+        // The line that carried it was written once, and has been wiped.
+        expect(written).toHaveLength(1);
+        await until(() => written[0]?.every((byte) => byte === 0) === true, "the line being wiped");
+        // Nothing reachable from the runner holds it, as text or as bytes.
+        expect(holdsBytes(runner, PASSWORD)).toEqual([]);
         // Not in what the interface is shown, not held by the runner, not written anywhere.
         expect(JSON.stringify(states)).not.toContain(PASSWORD);
         expect(inspect(runner, { depth: 12, showHidden: true })).not.toContain(PASSWORD);

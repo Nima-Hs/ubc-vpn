@@ -122,7 +122,13 @@ export interface MockCli {
 /** Scripts the mock command-line client's side of a login. */
 export function mockCli(
     steps: CliStep[],
-    options: { ignoresCancel?: boolean; stderr?: string; reportStart?: boolean } = {},
+    options: {
+        ignoresCancel?: boolean;
+        stderr?: string;
+        reportStart?: boolean;
+        /** The steps for the second login, the third, and so on. */
+        laterLogins?: CliStep[][];
+    } = {},
 ): MockCli {
     const dir = mkdtempSync(join(tmpdir(), "ubc-vpn-cli-"));
     const config = join(dir, "config.json");

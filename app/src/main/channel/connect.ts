@@ -55,8 +55,15 @@ const BROKEN: LoginState = { phase: "failed", code: "internal", message: "" };
 export class ConnectRunner implements LoginRunner {
     private readonly options: Required<ConnectOptions>;
     private child: ChildProcessWithoutNullStreams | null = null;
-    /** The id of the prompt waiting for an answer, if one is. */
-    private waitingFor: number | null = null;
+    /**
+     * The prompt waiting for an answer, if one is. The client numbers its
+     * prompts from the start with every login, so its ids say nothing about
+     * which login a prompt belongs to. The interface is given an id the app
+     * makes itself, never used twice, and only that id is accepted back: an
+     * answer typed for one login's question cannot reach another's.
+     */
+    private waiting: { ours: number; clients: number } | null = null;
+    private lastPromptId = 0;
     private readonly leaving = new Set<ChildProcessWithoutNullStreams>();
 
     constructor(options: ConnectOptions) {
@@ -109,10 +116,11 @@ export class ConnectRunner implements LoginRunner {
 
     answer(id: number, value: string): boolean {
         const child = this.child;
-        if (child === null || this.waitingFor === null || this.waitingFor !== id) {
+        const waiting = this.waiting;
+        if (child === null || waiting === null || waiting.ours !== id) {
             return false;
         }
-        const answer: AppMessage = { type: "answer", id, value };
+        const answer: AppMessage = { type: "answer", id: waiting.clients, value };
         let line: Buffer;
         try {
             line = encodeLine(answer);
@@ -120,9 +128,12 @@ export class ConnectRunner implements LoginRunner {
             // Longer than a line may be. Nothing is sent; the prompt still waits.
             return false;
         }
-        this.waitingFor = null;
-        // Written once. Nothing here keeps the value or the line.
-        child.stdin.write(line);
+        this.waiting = null;
+        // Written once, and the bytes are wiped as soon as they have gone.
+        // Nothing here keeps the value or the line. (The text itself cannot
+        // be wiped: a JavaScript string cannot be changed. It is simply not
+        // kept, and is gone once the caller lets go of it.)
+        child.stdin.write(line, () => line.fill(0));
         this.options.onState(WORKING);
         return true;
     }
@@ -153,13 +164,14 @@ export class ConnectRunner implements LoginRunner {
             case "prompt": {
                 // A second question while the first still waits is not something
                 // the client does; the answer could go to the wrong one.
-                if (this.waitingFor !== null) {
+                if (this.waiting !== null) {
                     this.finish(child, BROKEN);
                     return;
                 }
-                this.waitingFor = line.id;
+                this.lastPromptId += 1;
+                this.waiting = { ours: this.lastPromptId, clients: line.id };
                 const prompt: LoginPrompt = {
-                    id: line.id,
+                    id: this.lastPromptId,
                     kind: line.kind,
                     label: line.label.slice(0, MAX_LABEL),
                     ...(line.message !== undefined && {
@@ -199,7 +211,7 @@ export class ConnectRunner implements LoginRunner {
                 return;
             }
             this.child = null;
-            this.waitingFor = null;
+            this.waiting = null;
             child.stdin.end();
             if (child.exitCode === null && child.signalCode === null) {
                 this.leaving.add(child);

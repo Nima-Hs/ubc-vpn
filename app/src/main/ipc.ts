@@ -58,6 +58,22 @@ export function isPromptAnswer(args: readonly unknown[]): args is [number, strin
 }
 
 /**
+ * Takes an answer to a login prompt from the interface and hands it straight
+ * on. An answer may be a password, so nothing here keeps it, and a refusal
+ * says only "refused": Electron prints a handler's error to the main
+ * process's standard error, and nothing that was sent may end up there.
+ */
+export function takePromptAnswer(
+    controller: Pick<Controller, "answerPrompt">,
+    args: readonly unknown[],
+): void {
+    if (!isPromptAnswer(args)) {
+        throw new Error("refused");
+    }
+    controller.answerPrompt(args[0], args[1]);
+}
+
+/**
  * The fixed set of things the interface can ask for. Only one takes
  * arguments, and it checks them.
  */
@@ -74,14 +90,9 @@ export function registerIpc(
     handle(IPC.disconnect, () => controller.disconnect());
     handle(IPC.retry, () => controller.retry());
     handle(IPC.cancelLogin, () => controller.cancelLogin());
-    handleFromInterface(window, devServerUrl, IPC.answerPrompt, (...args) => {
-        // Handed straight on. An answer may be a password: nothing here
-        // keeps it, and a refusal says nothing about what was sent.
-        if (!isPromptAnswer(args)) {
-            throw new Error("refused");
-        }
-        controller.answerPrompt(args[0], args[1]);
-    });
+    handleFromInterface(window, devServerUrl, IPC.answerPrompt, (...args) =>
+        takePromptAnswer(controller, args),
+    );
     handle(IPC.minimizeWindow, () => window.minimize());
     handle(IPC.closeWindow, () => window.close());
 
