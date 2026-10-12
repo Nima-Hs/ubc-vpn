@@ -246,7 +246,7 @@ If the service cannot resume a session, during reconnect or otherwise, it report
 
 ### DNS on Linux
 
-v0.1.0 supports systemd-resolved only. The `.deb` and `.rpm` declare it as a dependency, since Debian does not install it by default. Where it is not running, connecting fails with a message that says so.
+v0.1.0 supports systemd-resolved only. The packages declare it as a dependency, since Debian does not install it by default. The `.rpm` names `systemd-resolved`. The `.deb` names `systemd-resolved | systemd (<< 251.3-2~)`, because on Ubuntu 22.04 it is part of systemd and no separate package exists. Where it is not running, connecting fails with a message that says so.
 
 ### Licences outside Cargo
 
@@ -256,9 +256,46 @@ Wintun, the Windows tunnel driver, ships as a prebuilt signed binary under its o
 
 The app's bundled fonts are under the SIL Open Font License 1.1, approved in the same place for font files only.
 
+### What the installers must do
+
+A trial packaged the app with pnpm and `electron-builder` on all three OSes, installed it on CI runners, and looked at what landed where. It works. These are the rules it produced; each was observed on a runner unless it says otherwise.
+
+**Every OS**
+
+- The installed service and the libraries it loads run only from a folder that ordinary accounts cannot change: writable only by root on macOS and Linux, and only by SYSTEM and the Administrators group on Windows. The same holds for every folder above it, so the folder cannot be swapped either. The installed service checks this when it starts and refuses to run otherwise. Dev mode, which runs unprivileged from a build folder, is exempt.
+- Extra files (the command-line client, the native libraries, licence texts) ship as separate files beside the app, outside the app archive. They arrive on the user's disk byte for byte as built.
+- Electron's fuses are set so that a packaged app cannot be run as plain Node, ignores `NODE_OPTIONS` and `--inspect`, and loads its code only from the app archive. No fuse covers `--remote-debugging-port`, so the main process removes the remote debugging switches itself before anything else.
+- The archive's integrity is checked at start on Windows and macOS. Electron has no such check on Linux, where root-owned files are the only protection.
+- No updater is included, and the build produces no update feed for one to read.
+- The fonts' licence files are copied into the package explicitly; the build does not pick them up by itself.
+
+**Windows**
+
+- The setup program installs for the whole machine into `Program Files` and does not let the folder be changed. Given the `/D=` option it stops with a message and installs nothing; in the trial that option installed, and registered the service, in a folder ordinary users could write to.
+- The data folder under `ProgramData` gets its owner and access list set by the installer on every install and update, never inherited: a folder made there by default lets users create files in it. A user can also create the folder before the first install, so on a first install the installer empties a folder it finds there. On an update it keeps the contents, so `state.json` survives. The service checks the folder's owner and access list when it starts.
+- The installer's script hooks run as an administrator and can register, start and remove the service. During an update the old version's removal hooks run before the new version's install hook, so the service is stopped before files are replaced.
+- With no certificate nothing is signed. If signing is added later, DLLs are never included in it, so `wintun.dll` keeps WireGuard's signature.
+
+**macOS**
+
+- `/Applications` is writable by any user in the admin group without a password, so such a user can swap the whole app. The service and its libraries therefore do not run from inside the app. The installer's script copies them to a folder under `/Library` that only root can write, and the daemon runs from there; the exact folder is chosen with the installer work.
+- That leaves two copies of the libraries: the one in the app, which the command-line client loads as the user, and the one the service loads. Both stay separate files that can be replaced, which is what the LGPL asks for.
+- A `.pkg` has no uninstall. The project ships an uninstall script that stops the daemon and removes it, the copied service and libraries, the app, the policy and the state.
+- Installer scripts run twice per install, so they must be safe to repeat.
+- The package is built with no signing identity. Using the ad-hoc identity would re-sign, and so change, every bundled library.
+- From documentation, not tested: macOS blocks an unsigned package downloaded with a browser until the user allows it in System Settings.
+
+**Linux**
+
+- The app lands in `/opt/UBC VPN`, owned by root. The path contains a space, so every script and unit file quotes it.
+- Our install and removal scripts are added to the ones `electron-builder` supplies, not put in their place. The supplied scripts set up the sandbox helper and the AppArmor profile the sandbox needs on Ubuntu 24.04.
+- Removing the `.rpm` must delete the app's own folders, which are otherwise left behind empty.
+- The `.rpm` is built without the links `rpmbuild` adds under `/usr/lib/.build-id`. Every Electron app would own the same ones, so two such packages could not be installed together.
+
 ## Open points
 
 - **macOS update prompts.** Expected to need one admin prompt like the others; to confirm when the installer is built.
-- **pnpm with `electron-builder`.** Untested together.
+- **Windows install folder owner.** On the CI runner the account that ran the installer kept full control of the install folder. On a normal machine with UAC the owner should be the Administrators group; to confirm on a real machine, or set the owner in the installer.
+- **Package and command names.** The trial's package was named after the app's `package.json`; choose the final names before release.
 - **Signing.** Revisit before a public release. A signed macOS build needs a setting that keeps the bundled LGPL libraries replaceable.
 - **Proxy mode.** A no-admin mode that exposes a local proxy was considered and set aside in favour of transparent routing.
