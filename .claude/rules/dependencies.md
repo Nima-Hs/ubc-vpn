@@ -16,6 +16,15 @@ Cargo does not manage native libraries, build and packaging tools, GitHub Action
 
 - Pin each one to an exact version in a file in the repo, using the ecosystem's lockfile where one exists. Pin GitHub Actions and git hooks to a full commit SHA with the version in a comment.
 - Document how to obtain it in `CONTRIBUTING.md`, and install it the same way in CI.
+- Approved exception: Process Monitor, Microsoft's tracing tool, is not pinned. Only the Windows native workflow uses it, in `native/windows/tests/trace.sh`, to record what the probe touches. It is never shipped.
+  - It is downloaded on each run from `https://live.sysinternals.com/Procmon64.exe`. Microsoft publishes only the current version there, with no versioned address, so a pinned checksum would stop matching whenever the file is replaced and the old version could not be fetched again.
+  - Before it runs, the script requires a valid Authenticode signature whose publisher is Microsoft Corporation, and prints the version in the log.
+  - It runs as administrator on the build machine after the output is built and before it is uploaded, so that signature check is what we rely on. The machine is GitHub's and is discarded after the run, and the workflow uses no secrets and has read-only access to the repository.
+- Approved exception: the MSYS2 base that the Windows native build runs in is not pinned. The build uses the MSYS2 already installed on GitHub's `windows-latest` runner, which changes when GitHub updates the image.
+  - Pinned, by file name and SHA-256: the build tools in `native/windows/tools.lock` and the compiler and libraries in `native/windows/packages.lock`. `build.sh` stops if the installed ones differ.
+  - Not pinned: everything those run on, such as the shell, coreutils, tar, curl, gpg and pacman.
+  - It could be pinned by starting from a dated `msys2-base` archive with a known checksum instead of the runner's copy. That is not done yet.
+  - Nothing from the base ships: every DLL in the output comes from our own build or from a package in `packages.lock`, and the build stops on any other. The output's `build-packages.txt` records every installed package and its version, and the workflow's tests run on the output itself.
 
 ## Licenses
 
