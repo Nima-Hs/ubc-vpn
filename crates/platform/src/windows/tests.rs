@@ -500,7 +500,7 @@ fn the_pipe_carries_its_descriptor_before_and_after_narrowing() {
 // refuses.
 #[test]
 fn a_caller_from_the_network_is_refused() {
-    within(|| {
+    let served = within(|| {
         let open_to_all = Descriptor::parse("D:P(A;;FA;;;WD)").unwrap();
         let reach = |name: &str, mode| {
             let path = pipe_path(name).unwrap();
@@ -510,12 +510,18 @@ fn a_caller_from_the_network_is_refused() {
         };
         let (control, _pipe) = reach(&unique("lan"), PIPE_MODE & !PIPE_REJECT_REMOTE_CLIENTS);
         if control.is_err() {
-            return skip("this machine does not serve pipes over the loopback network");
+            skip("this machine does not serve pipes over the loopback network");
+            return false;
         }
         let (ours, _pipe) = reach(&unique("lan"), PIPE_MODE);
         assert_eq!(ours, Err(5), "a remote caller got in");
-        ran("remote");
+        true
     });
+    // Without the loopback network every open below would fail, whatever
+    // the listener did, so there is nothing to learn from them.
+    if !served {
+        return;
+    }
     // The listener's own instances: the first, and one created by an accept.
     each(|transport| {
         let listener = transport.listener(&unique("lan")).unwrap();
@@ -529,6 +535,7 @@ fn a_caller_from_the_network_is_refused() {
         let _attached = pair(&transport, &listener);
         assert_eq!(reach(), Err(5), "a remote caller reached a later instance");
     });
+    ran("remote");
 }
 
 // Security rules: a client that says nothing cannot hold a reader, and one
