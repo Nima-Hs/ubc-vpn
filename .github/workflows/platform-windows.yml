@@ -51,6 +51,15 @@ jobs:
       - name: Dev-mode code is free of warnings on Windows
         if: matrix.profile == 'debug'
         run: cargo clippy --locked -p ubc-vpn-platform --features dev-mode --all-targets -- -D warnings
+      # Without the test-only features there must be no way to send a program
+      # a request to stop. The crate's documentation has an example that
+      # must not compile without them.
+      - name: A build without the test-only features cannot send an interrupt
+        if: matrix.profile == 'debug'
+        shell: bash
+        run: |
+          cargo test --locked -p ubc-vpn-platform --doc 2>&1 | tee doc.log
+          grep -q "interrupt (line [0-9]*) - compile fail ... ok" doc.log
       # The second user exists for this one step. Its random password stays in
       # this step's memory: it is handed to the tests through their
       # environment and never written to a file, a log or a command line.
@@ -79,7 +88,7 @@ jobs:
       - name: The elevated tests really ran
         shell: bash
         run: |
-          for test in suite users dev remote console; do
+          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent"; do
             if ! grep -q "RAN: $test" test.log; then
               echo "The elevated test '$test' did not run."
               exit 1

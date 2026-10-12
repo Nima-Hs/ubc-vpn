@@ -44,7 +44,7 @@ fn forget_keys(input: HANDLE) {
 
 /// Opens the console's input or output, whatever the program's standard
 /// handles are. A program without a console cannot.
-fn console(name: &str) -> Result<Handle> {
+pub(super) fn console(name: &str) -> Result<Handle> {
     let (name, share) = (wide(name), FILE_SHARE_READ | FILE_SHARE_WRITE);
     let access = GENERIC_READ | GENERIC_WRITE;
     // SAFETY: `name` is NUL-terminated and outlives the call; the other
@@ -343,7 +343,7 @@ mod tests {
         let typist = std::thread::spawn(|| type_when_quiet("half\u{3}REST-OF-FAKE-SECRET\r"));
         let read = read_hidden_line("").map(|_| ());
         typist.join().expect("the typist");
-        assert_eq!(read, Err(Error::Closed));
+        assert_eq!(read, Err(Error::Interrupted));
         assert_eq!(mode(&input), before, "the mode after Ctrl-C");
         assert_eq!(waiting(&input), 0, "keys left after giving up");
 

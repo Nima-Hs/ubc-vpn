@@ -47,6 +47,7 @@ use ubc_vpn_core::routes::Ipv4Net;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+pub mod interrupt;
 #[cfg(any(test, feature = "fake"))]
 pub mod suite;
 pub mod terminal;
@@ -84,6 +85,8 @@ pub enum Error {
     /// There is no terminal to ask the user in: input is redirected and the
     /// program has no terminal of its own, as in a service or under CI.
     NotATerminal,
+    /// The user pressed Ctrl-C at a question asked in the terminal.
+    Interrupted,
     /// A line was longer than [`MAX_LINE_BYTES`]. Drop the connection.
     LineTooLong,
     /// A whole line did not arrive within the read timeout, or the peer did
@@ -109,6 +112,7 @@ impl fmt::Display for Error {
             Self::AlreadyExists => "already exists",
             Self::NotTheService => "the channel is held by a program that is not the service",
             Self::NotATerminal => "there is no terminal to ask in",
+            Self::Interrupted => "the user pressed Ctrl-C at a question",
             Self::LineTooLong => "line too long",
             Self::TimedOut => "timed out",
             Self::Closed => "closed",

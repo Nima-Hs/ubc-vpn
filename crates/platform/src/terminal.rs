@@ -11,10 +11,11 @@
 //! - **Arrow keys, Delete** and the like do nothing. On Linux and macOS they
 //!   arrive as an escape sequence, which is swallowed whole. (A lone Escape
 //!   therefore also swallows the key after it.)
-//! - **Ctrl-C** gives the line up: the call fails with [`Error::Closed`]. It
-//!   arrives as a key and not as a signal, so the program is still running
-//!   to put the terminal back. So does **Ctrl-D** on an empty line, and the
-//!   terminal going away.
+//! - **Ctrl-C** gives the line up: the call fails with
+//!   [`Error::Interrupted`]. It arrives as a key and not as a signal, so the
+//!   program is still running to put the terminal back.
+//! - **Ctrl-D** on an empty line, and the terminal going away, fail with
+//!   [`Error::Closed`].
 //! - A line over [`MAX_HIDDEN_LINE_BYTES`] fails with [`Error::LineTooLong`]
 //!   once Enter is pressed. It is never cut short, and the rest of it is not
 //!   left for the shell to read.
@@ -52,8 +53,9 @@ pub const MAX_HIDDEN_LINE_BYTES: usize = 1024;
 
 /// Writes `prompt` to the terminal and reads one line from it that is not
 /// shown. Fails with [`Error::NotATerminal`] when there is no terminal, with
-/// [`Error::Closed`] when the user gives up, and with [`Error::LineTooLong`]
-/// for a line over the limit. No error ever contains what was typed.
+/// [`Error::Interrupted`] when the user presses Ctrl-C, with
+/// [`Error::Closed`] for Ctrl-D on an empty line or a terminal that went
+/// away, and with [`Error::LineTooLong`] for a line over the limit. No error ever contains what was typed.
 pub fn read_hidden_line(prompt: &str) -> Result<Secret> {
     os::read_hidden_line(prompt)
 }
@@ -112,6 +114,7 @@ enum Key {
     More,
     Entered,
     GivenUp,
+    Interrupted,
 }
 
 /// The line being typed. Wiped when dropped.
@@ -149,7 +152,7 @@ impl Line {
         match byte {
             b'\r' | b'\n' => return Key::Entered,
             // Ctrl-C, and Ctrl-D on an empty line.
-            0x03 => return Key::GivenUp,
+            0x03 => return Key::Interrupted,
             0x04 if self.len == 0 && !self.too_long => return Key::GivenUp,
             // Backspace, as either of the two bytes terminals send for it:
             // the bytes of one whole character go.
@@ -203,6 +206,7 @@ pub(crate) fn read_keys(mut next: impl FnMut() -> Result<Option<u8>>) -> Result<
             Key::More => {}
             Key::Entered => return line.finish(),
             Key::GivenUp => return Err(Error::Closed),
+            Key::Interrupted => return Err(Error::Interrupted),
         }
     }
 }
@@ -242,7 +246,7 @@ mod tests {
         assert_eq!(typed(b"a\x1bOPb\x1b[1;5Cc\r"), Ok("abc".to_string()));
         // Enter and Ctrl-C still count in the middle of one.
         assert_eq!(typed(b"ab\x1b[\r"), Ok("ab".to_string()));
-        assert_eq!(typed(b"ab\x1b\x03"), Err(Error::Closed));
+        assert_eq!(typed(b"ab\x1b\x03"), Err(Error::Interrupted));
         // What follows a finished one is text again.
         assert_eq!(typed(b"\x1b[A[D\r"), Ok("[D".to_string()));
     }
@@ -274,7 +278,7 @@ mod tests {
 
     #[test]
     fn giving_up_and_a_vanished_terminal_end_the_call() {
-        assert_eq!(typed(b"half\x03more\r"), Err(Error::Closed));
+        assert_eq!(typed(b"half\x03more\r"), Err(Error::Interrupted));
         assert_eq!(typed(b"\x04"), Err(Error::Closed));
         assert_eq!(typed(b"half"), Err(Error::Closed));
     }
