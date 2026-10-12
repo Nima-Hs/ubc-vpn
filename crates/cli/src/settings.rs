@@ -148,6 +148,10 @@ fn understood(text: &str) -> Result<Settings, SettingsFailureCode> {
 fn create_private(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
+    // The one piece of OS-specific code outside the platform crate, kept
+    // here on purpose: it is the standard library's own open option, with no
+    // unsafe code, and a platform operation for it would be more code than
+    // these lines.
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path)
