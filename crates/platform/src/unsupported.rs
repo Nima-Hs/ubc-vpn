@@ -1,37 +1,18 @@
-//! What an OS module offers until its real implementation is written: every
-//! operation fails with [`Error::Unsupported`], and every check answers
-//! [`Verified::Unknown`].
+//! What an OS module offers for the parts whose real implementation is not
+//! written yet: every operation fails with [`Error::Unsupported`], and every
+//! check answers [`Verified::Unknown`].
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
-    Connection, Dns, Error, Listener, Mode, NetworkEvent, NetworkEvents, Paths, PhysicalNetwork,
-    Platform, Result, Routes, SplitDns, Transport, Verified,
+    Connection, Dns, Error, Listener, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes,
+    SplitDns, Transport, Verified,
 };
 
 pub(crate) struct Native;
-
-#[cfg_attr(any(unix, windows), allow(dead_code))]
-/// The shape a real OS module fills in: it builds every part for `mode`, so
-/// the transport and anything kept on disk know which mode they serve.
-pub(crate) fn native(mode: Mode) -> Result<Platform> {
-    Ok(Platform {
-        routes: Arc::new(Native),
-        dns: Arc::new(Native),
-        events: Arc::new(Native),
-        transport: Arc::new(Native),
-        paths: paths(mode)?,
-    })
-}
-
-#[cfg_attr(any(unix, windows), allow(dead_code))]
-fn paths(_mode: Mode) -> Result<Paths> {
-    Err(Error::Unsupported)
-}
 
 impl Routes for Native {
     fn capture_physical(&self, _gateway: Ipv4Addr) -> Result<PhysicalNetwork> {
