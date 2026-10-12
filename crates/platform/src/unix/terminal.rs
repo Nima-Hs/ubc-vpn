@@ -137,7 +137,7 @@ pub(crate) fn read_hidden_from(terminal: &File, prompt: &str) -> Result<Secret> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::{Mutex, MutexGuard, mpsc};
     use std::thread;
@@ -157,13 +157,13 @@ mod tests {
     /// A terminal that exists only for one test: `ours` is the keyboard and
     /// screen, `theirs` what a program sees as its terminal. It never
     /// becomes this process's own terminal.
-    struct Pty {
-        ours: File,
+    pub(crate) struct Pty {
+        pub(crate) ours: File,
         theirs: File,
         _turn: MutexGuard<'static, ()>,
     }
 
-    fn pty() -> Pty {
+    pub(crate) fn pty() -> Pty {
         let turn = lock(&TURN);
         let ours = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).expect("a pty");
         grantpt(&ours).expect("grant");
@@ -182,7 +182,7 @@ mod tests {
 
     /// What can be read from `end` until nothing more comes for `pause`, or
     /// until it ends with `awaited`.
-    fn read_from(mut end: &File, awaited: Option<&str>, pause: u64) -> String {
+    pub(crate) fn read_from(mut end: &File, awaited: Option<&str>, pause: u64) -> String {
         let mut got = String::new();
         let pause = Timespec::try_from(Duration::from_millis(pause)).expect("fits");
         while awaited.is_none_or(|awaited| !got.ends_with(awaited)) {
@@ -234,7 +234,7 @@ mod tests {
         /// The settings the call changes. `PENDIN` is left out: it is not a
         /// setting but a note macOS makes for itself when line editing comes
         /// back on, and drops at the next read.
-        fn mode(&self) -> (LocalModes, u8) {
+        pub(crate) fn mode(&self) -> (LocalModes, u8) {
             let now = tcgetattr(&self.theirs).expect("its mode");
             let local = now.local_modes.difference(LocalModes::PENDIN);
             (local, now.special_codes[SpecialCodeIndex::VMIN])
@@ -262,7 +262,7 @@ mod tests {
         let pty = pty();
         let before = pty.mode();
         let (read, screen) = pty.ask(b"half\x03");
-        assert_eq!(read, Err(Error::Closed));
+        assert_eq!(read, Err(Error::Interrupted));
         assert_eq!(screen, "Password: \r\n");
         assert_eq!(pty.mode(), before, "after Ctrl-C");
 
@@ -282,7 +282,11 @@ mod tests {
         let not_text = Error::Failed("the line is not text".to_string());
         let cases: [(&[u8], Result<&str>, &str); 5] = [
             (b"\xff\rNEXT\r", Err(not_text), ""),
-            (b"half\x03REST-OF-FAKE-SECRET\r", Err(Error::Closed), ""),
+            (
+                b"half\x03REST-OF-FAKE-SECRET\r",
+                Err(Error::Interrupted),
+                "",
+            ),
             (b"\x04REST\r", Err(Error::Closed), ""),
             (&long, Err(Error::LineTooLong), ""),
             (b"fake\rNEXT\r", Ok("fake"), "NEXT\n"),

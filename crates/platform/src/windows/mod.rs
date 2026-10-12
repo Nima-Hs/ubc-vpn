@@ -27,6 +27,7 @@
 //! One difference from a socket: a pipe's name stays taken while any instance
 //! is open, so closing the listener also closes the connections it accepted.
 
+pub(crate) mod interrupt;
 mod pipe;
 mod security;
 pub(crate) mod terminal;

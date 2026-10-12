@@ -85,7 +85,7 @@ impl Ask for Terminal {
         match read {
             Ok(answer) => Some(answer),
             // Ctrl-C or Ctrl-D at the question, or the terminal went away.
-            Err(Error::Closed) => None,
+            Err(Error::Closed | Error::Interrupted) => None,
             Err(other) => {
                 self.stopped = Some(match other {
                     Error::NotATerminal => NOT_A_TERMINAL,

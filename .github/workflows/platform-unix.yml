@@ -54,6 +54,14 @@ jobs:
       - name: Dev-mode code is free of warnings
         if: matrix.profile == 'debug'
         run: cargo clippy --locked -p ubc-vpn-platform --features dev-mode --all-targets -- -D warnings
+      # Without the test-only features there must be no way to send a program
+      # a request to stop. The crate's documentation has an example that
+      # must not compile without them.
+      - name: A build without the test-only features cannot send an interrupt
+        if: matrix.profile == 'debug'
+        run: |
+          cargo test --locked -p ubc-vpn-platform --doc 2>&1 | tee doc.log
+          grep -q "interrupt (line [0-9]*) - compile fail ... ok" doc.log
       # A record of what the channel's rules meet on this runner: every
       # folder on the way to the installed socket must be root's alone.
       - name: The folders the installed channel relies on
