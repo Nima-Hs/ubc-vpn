@@ -7,6 +7,7 @@ import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
+import { stopForQuit } from "./quit";
 import {
     allowsRemoteDebugging,
     applicationMenu,
@@ -155,11 +156,7 @@ async function start(): Promise<void> {
     app.on("second-instance", show);
     app.on("activate", show);
     app.on("window-all-closed", () => app.quit());
-    app.on("will-quit", () => {
-        controller.dispose();
-        settings.stop();
-        tray?.destroy();
-    });
+    app.on("will-quit", () => stopForQuit(controller, settings, tray));
 
     // If the interface's process dies, start it again, but not in a loop.
     let restarts = 0;

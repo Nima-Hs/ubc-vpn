@@ -86,11 +86,18 @@ export const MAX_ROUTE_ENTRIES = 1024;
 export const MAX_ROUTE_ENTRY_LENGTH = 512;
 
 function isEntryList(value: unknown): value is string[] {
-    return (
-        Array.isArray(value) &&
-        value.length <= MAX_ROUTE_ENTRIES &&
-        value.every((entry) => typeof entry === "string" && entry.length <= MAX_ROUTE_ENTRY_LENGTH)
-    );
+    if (!Array.isArray(value) || value.length > MAX_ROUTE_ENTRIES) {
+        return false;
+    }
+    // By position, not with `every`: that skips a gap in a list, and a gap
+    // would go on to the client as `null`.
+    for (let at = 0; at < value.length; at++) {
+        const entry: unknown = value[at];
+        if (typeof entry !== "string" || entry.length > MAX_ROUTE_ENTRY_LENGTH) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
