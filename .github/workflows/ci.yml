@@ -43,6 +43,10 @@ jobs:
         run: |
           cargo clippy --locked -p ubc-vpn-platform --features dev-mode --all-targets -- -D warnings
           cargo test --locked -p ubc-vpn-platform --features dev-mode
+          cargo clippy --locked -p ubc-vpn-service --features dev-mode --all-targets -- -D warnings
+          cargo test --locked -p ubc-vpn-service --features dev-mode
+          cargo clippy --locked -p ubc-vpn-engine --features fake,debug-logs --all-targets -- -D warnings
+          cargo test --locked -p ubc-vpn-engine --features fake,debug-logs
       # A release must be built one program at a time (-p), never with
       # --workspace: features enabled by any other crate would be switched on
       # for these two as well.
