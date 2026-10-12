@@ -111,6 +111,18 @@ impl Peer {
     fn lines(&self) -> usize {
         self.state().received.lines().count()
     }
+
+    /// Sends one more line.
+    fn send(&self, line: &str) {
+        self.state().sends.extend(format!("{line}\n").into_bytes());
+        self.0.1.notify_all();
+    }
+
+    /// How many times the service told it of the state named `state`.
+    fn heard(&self, state: &str) -> usize {
+        let event = format!(r#""kind":"state_changed","value":{{"state":"{state}""#);
+        self.state().received.matches(&event).count()
+    }
 }
 
 impl RawConnection for Peer {
@@ -169,7 +181,7 @@ impl RawConnection for Peer {
 fn start(rig: &Rig, channel: &Scripted, timeouts: Timeouts) -> Service {
     let platform = Platform {
         transport: Arc::new(channel.clone()),
-        ..rig.fake.platform(&rig.root)
+        ..rig.platform()
     };
     Service::start(platform, rig.spy.clone(), timeouts).unwrap()
 }
@@ -239,6 +251,55 @@ fn clients_that_stop_reading_delay_nobody_else() {
     assert!(received.contains(r#""kind":"state_changed""#), "{received}");
     assert!(received.contains(r#""kind":"status""#), "{received}");
     assert!(stuck.iter().all(|peer| peer.lines() == 1), "still stuck");
+}
+
+// The same for a state change: clients stuck on one state delay neither the
+// next state for a healthy client nor anybody's requests.
+#[test]
+fn a_state_change_is_not_held_up_by_clients_that_stop_reading() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let timeouts = Timeouts {
+        write: Duration::from_secs(120),
+        ..Timeouts::default()
+    };
+    let _service = start(&rig, &channel, timeouts);
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+
+    // Each takes the hello's answer and its first state, and no more.
+    let stuck = [(); 3].map(|()| Peer::sending(&[HELLO]));
+    for peer in &stuck {
+        peer.state().takes = Some(2);
+        channel.connect(peer);
+        until("its first state", || peer.lines() == 2);
+    }
+    let healthy = Peer::sending(&[HELLO]);
+    channel.connect(&healthy);
+    until("its first state", || healthy.lines() == 2);
+
+    let subnets = r#"{"subnets":["10.255.0.0/24","192.0.2.0/24"]}"#;
+    let params =
+        format!(r#"{{"cookie":"{COOKIE}","gateway_addr":"192.0.2.1","routes":{subnets}}}"#);
+    owner.send(&format!(
+        r#"{{"id":3,"body":{{"method":"connect","params":{params}}}}}"#
+    ));
+    for peer in &stuck {
+        until("a state nobody takes", || peer.state().holding_a_write);
+    }
+    until("connected, for the healthy client", || {
+        healthy.heard("connected") == 1
+    });
+
+    // Requests are served meanwhile, and the next change arrives too.
+    healthy.send(STATUS);
+    until("the status", || {
+        healthy.state().received.contains(r#""kind":"status""#)
+    });
+    owner.send(r#"{"id":4,"body":{"method":"disconnect"}}"#);
+    until("disconnected again", || healthy.heard("disconnected") == 2);
+    assert!(stuck.iter().all(|peer| peer.lines() == 2), "still stuck");
 }
 
 // A connection's place, and the connection itself, are given back by a

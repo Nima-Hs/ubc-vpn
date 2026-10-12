@@ -5,7 +5,7 @@ mod harness;
 
 use harness::*;
 use ubc_vpn_core::policy::Policy;
-use ubc_vpn_engine::Gateway;
+use ubc_vpn_engine::{CloseMode, Gateway};
 use ubc_vpn_platform::SplitDns;
 use ubc_vpn_platform::fake::PHYSICAL_INTERFACE;
 
@@ -241,9 +241,29 @@ fn teardown_runs_every_step_even_when_steps_fail() {
     let logged = |what: &str| rig.logs().iter().any(|line| line.contains(what));
     assert!(logged("clearing split DNS failed") && logged("removing the gateway route failed"));
 
+    // The last step failing on its own is not "clean" either.
     for op in broken {
         rig.fake.set_failure(op, None);
     }
+    let denied = Some(Error::PermissionDenied);
+    rig.fake.set_failure(Op::RemoveAllRoutes, denied);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::Internal), "{state:?}");
+
+    // Security rule: nothing is connected on a machine that could not be
+    // cleaned first. No tunnel is opened, and the state says why.
+    let opens = rig.spy.opens().len();
+    let state = alice.connect_ends(good());
+    assert!(failed_with(&state, ErrorCode::Internal), "{state:?}");
+    assert_eq!(
+        rig.spy.opens().len(),
+        opens,
+        "no tunnel on an unclean machine"
+    );
+
+    rig.fake.set_failure(Op::RemoveAllRoutes, None);
     assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
     assert_eq!(
         [alice.state(), alice.state()],
@@ -263,11 +283,10 @@ fn the_cookie_appears_nowhere() {
         alice.ask(RequestBody::Status),
         Ok(ResponseBody::Status(state))
     );
-    assert_eq!(alice.ask(good()), ACCEPTED);
-    assert_eq!(
-        [alice.state(), alice.state()],
-        [ConnState::Connecting, ConnState::LoginNeeded]
-    );
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+    assert_eq!(alice.connect_ends(good()), ConnState::LoginNeeded);
 
     let logs = rig.logs();
     assert!(logs.contains(&"> [redacted]".to_string()), "{logs:?}");
@@ -358,6 +377,11 @@ fn a_disconnect_removes_everything_and_logs_the_session_off() {
     );
     assert!(rig.is_clean());
     assert!(rig.fake.calls().ends_with(&TEARDOWN));
+    // The tunnel was closed after its routes and DNS were gone, and before
+    // the gateway's own route, with a log-off.
+    let (how, before) = rig.spy.closes().remove(0);
+    assert_eq!(how, CloseMode::LogOff);
+    assert!(before.ends_with(&TEARDOWN[..2]), "{before:?}");
     assert_eq!(alice.connect_ends(good()), ConnState::LoginNeeded);
 
     // Shutting down tears down as well. A fresh service, since that session
@@ -421,26 +445,206 @@ fn without_dns_domains_no_dns_is_set_and_no_server_is_routed() {
     assert_eq!(rig.fake.calls()[5..], after_open);
 }
 
-// Security rule: a DNS server address that could not be a server is never
-// routed. The gateway chose it, but the route would be added as an admin.
+/// Connects against a gateway that assigns `servers` and returns the rig and
+/// the state the connect ended in.
+fn with_dns_servers(servers: &[[u8; 4]]) -> (Rig, ConnState) {
+    let mut rig = Rig::scripted(policy('A', ""), |script| {
+        script.assigned.dns = servers.iter().map(|addr| (*addr).into()).collect();
+    });
+    rig.start().unwrap();
+    let state = rig.owner().connect_ends(good());
+    (rig, state)
+}
+
+// Security rule: the DNS servers come from the gateway, and each becomes a
+// route added as an admin, so the list is not trusted. One that could not be
+// a DNS server behind the tunnel, or too many of them, fails the connect
+// before any route is added.
 #[test]
 fn a_dns_server_that_cannot_be_one_fails_the_connect() {
-    for bad in [
-        [127, 0, 0, 53],
-        [0, 0, 0, 0],
-        [169, 254, 1, 1],
-        [224, 0, 0, 1],
-    ] {
-        let mut rig = Rig::scripted(policy('A', ""), |script| {
-            script.assigned.dns = vec![[10, 255, 0, 53].into(), bad.into()];
-        });
-        rig.start().unwrap();
-        let state = rig.owner().connect_ends(good());
-        assert!(
-            failed_with(&state, ErrorCode::EngineFailed),
-            "{bad:?}: {state:?}"
-        );
-        assert!(rig.is_clean(), "{bad:?} left something behind");
-        assert!(!rig.fake.calls().contains(&Op::AddTunnelRoutes), "{bad:?}");
+    let good_one = [10, 255, 0, 53];
+    let refused: [&[[u8; 4]]; 7] = [
+        &[good_one, [127, 0, 0, 53]],
+        &[good_one, [0, 0, 0, 0]],
+        &[good_one, [169, 254, 1, 1]],
+        &[good_one, [224, 0, 0, 1]],
+        // The gateway's own address, which must stay outside the tunnel.
+        &[good_one, GATEWAY],
+        // The router of the physical network.
+        &[good_one, [192, 168, 0, 1]],
+        // One more than a gateway may assign.
+        &[
+            [10, 0, 0, 1],
+            [10, 0, 0, 2],
+            [10, 0, 0, 3],
+            [10, 0, 0, 4],
+            [10, 0, 0, 5],
+        ],
+    ];
+    for servers in refused {
+        let (rig, state) = with_dns_servers(servers);
+        let why = format!("{servers:?}: {state:?}");
+        assert!(failed_with(&state, ErrorCode::EngineFailed), "{why}");
+        assert!(rig.is_clean(), "{why}");
+        let calls = rig.fake.calls();
+        let routed = [Op::AddGatewayRoute, Op::AddTunnelRoutes];
+        assert!(!calls.iter().any(|op| routed.contains(op)), "{why}");
     }
+
+    // As many as allowed, each routed once however often it was named.
+    let most = [
+        [10, 0, 0, 1],
+        [10, 0, 0, 2],
+        [10, 0, 0, 1],
+        [10, 0, 0, 3],
+        [10, 0, 0, 4],
+    ];
+    let (rig, state) = with_dns_servers(&most);
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+    let applied = rig.fake.applied();
+    assert_eq!(
+        applied.tunnel_routes.len(),
+        2 + 4,
+        "two subnets, four servers"
+    );
+    assert_eq!(applied.split_dns.unwrap().1.resolvers.len(), 4);
+}
+
+// Security rule: only what the user chose is routed. The routes the gateway
+// suggests, here everything, never reach the OS.
+#[test]
+fn routes_the_gateway_suggests_are_never_applied() {
+    let mut rig = Rig::scripted(policy('A', ""), |script| {
+        let everything = ["0.0.0.0/1", "128.0.0.0/1", "172.16.0.0/12"];
+        script.assigned.split_includes = everything.map(|net| net.parse().unwrap()).to_vec();
+    });
+    rig.start().unwrap();
+    let state = rig.owner().connect_ends(good());
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+    let routed = ["10.255.0.0/24", "192.0.2.0/24", "10.255.0.53/32"];
+    let routed = routed.map(|net| ("fake0".to_string(), net.parse().unwrap()));
+    assert_eq!(rig.fake.applied().tunnel_routes, routed);
+}
+
+// Security rule: the tunnel must be connected to the address the cookie was
+// issued at, which is the address the gateway route is for. One that is
+// connected elsewhere is torn down.
+#[test]
+fn a_tunnel_at_another_address_is_torn_down() {
+    let rig = rig();
+    rig.spy.claim_address([192, 0, 2, 77]);
+    let state = rig.owner().connect_ends(good());
+    assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
+    assert!(rig.is_clean());
+    assert!(!rig.fake.calls().contains(&Op::AddGatewayRoute));
+}
+
+// Security rule: a bug that panics the worker part-way through a connect
+// leaves nothing applied and does not leave the service stuck. Everything is
+// torn down, the session logged off, the state is `failed`, and the next
+// request is taken.
+#[test]
+fn a_panic_part_way_through_a_connect_leaves_nothing_behind() {
+    let stages = [
+        Op::CapturePhysical,
+        Op::AddGatewayRoute,
+        Op::AddTunnelRoutes,
+        Op::SetSplitDns,
+        Op::VerifyRoute,
+        Op::VerifyDns,
+    ];
+    for stage in stages {
+        let rig = rig();
+        let mut alice = rig.owner();
+        rig.os.panic_at(stage);
+        let state = alice.connect_ends(good());
+        assert!(
+            failed_with(&state, ErrorCode::Internal),
+            "{stage:?}: {state:?}"
+        );
+        assert!(rig.is_clean(), "{stage:?} left something behind");
+        assert_eq!(
+            alice.ask(RequestBody::Status),
+            Ok(ResponseBody::Status(state))
+        );
+
+        // The service takes requests again. Before the tunnel existed the
+        // session is untouched and connects; after, it was logged off.
+        let next = alice.connect_ends(good());
+        match stage {
+            Op::CapturePhysical => assert!(matches!(next, ConnState::Connected { .. }), "{next:?}"),
+            _ => assert_eq!(next, ConnState::LoginNeeded, "{stage:?}"),
+        }
+        assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+        assert_eq!(alice.state(), ConnState::Disconnecting);
+        assert_eq!(alice.state(), ConnState::Disconnected);
+        assert!(rig.is_clean(), "{stage:?}");
+    }
+}
+
+// A connect is taken only when nothing is connected or in progress. To
+// replace a connection the client disconnects first.
+#[test]
+fn a_connect_while_connected_is_busy() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    let state = connected(&mut alice);
+    assert_eq!(alice.ask(good()), Err(ErrorCode::Busy));
+    assert_eq!(
+        alice.ask(RequestBody::Status),
+        Ok(ResponseBody::Status(state))
+    );
+    assert_eq!(rig.spy.opens().len(), 1);
+    assert!(rig.engine.tunnel_is_open(), "the connection was left alone");
+
+    // Once the tunnel has ended by itself a connect is taken again.
+    rig.engine.drop_connection();
+    assert!(matches!(alice.state(), ConnState::Failed { .. }));
+    assert_eq!(alice.ask(good()), ACCEPTED);
+}
+
+// While a disconnect is in progress nothing else is taken.
+#[test]
+fn requests_during_a_disconnect_are_busy() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    rig.spy.hold_closes();
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    rig.spy.wait_for_a_held_close();
+    assert_eq!(alice.ask(RequestBody::Disconnect), Err(ErrorCode::Busy));
+    assert_eq!(alice.ask(good()), Err(ErrorCode::Busy));
+    rig.spy.release();
+    assert_eq!(
+        [alice.state(), alice.state()],
+        [ConnState::Disconnecting, ConnState::Disconnected]
+    );
+    assert!(alice.is_quiet(), "one disconnect, and no connect");
+    assert_eq!(rig.spy.opens().len(), 1);
+}
+
+// The ending of a tunnel that was already closed must not undo the
+// connection that came after it.
+#[test]
+fn an_old_tunnels_ending_does_not_end_the_next_connection() {
+    let rig = rig();
+    // So that the same cookie opens a second tunnel after the first closes.
+    rig.spy.keep_sessions();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    rig.spy.hold_endings();
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(
+        [alice.state(), alice.state()],
+        [ConnState::Disconnecting, ConnState::Disconnected]
+    );
+    let second = connected(&mut alice);
+    // Only now does the first tunnel's "closed" arrive.
+    rig.spy.release();
+    assert!(alice.is_quiet(), "the second connection stays up");
+    assert_eq!(
+        alice.ask(RequestBody::Status),
+        Ok(ResponseBody::Status(second))
+    );
+    assert!(rig.engine.tunnel_is_open());
 }

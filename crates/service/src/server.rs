@@ -145,8 +145,9 @@ impl Service {
             narrowed.map_err(|e| format!("The channel could not be kept to the owner: {e}."))?;
         }
         let hub = Arc::new(Hub::new(owner));
+        let session = Session::start(&platform, engine, policy, hub.clone(), logs.clone())?;
         let shared = Arc::new(Shared {
-            session: Session::start(&platform, engine, policy, hub.clone(), logs.clone()),
+            session,
             serving: Mutex::default(),
             narrowing_due: AtomicBool::new(false),
             unreadable: AtomicUsize::new(0),

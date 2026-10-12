@@ -6,12 +6,13 @@
     reason = "each test file uses its own part of this"
 )]
 
+mod spy;
+
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use ubc_vpn_core::protocol::{ErrorCode, RequestBody, ResponseBody};
@@ -19,6 +20,7 @@ pub use ubc_vpn_core::state::ConnState;
 pub use ubc_vpn_platform::fake::{Fake, Op};
 pub use ubc_vpn_platform::{Connection, Error, UserId};
 
+pub use spy::{Faulty, Spy};
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::protocol::{
     ClientKind, ConnectParams, Event, Hello, HelloReply, Outcome, PROTOCOL_VERSION, Request,
@@ -27,9 +29,6 @@ use ubc_vpn_core::protocol::{
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::RouteSet;
 pub use ubc_vpn_engine::fake::{FakeEngine, Script};
-use ubc_vpn_engine::{
-    Cancel, Gateway, LogLevel, LogSink, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent,
-};
 use ubc_vpn_platform::fake::paths;
 use ubc_vpn_service::{Service, Timeouts};
 
@@ -74,43 +73,13 @@ pub fn good() -> RequestBody {
     connect(COOKIE, GATEWAY, &subnets, &["ece.example.test"])
 }
 
-/// Wraps the engine fake to record, for every `open`, the gateway it was
-/// given and the OS calls made before it. It also logs the cookie as a
-/// careless library would: at a level that is kept, with no marker word, and
-/// before the engine has hidden it.
-pub struct Spy {
-    engine: FakeEngine,
-    fake: Fake,
-    opens: Mutex<Vec<(Gateway, Vec<Op>)>>,
-}
-
-impl Spy {
-    pub fn opens(&self) -> Vec<(Gateway, Vec<Op>)> {
-        self.opens.lock().unwrap().clone()
-    }
-}
-
-impl TunnelEngine for Spy {
-    fn open(
-        &self,
-        gateway: &Gateway,
-        session: &Session,
-        cancel: &Cancel,
-        events: Sender<TunnelEvent>,
-        logs: LogSink,
-    ) -> Result<Box<dyn Tunnel>, TunnelError> {
-        let seen = (gateway.clone(), self.fake.calls());
-        self.opens.lock().unwrap().push(seen);
-        logs.log(LogLevel::Info, &format!("> {}", session.cookie.expose()));
-        self.engine.open(gateway, session, cancel, events, logs)
-    }
-}
-
 /// A service on fakes, with its files in a folder of its own.
 pub struct Rig {
     pub fake: Fake,
     pub engine: FakeEngine,
     pub spy: Arc<Spy>,
+    /// The fake's routes and DNS as the service sees them.
+    pub os: Arc<Faulty>,
     pub root: PathBuf,
     pub timeouts: Timeouts,
     pub service: Option<Service>,
@@ -143,15 +112,13 @@ impl Rig {
         let mut script = Script::new(pin('A').try_into().unwrap());
         edit(&mut script);
         let engine = FakeEngine::new(script);
-        let spy = Arc::new(Spy {
-            engine: engine.clone(),
-            fake: fake.clone(),
-            opens: Mutex::default(),
-        });
+        let spy = Arc::new(Spy::new(engine.clone(), fake.clone()));
+        let os = Arc::new(Faulty::new(fake.clone()));
         Self {
             fake,
             engine,
             spy,
+            os,
             root,
             timeouts: Timeouts::default(),
             service: None,
@@ -159,9 +126,18 @@ impl Rig {
     }
 
     pub fn start(&mut self) -> Result<(), String> {
-        let platform = self.fake.platform(&self.root);
+        let platform = self.platform();
         self.service = Some(Service::start(platform, self.spy.clone(), self.timeouts)?);
         Ok(())
+    }
+
+    /// The fake OS, with routes and DNS going through [`Faulty`].
+    pub fn platform(&self) -> ubc_vpn_platform::Platform {
+        ubc_vpn_platform::Platform {
+            routes: self.os.clone(),
+            dns: self.os.clone(),
+            ..self.fake.platform(&self.root)
+        }
     }
 
     pub fn stop(&mut self) {
@@ -215,8 +191,9 @@ impl Rig {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        // So that a failed test ends, and does not wait on a held engine.
+        // So that a failed test ends, and does not wait on anything held.
         self.engine.release();
+        self.spy.release();
         self.stop();
         let _ = std::fs::remove_dir_all(&self.root);
     }

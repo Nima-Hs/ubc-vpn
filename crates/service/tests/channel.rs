@@ -54,6 +54,12 @@ fn a_non_owner_is_refused_and_disconnected() {
     // No time limit comes to the rescue: only the owner check closes these.
     let rig = open_to_all(NEVER);
     let mut early = rig.peer("mallory");
+    // An answered request shows the service has finished taking this
+    // connection in. One still between its hello and that point when the
+    // claim happens is not closed by the claim; it is a stranger's
+    // connection like any made later, refused at its first request.
+    let before = early.ask(RequestBody::Status);
+    assert_eq!(before, Err(ErrorCode::NotClaimed));
     let mut alice = rig.owner();
     let closed = early.is_closed();
     assert!(closed, "the claim closes a stranger's connection");
