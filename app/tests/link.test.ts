@@ -1,10 +1,11 @@
 import { type SpawnOptions, spawn } from "node:child_process";
 import type { LinkState, LoginState, Snapshot } from "@shared/api";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ConnectRunner } from "../src/main/channel/connect";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
 import { createServiceLink, type ServiceLink } from "../src/main/link";
-import { clientLogin, disconnectForCancel } from "../src/main/login";
+import { clientLogin, disconnectForCancel, LATE_DISCONNECT_MS } from "../src/main/login";
 import {
     type MockBridge,
     type MockRun,
@@ -125,7 +126,7 @@ describe("a login given up after the service had taken it", () => {
     it("is sent once more, when the bridge is next ready, if the service could not be reached", async () => {
         const link = fakeLink(["service_unavailable", "ok"]);
         let sent = false;
-        void disconnectForCancel(link).then(() => {
+        void disconnectForCancel(link, Date.now()).then(() => {
             sent = true;
         });
         await pause(50);
@@ -150,14 +151,92 @@ describe("a login given up after the service had taken it", () => {
     it("is not sent a third time, whatever the second answer", async () => {
         const link = fakeLink(["service_unavailable", "service_unavailable", "ok"]);
         link.becomes(READY);
-        await disconnectForCancel(link);
+        await disconnectForCancel(link, Date.now());
         expect(link.asked).toBe(2);
+    });
+
+    it("is dropped once the time for it has passed, however late the bridge returns", async () => {
+        const link = fakeLink(["service_unavailable", "ok"]);
+        const cancelledAt = Date.now();
+        let ended = false;
+        void disconnectForCancel(link, cancelledAt, 300).then(() => {
+            ended = true;
+        });
+        await pause(100);
+        expect(ended).toBe(false);
+        // The time passes with the service still away: the login is given up
+        // with nothing more sent, and nothing is left waiting for the bridge.
+        await until(() => ended, "the disconnect being dropped");
+        expect(Date.now() - cancelledAt).toBeGreaterThanOrEqual(290);
+        expect(link.asked).toBe(1);
+        expect(link.listening()).toBe(0);
+        // The bridge comes back afterwards, perhaps hours later, perhaps with
+        // a connection the user has since made by other means. It is left alone.
+        link.becomes(READY);
+        await pause(50);
+        expect(link.asked).toBe(1);
+    });
+
+    it("is still sent, once, when the bridge returns inside the time", async () => {
+        const link = fakeLink(["service_unavailable", "ok"]);
+        let ended = false;
+        void disconnectForCancel(link, Date.now(), 2000).then(() => {
+            ended = true;
+        });
+        await pause(100);
+        link.becomes(READY);
+        await until(() => ended, "the disconnect being sent");
+        expect(link.asked).toBe(2);
+        // The time running out afterwards changes nothing.
+        await pause(50);
+        expect(link.listening()).toBe(0);
+    });
+
+    it("counts the time from the cancel, not from when the service was first found gone", async () => {
+        const link = fakeLink(["service_unavailable", "ok"]);
+        // The user cancelled long ago by the time this is reached.
+        await disconnectForCancel(link, Date.now() - 60_000, 30_000);
+        expect(link.asked).toBe(1);
+        expect(link.listening()).toBe(0);
+        // Even with the bridge ready this very moment.
+        const ready = fakeLink(["service_unavailable", "ok"]);
+        ready.becomes(READY);
+        await disconnectForCancel(ready, Date.now() - 60_000, 30_000);
+        expect(ready.asked).toBe(1);
+    });
+
+    it("allows thirty seconds, and the app gives it the moment of the cancel", async () => {
+        expect(LATE_DISCONNECT_MS).toBe(30_000);
+        const seen: number[] = [];
+        const cli = mockCli([{ prompt: PROMPT }, { hang: true }], {
+            afterCancel: [{ done: true }],
+        });
+        const states: LoginState[] = [];
+        const runner = new ConnectRunner({
+            command: cli.command,
+            args: cli.args,
+            minStartGapMs: 0,
+            onState: (state) => states.push(state),
+            disconnect: async (cancelledAt) => {
+                seen.push(cancelledAt);
+            },
+        });
+        cleanups.push(() => runner.stop());
+        runner.start();
+        await until(() => states.at(-1)?.phase === "prompt", "the prompt");
+        const before = Date.now();
+        runner.cancel();
+        const after = Date.now();
+        await until(() => states.at(-1)?.phase === "idle", "the login being given up");
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toBeGreaterThanOrEqual(before);
+        expect(seen[0]).toBeLessThanOrEqual(after);
     });
 
     it("is not sent again when the service answered, yes or no", async () => {
         for (const answer of ["ok", "refused"] as const) {
             const link = fakeLink([answer]);
-            await disconnectForCancel(link);
+            await disconnectForCancel(link, Date.now());
             expect(link.asked, answer).toBe(1);
             expect(link.listening()).toBe(0);
         }
