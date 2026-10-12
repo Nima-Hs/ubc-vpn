@@ -157,6 +157,7 @@ fn each_failure_has_its_own_exit_code_and_message() {
         "connect, disconnect or status becomes the owner",
         "The bridge claims nothing itself",
         "never taken from an argument, a variable or a file",
+        "interrupted after the login may still complete; disconnect undoes it",
         "bridge            Carry messages",
     ] {
         assert!(help.contains(line), "{help}");

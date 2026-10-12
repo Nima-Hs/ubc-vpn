@@ -194,6 +194,67 @@ fn a_library_that_leaks_secrets_has_them_removed() {
     }
 }
 
+// Security rule: what an engine logs can be text a gateway sent, some of it
+// before its certificate was judged, and connect prints it in the user's
+// terminal. No control character gets there. The careless gateway echoes the
+// username, which is too short for the log sink to hide.
+#[test]
+fn engine_lines_are_printed_without_control_characters() {
+    const ESCAPE: &str = "\u{1b}[2";
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    (script.leaks, script.form[0].1) = (true, Secret::new(ESCAPE));
+    scene.gateway = FakeEngine::new(script);
+    let mut typist = Typist::typing(&[Some(ESCAPE), Some(PASSWORD)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!(code, 0, "{err:?}");
+    assert!(err.contains("ubc-vpn: > [2\n"), "{err:?}");
+    assert!(!err.chars().any(|c| c.is_control() && c != '\n'), "{err:?}");
+
+    // The same for a reason that quotes the settings file. The route error
+    // itself writes the domain with its control characters escaped, and
+    // this fails if that ever stops being so.
+    let quoted = r#"{"routes":{"subnets":["10.255.0.0/24"],"dns_domains":["a\u001b[2J.test"]}}"#;
+    let scene = Scene::new(Some(quoted), "");
+    let (code, _, err) = scene.connect(&mut Typist::default());
+    assert_eq!(code, FAILED);
+    assert!(
+        err.contains("saved routes cannot be used") && err.contains("[2J"),
+        "{err:?}"
+    );
+    assert!(!err.chars().any(|c| c.is_control() && c != '\n'), "{err:?}");
+}
+
+// A connection that failed, or whose session has ended, is over. Connecting
+// again is not "busy".
+#[test]
+fn a_failed_or_ended_connection_can_be_connected_again() {
+    let mut scene = Scene::usual();
+    scene.service = None;
+    // One gateway for both sides, so that a new login brings the session
+    // back after the service logged it off.
+    scene.service = Some(scene.rig.service_on(scene.gateway.clone()));
+    let connect = |scene: &Scene| {
+        let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+        let (code, _, err) = scene.connect(&mut typist);
+        (code, err)
+    };
+    let denied = Some(Error::PermissionDenied);
+    scene.rig.fake.set_failure(Op::AddTunnelRoutes, denied);
+    assert_eq!(connect(&scene).0, FAILED);
+    assert!(scene.state().contains(r#""state":"failed""#));
+    scene.rig.fake.set_failure(Op::AddTunnelRoutes, None);
+    assert_eq!(connect(&scene), (0, String::new()));
+
+    scene.gateway.expire_session();
+    let patience = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !scene.state().contains(r#""state":"login_needed""#) {
+        assert!(std::time::Instant::now() < patience, "{}", scene.state());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(connect(&scene), (0, String::new()));
+}
+
 // Security rule: a connect that cannot succeed asks nothing and sends the
 // gateway nothing, so it costs the user no MFA request.
 #[test]
@@ -233,21 +294,24 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
     };
     attempt(&scene, &mut mute, "run this in a terminal", FAILED);
 
-    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let mut typist = Typist::typing(&[Some(PASSWORD)]);
-    let none = |_: &Policy| None;
-    let code = connect(&platform, &none, &mut typist, brief(), &mut out, &mut err);
-    assert_eq!((code, out.is_empty()), (FAILED, true));
-    assert!(
-        String::from_utf8(err)
-            .unwrap()
-            .contains("no VPN engine yet")
-    );
-    assert!(typist.asked.is_empty());
+    let no_engine = |scene: &Scene| {
+        let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut typist = Typist::typing(&[Some(PASSWORD)]);
+        let none = |_: &Policy| None;
+        let code = connect(&platform, &none, &mut typist, brief(), &mut out, &mut err);
+        assert_eq!((code, out.is_empty()), (FAILED, true));
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("no VPN engine yet"), "{err}");
+        assert!(typist.asked.is_empty());
+    };
+    no_engine(&scene);
 
     let mut scene = Scene::usual();
     scene.service = None;
+    // A build with no engine says so before it looks for the service, so it
+    // claims nothing on the way to failing.
+    no_engine(&scene);
     let mut typist = Typist::typing(&[Some(PASSWORD)]);
     attempt(&scene, &mut typist, "service is not running", NOT_RUNNING);
 }

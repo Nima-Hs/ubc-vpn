@@ -52,7 +52,8 @@ The bridge claims nothing itself; it leaves that to the app. The settings
 commands do not talk to the service at all.
 
 connect asks for the password and the one-time code in the terminal. They are
-never taken from an argument, a variable or a file.
+never taken from an argument, a variable or a file. A connect that is
+interrupted after the login may still complete; disconnect undoes it.
 
 With --json, status prints the connection state as one line of JSON. Each
 settings command prints one line of JSON, and exits with status 1 only when

@@ -162,6 +162,8 @@ fn try_connect(
     let saved = saved(&platform)?;
     // The routes come from the user's settings and from nowhere else.
     if let Err(why) = saved.routes.check(policy.allowed_routes.as_deref()) {
+        // The reason can quote the settings file. It does so with every
+        // control character written out as an escape, which a test checks.
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
         return Err((FAILED, message));
     }
@@ -225,6 +227,9 @@ fn login(
     let result = engine.login(gateway, &mut prompts, &Cancel::new(), &logs);
     // The engine held the cookie before this code did, so a line it wrote on
     // the way may show it. The lines are printed only now, with it removed.
+    // They can also carry text the gateway sent, some of it from before its
+    // certificate was judged, so they go through `clean` like any text that
+    // is not this program's own.
     let cookie = result.as_ref().ok().map(|session| session.cookie.expose());
     for line in lines.lock().unwrap().iter() {
         let line = match cookie {
