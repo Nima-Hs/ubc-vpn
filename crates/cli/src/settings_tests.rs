@@ -12,8 +12,8 @@ use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
 
 use crate::settings::{
-    Command, nowhere_to_keep, partial_name, place, remember_username, reset_with, run, sweep,
-    write_partial,
+    Command, kept_notice, nowhere_to_keep, partial_name, place, remember_username, reset_with, run,
+    sweep, write_partial,
 };
 
 const GOOD: &str =
@@ -1122,14 +1122,13 @@ fn no_number_of_resets_replaces_a_kept_file() {
     );
     assert!(machine.kept(2).is_dir());
 
-    // The sentence about the kept files is for a reset that failed. A save
-    // that fails here, with every name still taken, says nothing of them.
-    let lock = machine.root.join("settings/settings.json.lock");
-    std::fs::remove_file(&lock).unwrap();
-    std::fs::create_dir(&lock).unwrap();
-    let why = machine.fails(Command::SetRoutes, GOOD);
-    assert_eq!(why, SettingsFailureCode::Unwritable);
-    assert_eq!(*machine.said.borrow(), "");
+    // The sentence about the kept files is for a reset that could not
+    // write. With every name still taken, a save that fails says nothing of
+    // them, and neither does a reset that did not fail.
+    let dir = machine.root.join("settings");
+    assert!(kept_notice(RESET_ALL, true, &dir).is_some());
+    assert_eq!(kept_notice(Command::SetRoutes, true, &dir), None);
+    assert_eq!(kept_notice(RESET, false, &dir), None);
 }
 
 // A reset that could not move the old file, or could not write the new

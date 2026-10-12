@@ -1,19 +1,24 @@
 //! One change to the settings at a time: each writer waits for the lock,
-//! and what it then reads is what the writer before it wrote.
+//! holds it while it reads and writes, and goes ahead without it only where
+//! it cannot be had.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_platform::fake::Fake;
 
-use crate::settings::{Command, remember_username, run};
-use crate::settings_lock::{change, change_within};
+use crate::settings::{Command, DURING_A_SAVE, remember_username, run};
+use crate::settings_lock::{Tried, WAIT, change, change_with, change_within};
 use crate::tests::settings_folder;
 
 const ROUTES: &str = r#"{"subnets":["10.19.0.0/16"],"dns_domains":["ece.example.test"]}"#;
+const SHORT: Duration = Duration::from_millis(100);
+const HELD: Result<bool, SettingsFailureCode> = Err(SettingsFailureCode::Unwritable);
 
 /// A settings folder of its own for one test, removed afterwards.
 struct Folder(PathBuf);
@@ -38,12 +43,32 @@ impl Folder {
     fn value(&self) -> serde_json::Value {
         serde_json::from_str(&self.text()).unwrap()
     }
+
+    /// Runs a settings command here, on this thread.
+    fn run(&self, command: Command, typed: &str) -> (u8, String) {
+        let platform = || Ok(Fake::new().platform(&self.0));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let status = run(
+            command,
+            &platform,
+            &mut typed.as_bytes(),
+            &mut out,
+            &mut err,
+        );
+        (status, String::from_utf8(out).unwrap())
+    }
 }
 
 impl Drop for Folder {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Tries for the real lock for a short while. `Ok(true)` is "went ahead
+/// without it".
+fn tries(dir: &Path) -> Result<bool, SettingsFailureCode> {
+    change_within(dir, SHORT).map(|changing| changing.unlocked())
 }
 
 /// Runs a settings command on a thread of its own and returns where its
@@ -71,6 +96,7 @@ fn command(folder: &Folder, command: Command, typed: &'static str) -> Receiver<(
 fn waits_its_turn(folder: &Folder, writer: impl FnOnce() -> Receiver<(u8, String)>) {
     let dir = folder.dir();
     let held = change(&dir).expect("the lock is free");
+    assert!(!held.unlocked());
     let ended = writer();
     // The other change is still under way: the writer has done nothing.
     let early = ended.recv_timeout(Duration::from_millis(300));
@@ -79,9 +105,8 @@ fn waits_its_turn(folder: &Folder, writer: impl FnOnce() -> Receiver<(u8, String
     let theirs = r#"{"theme":"dark","made_by":"the other change"}"#;
     std::fs::write(dir.join("settings.json"), theirs).unwrap();
     drop(held);
-    let (status, line) = ended
-        .recv_timeout(Duration::from_secs(10))
-        .expect("its turn came");
+    let ended = ended.recv_timeout(Duration::from_secs(10));
+    let (status, line) = ended.expect("its turn came");
     assert_eq!(status, 0, "{line}");
 }
 
@@ -119,6 +144,28 @@ fn a_reset_and_a_username_wait_too() {
     assert_eq!(folder.value()["made_by"], "the other change");
 }
 
+// Waiting for the lock is half of it. Each writer must also still hold the
+// lock when it writes: one that took it and let go at once would wait its
+// turn and then read and write unguarded.
+#[test]
+fn every_writer_holds_the_lock_while_it_writes() {
+    let folder = Folder::new();
+    let found = Rc::new(RefCell::new(Vec::new()));
+    let looked = found.clone();
+    // In the middle of each save, somebody else tries for the lock.
+    let look = move |dir: &Path| looked.borrow_mut().push(tries(dir));
+    DURING_A_SAVE.with(|during| *during.borrow_mut() = Some(Box::new(look)));
+
+    assert_eq!(folder.run(Command::SetRoutes, ROUTES).0, 0);
+    assert_eq!(remember_username(&folder.dir(), None, Some("jdoe")), Ok(()));
+    assert_eq!(folder.run(Command::Reset { force: true }, "").0, 0);
+
+    DURING_A_SAVE.with(|during| *during.borrow_mut() = None);
+    assert_eq!(*found.borrow(), [HELD, HELD, HELD]);
+    // And each let go when it was done.
+    assert_eq!(tries(&folder.dir()), Ok(false));
+}
+
 // A change that holds the lock too long does not hang the next one for
 // ever: it gives up and says the settings could not be written. Once the
 // lock is free it can be had again.
@@ -131,50 +178,118 @@ fn a_lock_held_too_long_is_given_up_on() {
     // On a thread of its own, so that a wait with no end fails this test
     // and does not hang it.
     let (waiting, (done, ended)) = (dir.clone(), channel());
-    std::thread::spawn(move || done.send(change_within(&waiting, wait).map(drop)));
+    std::thread::spawn(move || done.send(change_within(&waiting, wait).map(|c| c.unlocked())));
     let refused = ended.recv_timeout(Duration::from_secs(4));
     let refused = refused.expect("it gave up");
     let waited = started.elapsed();
-    assert_eq!(refused, Err(SettingsFailureCode::Unwritable));
-    assert!(
-        waited >= wait && waited < Duration::from_secs(4),
-        "{waited:?}"
-    );
+    assert_eq!(refused, HELD);
+    assert!(waited >= wait, "{waited:?}");
     drop(held);
-    assert!(change_within(&dir, wait).is_ok());
+    assert_eq!(tries(&dir), Ok(false));
+    // The real wait is long enough for a save and short enough to bear.
+    assert_eq!(WAIT, Duration::from_secs(5));
+}
+
+/// What a lock that is held lets go of. The test hears when it is dropped.
+struct Lock(Sender<&'static str>);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.0.send("let go");
+    }
+}
+
+// Only a lock that another change holds refuses the change. Where the lock
+// cannot be had at all, as on a file system without locks, the change goes
+// ahead without it: losing every save would be far worse than the rare
+// lost field the lock is there for.
+#[test]
+fn a_lock_that_cannot_be_had_does_not_stop_the_change() {
+    let folder = Folder::new();
+    let dir = folder.dir();
+    let with = |attempt: fn() -> std::io::Result<Tried>| {
+        change_with(&dir, SHORT, attempt).map(|changing| changing.unlocked())
+    };
+    assert_eq!(with(|| Ok(Tried::Held(Box::new(())))), Ok(false));
+    assert_eq!(with(|| Ok(Tried::Busy)), HELD);
+    let no_locks = || Err(std::io::ErrorKind::Unsupported.into());
+    let started = Instant::now();
+    assert_eq!(with(no_locks), Ok(true));
+    assert!(started.elapsed() < SHORT, "there was nothing to wait for");
+
+    // A try that is busy at first and then succeeds is tried again.
+    let tries = AtomicUsize::new(0);
+    let third_time = move || match tries.fetch_add(1, Ordering::SeqCst) {
+        0 | 1 => Ok(Tried::Busy),
+        _ => Ok(Tried::Held(Box::new(()))),
+    };
+    let had = change_with(&dir, Duration::from_secs(2), third_time);
+    assert_eq!(had.map(|changing| changing.unlocked()), Ok(false));
+}
+
+// On some file systems the lock call does not come back. The change waits
+// for it no longer than for a held lock, and then goes ahead without it. If
+// the call does come back later, with the lock, nobody is waiting for it and
+// it is let go at once: it is not left held with nobody to release it.
+#[test]
+fn a_lock_call_that_never_returns_is_not_waited_for() {
+    let folder = Folder::new();
+    let (come_back, waiting) = channel::<()>();
+    let (dropped, let_go) = channel();
+    let hangs = move || {
+        let _ = waiting.recv();
+        Ok(Tried::Held(Box::new(Lock(dropped.clone()))))
+    };
+    let started = Instant::now();
+    // Asked for on a thread of its own, so that a change which waited for
+    // ever fails this test and does not hang it.
+    let (dir, (done, ended)) = (folder.dir(), channel());
+    std::thread::spawn(move || {
+        let changing = change_with(&dir, SHORT, hangs);
+        done.send(changing.map(|changing| changing.unlocked()))
+    });
+    let went_ahead = ended.recv_timeout(Duration::from_secs(4));
+    assert_eq!(went_ahead, Ok(Ok(true)), "it did not go ahead in time");
+    assert!(started.elapsed() >= SHORT);
+
+    come_back.send(()).unwrap();
+    let late = let_go.recv_timeout(Duration::from_secs(4));
+    assert_eq!(late, Ok("let go"), "the late lock was not kept");
 }
 
 // The lock is taken on a plain file and nothing else, and the file is left
-// where it is: it holds nothing, and nothing removes it.
+// where it is: it is never written, and nothing removes it, however old.
 #[test]
 fn the_lock_is_a_plain_file_that_stays() {
     let folder = Folder::new();
     let lock = folder.dir().join("settings.json.lock");
-    drop(change(&folder.dir()).unwrap());
+    assert_eq!(tries(&folder.dir()), Ok(false));
     assert_eq!(std::fs::read(&lock).unwrap(), b"");
     // Taking the lock never writes the file, whatever is in it.
     std::fs::write(&lock, "left as found").unwrap();
-    drop(change(&folder.dir()).unwrap());
+    assert_eq!(tries(&folder.dir()), Ok(false));
     assert_eq!(std::fs::read(&lock).unwrap(), b"left as found");
-    std::fs::write(&lock, "").unwrap();
-    // A save sweeps old partial files, and leaves this.
-    let (status, _) = command(&folder, Command::SetRoutes, ROUTES).recv().unwrap();
-    assert_eq!(status, 0);
-    assert_eq!(std::fs::read(&lock).unwrap(), b"");
+    // A save sweeps old partial files, and leaves this, old as it is.
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(48 * 3600);
+    let file = std::fs::File::options().write(true).open(&lock).unwrap();
+    file.set_modified(long_ago).unwrap();
+    drop(file);
+    assert_eq!(folder.run(Command::SetRoutes, ROUTES).0, 0);
+    assert_eq!(std::fs::read(&lock).unwrap(), b"left as found");
 
-    // A folder in its place cannot be locked, and nothing is saved.
-    let before = folder.text();
+    // A folder in its place cannot be locked. The save goes ahead without.
     std::fs::remove_file(&lock).unwrap();
     std::fs::create_dir(&lock).unwrap();
-    let refused = change_within(&folder.dir(), Duration::from_millis(50)).map(drop);
-    assert_eq!(refused, Err(SettingsFailureCode::Unwritable));
-    let (status, line) = command(&folder, Command::SetRoutes, ROUTES).recv().unwrap();
-    assert_eq!((status, line.as_str()), (1, "{\"error\":\"unwritable\"}\n"));
-    assert_eq!(folder.text(), before);
+    assert_eq!(tries(&folder.dir()), Ok(true));
+    std::fs::remove_file(folder.dir().join("settings.json")).unwrap();
+    assert_eq!(folder.run(Command::SetRoutes, ROUTES).0, 0);
+    assert_eq!(folder.value()["routes"]["subnets"][0], "10.19.0.0/16");
+    assert!(lock.is_dir());
 }
 
 // Security rule: a link where the lock should be is not followed. Whatever
-// it leads to is neither opened nor locked.
+// it leads to is neither opened nor locked, and the change goes ahead
+// without a lock.
 #[test]
 fn a_link_in_place_of_the_lock_is_not_followed() {
     fn link(target: &Path, link: &Path) -> std::io::Result<()> {
@@ -191,9 +306,11 @@ fn a_link_in_place_of_the_lock_is_not_followed() {
         std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes()).unwrap();
         return;
     }
-    let refused = change_within(&folder.dir(), Duration::from_millis(50)).map(drop);
-    assert_eq!(refused, Err(SettingsFailureCode::Unwritable));
-    // Had it been followed and locked, this would have to wait.
+    let held = change_within(&folder.dir(), SHORT).expect("it goes ahead");
+    assert!(held.unlocked());
+    // Had the link been followed and its target locked, this would fail.
     let free = std::fs::File::options().write(true).open(&target).unwrap();
     assert!(free.try_lock().is_ok());
+    drop(free);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
 }

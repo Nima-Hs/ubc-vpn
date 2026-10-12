@@ -90,15 +90,33 @@ pub fn run(
     {
         let _ = writeln!(err, "ubc-vpn: {why}");
     }
-    let full = matches!(command, Command::Reset { .. })
-        && answered == Err(SettingsFailureCode::Unwritable);
-    if let Some(why) = dir.filter(|_| full).and_then(nowhere_to_keep) {
+    let unwritten = answered == Err(SettingsFailureCode::Unwritable);
+    if let Some(why) = dir.and_then(|dir| kept_notice(command, unwritten, dir)) {
         let _ = writeln!(err, "ubc-vpn: {why}");
     }
     let line = answered.or_else(|error| encode(&SettingsFailure { error }));
     let written = out.write_all(line.unwrap_or_default().as_bytes());
     let unsaid = written.and_then(|()| out.flush()).is_err();
     u8::from(failed || unsaid)
+}
+
+/// For tests only: something to do in the middle of a save.
+#[cfg(test)]
+pub(crate) type Look = Box<dyn Fn(&Path)>;
+
+// For tests only: what to do in the middle of every save made on this
+// thread, to look at what the one saving holds at that moment.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DURING_A_SAVE: std::cell::RefCell<Option<Look>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What to say about the kept files, if anything: only when it was a reset
+/// that could not write, and only when their names being taken is why.
+pub(crate) fn kept_notice(command: Command, unwritten: bool, dir: &Path) -> Option<String> {
+    let reset = matches!(command, Command::Reset { .. });
+    nowhere_to_keep(dir).filter(|_| reset && unwritten)
 }
 
 /// The line to write for `command`, or why there is none.
@@ -398,6 +416,8 @@ pub(crate) fn partial_name() -> String {
 /// old file is untouched.
 fn save(dir: &Path, text: &str) -> io::Result<()> {
     create_folder(dir)?;
+    #[cfg(test)]
+    DURING_A_SAVE.with(|look| look.borrow().as_ref().map(|look| look(dir)));
     sweep(dir, STALE);
     let partial = write_partial(dir, text, &mut partial_name)?;
     place(&partial, dir)
