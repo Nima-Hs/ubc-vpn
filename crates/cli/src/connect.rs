@@ -76,7 +76,7 @@ fn failed(code: LoginErrorCode, message: &str) -> Stop {
     }
 }
 
-fn stop(error: ClientError) -> Stop {
+pub(crate) fn stop(error: ClientError) -> Stop {
     let code = match &error {
         ClientError::Refused(refusal) => match refusal.code {
             ErrorCode::Busy => return busy(),

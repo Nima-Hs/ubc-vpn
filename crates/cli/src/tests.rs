@@ -158,6 +158,8 @@ fn each_failure_has_its_own_exit_code_and_message() {
         "The bridge claims nothing itself",
         "never taken from an argument, a variable or a file",
         "interrupted after the login may still complete; disconnect undoes it",
+        "connect [--json]  Log in and connect",
+        "A\ncancel line, or standard input closing, stops the login.",
         "bridge            Carry messages",
     ] {
         assert!(help.contains(line), "{help}");

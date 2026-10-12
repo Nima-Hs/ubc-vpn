@@ -51,3 +51,18 @@ fn connect_in_a_terminal_is_not_available_yet() {
         "{err}"
     );
 }
+
+// `connect --json` answers in JSON lines whatever happens. Here it cannot
+// connect: this build has no engine, or this machine no policy. Standard
+// input is empty, which it must survive.
+#[test]
+fn connect_for_the_app_ends_with_one_error_line() {
+    let (status, out, _) = run(&["connect", "--json"]);
+    assert!(!matches!(status, Some(0 | 2)), "{status:?}");
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.starts_with(r#"{"type":"error","code":""#), "{out}");
+    // Only this spelling is the command.
+    for args in [&["connect", "--json", "more"][..], &["connect", "json"]] {
+        assert_eq!(run(args).0, Some(2), "{args:?}");
+    }
+}
