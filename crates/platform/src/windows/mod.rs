@@ -10,10 +10,17 @@
 //!   the name never becomes free while it is open.
 //! - **Local callers only**: every instance has `PIPE_REJECT_REMOTE_CLIENTS`.
 //! - **The caller is who Windows says**: the token of the pipe's client.
-//! - **Narrowing** replaces the access list of the pipe, which all its
-//!   instances share, and is used for every instance created later. Windows
-//!   checks it when a client opens the pipe, so a client that already opened
-//!   it stays attached.
+//! - **Narrowing** replaces the access list of the pipe. A pipe has one
+//!   descriptor, shared by all its instances; Windows 11 was seen to ignore
+//!   the one passed when a later instance is created, and it is passed all
+//!   the same in case another version does not. Windows checks the list when
+//!   a client opens the pipe, so a client that already opened it stays
+//!   attached, and one still waiting for a free instance is refused.
+//! - **Callers must open the pipe as [`Transport::connect`] does.** One that
+//!   asks for generic write access is refused, because that includes the
+//!   right to create instances; one that does not state how far the server
+//!   may impersonate it cannot be identified before it has sent data, and is
+//!   dropped.
 //! - **A client checks the server** by the pipe's owner, and lends it no more
 //!   than its name (identification-level impersonation).
 //!
