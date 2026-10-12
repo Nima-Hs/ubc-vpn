@@ -197,7 +197,7 @@ An update replaces `policy.json` and never touches `state.json` or `settings.jso
 The settings folder belongs to the CLI. Beside `settings.json` it holds:
 
 - `settings.json.lock`, which a command holds from reading the settings to saving them, so one change cannot undo another. Where the file system cannot give the lock, the change goes ahead without it and says so.
-- `settings.json.damaged-1` to `-3`, copies that `ubc-vpn settings reset` set aside. A reset never replaces one of them.
+- `settings.json.damaged-1` to `-3`, earlier settings files that `ubc-vpn settings reset` moved aside. A reset never replaces one of them.
 - `app/`, the app's own profile (Electron's data). The app keeps nothing else there and never opens `settings.json`.
 
 On macOS and Linux the CLI creates the folder for the user alone and refuses to use one that the group or others can write to.
@@ -253,10 +253,10 @@ Newline-delimited JSON, one message per line. The service drops a connection tha
 The service keeps its recent log lines in memory and the owner can read them, for the app's log view and for a report to paste into a bug report. The shapes are in `crates/core/src/protocol.rs` (protocol version 3).
 
 - **What is kept:** 500 lines from the service and the engine, and 100 lines that the client hands over from a login, in a space of their own so a client cannot push the service's lines out. Nothing is written to disk.
-- **Before a line is kept:** the service removes every secret it holds at that moment and any character that could mislead when shown. A line that cannot be kept whole is replaced by a marker, never cut. Debug-level lines are never kept. Only the exact form of a secret is found; one that is split or encoded is not.
+- **Before a line is kept:** the service removes any character that could mislead when shown, then every secret it holds at that moment, then everything from a word such as `cookie`, `pass` or `session` to the end of the line, which it replaces with `[redacted]`. A line that is empty or too long after the first step is replaced whole by a marker, not shortened to fit. Debug-level lines are never kept. Only the exact form of a secret is found; one that is split or encoded is not.
 - **The session cookie** is held for this cleaning for 30 seconds after a connection ends, or until the next one starts, and is then wiped.
 - **Reading:** `logs` returns a page of lines after a given point, `watch_logs` asks for new lines as events, and `diagnostics` returns a short summary with no paths and no user names. All are for the owner only. A reader that falls behind loses log events, not its connection, and reads the gap again with `logs`.
-- **What a reader may see:** login lines can name the username and what the gateway said, and lines can name local paths and addresses. The app says so before it copies a report.
+- **What a reader may see:** login lines can name the username and what the gateway said, and lines can name local paths and addresses. The app's log view is not built yet; it will say so before it copies a report.
 
 ### When the session expires
 
