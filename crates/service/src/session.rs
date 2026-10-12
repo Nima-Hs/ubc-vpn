@@ -31,18 +31,18 @@ impl Session {
         if let Err(message) = &self.policy {
             return Err(error(ErrorCode::PolicyInvalid, message));
         }
-        Err(not_yet())
+        Err(not_yet("Connecting"))
     }
 
     pub(crate) fn disconnect(&self) -> Result<(), ErrorInfo> {
-        Err(not_yet())
+        Err(not_yet("Disconnecting"))
     }
 
     /// Tears everything down at shutdown. There is nothing to tear down yet.
     pub(crate) fn stop(&self) {}
 }
 
-fn not_yet() -> ErrorInfo {
-    let message = "Connecting is not available in this version yet.";
+fn not_yet(what: &str) -> ErrorInfo {
+    let message = format!("{what} is not available in this version yet.");
     error(ErrorCode::Internal, message)
 }

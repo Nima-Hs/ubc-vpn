@@ -109,3 +109,40 @@ impl Hub {
         clients.iter().for_each(|client| client.conn.close());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Security rule: only the first claim makes an owner. A second user is
+    // told no, nothing is stored for them, and the owner does not change.
+    #[test]
+    fn a_second_claim_by_another_user_changes_nothing() {
+        let hub = Hub::new(None);
+        let user = |name: &str| name.parse::<UserId>().unwrap();
+        let mut stored = Vec::new();
+        let mut claim = |name: &str| {
+            let persist = || {
+                stored.push(name.to_string());
+                Ok(())
+            };
+            hub.claim(&user(name), persist)
+        };
+        assert_eq!(claim("alice"), Ok(true));
+        assert_eq!(claim("mallory"), Ok(false));
+        assert_eq!(claim("alice"), Ok(true));
+        assert_eq!(stored, ["alice"]);
+        assert_eq!(hub.owner(), Some(user("alice")));
+    }
+
+    // Security rule: an owner the service could not store does not exist.
+    // Otherwise a restart would forget it and let someone else claim.
+    #[test]
+    fn a_claim_that_cannot_be_stored_makes_no_owner() {
+        let hub = Hub::new(None);
+        let alice = "alice".parse().unwrap();
+        let failed = hub.claim(&alice, || Err("disk full".to_string()));
+        assert_eq!(failed, Err("disk full".to_string()));
+        assert_eq!(hub.owner(), None);
+    }
+}

@@ -1,7 +1,9 @@
 //! The channel server: start-up, the listener, and one thread per connection
 //! doing the handshake and the owner check on every request.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -25,6 +27,10 @@ pub const MAX_CONNECTIONS: usize = 32;
 /// never use up the threads the owner needs. Until someone claims the service
 /// everyone is a stranger, and this is the whole limit.
 pub const MAX_STRANGERS: usize = 8;
+
+/// The most of the strangers' places one user may hold, so that a single
+/// user cannot take them all and keep the first real user from claiming.
+pub const MAX_PER_STRANGER: usize = 2;
 
 /// How long the service waits on a client.
 ///
@@ -59,12 +65,50 @@ pub struct Service {
     accepting: Option<JoinHandle<()>>,
 }
 
+/// How many connections are being served.
+#[derive(Default)]
+struct Serving {
+    total: usize,
+    /// Those of users who were not the owner when they connected, by user.
+    strangers: HashMap<UserId, usize>,
+}
+
+/// One connection's place. Dropping it closes the connection, forgets it
+/// and gives the place back, so a thread that panics or never starts cannot
+/// leak any of the three.
+struct Place {
+    shared: Arc<Shared>,
+    conn: Arc<Connection>,
+    user: UserId,
+    stranger: bool,
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.shared.hub.remove(&self.conn);
+        self.conn.close();
+        let mut serving = lock(&self.shared.serving);
+        serving.total -= 1;
+        if !self.stranger {
+            return;
+        }
+        let held = serving.strangers.get(&self.user).copied().unwrap_or(1);
+        match held {
+            1 => serving.strangers.remove(&self.user),
+            more => serving.strangers.insert(self.user.clone(), more - 1),
+        };
+    }
+}
+
 struct Shared {
     listener: Box<dyn Listener>,
     hub: Arc<Hub>,
     session: Session,
-    /// How many connections are being served: all of them, and strangers'.
-    serving: Mutex<(usize, usize)>,
+    serving: Mutex<Serving>,
+    /// Whether the OS has yet to be told to refuse everyone but the owner.
+    narrowing_due: AtomicBool,
+    /// Requests from non-owners that could not be understood.
+    unreadable: AtomicUsize,
     logs: Logs,
     state_dir: PathBuf,
     timeouts: Timeouts,
@@ -75,8 +119,9 @@ impl Service {
     /// left applied, loads the owner, and only then opens the channel.
     ///
     /// A missing or invalid policy does not stop it: it then serves `status`
-    /// and refuses every `connect`. A state file it cannot understand, or a
-    /// channel it cannot open, does; the error is a sentence for the log.
+    /// and refuses every `connect`. A state file it cannot read or understand
+    /// does, and so does a channel it cannot open or cannot narrow to the
+    /// owner it has stored; the error is a sentence for the log.
     pub fn start(platform: Platform, timeouts: Timeouts) -> Result<Self, String> {
         let logs = Logs::default();
         let policy = policy::load(&platform.paths.policy_dir);
@@ -90,19 +135,22 @@ impl Service {
         let owner = owner::load(&platform.paths.state_dir)?;
         let listener = platform.transport.listen(&platform.paths.channel_name);
         let listener = listener.map_err(|e| format!("The channel could not be opened: {e}."))?;
-        let hub = Arc::new(Hub::new(owner.clone()));
+        if let Some(owner) = &owner {
+            let narrowed = listener.restrict_to(owner);
+            narrowed.map_err(|e| format!("The channel could not be kept to the owner: {e}."))?;
+        }
+        let hub = Arc::new(Hub::new(owner));
         let shared = Arc::new(Shared {
             session: Session::start(policy),
             serving: Mutex::default(),
+            narrowing_due: AtomicBool::new(false),
+            unreadable: AtomicUsize::new(0),
             listener,
             hub,
             logs,
             state_dir: platform.paths.state_dir,
             timeouts,
         });
-        if let Some(owner) = &owner {
-            shared.narrow(owner);
-        }
         let accepting = shared.clone();
         let accepting = Some(thread::spawn(move || accepting.accept()));
         Ok(Self { shared, accepting })
@@ -113,15 +161,17 @@ impl Service {
         self.shared.logs.lines()
     }
 
-    /// Serves until the channel is closed.
-    pub fn wait(mut self) {
-        self.join();
+    /// Serves until accepting ends. That is an error unless the channel was
+    /// closed on purpose: a service that no longer accepts must not look
+    /// healthy.
+    pub fn wait(mut self) -> Result<(), String> {
+        self.join()
     }
 
-    fn join(&mut self) {
-        if let Some(accepting) = self.accepting.take() {
-            let _ = accepting.join();
-        }
+    fn join(&mut self) -> Result<(), String> {
+        let ended = self.accepting.take().map(JoinHandle::join);
+        let stopped = |_| "The service stopped accepting connections unexpectedly.".to_string();
+        ended.unwrap_or(Ok(())).map_err(stopped)
     }
 }
 
@@ -129,7 +179,7 @@ impl Drop for Service {
     /// Stops accepting, tears the tunnel down and closes every connection.
     fn drop(&mut self) {
         self.shared.listener.close();
-        self.join();
+        let _ = self.join();
         self.shared.session.stop();
         self.shared.hub.close_all();
     }
@@ -140,18 +190,33 @@ impl Shared {
         loop {
             match self.listener.accept() {
                 Ok((conn, user)) => {
+                    if self.narrowing_due.load(Ordering::SeqCst)
+                        && let Some(owner) = self.hub.owner()
+                    {
+                        self.narrow(&owner);
+                    }
                     // Decided here, on the one accepting thread, so a burst
                     // of connections cannot slip past the limits.
                     let stranger = self.hub.owner().as_ref() != Some(&user);
-                    if !self.admit(stranger) {
+                    let conn = Arc::new(conn);
+                    if !self.admit(&user, stranger) {
                         conn.close();
                         continue;
                     }
                     let shared = self.clone();
-                    thread::spawn(move || {
-                        shared.serve(&Arc::new(conn), &user);
-                        shared.release(stranger);
-                    });
+                    let place = Place {
+                        shared,
+                        conn,
+                        user,
+                        stranger,
+                    };
+                    // If the OS refuses a thread, the place is dropped and
+                    // the connection closed; accepting carries on.
+                    let serve = move || place.shared.serve(&place.conn, &place.user);
+                    if let Err(error) = thread::Builder::new().spawn(serve) {
+                        self.logs
+                            .push(&format!("a connection got no thread: {error}"));
+                    }
                 }
                 Err(Error::Closed) => return,
                 Err(error) => {
@@ -163,18 +228,20 @@ impl Shared {
     }
 
     /// Takes a place for a new connection, unless it would be one too many.
-    fn admit(&self, stranger: bool) -> bool {
+    /// The place is given back when its [`Place`] is dropped.
+    fn admit(&self, user: &UserId, stranger: bool) -> bool {
         let mut serving = lock(&self.serving);
-        let full = serving.0 >= MAX_CONNECTIONS || (stranger && serving.1 >= MAX_STRANGERS);
+        let strangers: usize = serving.strangers.values().sum();
+        let own = serving.strangers.get(user).copied().unwrap_or(0);
+        let crowded = strangers >= MAX_STRANGERS || own >= MAX_PER_STRANGER;
+        let full = serving.total >= MAX_CONNECTIONS || (stranger && crowded);
         if !full {
-            *serving = (serving.0 + 1, serving.1 + usize::from(stranger));
+            serving.total += 1;
+            if stranger {
+                *serving.strangers.entry(user.clone()).or_default() += 1;
+            }
         }
         !full
-    }
-
-    fn release(&self, stranger: bool) {
-        let mut serving = lock(&self.serving);
-        *serving = (serving.0 - 1, serving.1 - usize::from(stranger));
     }
 
     fn serve(&self, conn: &Arc<Connection>, user: &UserId) {
@@ -185,9 +252,7 @@ impl Shared {
         if limits.iter().all(Result::is_ok) && self.handshake(conn) {
             self.hub.add(user, conn);
             self.requests(conn, user);
-            self.hub.remove(conn);
         }
-        conn.close();
     }
 
     /// Always answers, so a client that cannot be served learns why. Returns
@@ -214,8 +279,9 @@ impl Shared {
                 Err(Error::TimedOut) if self.hub.owner().as_ref() == Some(user) => continue,
                 _ => return,
             };
+            // Nothing from a request is ever logged: it may hold a cookie.
             let Ok(Request { id, body }) = decode(&line) else {
-                return self.logs.push("a request could not be understood");
+                return self.unreadable(user);
             };
             let (answer, keep) = self.answer(user, body);
             let outcome = answer.map_or_else(Outcome::Error, Outcome::Ok);
@@ -230,24 +296,36 @@ impl Shared {
     /// never from anything the caller sent. Also says whether the connection
     /// stays open.
     fn answer(&self, user: &UserId, body: RequestBody) -> (Result<ResponseBody, ErrorInfo>, bool) {
-        let refused = |code, message| Err(error(code, message));
-        match self.hub.owner() {
-            None if body == RequestBody::Claim => (self.claim(user), true),
-            None => {
+        let owner = self.hub.owner();
+        let accepted = |done: Result<(), ErrorInfo>| done.map(|()| ResponseBody::Accepted);
+        let answer = match body {
+            // Every claim takes the one path that decides who the owner is.
+            RequestBody::Claim => self.claim(user),
+            _ if owner.is_none() => {
                 let message = "Nobody owns the service yet. Claim it first.";
-                (refused(ErrorCode::NotClaimed, message), true)
+                Err(error(ErrorCode::NotClaimed, message))
             }
-            Some(owner) if owner != *user => (self.not_owner(), false),
-            Some(_) => {
-                let accepted = |done: Result<(), ErrorInfo>| done.map(|()| ResponseBody::Accepted);
-                let answer = match body {
-                    RequestBody::Claim => Ok(ResponseBody::Claimed),
-                    RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
-                    RequestBody::Connect(params) => accepted(self.session.connect(params)),
-                    RequestBody::Disconnect => accepted(self.session.disconnect()),
-                };
-                (answer, true)
-            }
+            _ if owner.as_ref() != Some(user) => self.not_owner(),
+            RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
+            RequestBody::Connect(params) => accepted(self.session.connect(params)),
+            RequestBody::Disconnect => accepted(self.session.disconnect()),
+        };
+        let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
+        (answer, !stranger)
+    }
+
+    /// Notes a request that could not be understood, without its content.
+    /// The owner's gets a line each. Anyone else's are counted, with one line
+    /// for the first, so a stranger cannot push everything else out of the
+    /// log.
+    fn unreadable(&self, user: &UserId) {
+        if self.hub.owner().as_ref() == Some(user) {
+            self.logs
+                .push("a request from the owner could not be understood");
+        } else if self.unreadable.fetch_add(1, Ordering::SeqCst) == 0 {
+            let line = "a request from a user who is not the owner could not be understood; \
+                        later ones are only counted";
+            self.logs.push(line);
         }
     }
 
@@ -256,8 +334,10 @@ impl Shared {
         Err(error(ErrorCode::NotOwner, message))
     }
 
-    /// Makes `user` the owner: stored first, so an owner is never forgotten
-    /// by a restart, then enforced by the OS as well.
+    /// Makes `user` the owner if nobody is: stored first, so an owner is never
+    /// forgotten by a restart, then enforced by the OS as well. Anyone but
+    /// the owner is refused, whether they came second in a race or years
+    /// later.
     fn claim(&self, user: &UserId) -> Result<ResponseBody, ErrorInfo> {
         let persist = || owner::save(&self.state_dir, user);
         match self.hub.claim(user, persist) {
@@ -265,16 +345,18 @@ impl Shared {
                 self.narrow(user);
                 Ok(ResponseBody::Claimed)
             }
-            // Someone else's claim got there first.
             Ok(false) => self.not_owner(),
             Err(message) => Err(error(ErrorCode::Internal, message)),
         }
     }
 
     /// Asks the OS to refuse everyone but the owner. If it cannot, the check
-    /// in [`Shared::answer`] still stands.
+    /// in [`Shared::answer`] still stands, the failure is logged once, and
+    /// the next accepted connection tries again.
     fn narrow(&self, owner: &UserId) {
-        if let Err(error) = self.listener.restrict_to(owner) {
+        let narrowed = self.listener.restrict_to(owner);
+        let was_due = self.narrowing_due.swap(narrowed.is_err(), Ordering::SeqCst);
+        if let (Err(error), false) = (narrowed, was_due) {
             let line = format!("the channel could not be narrowed to the owner: {error}");
             self.logs.push(&line);
         }

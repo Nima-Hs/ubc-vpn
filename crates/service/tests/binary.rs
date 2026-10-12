@@ -45,7 +45,15 @@ fn dev_mode_says_why_it_cannot_run_yet() {
 // makes GnuTLS write out session keys or weaken its settings.
 #[test]
 fn refuses_to_start_while_a_tls_variable_is_set() {
-    for name in FORBIDDEN_ENV {
+    // Spelled out here, so that dropping one from the list is noticed.
+    let names = [
+        "SSLKEYLOGFILE",
+        "GNUTLS_KEYLOGFILE",
+        "GNUTLS_SYSTEM_PRIORITY_FILE",
+        "GNUTLS_DEBUG_LEVEL",
+    ];
+    assert_eq!(names, FORBIDDEN_ENV);
+    for name in names {
         let (ok, stderr) = run(&[], Some(name));
         assert!(
             !ok && stderr.contains(&format!("while {name} is set")),

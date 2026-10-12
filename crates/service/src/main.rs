@@ -19,14 +19,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mode = args::parse(std::env::args().skip(1))?;
+    let mode = args::parse(std::env::args_os().skip(1))?;
     if let Some(name) = args::forbidden_env() {
         return Err(format!("refusing to start while {name} is set"));
     }
     let service = Service::start(platform(mode)?, Timeouts::default())?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
-    service.wait();
-    Ok(())
+    service.wait()
 }
 
 fn platform(mode: Run) -> Result<Platform, String> {

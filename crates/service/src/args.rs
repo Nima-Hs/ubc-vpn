@@ -1,5 +1,7 @@
 //! The service binary's command line and the environment it accepts.
 
+use std::ffi::OsString;
+
 /// How the binary was asked to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Run {
@@ -12,19 +14,24 @@ pub enum Run {
 }
 
 /// Reads the arguments after the program name. Anything unknown is an error,
-/// and `--dev` is unknown to a build without the `dev-mode` feature.
-pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Run, String> {
-    let read = |_run, arg: String| match arg.as_str() {
+/// an argument that is not Unicode included, and `--dev` is unknown to a
+/// build without the `dev-mode` feature.
+pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Run, String> {
+    let read = |_run, arg: OsString| match arg.to_str() {
         #[cfg(feature = "dev-mode")]
-        "--dev" => Ok(Run::Dev),
-        other => Err(format!("unknown argument: {other}")),
+        Some("--dev") => Ok(Run::Dev),
+        Some(other) => Err(format!("unknown argument: {other}")),
+        None => Err("unknown argument: it is not valid Unicode".to_string()),
     };
     args.into_iter().try_fold(Run::Installed, read)
 }
 
-/// Variables GnuTLS honours that would expose or weaken the tunnel's TLS.
-pub const FORBIDDEN_ENV: [&str; 3] = [
+/// Variables that would expose or weaken the tunnel's TLS: the two names
+/// under which a TLS library writes out session keys, and two that GnuTLS
+/// takes its settings and debug output from.
+pub const FORBIDDEN_ENV: [&str; 4] = [
     "SSLKEYLOGFILE",
+    "GNUTLS_KEYLOGFILE",
     "GNUTLS_SYSTEM_PRIORITY_FILE",
     "GNUTLS_DEBUG_LEVEL",
 ];

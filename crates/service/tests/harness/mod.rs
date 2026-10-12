@@ -1,6 +1,10 @@
 //! Shared by the test files: a service running on the platform fake, and a
 //! client that speaks the channel in raw lines.
-#![allow(dead_code, reason = "each test file uses its own part of this")]
+#![allow(
+    dead_code,
+    unused_imports,
+    reason = "each test file uses its own part of this"
+)]
 
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
@@ -23,10 +27,8 @@ use ubc_vpn_core::routes::RouteSet;
 use ubc_vpn_platform::fake::paths;
 use ubc_vpn_service::{Service, Timeouts};
 
-/// The cookie the pretend gateway accepts. Made up.
+/// A session cookie for requests to carry. Made up.
 pub const COOKIE: &str = "Zq7-made-up-0123456789";
-/// Where the pretend gateway lives.
-pub const GATEWAY: [u8; 4] = [192, 0, 2, 1];
 /// Longer than anything here should take. A regression fails, not hangs.
 pub const WAIT: Duration = Duration::from_secs(10);
 
@@ -46,22 +48,17 @@ pub fn user(name: &str) -> UserId {
     name.parse().unwrap()
 }
 
-pub fn connect(cookie: &str, addr: [u8; 4], subnets: &[&str], domains: &[&str]) -> RequestBody {
+/// A well-formed connect request carrying [`COOKIE`]. Nothing can connect
+/// yet, so what matters is that it is a request the service must read.
+pub fn good() -> RequestBody {
     RequestBody::Connect(ConnectParams {
-        cookie: Secret::new(cookie),
-        gateway_addr: Ipv4Addr::from(addr),
+        cookie: Secret::new(COOKIE),
+        gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
         routes: RouteSet {
-            subnets: subnets.iter().map(|s| s.parse().unwrap()).collect(),
-            dns_domains: domains.iter().map(|d| d.to_string()).collect(),
+            subnets: vec!["10.255.0.0/24".parse().unwrap()],
+            dns_domains: vec!["ece.example.test".to_string()],
         },
     })
-}
-
-/// A request that connects: the second subnet holds the gateway and the first
-/// holds the DNS server the pretend gateway assigns.
-pub fn good() -> RequestBody {
-    let subnets = ["10.255.0.0/24", "192.0.2.0/24"];
-    connect(COOKIE, GATEWAY, &subnets, &["ece.example.test"])
 }
 
 /// A service on fakes, with its files in a folder of its own.
