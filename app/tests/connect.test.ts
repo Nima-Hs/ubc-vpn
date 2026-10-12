@@ -948,6 +948,30 @@ describe("cancelling", () => {
         await until(() => !alive(pid), "the client ending", 3000);
     });
 
+    it("on a quit after Cancel, waits for a disconnect that is already on its way", async () => {
+        const { runner, phase, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ done: true }] },
+        );
+        disconnects.hold = true;
+        runner.cancel();
+        // The client has given its last line and gone; only the disconnect is
+        // still to be answered when the user quits.
+        await until(() => disconnects.asked === 1, "the disconnect being asked for");
+        const woundUp = runner.windDown(10_000);
+        expect(woundUp).not.toBeNull();
+        let done = false;
+        void woundUp?.then(() => {
+            done = true;
+        });
+        await pause(150);
+        expect(done).toBe(false);
+        disconnects.release();
+        await until(() => done, "the quit being let through");
+        expect(phase()).toBe("idle");
+        expect(disconnects.asked).toBe(1);
+    });
+
     it("on a quit after Cancel, does not wait past the limit for a disconnect that is not answered", async () => {
         const { runner, disconnects } = await atPrompt(
             [{ prompt: PASSWORD_PROMPT }, { hang: true }],

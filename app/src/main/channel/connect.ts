@@ -56,8 +56,9 @@ export interface ConnectOptions {
      * Asks the service, through the bridge, to disconnect. Called when a
      * login the user gave up was accepted by the service all the same, or
      * may have been. Asking is harmless when nothing is connected.
+     * `cancelledAt` is when the user gave the login up, by the clock.
      */
-    disconnect(): Promise<unknown>;
+    disconnect(cancelledAt: number): Promise<unknown>;
     /**
      * How long a client has to give its last line after a cancel, and to
      * leave once the app has let go of it, before it is killed.
@@ -150,6 +151,8 @@ export class ConnectRunner implements LoginRunner {
      * know whether the service was asked to connect.
      */
     private cancelling: NodeJS.Timeout | null = null;
+    /** When the user last gave a login up. */
+    private cancelledAt = 0;
     /** A disconnect after a cancel is on its way to the service. */
     private settling = false;
     /** Told when a cancel has been wound up, if a quit is waiting for that. */
@@ -275,6 +278,7 @@ export class ConnectRunner implements LoginRunner {
             return;
         }
         this.waiting = null;
+        this.cancelledAt = Date.now();
         child.stdin.write(encodeLine(CANCEL));
         // Its input stays open: the client takes a closed input as a cancel
         // too, and its last line is still to come.
@@ -433,7 +437,7 @@ export class ConnectRunner implements LoginRunner {
             };
             // Whatever the answer, the service's own state says what is so.
             Promise.resolve()
-                .then(() => this.options.disconnect())
+                .then(() => this.options.disconnect(this.cancelledAt))
                 .then(settled, settled);
         }
     }
