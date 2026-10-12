@@ -1,0 +1,90 @@
+name: Platform (Unix)
+
+# The Unix socket channel is the boundary between ordinary programs and the
+# root-level service. Some of its rules can only be tested by root with a
+# second user to play the stranger, which a developer machine does not offer
+# by default. GitHub's Linux and macOS runners have passwordless sudo, so
+# those tests run here, and this workflow fails if any of them was skipped.
+
+on:
+  pull_request:
+    paths:
+      - crates/platform/**
+      - crates/core/**
+      - .github/workflows/platform-unix.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/platform/**
+      - crates/core/**
+      - .github/workflows/platform-unix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-unix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  channel:
+    name: channel (${{ matrix.os }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - name: Dev-mode code is free of warnings
+        if: matrix.profile == 'debug'
+        run: cargo clippy --locked -p ubc-vpn-platform --features dev-mode --all-targets -- -D warnings
+      # A record of what the channel's rules meet on this runner: every
+      # folder on the way to the installed socket must be root's alone.
+      - name: The folders the installed channel relies on
+        run: |
+          uname -a
+          if [ "$RUNNER_OS" = macOS ]; then
+            sw_vers
+            ls -ldn / /Library "/Library/Application Support" /var /private/var/run
+          else
+            ls -ldn / /run
+          fi
+      # sudo resets PATH and the toolchain's environment, so the tests are
+      # built once here and the same program is then run as each user.
+      - name: Build the tests
+        run: |
+          cargo test --locked -p ubc-vpn-platform --features dev-mode $PROFILE \
+            --no-run --message-format=json > build.json
+          tests=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' build.json)
+          test -x "$tests"
+          echo "TESTS=$tests" >> "$GITHUB_ENV"
+        env:
+          PROFILE: ${{ matrix.profile == 'release' && '--release' || '' }}
+      - name: Tests as an ordinary user, in dev mode
+        run: |
+          "$TESTS" --nocapture 2>&1 | tee user.log
+          if grep "SKIPPED, needs dev mode" user.log; then
+            echo "A test that needs no root was skipped."
+            exit 1
+          fi
+      # The variable turns every "SKIPPED, needs root" into a failure.
+      - name: Tests as root, with other users to play the stranger
+        run: sudo env UBC_VPN_REQUIRE_ROOT=1 "$TESTS" --nocapture 2>&1 | tee root.log
+      # A test that is skipped passes. So prove from the log that each test
+      # needing root really ran.
+      - name: The root-only tests really ran
+        run: |
+          for test in "squatted socket" narrowing suite dev; do
+            if ! grep -q "RAN AS ROOT: $test" root.log; then
+              echo "The root-only test '$test' did not run."
+              exit 1
+            fi
+          done
+          if grep "SKIPPED" root.log; then
+            echo "A test was skipped."
+            exit 1
+          fi
