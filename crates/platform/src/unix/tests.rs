@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use rustix::process::geteuid;
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 
-use super::{NOT_A_FOLDER, NOT_THE_SERVICE, SocketTransport, TOO_OPEN, WRONG_OWNER, set_mode};
+use super::{NOT_A_FOLDER, SocketTransport, TOO_OPEN, WRONG_OWNER, set_mode};
 use crate::{
     Connection, Error, Listener, Mode, PhysicalNetwork, Platform, SplitDns, Transport, UserId,
     Verified, lock, os, suite,
@@ -437,14 +437,13 @@ fn an_installed_client_refuses_a_socket_in_a_folder_that_is_not_roots() {
             .connect(&socket_in(&folder))
             .expect("root's own");
         chown(&folder, Some(STRANGER), None).expect("hand over");
-        assert_eq!(connect(), failed(WRONG_OWNER));
+        assert_eq!(connect(), Some(Error::NotTheService), "a stranger's folder");
         chown(&folder, Some(0), None).expect("take back");
         set_mode(&folder, 0o775).expect("open to a group");
-        assert_eq!(connect(), failed(TOO_OPEN));
+        assert_eq!(connect(), Some(Error::NotTheService), "a group's folder");
     } else {
         // The temporary folder is this user's, or under one anyone can write.
-        let refusals = [NOT_A_FOLDER, WRONG_OWNER, TOO_OPEN].map(failed);
-        assert!(refusals.contains(&connect()), "{:?}", connect());
+        assert_eq!(connect(), Some(Error::NotTheService));
     }
 }
 
@@ -476,12 +475,12 @@ fn a_client_refuses_a_squatted_socket() {
     let _squatter = as_user(STRANGER, || UnixListener::bind(&name)).expect("bind");
     set_mode(&folder, 0o755).expect("close the folder");
     chown(&name, Some(0), None).expect("take the file");
-    assert_eq!(transport.connect(&name).err(), failed(NOT_THE_SERVICE));
+    assert_eq!(transport.connect(&name).err(), Some(Error::NotTheService));
 
     // A link to a real service's socket is not that socket.
     let name = socket_in(&sandbox.dir);
     symlink(socket_in(&sandbox.dir.join("file")), &name).expect("link");
-    assert_eq!(transport.connect(&name).err(), failed(NOT_THE_SERVICE));
+    assert_eq!(transport.connect(&name).err(), Some(Error::NotTheService));
 }
 
 // Security rule: once narrowed, the OS itself refuses everyone but the owner
@@ -543,7 +542,7 @@ fn a_dev_channel_refuses_another_user_from_the_start() {
     let denied = Some(ErrorKind::PermissionDenied);
     assert_eq!(kernel_connect(STRANGER, &name).err(), denied, "the kernel");
     let stranger = as_user(STRANGER, || transport.connect(&name));
-    assert_eq!(stranger.err(), failed(WRONG_OWNER));
+    assert_eq!(stranger.err(), Some(Error::NotTheService));
     let _owner = as_user(OWNER, || transport.connect(&name)).expect("the owner");
     let (_server, caller) = listener.accept().expect("accept");
     assert_eq!(caller, id(OWNER));
@@ -551,7 +550,7 @@ fn a_dev_channel_refuses_another_user_from_the_start() {
     // This user's folder and file, but another user answers.
     chown(shared.join("ch"), Some(0), None).expect("take the folder");
     chown(&name, Some(0), None).expect("take the file");
-    assert_eq!(transport.connect(&name).err(), failed(NOT_THE_SERVICE));
+    assert_eq!(transport.connect(&name).err(), Some(Error::NotTheService));
 }
 
 fn env(pairs: &'static [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {

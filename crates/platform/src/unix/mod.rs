@@ -24,7 +24,10 @@
 //!   that belongs to the service or to the caller, and a peer that is the
 //!   service (root when installed, the current user in dev mode). The peer
 //!   check is the one that cannot be raced: it describes the very socket the
-//!   client is connected to.
+//!   client is connected to. A client that finds otherwise reports
+//!   [`Error::NotTheService`] and has sent nothing. The one exception is a
+//!   socket file handed to another user, which only narrowing does in a
+//!   folder like that: it reports [`Error::PermissionDenied`].
 
 #[cfg(test)]
 mod tests;
@@ -53,12 +56,11 @@ use crate::{
     lock, os,
 };
 
-/// What `listen` and `connect` report for a folder that breaks the rule.
+/// What `listen` reports for a folder that breaks the rule. A client reports
+/// [`Error::NotTheService`] for all three.
 pub(crate) const NOT_A_FOLDER: &str = "the channel's folder is a link or not a folder";
 pub(crate) const WRONG_OWNER: &str = "the channel's folder belongs to the wrong user";
 pub(crate) const TOO_OPEN: &str = "the channel's folder can be changed by other users";
-/// What a client reports when the socket is held by something else.
-pub(crate) const NOT_THE_SERVICE: &str = "the channel is held by a program that is not the service";
 
 /// How the OS modules read the environment. Tests pass their own.
 pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
@@ -237,10 +239,13 @@ impl Transport for SocketTransport {
         let service = service_user(self.mode, me);
         // Security rule: a socket anyone else could have put there is not
         // the service's.
-        check_folder(self.mode, folder, me)?;
+        match check_folder(self.mode, folder, me) {
+            Err(Error::Failed(_)) => return Err(Error::NotTheService),
+            checked => checked?,
+        }
         let file = fs::symlink_metadata(path)?;
         if !file.file_type().is_socket() {
-            return Err(Error::Failed(NOT_THE_SERVICE.to_string()));
+            return Err(Error::NotTheService);
         }
         // Security rule: the socket is the service's, or was handed to this
         // user by narrowing. Anyone else's is narrowed to them.
@@ -256,7 +261,7 @@ impl Transport for SocketTransport {
         };
         // Security rule: whoever answers must be the service itself.
         if os::peer_user(&stream)? != service {
-            return Err(Error::Failed(NOT_THE_SERVICE.to_string()));
+            return Err(Error::NotTheService);
         }
         Ok(Connection::new(Box::new(SocketConnection::new(stream)?)))
     }
