@@ -12,8 +12,8 @@ use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
 
 use crate::settings::{
-    Command, nowhere_to_keep, partial_name, place, remember_username, reset_with, run, sweep,
-    write_partial,
+    Command, kept_notice, nowhere_to_keep, partial_name, place, remember_username, reset_with, run,
+    sweep, write_partial,
 };
 
 const GOOD: &str =
@@ -1121,6 +1121,14 @@ fn no_number_of_resets_replaces_a_kept_file() {
         (good.to_string(), "damaged, the third time".to_string())
     );
     assert!(machine.kept(2).is_dir());
+
+    // The sentence about the kept files is for a reset that could not
+    // write. With every name still taken, a save that fails says nothing of
+    // them, and neither does a reset that did not fail.
+    let dir = machine.root.join("settings");
+    assert!(kept_notice(RESET_ALL, true, &dir).is_some());
+    assert_eq!(kept_notice(Command::SetRoutes, true, &dir), None);
+    assert_eq!(kept_notice(RESET, false, &dir), None);
 }
 
 // A reset that could not move the old file, or could not write the new
@@ -1215,6 +1223,13 @@ fn a_link_in_place_of_the_settings_is_moved_and_not_followed() {
     assert!(moved.is_symlink() && !nowhere.exists());
     let fresh = std::fs::symlink_metadata(machine.settings_file()).unwrap();
     assert!(fresh.is_file());
+
+    // That link now sits at a kept name, leading nowhere. It still takes
+    // the name: the next reset goes to the one after it.
+    std::fs::write(machine.settings_file(), "not json").unwrap();
+    assert_eq!(machine.reset(RESET), was_reset(3));
+    let still = std::fs::symlink_metadata(machine.kept(2)).unwrap();
+    assert!(still.is_symlink() && !nowhere.exists());
 }
 
 // Security rule: the folder rule holds for `reset` too. In a folder others

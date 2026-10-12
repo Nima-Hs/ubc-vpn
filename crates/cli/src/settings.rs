@@ -22,6 +22,8 @@ use ubc_vpn_core::settings_cli::{
 };
 use ubc_vpn_platform::{Paths, Platform};
 
+use crate::settings_lock::change;
+
 const SETTINGS: &str = "settings.json";
 /// How long a partial file is left alone. No save takes this long, so an
 /// older one was left by a save that was cut short.
@@ -88,15 +90,33 @@ pub fn run(
     {
         let _ = writeln!(err, "ubc-vpn: {why}");
     }
-    let full = matches!(command, Command::Reset { .. })
-        && answered == Err(SettingsFailureCode::Unwritable);
-    if let Some(why) = dir.filter(|_| full).and_then(nowhere_to_keep) {
+    let unwritten = answered == Err(SettingsFailureCode::Unwritable);
+    if let Some(why) = dir.and_then(|dir| kept_notice(command, unwritten, dir)) {
         let _ = writeln!(err, "ubc-vpn: {why}");
     }
     let line = answered.or_else(|error| encode(&SettingsFailure { error }));
     let written = out.write_all(line.unwrap_or_default().as_bytes());
     let unsaid = written.and_then(|()| out.flush()).is_err();
     u8::from(failed || unsaid)
+}
+
+/// For tests only: something to do in the middle of a save.
+#[cfg(test)]
+pub(crate) type Look = Box<dyn Fn(&Path)>;
+
+// For tests only: what to do in the middle of every save made on this
+// thread, to look at what the one saving holds at that moment.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DURING_A_SAVE: std::cell::RefCell<Option<Look>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What to say about the kept files, if anything: only when it was a reset
+/// that could not write, and only when their names being taken is why.
+pub(crate) fn kept_notice(command: Command, unwritten: bool, dir: &Path) -> Option<String> {
+    let reset = matches!(command, Command::Reset { .. });
+    nowhere_to_keep(dir).filter(|_| reset && unwritten)
 }
 
 /// The line to write for `command`, or why there is none.
@@ -144,8 +164,12 @@ fn answer(
     .map_err(too_long)?;
     let mut settings = Settings::default();
     let mut current = None;
+    // Held from the read of the stored settings to the save below, so that
+    // no other change to them can fall in between and be undone by it.
+    let mut _changing = None;
     if command == Command::SetRoutes {
         let dir = settings_dir.ok_or(SettingsFailureCode::Unwritable)?;
+        _changing = Some(change(dir)?);
         current = stored(dir)?;
         if let Some(text) = &current {
             settings = understood(text)?;
@@ -174,6 +198,7 @@ pub(crate) fn remember_username(
     policy: Option<&Policy>,
     username: Option<&str>,
 ) -> Result<(), SettingsFailureCode> {
+    let _changing = change(dir)?;
     let current = stored(dir)?;
     let text = replace_username(current.as_deref(), username)?;
     let too_long = |_| SettingsFailureCode::BadInput;
@@ -213,6 +238,12 @@ pub(crate) fn reset_with(
     if folder_problem(dir).is_some() {
         return Err(SettingsFailureCode::Unreadable);
     }
+    // With no settings folder there are no settings to reset, and none is
+    // made for the asking.
+    if !dir.is_dir() {
+        return Ok(ResetReply::NotNeeded);
+    }
+    let _changing = change(dir)?;
     // Whatever is at the name counts, a link or a folder too. The link
     // itself is asked about and later moved, and never followed. With
     // nothing there, there is nothing to reset and nothing is made.
@@ -319,7 +350,7 @@ pub(crate) fn folder_problem(dir: &Path) -> Option<String> {
 /// Makes the settings folder if it is not there. On Unix a folder made here
 /// is the user's alone, mode 0700, whatever the umask; one that is already
 /// there is left as it is, and must pass [`folder_problem`].
-fn create_folder(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_folder(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -385,6 +416,8 @@ pub(crate) fn partial_name() -> String {
 /// old file is untouched.
 fn save(dir: &Path, text: &str) -> io::Result<()> {
     create_folder(dir)?;
+    #[cfg(test)]
+    DURING_A_SAVE.with(|look| look.borrow().as_ref().map(|look| look(dir)));
     sweep(dir, STALE);
     let partial = write_partial(dir, text, &mut partial_name)?;
     place(&partial, dir)
