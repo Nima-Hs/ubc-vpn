@@ -15,7 +15,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use ubc_vpn_core::login::PromptKind;
+use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{
     ClientKind, ConnectParams, ErrorCode, Event, RequestBody, ResponseBody,
@@ -57,20 +57,53 @@ pub trait Ask {
 /// one.
 pub type Engines<'a> = &'a dyn Fn(&Policy) -> Option<Box<dyn LoginEngine>>;
 
-/// Why a command stopped: its exit status and a sentence for the user.
-type Stop = (u8, String);
+/// Why a command stopped.
+pub(crate) struct Stop {
+    /// The exit status.
+    pub exit: u8,
+    /// The same reason as the app is told it by `connect --json`.
+    pub code: LoginErrorCode,
+    /// A sentence for the user.
+    pub message: String,
+}
+
+/// A failure that has no exit status of its own.
+fn failed(code: LoginErrorCode, message: &str) -> Stop {
+    Stop {
+        exit: FAILED,
+        code,
+        message: message.to_string(),
+    }
+}
 
 fn stop(error: ClientError) -> Stop {
-    match &error {
-        ClientError::Refused(refusal) if refusal.code == ErrorCode::Busy => busy(),
-        _ => explain(&error),
+    let code = match &error {
+        ClientError::Refused(refusal) => match refusal.code {
+            ErrorCode::Busy => return busy(),
+            ErrorCode::NotOwner => LoginErrorCode::NotOwner,
+            ErrorCode::RouteRefused => LoginErrorCode::RouteRefused,
+            _ => LoginErrorCode::Internal,
+        },
+        ClientError::NotOwner => LoginErrorCode::NotOwner,
+        // Not running, another version, another program in its place, or
+        // gone part-way: each has its own sentence.
+        _ => LoginErrorCode::ServiceUnavailable,
+    };
+    let (exit, message) = explain(&error);
+    Stop {
+        exit,
+        code,
+        message,
     }
 }
 
 fn busy() -> Stop {
     let message = "The VPN is connected, or is connecting or disconnecting. \
                    Run `ubc-vpn disconnect` first.";
-    (BUSY, message.to_string())
+    Stop {
+        exit: BUSY,
+        ..failed(LoginErrorCode::Busy, message)
+    }
 }
 
 /// Runs `connect` and returns the exit status.
@@ -82,7 +115,8 @@ pub fn connect(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
-    let ended = try_connect(platform, engines, ask, limits, err);
+    let ended = start(platform, engines, ask, &Cancel::new(), limits, err)
+        .and_then(|mut client| follow(&mut client, &ConnState::Connecting));
     report(ended, &ConnState::Connecting, out, err)
 }
 
@@ -118,7 +152,7 @@ fn report(
         }
         Ok(state @ ConnState::LoginNeeded) => (LOGIN_REFUSED, describe(&state)),
         Ok(state) => (FAILED, describe(&state)),
-        Err(stop) => stop,
+        Err(stop) => (stop.exit, stop.message),
     };
     say(err, &format!("ubc-vpn: {message}"), code)
 }
@@ -140,32 +174,35 @@ fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
     Ok(client)
 }
 
-fn try_connect(
+/// Does everything up to the service accepting the connect request: the
+/// checks, the login, and the request. `cancel` stops the login.
+pub(crate) fn start(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
+    cancel: &Cancel,
     limits: Limits,
     err: &mut dyn Write,
-) -> Result<ConnState, Stop> {
-    let failed = |message: &str| (FAILED, message.to_string());
+) -> Result<Client, Stop> {
+    let internal = |message: &str| failed(LoginErrorCode::Internal, message);
     if let Some(why) = ask.unusable() {
-        return Err((FAILED, why));
+        return Err(internal(&why));
     }
     let platform = platform().map_err(|e| stop(e.into()))?;
 
     // What can be known without logging in is checked before logging in.
     let no_policy = "The policy file is missing or not valid. Reinstall UBC VPN.";
-    let policy = settings::policy(&platform.paths.policy_dir).ok_or_else(|| failed(no_policy))?;
-    let gateway = Gateway::from_policy(&policy).map_err(|_| failed(no_policy))?;
+    let policy = settings::policy(&platform.paths.policy_dir).ok_or_else(|| internal(no_policy))?;
+    let gateway = Gateway::from_policy(&policy).map_err(|_| internal(no_policy))?;
     let no_engine = "This build has no VPN engine yet, so it cannot connect.";
-    let engine = engines(&policy).ok_or_else(|| failed(no_engine))?;
+    let engine = engines(&policy).ok_or_else(|| internal(no_engine))?;
     let saved = saved(&platform)?;
     // The routes come from the user's settings and from nowhere else.
     if let Err(why) = saved.routes.check(policy.allowed_routes.as_deref()) {
         // The reason can quote the settings file. It does so with every
         // control character written out as an escape, which a test checks.
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
-        return Err((FAILED, message));
+        return Err(failed(LoginErrorCode::RouteRefused, &message));
     }
     let mut client = owner(&platform, limits)?;
     let now = client.request(RequestBody::Status).map_err(stop)?;
@@ -180,7 +217,14 @@ fn try_connect(
     let Session {
         cookie,
         gateway_addr,
-    } = login(&*engine, &gateway, saved.username.as_deref(), ask, err)?;
+    } = login(
+        &*engine,
+        &gateway,
+        saved.username.as_deref(),
+        ask,
+        cancel,
+        err,
+    )?;
     // The cookie goes into the request and nowhere else.
     let params = ConnectParams {
         cookie,
@@ -188,12 +232,17 @@ fn try_connect(
         routes: saved.routes,
     };
     client.request(RequestBody::Connect(params)).map_err(stop)?;
-    follow(&mut client, &ConnState::Connecting)
+    Ok(client)
 }
 
 /// The user's settings, or the defaults when none are saved.
 fn saved(platform: &Platform) -> Result<Settings, Stop> {
-    let unreadable = |_| (FAILED, "The settings file cannot be read.".to_string());
+    let unreadable = |_| {
+        failed(
+            LoginErrorCode::Internal,
+            "The settings file cannot be read.",
+        )
+    };
     let text = settings::stored(&platform.paths.settings_dir).map_err(unreadable)?;
     match text {
         Some(text) => settings::understood(&text).map_err(unreadable),
@@ -209,6 +258,7 @@ fn login(
     gateway: &Gateway,
     username: Option<&str>,
     ask: &mut dyn Ask,
+    cancel: &Cancel,
     err: &mut dyn Write,
 ) -> Result<Session, Stop> {
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -224,7 +274,13 @@ fn login(
         given.inspect(|secret| logs.hide(secret))
     };
     let mut prompts = Prompts::new(&mut answer);
-    let result = engine.login(gateway, &mut prompts, &Cancel::new(), &logs);
+    let result = engine.login(gateway, &mut prompts, cancel, &logs);
+    // A login that was cancelled too late to stop still yields a session.
+    // It is thrown away: the user gave up, so nothing is connected.
+    let result = match result {
+        Ok(_) if cancel.is_cancelled() => Err(LoginError::Cancelled),
+        other => other,
+    };
     // The engine held the cookie before this code did, so a line it wrote on
     // the way may show it. The lines are printed only now, with it removed.
     // They can also carry text the gateway sent, some of it from before its
@@ -239,12 +295,17 @@ fn login(
         let _ = writeln!(err, "ubc-vpn: {}", clean(&line));
     }
     result.map_err(|error| {
-        let code = match error {
-            LoginError::WrongPassword => LOGIN_REFUSED,
-            LoginError::Cancelled => CANCELLED,
-            _ => FAILED,
+        let (exit, code) = match error {
+            LoginError::WrongPassword => (LOGIN_REFUSED, LoginErrorCode::WrongPassword),
+            LoginError::Cancelled => (CANCELLED, LoginErrorCode::Cancelled),
+            LoginError::PinMismatch => (FAILED, LoginErrorCode::PinMismatch),
+            LoginError::GatewayUnreachable => (FAILED, LoginErrorCode::GatewayUnreachable),
+            LoginError::Failed => (FAILED, LoginErrorCode::Internal),
         };
-        (code, error.to_string())
+        Stop {
+            exit,
+            ..failed(code, &error.to_string())
+        }
     })
 }
 
