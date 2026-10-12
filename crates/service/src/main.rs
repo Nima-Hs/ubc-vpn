@@ -3,10 +3,14 @@
 //! only chooses the parts and starts it.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use ubc_vpn_platform::{Mode, Platform};
+use ubc_vpn_engine::TunnelEngine;
+use ubc_vpn_platform::Platform;
 use ubc_vpn_service::args::{self, Run};
 use ubc_vpn_service::{Service, Timeouts};
+
+type Parts = (Platform, Arc<dyn TunnelEngine>);
 
 fn main() -> ExitCode {
     match run() {
@@ -23,26 +27,26 @@ fn run() -> Result<(), String> {
     if let Some(name) = args::forbidden_env() {
         return Err(format!("refusing to start while {name} is set"));
     }
-    let service = Service::start(platform(mode)?, Timeouts::default())?;
+    let (platform, engine) = parts(mode)?;
+    let service = Service::start(platform, engine, Timeouts::default())?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
     Err(service.wait())
 }
 
-fn platform(mode: Run) -> Result<Platform, String> {
+fn parts(mode: Run) -> Result<Parts, String> {
     match mode {
-        Run::Installed => Platform::native(Mode::Installed)
-            .map_err(|e| format!("the service cannot run on this system yet ({e})")),
+        Run::Installed => Err("this build has no VPN engine yet, so it cannot run".to_string()),
         #[cfg(feature = "dev-mode")]
         Run::Dev => dev(),
     }
 }
 
-/// Dev mode: the real channel and files for `Mode::Dev`, with fake routing
-/// and fake DNS.
+/// Dev mode: the real channel and files for `Mode::Dev`, with fake routing,
+/// fake DNS and the fake engine.
 #[cfg(feature = "dev-mode")]
-fn dev() -> Result<Platform, String> {
-    use std::sync::Arc;
-    use ubc_vpn_platform::fake::Fake;
+fn dev() -> Result<Parts, String> {
+    use ubc_vpn_engine::fake::{FakeEngine, Script};
+    use ubc_vpn_platform::{Mode, fake::Fake};
 
     let native = Platform::native(Mode::Dev).map_err(|e| {
         format!(
@@ -51,10 +55,15 @@ fn dev() -> Result<Platform, String> {
         )
     })?;
     let fake = Fake::new();
-    Ok(Platform {
+    let platform = Platform {
         routes: Arc::new(fake.clone()),
         dns: Arc::new(fake.clone()),
         events: Arc::new(fake),
         ..native
-    })
+    };
+    // The pretend gateway presents the dev policy's first pin, so that
+    // policy accepts it. A valid policy always has one.
+    let mut policy = ubc_vpn_service::policy::load(&platform.paths.policy_dir)?;
+    let script = Script::new(policy.pins.remove(0));
+    Ok((platform, Arc::new(FakeEngine::new(script))))
 }

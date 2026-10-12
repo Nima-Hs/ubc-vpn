@@ -13,6 +13,7 @@ use ubc_vpn_core::protocol::{
     ErrorCode, ErrorInfo, Hello, HelloReply, Outcome, PROTOCOL_VERSION, Request, RequestBody,
     Response, ResponseBody, ServerMessage, decode, encode, peek_protocol_version,
 };
+use ubc_vpn_engine::TunnelEngine;
 use ubc_vpn_platform::{Connection, Error, Listener, Platform, UserId};
 
 use crate::hub::{Hub, send};
@@ -45,8 +46,8 @@ pub struct Timeouts {
     /// how long anyone who is not the owner may take over each later line.
     pub stranger: Duration,
     /// How long any client may take to accept a line. One that does not is
-    /// closed, so a client that stops reading delays a state change by at
-    /// most this long, once.
+    /// closed. Events are written by a thread of the connection's own, so a
+    /// client that stops reading delays nobody but itself.
     pub write: Duration,
 }
 
@@ -122,7 +123,11 @@ impl Service {
     /// and refuses every `connect`. A state file it cannot read or understand
     /// does, and so does a channel it cannot open or cannot narrow to the
     /// owner it has stored; the error is a sentence for the log.
-    pub fn start(platform: Platform, timeouts: Timeouts) -> Result<Self, String> {
+    pub fn start(
+        platform: Platform,
+        engine: Arc<dyn TunnelEngine>,
+        timeouts: Timeouts,
+    ) -> Result<Self, String> {
         let logs = Logs::default();
         let policy = policy::load(&platform.paths.policy_dir);
         if let Err(message) = &policy {
@@ -140,8 +145,9 @@ impl Service {
             narrowed.map_err(|e| format!("The channel could not be kept to the owner: {e}."))?;
         }
         let hub = Arc::new(Hub::new(owner));
+        let session = Session::start(&platform, engine, policy, hub.clone(), logs.clone())?;
         let shared = Arc::new(Shared {
-            session: Session::start(policy),
+            session,
             serving: Mutex::default(),
             narrowing_due: AtomicBool::new(false),
             unreadable: AtomicUsize::new(0),
