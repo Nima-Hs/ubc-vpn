@@ -362,9 +362,10 @@ fn nothing_from_a_request_reaches_the_log() {
         assert!(stranger.is_closed(), "no answer to what is not a request");
     }
     let mut alice = rig.owner();
-    assert_eq!(alice.ask(good()), Err(ErrorCode::Internal));
+    assert_eq!(alice.ask(good()), Ok(ResponseBody::Accepted));
     alice.conn.write_line(&unreadable).unwrap();
-    assert!(alice.is_closed());
+    // After the events of the connect that was accepted.
+    assert!((0..5).any(|_| alice.is_closed()));
 
     let logs = rig.logs();
     let about = |who: &str| {
@@ -374,20 +375,6 @@ fn nothing_from_a_request_reaches_the_log() {
     assert_eq!(about("not the owner"), 1, "counted, not logged each time");
     assert_eq!(about("from the owner"), 1);
     assert!(!logs.join("\n").contains(COOKIE), "{logs:?}");
-    assert!(!logs.join("\n").contains("connect"), "{logs:?}");
-}
-
-// Connecting is not built yet. The service says so; it does not pretend.
-#[test]
-fn connect_and_disconnect_say_they_are_not_available_yet() {
-    let rig = rig();
-    let mut alice = rig.owner();
-    assert_eq!(alice.ask(good()), Err(ErrorCode::Internal));
-    assert_eq!(alice.ask(RequestBody::Disconnect), Err(ErrorCode::Internal));
-    assert!(alice.lines.iter().all(|line| !line.contains(COOKIE)));
-    assert!(alice.lines[2].contains("Connecting is not available in this version yet"));
-    assert!(alice.lines[3].contains("Disconnecting is not available"));
-    assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
 }
 
 /// Makes `link` a symbolic link to the file `target`, where the OS and the

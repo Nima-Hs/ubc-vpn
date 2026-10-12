@@ -1,6 +1,6 @@
 //! What the platform fake cannot show: the limit the service puts on its
-//! writes, a connection whose thread panics, and what happens when accepting
-//! ends by itself. A transport made for these tests stands in for the fake's.
+//! writes, clients that stop reading, a connection whose thread panics, and
+//! what happens when accepting ends by itself. A transport made for these tests stands in for the fake's.
 
 mod harness;
 
@@ -171,7 +171,7 @@ fn start(rig: &Rig, channel: &Scripted, timeouts: Timeouts) -> Service {
         transport: Arc::new(channel.clone()),
         ..rig.fake.platform(&rig.root)
     };
-    Service::start(platform, timeouts).unwrap()
+    Service::start(platform, rig.spy.clone(), timeouts).unwrap()
 }
 
 /// Waits for something that should happen soon. A regression fails here.
@@ -184,6 +184,8 @@ fn until(what: &str, happened: impl Fn() -> bool) {
 }
 
 const HELLO: &str = r#"{"protocol_version":2,"client":"app","client_version":"0.1.0"}"#;
+const CLAIM: &str = r#"{"id":1,"body":{"method":"claim"}}"#;
+const STATUS: &str = r#"{"id":2,"body":{"method":"status"}}"#;
 
 // Security rule: every write to a client has a time limit, so one that
 // stops reading is closed and cannot hold a thread for ever.
@@ -202,6 +204,41 @@ fn every_connection_is_given_the_write_limit() {
     // The service answers the hello that never came; that is a write.
     until("a write", || peer.lines() == 1);
     assert_eq!(peer.state().write_limits, [Some(write)]);
+}
+
+// Security rule: owner connections that stop reading delay nobody else.
+// Nothing is written to a client while the hub's lock is held, so a healthy
+// client is served while several stuck ones still wait out their limit.
+#[test]
+fn clients_that_stop_reading_delay_nobody_else() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    // Far longer than the test: nothing here may wait for it.
+    let timeouts = Timeouts {
+        write: Duration::from_secs(120),
+        ..Timeouts::default()
+    };
+    let _service = start(&rig, &channel, timeouts);
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+
+    // Each takes the hello's answer and then never reads again, so the
+    // state it is owed as the owner's connection is never taken.
+    let stuck = [(); 3].map(|()| Peer::sending(&[HELLO]));
+    for peer in &stuck {
+        peer.state().takes = Some(1);
+        channel.connect(peer);
+        until("a write nobody takes", || peer.state().holding_a_write);
+    }
+
+    let healthy = Peer::sending(&[HELLO, STATUS]);
+    channel.connect(&healthy);
+    until("the healthy client is served", || healthy.lines() == 3);
+    let received = healthy.state().received.clone();
+    assert!(received.contains(r#""kind":"state_changed""#), "{received}");
+    assert!(received.contains(r#""kind":"status""#), "{received}");
+    assert!(stuck.iter().all(|peer| peer.lines() == 1), "still stuck");
 }
 
 // A connection's place, and the connection itself, are given back by a

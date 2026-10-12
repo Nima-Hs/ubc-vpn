@@ -4,18 +4,21 @@
 //!
 //! One file per job: `args` (the command line), `policy` (the policy file),
 //! `owner` (the state file), `logs` (the log buffer), `hub` (who is connected
-//! and what they are told), `server` (the channel) and `session` (connecting,
-//! which is not built yet).
+//! and what they are told), `server` (the channel), `session` (the connection
+//! state machine), `connect`, `verify` and `teardown` (its three steps).
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub mod args;
+mod connect;
 mod hub;
 mod logs;
 mod owner;
 pub mod policy;
 mod server;
 mod session;
+mod teardown;
+mod verify;
 
 pub use logs::Logs;
 pub use server::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS, Service, Timeouts};

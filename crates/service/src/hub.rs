@@ -1,8 +1,15 @@
 //! Who is connected, who the owner is, and what the owner's connections are
 //! told. One lock covers all three, so a connection can neither miss a state
 //! change nor be told about one it has no right to see.
+//!
+//! Nothing is ever written to a connection while that lock is held. Under
+//! the lock a state is only put in a connection's queue; a thread of the
+//! connection's own writes it. So a client that stops reading holds up its
+//! own events until the write limit closes it, and nobody else's.
 
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use ubc_vpn_core::protocol::{Event, ServerMessage, encode};
 use ubc_vpn_core::state::ConnState;
@@ -22,8 +29,9 @@ struct Inner {
 struct Client {
     user: UserId,
     conn: Arc<Connection>,
-    /// Whether it receives events. Only ever true for the owner.
-    subscribed: bool,
+    /// Where its events are queued, once it receives any. Only ever set
+    /// for the owner.
+    events: Option<Sender<ConnState>>,
 }
 
 /// Sends one message. A failed write has already closed the connection.
@@ -32,12 +40,25 @@ pub(crate) fn send(conn: &Connection, message: &ServerMessage) -> bool {
 }
 
 /// Starts sending events to an owner's connection, beginning with the current
-/// state, and lifts its read limit: see [`crate::Timeouts`].
+/// state, and lifts its read limit: see [`crate::Timeouts`]. Writes nothing
+/// itself: it starts the connection's writer and queues the state for it.
 fn subscribe(client: &mut Client, state: &ConnState) {
     let _ = client.conn.set_read_timeout(None);
-    client.subscribed = true;
-    let event = Event::StateChanged(state.clone());
-    send(&client.conn, &ServerMessage::Event(event));
+    let (events, queued) = mpsc::channel();
+    let conn = client.conn.clone();
+    // Ends when the hub forgets the connection or a write fails, which
+    // closes the connection.
+    let write = move || {
+        let event = |state| ServerMessage::Event(Event::StateChanged(state));
+        let _ = queued
+            .into_iter()
+            .try_for_each(|state| send(&conn, &event(state)).then_some(()));
+    };
+    if thread::Builder::new().spawn(write).is_err() {
+        return client.conn.close();
+    }
+    let _ = events.send(state.clone());
+    client.events = Some(events);
 }
 
 impl Hub {
@@ -65,7 +86,7 @@ impl Hub {
         let mut client = Client {
             user,
             conn,
-            subscribed: false,
+            events: None,
         };
         if inner.owner.as_ref() == Some(&client.user) {
             subscribe(&mut client, &inner.state);
@@ -102,6 +123,20 @@ impl Hub {
             owned
         });
         Ok(true)
+    }
+
+    /// Records the new state and queues it for every connection of the
+    /// owner, in the order states are published.
+    pub(crate) fn publish(&self, state: ConnState) {
+        let mut inner = lock(&self.0);
+        for events in inner
+            .clients
+            .iter()
+            .filter_map(|client| client.events.as_ref())
+        {
+            let _ = events.send(state.clone());
+        }
+        inner.state = state;
     }
 
     pub(crate) fn close_all(&self) {

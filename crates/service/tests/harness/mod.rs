@@ -1,5 +1,5 @@
-//! Shared by the test files: a service running on the platform fake, and a
-//! client that speaks the channel in raw lines.
+//! Shared by the test files: a service running on the platform fake and the
+//! engine fake, and a client that speaks the channel in raw lines.
 #![allow(
     dead_code,
     unused_imports,
@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use ubc_vpn_core::protocol::{ErrorCode, RequestBody, ResponseBody};
@@ -24,11 +26,17 @@ use ubc_vpn_core::protocol::{
 };
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::RouteSet;
+pub use ubc_vpn_engine::fake::{FakeEngine, Script};
+use ubc_vpn_engine::{
+    Cancel, Gateway, LogLevel, LogSink, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent,
+};
 use ubc_vpn_platform::fake::paths;
 use ubc_vpn_service::{Service, Timeouts};
 
-/// A session cookie for requests to carry. Made up.
+/// The cookie the pretend gateway accepts. Made up.
 pub const COOKIE: &str = "Zq7-made-up-0123456789";
+/// Where the pretend gateway lives.
+pub const GATEWAY: [u8; 4] = [192, 0, 2, 1];
 /// Longer than anything here should take. A regression fails, not hangs.
 pub const WAIT: Duration = Duration::from_secs(10);
 
@@ -48,28 +56,68 @@ pub fn user(name: &str) -> UserId {
     name.parse().unwrap()
 }
 
-/// A well-formed connect request carrying [`COOKIE`]. Nothing can connect
-/// yet, so what matters is that it is a request the service must read.
-pub fn good() -> RequestBody {
+pub fn connect(cookie: &str, addr: [u8; 4], subnets: &[&str], domains: &[&str]) -> RequestBody {
     RequestBody::Connect(ConnectParams {
-        cookie: Secret::new(COOKIE),
-        gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
+        cookie: Secret::new(cookie),
+        gateway_addr: Ipv4Addr::from(addr),
         routes: RouteSet {
-            subnets: vec!["10.255.0.0/24".parse().unwrap()],
-            dns_domains: vec!["ece.example.test".to_string()],
+            subnets: subnets.iter().map(|s| s.parse().unwrap()).collect(),
+            dns_domains: domains.iter().map(|d| d.to_string()).collect(),
         },
     })
+}
+
+/// A request that connects: the second subnet holds the gateway and the first
+/// holds the DNS server the pretend gateway assigns.
+pub fn good() -> RequestBody {
+    let subnets = ["10.255.0.0/24", "192.0.2.0/24"];
+    connect(COOKIE, GATEWAY, &subnets, &["ece.example.test"])
+}
+
+/// Wraps the engine fake to record, for every `open`, the gateway it was
+/// given and the OS calls made before it. It also logs the cookie as a
+/// careless library would: at a level that is kept, with no marker word, and
+/// before the engine has hidden it.
+pub struct Spy {
+    engine: FakeEngine,
+    fake: Fake,
+    opens: Mutex<Vec<(Gateway, Vec<Op>)>>,
+}
+
+impl Spy {
+    pub fn opens(&self) -> Vec<(Gateway, Vec<Op>)> {
+        self.opens.lock().unwrap().clone()
+    }
+}
+
+impl TunnelEngine for Spy {
+    fn open(
+        &self,
+        gateway: &Gateway,
+        session: &Session,
+        cancel: &Cancel,
+        events: Sender<TunnelEvent>,
+        logs: LogSink,
+    ) -> Result<Box<dyn Tunnel>, TunnelError> {
+        let seen = (gateway.clone(), self.fake.calls());
+        self.opens.lock().unwrap().push(seen);
+        logs.log(LogLevel::Info, &format!("> {}", session.cookie.expose()));
+        self.engine.open(gateway, session, cancel, events, logs)
+    }
 }
 
 /// A service on fakes, with its files in a folder of its own.
 pub struct Rig {
     pub fake: Fake,
+    pub engine: FakeEngine,
+    pub spy: Arc<Spy>,
     pub root: PathBuf,
     pub timeouts: Timeouts,
     pub service: Option<Service>,
 }
 
-/// A running service with a valid policy.
+/// A running service with a valid policy that pins the key `A`, which is the
+/// key the pretend gateway presents.
 pub fn rig() -> Rig {
     let mut rig = Rig::stopped(policy('A', ""));
     rig.start().unwrap();
@@ -79,6 +127,11 @@ pub fn rig() -> Rig {
 impl Rig {
     /// A service that has not started, with `policy` as its policy file.
     pub fn stopped(policy: Option<String>) -> Self {
+        Self::scripted(policy, |_| {})
+    }
+
+    /// The same, with a pretend gateway that `edit` has changed.
+    pub fn scripted(policy: Option<String>, edit: impl FnOnce(&mut Script)) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("svc-{unique:?}"));
@@ -86,8 +139,19 @@ impl Rig {
         if let Some(policy) = policy {
             std::fs::write(root.join("policy/policy.json"), policy).unwrap();
         }
+        let fake = Fake::new();
+        let mut script = Script::new(pin('A').try_into().unwrap());
+        edit(&mut script);
+        let engine = FakeEngine::new(script);
+        let spy = Arc::new(Spy {
+            engine: engine.clone(),
+            fake: fake.clone(),
+            opens: Mutex::default(),
+        });
         Self {
-            fake: Fake::new(),
+            fake,
+            engine,
+            spy,
             root,
             timeouts: Timeouts::default(),
             service: None,
@@ -96,7 +160,7 @@ impl Rig {
 
     pub fn start(&mut self) -> Result<(), String> {
         let platform = self.fake.platform(&self.root);
-        self.service = Some(Service::start(platform, self.timeouts)?);
+        self.service = Some(Service::start(platform, self.spy.clone(), self.timeouts)?);
         Ok(())
     }
 
@@ -106,6 +170,11 @@ impl Rig {
 
     pub fn logs(&self) -> Vec<String> {
         self.service.as_ref().unwrap().logs()
+    }
+
+    /// Whether nothing is applied and no tunnel is open.
+    pub fn is_clean(&self) -> bool {
+        self.fake.applied() == Default::default() && !self.engine.tunnel_is_open()
     }
 
     /// Connects as `name` without saying hello.
@@ -146,6 +215,8 @@ impl Rig {
 
 impl Drop for Rig {
     fn drop(&mut self) {
+        // So that a failed test ends, and does not wait on a held engine.
+        self.engine.release();
         self.stop();
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -197,6 +268,13 @@ impl Peer {
             Some(ServerMessage::Event(Event::StateChanged(state))) => state,
             other => panic!("expected a state event, got {other:?}"),
         }
+    }
+
+    /// Sends a connect request and returns the state it ends in.
+    pub fn connect_ends(&mut self, body: RequestBody) -> ConnState {
+        assert_eq!(self.ask(body), Ok(ResponseBody::Accepted));
+        assert_eq!(self.state(), ConnState::Connecting);
+        self.state()
     }
 
     /// Whether the service closed the connection, with nothing left unread.
