@@ -1,18 +1,16 @@
 //! The Linux and macOS half of `terminal::testing`: a pseudo-terminal.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use rustix::fs::OFlags;
-use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{LocalModes, tcgetattr};
 
+use crate::unix::terminal::new_terminal;
 use crate::{Result, lock};
 
 /// What the child has written, and whether more can come.
@@ -29,18 +27,9 @@ pub(super) struct Screen {
 }
 
 pub(super) fn spawn(command: &mut Command) -> Result<(Child, Screen)> {
-    // Neither end becomes this process's own terminal.
-    let ours = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).map_err(io::Error::from)?;
-    grantpt(&ours).map_err(io::Error::from)?;
-    unlockpt(&ours).map_err(io::Error::from)?;
-    let name = ptsname(&ours, Vec::new()).map_err(io::Error::from)?;
-    let name = name.into_string();
-    let name = name.map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-    let mut theirs = OpenOptions::new();
-    theirs.read(true).write(true);
-    theirs.custom_flags(OFlags::NOCTTY.bits() as i32);
-    let theirs = theirs.open(name)?;
-    let ours = File::from(ours);
+    // The child gets its end as its three streams below, and nothing else:
+    // not the test's end, or its terminal could never hang up on it.
+    let (ours, theirs) = new_terminal()?;
 
     command.stdin(theirs.try_clone()?);
     command.stdout(theirs.try_clone()?);

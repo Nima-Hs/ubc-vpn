@@ -19,7 +19,7 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use crate::Result;
+use crate::{Error, Result};
 
 #[cfg(unix)]
 #[path = "testing_unix.rs"]
@@ -54,6 +54,10 @@ mod os {
 }
 
 /// The test's end of a child's terminal: its keyboard and its screen.
+///
+/// Dropping it does not end the child. A test must bring the child to its
+/// end, by what it types or by killing it, and wait for it: a child left
+/// running outlives the test.
 pub struct Screen(os::Screen);
 
 /// Starts `command` with a new terminal as its controlling terminal and as
@@ -80,6 +84,22 @@ impl Screen {
     /// the terminal shows of the typing is in it too.
     pub fn wait_for(&mut self, text: &str, within: Duration) -> Result<String> {
         self.0.wait_for(text, within)
+    }
+
+    /// As [`Screen::wait_for`], but it is an error if `text` does not come:
+    /// the error's message holds what the screen shows instead.
+    ///
+    /// Use this one to wait for the point a test is about, and only then
+    /// say what must *not* be on the screen. "It is not there" proves
+    /// nothing about a screen that has not got that far.
+    pub fn expect(&mut self, text: &str, within: Duration) -> Result<String> {
+        let shown = self.wait_for(text, within)?;
+        match shown.contains(text) {
+            true => Ok(shown),
+            false => Err(Error::Failed(format!(
+                "{text:?} did not come; the screen shows {shown:?}"
+            ))),
+        }
     }
 
     /// Types `text` as the user would. Enter is `\r`, Ctrl-C is `\x03`.
@@ -119,8 +139,7 @@ mod tests {
         command.env(CHILD, "1");
         let (mut child, mut screen) = spawn_in_terminal(&mut command).expect("start");
 
-        let shown = screen.wait_for("Password: ", WAIT).expect("read");
-        assert!(shown.contains("Password: "), "no question: {shown:?}");
+        screen.expect("Password: ", WAIT).expect("the question");
         assert!(
             !screen.echoes().expect("the mode"),
             "the question shows typing"
@@ -131,10 +150,18 @@ mod tests {
         let shown = screen.wait_for("never shown", brief).expect("read");
         assert!(!shown.contains("never shown"));
         assert!(started.elapsed() >= brief && started.elapsed() < WAIT);
+        // The strict form says so, and says what is there instead.
+        match screen.expect("never shown", brief) {
+            Err(Error::Failed(why)) => assert!(why.contains("Password: "), "{why}"),
+            other => panic!("it did not come, and yet: {other:?}"),
+        }
 
         screen.type_text("s3cret fake\r").expect("type");
-        let shown = screen.wait_for("own terminal", WAIT).expect("read");
-        let said = "SAYS 11 bytes, streams [true, true, true], own terminal true";
+        let shown = screen.expect("own terminal", WAIT).expect("what it says");
+        // Security rule: the child holds its three streams and nothing else
+        // of the test's. With the test's end of its own terminal in hand, it
+        // would keep that terminal alive, and it could never hang up.
+        let said = "SAYS 11 bytes, open [0, 1, 2], streams [true, true, true], own terminal true";
         assert!(shown.contains(said), "{shown:?}");
         assert!(!shown.contains("s3cret"), "the secret was shown: {shown:?}");
 
@@ -173,10 +200,13 @@ mod tests {
             io::stdout().is_terminal(),
             io::stderr().is_terminal(),
         ];
+        // SAFETY: the call only asks about a number; it has no conditions.
+        let open = |fd: &i32| unsafe { libc::fcntl(*fd, libc::F_GETFD) } != -1;
+        let open: Vec<i32> = (0..256).filter(open).collect();
         let own = File::open("/dev/tty").is_ok();
         let typed = read_hidden_line("Password: ").expect("a hidden line");
         let bytes = typed.expose().len();
-        println!("SAYS {bytes} bytes, streams {streams:?}, own terminal {own}");
+        println!("SAYS {bytes} bytes, open {open:?}, streams {streams:?}, own terminal {own}");
         let mut line = String::new();
         io::stdin().read_line(&mut line).expect("a line");
         println!("SAYS line {}", line.trim());
