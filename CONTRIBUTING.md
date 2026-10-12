@@ -28,7 +28,7 @@ Ordinary builds and tests need no native library. Only the engine's `libopenconn
 ```sh
 gh run list --workflow native-windows.yml --branch main --event push --status success --limit 1
 gh run download <run-id> --name libopenconnect-windows-x64 --dir <folder>
-UBC_VPN_NATIVE_DIR=<folder> cargo test -p ubc-vpn-engine --features libopenconnect
+UBC_VPN_NATIVE_DIR=<folder> cargo test -p ubc-vpn-engine --features libopenconnect,fake
 ```
 
 The macOS and Linux artifacts hold a tarball to unpack, and the tests there build a small stand-in library with the system's C compiler (`cc`). `.github/workflows/engine.yml` has the exact steps.

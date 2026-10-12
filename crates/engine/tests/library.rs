@@ -1,6 +1,6 @@
 //! Loads the real `libopenconnect` and calls it.
 //!
-//! Needs `--features libopenconnect` and `UBC_VPN_NATIVE_DIR` (see
+//! Needs `--features libopenconnect,fake` and `UBC_VPN_NATIVE_DIR` (see
 //! `build.rs`). The `Engine` workflow runs it on all three OSes. On macOS
 //! and Linux it compiles a small stand-in library with `cc`.
 //!
@@ -9,17 +9,15 @@
 //! a child, set up the way a careless or hostile start would be. The child
 //! runs `child` below and prints what happened.
 
-#![cfg(feature = "libopenconnect")]
-
-#[path = "../src/ffi.rs"]
-mod ffi;
+#![cfg(all(feature = "libopenconnect", feature = "fake"))]
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::{env, fs};
 
-use ffi::{Library, LoadError, os};
+use ubc_vpn_engine::ffi::{self, Handle, Library, LoadError};
 
 const LIBS: &str = env!("UBC_VPN_NATIVE_LIBS");
 /// The loader's search variable on this OS.
@@ -69,7 +67,7 @@ fn hostile(name: &str) -> PathBuf {
         fs::write(&source, code).unwrap();
         let built = Command::new("cc")
             .args(["-shared", "-fPIC", "-o"])
-            .arg(dir.join(os::FILE))
+            .arg(dir.join(ffi::FILE))
             .arg(&source)
             .status();
         assert!(built.unwrap().success(), "cc could not build the stand-in");
@@ -80,19 +78,28 @@ fn hostile(name: &str) -> PathBuf {
 /// Runs a child that loads the library from `dir` and returns its report.
 /// `set` adds to its environment, and `cwd` is where it starts.
 fn run(dir: &Path, cwd: &Path, set: &[(&str, &OsStr)]) -> String {
+    printed("LOAD: ", dir, cwd, set)
+}
+
+/// The same, for the line the child printed after `label`.
+fn printed(label: &str, dir: &Path, cwd: &Path, set: &[(&str, &OsStr)]) -> String {
+    let output = child_output(dir, cwd, set);
+    let text = String::from_utf8_lossy(&output.stdout);
+    // The test harness prints the test's name first, on the same line.
+    let line = text
+        .split(label)
+        .nth(1)
+        .and_then(|rest| rest.lines().next());
+    line.unwrap_or_else(|| panic!("the child printed no {label} in: {text}"))
+        .to_string()
+}
+
+fn child_output(dir: &Path, cwd: &Path, set: &[(&str, &OsStr)]) -> std::process::Output {
     let mut child = Command::new(env::current_exe().unwrap());
     child.args(["child", "--exact", "--nocapture", "--test-threads=1"]);
     child.env("UBC_VPN_TEST_LOAD", dir).current_dir(cwd);
     child.envs(set.iter().copied());
-    let output = child.output().unwrap();
-    let text = String::from_utf8_lossy(&output.stdout);
-    // The test harness prints the test's name first, on the same line.
-    let line = text
-        .split("LOAD: ")
-        .nth(1)
-        .and_then(|rest| rest.lines().next());
-    line.unwrap_or_else(|| panic!("the child printed no result: {text}"))
-        .to_string()
+    child.output().unwrap()
 }
 
 /// The result alone, without what Windows adds about the DLLs.
@@ -127,13 +134,16 @@ fn child() {
         return;
     };
     if let Some(first) = env::var_os("UBC_VPN_TEST_CARELESS") {
-        assert!(os::careless_load(&first), "the careless load itself failed");
+        assert!(
+            raw::careless_load(&first),
+            "the careless load itself failed"
+        );
     }
     #[cfg(unix)]
     if let Some(name) = env::var_os("UBC_VPN_TEST_FORGET") {
         // SAFETY: this child runs this one test, and nothing else in it
         // touches the environment while the variable is removed.
-        unsafe { os::forget_variable(&name) };
+        unsafe { raw::forget_variable(&name) };
     }
     // Windows: which of the folder's DLLs are in the process, and from where.
     #[cfg(windows)]
@@ -142,12 +152,13 @@ fn child() {
             .unwrap()
             .map(|entry| entry.unwrap().file_name());
         names
-            .filter_map(|name| os::module_path(name.to_str()?))
+            .filter_map(|name| raw::module_path(name.to_str()?))
             .collect()
     };
     #[cfg(windows)]
     let before = modules().len();
-    let result = Library::load(&dir).map(Library::version);
+    let loaded = Library::load(&dir);
+    let result = loaded.clone().map(Library::version);
     #[cfg(windows)]
     let report = format!(
         " before={before} elsewhere={} planted={}",
@@ -155,11 +166,76 @@ fn child() {
             .iter()
             .filter(|path| path.parent() != Some(&dir))
             .count(),
-        os::careless_load(OsStr::new("ubc-vpn-planted.dll")),
+        raw::careless_load(OsStr::new("ubc-vpn-planted.dll")),
     );
     #[cfg(not(windows))]
     let report = "";
     println!("LOAD: {result:?}{report}");
+    // What a handle logs when it is given two server addresses it refuses.
+    if let Ok(library) = loaded {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let lines = Arc::clone(&seen);
+        let handle = Handle::new(
+            library,
+            Box::new(move |level, line| {
+                let line = line.to_string_lossy().into_owned();
+                lines.lock().unwrap().push((level, line));
+            }),
+        )
+        .expect("the library makes a handle");
+        let results = [
+            handle.parse_url(c"ftp://vpn.example.test"),
+            handle.parse_url(c"http://vpn.example.test"),
+        ];
+        drop(handle);
+        println!("LOGGED: {results:?} {:?}", seen.lock().unwrap());
+    }
+}
+
+// Security rule: the declared functions are spelled out here, so that a
+// change to the table is a visible change to this list. Each signature was
+// checked against `openconnect.h` of v9.21.
+#[test]
+fn the_declared_functions_are_the_reviewed_ones() {
+    let reviewed = [
+        "get_version",
+        "init_ssl",
+        "vpninfo_new",
+        "vpninfo_free",
+        "parse_url",
+        "set_system_trust",
+        "get_peer_cert_hash",
+        "disable_ipv6",
+        "override_getaddrinfo",
+        "setup_cmd_pipe",
+        "obtain_cookie",
+        "get_cookie",
+        "set_cookie",
+        "mainloop",
+    ];
+    let names: Vec<String> = reviewed
+        .iter()
+        .map(|name| format!("openconnect_{name}"))
+        .collect();
+    assert_eq!(ffi::FUNCTIONS, names);
+}
+
+// The library's log lines are printf-style. They reach Rust through the C
+// shim, formatted and whole, at the library's own level.
+#[test]
+fn a_handle_logs_through_the_shim() {
+    let libs = Path::new(LIBS);
+    let logged = printed("LOGGED: ", libs, libs, &[]);
+    assert!(
+        !logged.starts_with("[0, 0]"),
+        "both addresses must be refused: {logged}"
+    );
+    let first = r#"(0, "Failed to parse server URL 'ftp://vpn.example.test'\n")"#;
+    let second = r#"(0, "Only https:// permitted for server URL\n")"#;
+    assert!(
+        logged.ends_with(&format!("[{first}, {second}]")),
+        "{logged}"
+    );
 }
 
 #[test]
@@ -220,7 +296,7 @@ fn nothing_is_loaded_with_a_dyld_variable_set() {
     assert!(!marker.exists(), "the stand-in's code ran");
     // Not that one variable alone. This one makes dyld load the stand-in at
     // start, which is harmless here: it is given no marker to write.
-    let inserted = planted.join(os::FILE);
+    let inserted = planted.join(ffi::FILE);
     let insert = [("DYLD_INSERT_LIBRARIES", inserted.as_os_str())];
     let error = LoadError::UnsafeEnvironment("DYLD_INSERT_LIBRARIES".into());
     assert_eq!(
@@ -268,7 +344,7 @@ fn a_copy_loaded_through_a_removed_dyld_variable_is_refused() {
 fn a_folder_that_is_not_a_plain_absolute_path_is_refused() {
     let libs = Path::new(LIBS);
     // The loader would stop reading at the NUL and load the real file.
-    let cut = PathBuf::from(format!("{}\0x", libs.join(os::FILE).display()));
+    let cut = PathBuf::from(format!("{}\0x", libs.join(ffi::FILE).display()));
     let mut bad = vec![PathBuf::from("."), PathBuf::from("lib"), cut];
     if cfg!(windows) {
         // A share, a device form, and a path with no drive.
@@ -296,7 +372,7 @@ fn a_folder_that_is_not_a_plain_absolute_path_is_refused() {
 fn a_library_without_a_declared_function_is_refused() {
     let dir = if cfg!(windows) {
         let dir = scratch("other");
-        fs::copy(Path::new(LIBS).join("zlib1.dll"), dir.join(os::FILE)).unwrap();
+        fs::copy(Path::new(LIBS).join("zlib1.dll"), dir.join(ffi::FILE)).unwrap();
         dir
     } else {
         hostile("other")
@@ -313,7 +389,7 @@ fn a_library_without_a_declared_function_is_refused() {
 fn a_library_of_another_version_is_refused() {
     let dir = scratch("version");
     copy_libs(&dir);
-    let file = dir.join(os::FILE);
+    let file = dir.join(ffi::FILE);
     let mut bytes = fs::read(&file).unwrap();
     let mut patched = 0;
     for at in 0..bytes.len() - 5 {
@@ -342,9 +418,9 @@ fn a_library_loaded_before_the_folder_was_chosen_is_refused() {
     let libs = Path::new(LIBS);
     // Windows searches the working directory for a name alone.
     let first = if cfg!(windows) {
-        PathBuf::from(os::FILE)
+        PathBuf::from(ffi::FILE)
     } else {
-        libs.join(os::FILE)
+        libs.join(ffi::FILE)
     };
     let set = [("UBC_VPN_TEST_CARELESS", first.as_os_str())];
     assert_eq!(outcome(libs, libs, &set), refused(LoadError::LoadedEarly));
@@ -353,8 +429,93 @@ fn a_library_loaded_before_the_folder_was_chosen_is_refused() {
     if cfg!(target_os = "linux") {
         let copy = scratch("early");
         copy_libs(&copy);
-        let first = copy.join(os::FILE);
+        let first = copy.join(ffi::FILE);
         let set = [("UBC_VPN_TEST_CARELESS", first.as_os_str())];
         assert_eq!(outcome(libs, libs, &set), refused(LoadError::LoadedEarly));
+    }
+}
+
+/// What a careless or hostile program does, for the child to act out. None
+/// of it belongs in the engine.
+mod raw {
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+
+    #[cfg(windows)]
+    pub use windows::*;
+
+    #[cfg(windows)]
+    mod windows {
+        use std::ffi::{OsStr, OsString, c_void};
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use std::path::PathBuf;
+        use std::ptr;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+            fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+            fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, size: u32) -> u32;
+        }
+
+        fn wide(text: &OsStr) -> Vec<u16> {
+            text.encode_wide().chain([0]).collect()
+        }
+
+        /// Asks Windows for a library by name, with its usual search.
+        pub fn careless_load(name: &OsStr) -> bool {
+            let name = wide(name);
+            // SAFETY: `name` is NUL-terminated UTF-16 and outlives the call;
+            // the second argument is reserved. Loading runs the library's
+            // start-up code; the tests pass only our own libraries.
+            !unsafe { LoadLibraryExW(name.as_ptr(), ptr::null_mut(), 0) }.is_null()
+        }
+
+        /// The file a loaded library of this name came from.
+        pub fn module_path(name: &str) -> Option<PathBuf> {
+            let name = wide(OsStr::new(name));
+            let mut buffer = [0u16; 1024];
+            // SAFETY: `name` is NUL-terminated UTF-16. A null module makes
+            // the second call answer for the program, which is filtered out
+            // below; `buffer` is writable for the length given.
+            let (module, length) = unsafe {
+                let module = GetModuleHandleW(name.as_ptr());
+                (
+                    module,
+                    GetModuleFileNameW(module, buffer.as_mut_ptr(), 1024) as usize,
+                )
+            };
+            let known = !module.is_null() && length > 0 && length < buffer.len();
+            known.then(|| OsString::from_wide(&buffer[..length]).into())
+        }
+    }
+
+    /// Loads a library the way a careless program does.
+    #[cfg(unix)]
+    pub fn careless_load(name: &OsStr) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn dlopen(
+                path: *const std::ffi::c_char,
+                mode: std::ffi::c_int,
+            ) -> *mut std::ffi::c_void;
+        }
+        let name = std::ffi::CString::new(name.as_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated string that outlives the call.
+        // 2 is `RTLD_NOW`. Loading runs the library's start-up code; the
+        // tests pass only our own libraries.
+        !unsafe { dlopen(name.as_ptr(), 2) }.is_null()
+    }
+
+    /// Removes a variable from the environment, as a program that tidies up
+    /// after its start would.
+    ///
+    /// # Safety
+    ///
+    /// No other thread may read or write the environment during the call.
+    #[cfg(unix)]
+    pub unsafe fn forget_variable(name: &OsStr) {
+        // SAFETY: the caller keeps other threads off the environment.
+        unsafe { std::env::remove_var(name) };
     }
 }

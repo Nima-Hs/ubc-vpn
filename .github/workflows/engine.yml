@@ -86,10 +86,9 @@ jobs:
           fi
 
           # The commit of this repository the library was built from must be
-          # on main (see native/windows/README.md). The macOS manifest does
-          # not record it yet, so there the run's own commit stands in.
+          # on main (see native/windows/README.md). Windows and macOS record
+          # it as recipe.commit, Linux as build.repository_commit.
           commit=$(jq -r '.recipe.commit // .build.repository_commit // empty' native/manifest.json)
-          if [ -z "$commit" ] && [ "$RUNNER_OS" = macOS ]; then commit=$sha; fi
           [[ $commit =~ ^[0-9a-f]{40}$ ]]
           status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
           echo "The library was built from $commit; main is $status of it."
@@ -112,10 +111,14 @@ jobs:
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
 
+      # The binding as it ships, then as the tests see it: `fake` makes the
+      # binding reachable from the tests and never ships.
       - name: Lint
         env:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
-        run: cargo clippy --locked -p ubc-vpn-engine --features libopenconnect --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked -p ubc-vpn-engine --features libopenconnect --all-targets -- -D warnings
+          cargo clippy --locked -p ubc-vpn-engine --features libopenconnect,fake --all-targets -- -D warnings
 
       # The tests start themselves again with planted copies in the working
       # directory and the loader's search path. On macOS and Linux they build
@@ -124,9 +127,10 @@ jobs:
         env:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
         run: |
-          cargo test --locked -p ubc-vpn-engine --features libopenconnect --tests -- --nocapture | tee test.log
+          cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests -- --nocapture | tee test.log
           # The examples that show the binding is private only mean something
-          # in this configuration: the feature on and the fake off.
-          cargo test --locked -p ubc-vpn-engine --features libopenconnect --doc
+          # in this configuration: the feature on and the fake off. The tests
+          # that need no binding run in it too.
+          cargo test --locked -p ubc-vpn-engine --features libopenconnect
           # A test that is skipped passes, so prove from the log that it ran.
           grep -E '^RAN: Ok\("v9\.21(-unknown)?"\)' test.log
