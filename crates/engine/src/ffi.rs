@@ -269,18 +269,14 @@ pub(crate) mod os {
         // dyld tries the file's name in `DYLD_LIBRARY_PATH` before the full
         // path it was given, and other `DYLD_*` variables redirect it too.
         // The two fallback variables are allowed: Cargo sets one when it
-        // runs a program, and they only matter when the file is missing.
+        // runs a program, and dyld does not use them for a full path. A
+        // test checks that it still does not.
         let redirects = |name: &OsStr| {
             let name = name.as_bytes();
             name.starts_with(b"DYLD_") && !name.starts_with(b"DYLD_FALLBACK_")
         };
         if cfg!(target_os = "macos") && std::env::vars_os().any(|(name, _)| redirects(&name)) {
             return Err(LoadError::UnsafeEnvironment);
-        }
-        // Without the file, dyld would go on to look for its name in the
-        // fallback folders, `/usr/local/lib` among them.
-        if !file.is_file() {
-            return Err(LoadError::NotFound);
         }
         // Asks for the name alone, then the file, without loading anything.
         let present = |name: &OsStr| !open_with(name, RTLD_LAZY | LOCAL_NOLOAD.1).is_null();

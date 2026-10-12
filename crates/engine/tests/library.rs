@@ -212,8 +212,8 @@ fn nothing_is_loaded_with_a_dyld_variable_set() {
         refused(LoadError::UnsafeEnvironment)
     );
     assert!(!marker.exists(), "the stand-in's code ran");
-    // A fallback folder is where dyld looks when the file is missing. It is
-    // allowed, so a missing file must not send dyld there.
+    // The fallback variables are allowed, because dyld does not use them
+    // for a full path. This fails if a later macOS does.
     let fallback = [set[0], ("DYLD_FALLBACK_LIBRARY_PATH", planted.as_os_str())];
     let empty = scratch("dyld-empty");
     assert_eq!(

@@ -1,6 +1,6 @@
 name: Engine
 
-# The real engine links libopenconnect, which the ordinary CI does not have.
+# The real engine loads libopenconnect, which the ordinary CI does not have.
 # This workflow takes our own build of it from the newest good run of the
 # native-library workflow on main, and proves on each OS that the engine
 # crate loads it at run time from the folder it is given, and can call it.
@@ -42,7 +42,7 @@ defaults:
     shell: bash
 
 jobs:
-  link:
+  load:
     name: load (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
