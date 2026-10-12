@@ -146,8 +146,11 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
         onStatus,
         ...(options.onFault !== undefined && { onFault: options.onFault }),
         onEvent: (event) => {
-            conn = event.value;
-            publishReady();
+            // The one kind of event that says how the connection stands.
+            if (event.kind === "state_changed") {
+                conn = event.value;
+                publishReady();
+            }
         },
         ...(options.initialRetryDelayMs !== undefined && {
             initialRetryDelayMs: options.initialRetryDelayMs,

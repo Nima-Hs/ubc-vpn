@@ -179,6 +179,9 @@ export function startClient(
     }) as unknown as ChildProcessWithoutNullStreams;
 }
 
+/** The kinds of event the app acts on. Every other kind is ignored. */
+const KNOWN_EVENTS: ReadonlySet<string> = new Set<Event["kind"]>(["state_changed"]);
+
 interface Pending {
     resolve(outcome: Outcome): void;
     reject(error: BridgeError): void;
@@ -406,7 +409,12 @@ export class BridgeClient {
         // Only reached after `ready`: a first line must be `ready` or a
         // reason, and every reason ends the bridge.
         if (message.type === "event") {
-            this.options.onEvent(message.data);
+            // Only the kinds of event this app knows are passed on, and each
+            // was checked in full when the line was read. Any other kind is
+            // dropped here, unread.
+            if (KNOWN_EVENTS.has(message.data.kind)) {
+                this.options.onEvent(message.data);
+            }
             return;
         }
         const pending = this.pending.get(message.data.id);

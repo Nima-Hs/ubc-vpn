@@ -364,10 +364,10 @@ describe("when the bridge ends", () => {
 
         await until(() => last() === "ready" && bridge.starts() === 2, "ready again");
         // A new bridge starts with the current state, as the first did.
-        await until(
-            () => events.at(-1)?.value.state === "login_needed",
-            "the state after restarting",
-        );
+        await until(() => {
+            const event = events.at(-1);
+            return event?.kind === "state_changed" && event.value.state === "login_needed";
+        }, "the state after restarting");
     });
 
     it("reports a line of its own that the bridge refused, without the line, and starts another", async () => {
@@ -411,6 +411,38 @@ describe("when the bridge ends", () => {
         await until(() => last() === "unavailable", "unavailable");
     });
 
+    it("ignores an event of a kind it does not know, and carries on as before", async () => {
+        // A newer service may say things this app has no use for.
+        const unknown = (value: unknown) =>
+            `${JSON.stringify({
+                type: "server",
+                message: { type: "event", data: { kind: "comet_sighted", value } },
+            })}\n`;
+        const { bridge, client, events, statuses, last } = start([
+            {
+                later: [
+                    { afterMs: 30, raw: unknown({ state: "connected" }) },
+                    { afterMs: 40, raw: unknown("anything at all") },
+                    {
+                        afterMs: 50,
+                        raw: '{"type":"server","message":{"type":"event","data":{"kind":"comet_sighted"}}}\n',
+                    },
+                    { afterMs: 80, state: { state: "login_needed" } },
+                ],
+            },
+        ]);
+        await until(() => events.length === 2, "the event it does know");
+        // Nothing of the unknown ones was passed on, in any form.
+        expect(events.map((event) => event.kind)).toEqual(["state_changed", "state_changed"]);
+        expect(JSON.stringify(events)).not.toContain("comet");
+        // The bridge was not taken for a broken one: it is the same bridge,
+        // still ready, and it still answers.
+        expect(last()).toBe("ready");
+        expect(statuses.filter((status) => status.status === "unavailable")).toEqual([]);
+        expect(bridge.starts()).toBe(1);
+        await expect(client.request({ method: "status" })).resolves.toMatchObject({ status: "ok" });
+    });
+
     it.each([
         [
             "an unknown state",
@@ -425,6 +457,14 @@ describe("when the bridge ends", () => {
             '{"type":"server","message":{"type":"event","data":{"kind":"state_changed","value":{"state":"connected","tunnel":{"address":"198.51.100.1"}}}}}\n',
         ],
         ["a second ready", '{"type":"ready","service_version":"0.1.0","owner_claimed":true}\n'],
+        [
+            "an event that does not say its kind",
+            '{"type":"server","message":{"type":"event","data":{"value":1}}}\n',
+        ],
+        [
+            "an event whose kind is not text",
+            '{"type":"server","message":{"type":"event","data":{"kind":7,"value":1}}}\n',
+        ],
     ])("drops a bridge that sends %s", async (_name, raw) => {
         const { events, last, statuses } = start([{ later: [{ afterMs: 30, raw }] }], {
             initialRetryDelayMs: 60_000,
