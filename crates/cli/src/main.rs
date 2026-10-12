@@ -24,6 +24,9 @@ mod connect_tests;
 mod settings;
 #[cfg(test)]
 mod settings_tests;
+mod terminal;
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 mod tests;
 
@@ -125,23 +128,6 @@ fn login_engine(dev: bool, policy: &Policy) -> Option<Box<dyn LoginEngine>> {
 #[cfg(feature = "dev-mode")]
 const DEV_CODE: &str = "123456";
 
-/// Stands where the terminal will be. Reading a line with nothing shown
-/// needs an OS call this crate may not make; the platform crate is getting
-/// an operation for it. Until then `connect` says so and asks nothing.
-struct NoTerminalYet;
-
-impl connect::Ask for NoTerminalYet {
-    fn unusable(&self) -> Option<String> {
-        let why = "This build cannot yet ask for a password in a terminal. \
-                   Use the app to connect.";
-        Some(why.to_string())
-    }
-
-    fn ask(&mut self, _prompt: &ubc_vpn_engine::Prompt) -> Option<ubc_vpn_core::redact::Secret> {
-        None
-    }
-}
-
 fn main() -> ExitCode {
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     // An argument that is not Unicode is no command this program has.
@@ -180,7 +166,7 @@ fn main() -> ExitCode {
     }
     if args == ["connect"] {
         let engines = |policy: &Policy| login_engine(dev, policy);
-        let (mut ask, limits) = (NoTerminalYet, client::Limits::default());
+        let (mut ask, limits) = (terminal::Terminal::real(), client::Limits::default());
         let status = connect::connect(&chosen, &engines, &mut ask, limits, &mut out, &mut err);
         return ExitCode::from(status);
     }

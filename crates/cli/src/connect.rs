@@ -49,8 +49,14 @@ pub trait Ask {
     /// this before it does anything else.
     fn unusable(&self) -> Option<String>;
 
-    /// One answer, or `None` when the user gave up.
+    /// One answer, or `None` to stop the login: the user gave up, or
+    /// [`Ask::failure`] says what went wrong.
     fn ask(&mut self, prompt: &Prompt) -> Option<Secret>;
+
+    /// Why the last `None` was not the user giving up, if it was not.
+    fn failure(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The engine that logs in to the gateway `policy` names, if this build has
@@ -308,7 +314,13 @@ fn login(
         };
         let _ = writeln!(err, "ubc-vpn: {}", clean(&line));
     }
+    // A login that stopped at a question was given up by the user, unless
+    // the one asking says otherwise.
+    let stopped = ask.failure();
     result.map_err(|error| {
+        if let Some(why) = &stopped {
+            return failed(LoginErrorCode::Internal, why);
+        }
         let (exit, code) = match error {
             LoginError::WrongPassword => (LOGIN_REFUSED, LoginErrorCode::WrongPassword),
             LoginError::Cancelled => return cancelled(),

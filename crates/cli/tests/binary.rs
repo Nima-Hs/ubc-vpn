@@ -40,14 +40,15 @@ fn a_build_with_dev_mode_knows_the_dev_flag() {
     assert_eq!(run(&["version", "--dev"]).0, Some(2));
 }
 
-// Until the terminal can be read with nothing shown, `connect` says so and
-// does nothing: it asks no question and talks to no service.
+// Security rule: a password is never read from a pipe or a file. Here
+// standard input is not a terminal, so `connect` says so and does nothing:
+// it asks no question and talks to no service.
 #[test]
-fn connect_in_a_terminal_is_not_available_yet() {
+fn connect_outside_a_terminal_asks_nothing() {
     let (status, out, err) = run(&["connect"]);
     assert_eq!((status, out.as_str()), (Some(1), ""));
     assert!(
-        err.contains("cannot yet ask for a password in a terminal"),
+        err.contains("Run it in a terminal, or use the app."),
         "{err}"
     );
 }
