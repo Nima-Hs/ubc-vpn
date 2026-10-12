@@ -17,8 +17,8 @@ use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode, encode};
 use ubc_vpn_core::settings::Settings;
 use ubc_vpn_core::settings_cli::{
-    RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView, check_input,
-    replace_routes, replace_username,
+    ResetReply, RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView,
+    check_input, replace_routes, replace_username,
 };
 use ubc_vpn_platform::{Paths, Platform};
 
@@ -27,7 +27,11 @@ const SETTINGS: &str = "settings.json";
 /// older one was left by a save that was cut short.
 const STALE: Duration = Duration::from_secs(3600);
 
-/// The three commands. Each is spelled with `--json`, the only form so far.
+/// How many damaged settings files `reset` keeps aside. A further one takes
+/// the place of the oldest.
+pub(crate) const KEPT_ASIDE: usize = 3;
+
+/// The commands. Each is spelled with `--json`, the only form so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     /// `settings get --json`
@@ -36,6 +40,12 @@ pub enum Command {
     CheckRoutes,
     /// `settings set-routes --json`
     SetRoutes,
+    /// `settings reset --json`, or with `force` `settings reset --force
+    /// --json`, which also resets settings that can be read.
+    Reset {
+        /// Whether a settings file that can be read is reset too.
+        force: bool,
+    },
 }
 
 impl Command {
@@ -45,6 +55,8 @@ impl Command {
             ["get", "--json"] => Some(Self::Get),
             ["check-routes", "--json"] => Some(Self::CheckRoutes),
             ["set-routes", "--json"] => Some(Self::SetRoutes),
+            ["reset", "--json"] => Some(Self::Reset { force: false }),
+            ["reset", "--force", "--json"] => Some(Self::Reset { force: true }),
             _ => None,
         }
     }
@@ -98,6 +110,10 @@ fn answer(
             None => Settings::default(),
         };
         return encode(&SettingsView::new(settings, policy.as_ref())).map_err(unencodable);
+    }
+    if let Command::Reset { force } = command {
+        let dir = settings_dir.ok_or(SettingsFailureCode::Unwritable)?;
+        return encode(&reset(dir, policy.as_ref(), force)?).map_err(unencodable);
     }
     let typed = typed(input)?;
     // Without a readable policy everything but the allow-list is checked.
@@ -158,6 +174,62 @@ pub(crate) fn remember_username(
     let too_long = |_| SettingsFailureCode::BadInput;
     encode(&SettingsView::new(understood(&text)?, policy)).map_err(too_long)?;
     save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)
+}
+
+/// Starts the settings afresh when the file cannot be read, or whatever it
+/// holds with `force`. The old file is never destroyed: it is moved aside,
+/// as it is, under one of [`KEPT_ASIDE`] names that nothing here removes.
+///
+/// If the fresh file cannot then be written the answer is
+/// [`SettingsFailureCode::Unwritable`] with the old file already aside.
+/// There is then no settings file, which reads as the defaults all the same.
+fn reset(
+    dir: &Path,
+    policy: Option<&Policy>,
+    force: bool,
+) -> Result<ResetReply, SettingsFailureCode> {
+    // A folder others can write to is not touched, to reset it either.
+    if folder_problem(dir).is_some() {
+        return Err(SettingsFailureCode::Unreadable);
+    }
+    // Whatever is at the name counts, a link or a folder too. The link
+    // itself is asked about and later moved, and never followed.
+    match fs::symlink_metadata(dir.join(SETTINGS)) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(ResetReply::Reset { kept: None });
+        }
+        Err(_) => return Err(SettingsFailureCode::Unwritable),
+    }
+    // "Can be read" means what it means to `get`: it loads, and fits a line.
+    let shown = stored(dir).and_then(|text| {
+        let settings = understood(&text.unwrap_or_default())?;
+        let unshowable = |_| SettingsFailureCode::Unreadable;
+        encode(&SettingsView::new(settings, policy)).map_err(unshowable)
+    });
+    if shown.is_ok() && !force {
+        return Ok(ResetReply::NotNeeded);
+    }
+    let unwritable = |_| SettingsFailureCode::Unwritable;
+    let kept = keep_aside(dir).map_err(unwritable)?;
+    save(dir, "{}\n").map_err(unwritable)?;
+    Ok(ResetReply::Reset { kept: Some(kept) })
+}
+
+/// Moves `settings.json` to a name of its own beside it and returns that
+/// name: the first of `settings.json.damaged-1` and so on that is free, or
+/// the one last changed longest ago when all are taken.
+fn keep_aside(dir: &Path) -> io::Result<String> {
+    let names = (1..=KEPT_ASIDE).map(|n| format!("{SETTINGS}.damaged-{n}"));
+    // When it was last changed, or `None` for a name that is free, which
+    // sorts first.
+    let changed = |name: &String| {
+        let found = fs::symlink_metadata(dir.join(name)).ok()?;
+        Some(found.modified().unwrap_or(std::time::UNIX_EPOCH))
+    };
+    let name = names.min_by_key(changed).unwrap_or_default();
+    fs::rename(dir.join(SETTINGS), dir.join(&name))?;
+    Ok(name)
 }
 
 /// The policy, if its file is there and valid. Nothing fails for want of
