@@ -87,6 +87,9 @@ rules() {
 unexplained() {
     grep -v -i -E -f <(rules) || true
 }
+# The rules must still refuse what they are there to catch.
+refused=$(printf '%s\n' 'C:\Temp\evil.dll' 'D:\$Extend\evil.dll' 'HKCU\Software\GnuTLS' | unexplained | wc -l)
+[ "$refused" -eq 3 ] || die "trace-allow.txt lets through a path it must refuse"
 
 # --- Files -------------------------------------------------------------------
 

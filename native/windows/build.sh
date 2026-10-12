@@ -65,17 +65,31 @@ archive=openconnect-$VERSION.tar.gz
 git -C "$work/git" -c core.autocrlf=false archive \
     --prefix="openconnect-$VERSION/" -o "$out/source/$archive" "$COMMIT"
 
-# The patches and the recipe itself ship with the source: the LGPL asks for the
-# scripts that control the build.
-mkdir -p "$out/source/patches" "$out/source/recipe"
-cp -r "$here/patches/." "$out/source/patches/"
-cp "$here"/common.sh "$here"/setup.sh "$here"/gnutls.sh "$here"/build.sh "$here"/*.lock "$out/source/recipe/"
+# The recipe itself ships with the source: the LGPL asks for the scripts that
+# control the build. That is this whole folder, patches, keys and lists
+# included, without what a build leaves behind in it.
+#
+# In a checkout, only the files git tracks are copied, so nothing left lying in
+# the folder can end up in the output. Outside one, which is where someone
+# rebuilding from a shipped recipe is, the folder is all there is.
+mkdir -p "$out/source/recipe"
+repo_git() {
+    git -c safe.directory='*' -C "$here" "$@"
+}
+if repo_git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    repo_git ls-files -z | tar -C "$here" --null -T - -cf - | tar -C "$out/source/recipe" -xf -
+    # On GitHub the commit being built; elsewhere the one checked out.
+    commit=${GITHUB_SHA:-$(repo_git rev-parse HEAD)}
+else
+    tar -C "$here" -cf - --exclude=./cache --exclude=./work --exclude=./out . | tar -C "$out/source/recipe" -xf -
+    commit=unknown
+fi
 
 # --- Build it, from the archive and patches that ship ------------------------
 
 tar -xzf "$out/source/$archive" -C "$work"
 cd "$work/openconnect-$VERSION"
-for p in "$out"/source/patches/openconnect/*.patch; do
+for p in "$out"/source/recipe/patches/openconnect/*.patch; do
     patch -p1 <"$p"
 done
 ./autogen.sh
@@ -223,10 +237,8 @@ json_list() {
     list=$(printf '"%s", ' "$@")
     echo "[${list%, }]"
 }
-openconnect_patches=$(cd "$out" && json_list source/patches/openconnect/*.patch)
-gnutls_patches=$(cd "$out" && json_list source/patches/gnutls/*.patch)
-# On GitHub the commit being built; elsewhere the one checked out.
-commit=${GITHUB_SHA:-$(git -c safe.directory='*' -C "$here" rev-parse HEAD)}
+openconnect_patches=$(cd "$out" && json_list source/recipe/patches/openconnect/*.patch)
+gnutls_patches=$(cd "$out" && json_list source/recipe/patches/gnutls/*.patch)
 # shellcheck disable=SC2086 # the file list is split on purpose
 cat >"$out/manifest.json" <<EOF
 {

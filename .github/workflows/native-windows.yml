@@ -80,6 +80,10 @@ jobs:
           # Every DLL is listed, and Wintun is not bundled.
           for dll in bin/*.dll; do grep -qF "\"$dll\"" manifest.json; done
           test ! -e bin/wintun.dll
+          # The recipe shipped with the source is exactly the files git tracks
+          # in this folder of the repository: the same names, the same contents.
+          diff <(git -C .. ls-files | sort) <(cd source/recipe && find . -type f | sed 's|^\./||' | sort)
+          git -C .. ls-files | while read -r f; do cmp "../$f" "source/recipe/$f"; done
           # Nothing is shippable until the tests below have passed.
           python -c "import json; assert json.load(open('manifest.json'))['shippable'] is False"
 
@@ -158,4 +162,6 @@ jobs:
         with:
           name: libopenconnect-windows-x64${{ steps.approve.outputs.suffix }}
           path: native/windows/out
+          # The recipe has a .gitignore, which would otherwise be left out.
+          include-hidden-files: true
           if-no-files-found: error
