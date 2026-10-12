@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use ubc_vpn_core::protocol::{Event, HelloReply, PROTOCOL_VERSION, ResponseBody};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::Transport;
-use ubc_vpn_platform::fake::paths;
+use ubc_vpn_platform::fake::{Op, paths};
 
 use super::*;
 use crate::tests::Rig;
@@ -235,6 +235,23 @@ fn each_way_of_having_no_channel_has_its_one_line() {
     rig.claim_as_someone_else();
     assert_eq!(ends(&rig), [BridgeLine::NotOwner]);
     drop(service);
+
+    // Something that is not the service holds the channel. The app is told,
+    // and the impostor is sent nothing: not even a hello.
+    let name = paths(&rig.root).channel_name;
+    let listener = rig.fake.listen(&name).unwrap();
+    let impostor = thread::spawn(move || {
+        let (first, _) = listener.accept().unwrap();
+        first.read_line().ok().flatten()
+    });
+    let untrusted = Some(Error::NotTheService);
+    rig.fake.set_failure(Op::Connect, untrusted);
+    assert_eq!(ends(&rig), [BridgeLine::UntrustedService]);
+    rig.fake.set_failure(Op::Connect, None);
+    // The first the impostor ever hears is this test connecting and
+    // hanging up: the bridge never reached it.
+    drop(rig.fake.connect(&name).unwrap());
+    assert_eq!(impostor.join().unwrap(), None);
 
     let reply = HelloReply {
         protocol_version: PROTOCOL_VERSION + 1,

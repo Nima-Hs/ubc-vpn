@@ -99,15 +99,12 @@ fn open(
 ) -> Result<(Arc<Connection>, BridgeLine), NoChannel> {
     let unavailable = |why: Error| Box::new((BridgeLine::ServiceUnavailable, why.to_string()));
     let platform = platform().map_err(unavailable)?;
-    // The transport refuses a listener that is not the service, so nothing
-    // is ever sent to one: there is no connection to send on.
-    //
-    // SEAM: the platform contract has no error that says "not the service",
-    // so `untrusted_service` cannot be told apart yet and such a refusal is
-    // reported as `service_unavailable`.
+    // The transport refuses a listener that is not the service before
+    // anything is sent, and there is then no connection to send on.
     let connected = platform.transport.connect(&platform.paths.channel_name);
     let conn = connected.map_err(|why| match why {
         Error::PermissionDenied => Box::new((BridgeLine::NotOwner, why.to_string())),
+        Error::NotTheService => Box::new((BridgeLine::UntrustedService, why.to_string())),
         why => unavailable(why),
     })?;
     let reply = hello(&conn, ClientKind::App).map_err(|why| match why {
