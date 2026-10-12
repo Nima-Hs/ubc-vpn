@@ -184,7 +184,7 @@ Only IPv4 subnets are routed. IPv6 routes are refused, and the system's IPv6 set
 | `state.json` | The owner | The service; admin only | Admin only |
 | `settings.json` | Username, chosen subnets and DNS domains, preferences | The user | The user |
 
-All three are JSON. The app and the CLI read and write settings through `crates/core`, so they always agree.
+All three are JSON. Only the CLI reads and writes settings, through `crates/core`; the app asks the CLI.
 
 | | Policy | State | Settings |
 | --- | --- | --- | --- |

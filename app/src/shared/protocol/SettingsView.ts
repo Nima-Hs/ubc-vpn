@@ -10,9 +10,13 @@ export type SettingsView = {
  */
 settings: Settings, 
 /**
+ * Whether the policy file could be read and is valid. When it is not,
+ * the app cannot connect, and `allowed_routes` says nothing.
+ */
+policy_readable: boolean, 
+/**
  * When the policy limits routes, the only networks they may fall inside.
- * `None` means the policy sets no limit, or could not be read; the
- * service still applies the real policy when connecting.
+ * `None` means the policy sets no limit, or was not readable.
  */
 allowed_routes: Array<string> | null, 
 /**

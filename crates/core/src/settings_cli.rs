@@ -9,21 +9,43 @@
 //!   standard input and writes one [`RoutesReply`] line. It changes nothing.
 //! - `ubc-vpn settings set-routes --json` does the same, and when the reply
 //!   is [`RoutesReply::Ok`] it has replaced the `routes` field of
-//!   `settings.json` and nothing else in the file.
+//!   `settings.json` and nothing else in the file (see [`replace_routes`]).
 //!
 //! Saved routes are used by the next connection. A connection that is already
 //! up keeps the routes it started with.
 //!
-//! When a command cannot do its work at all it writes one [`SettingsFailure`]
-//! line instead and exits with a non-zero status.
+//! # The cases
+//!
+//! - **Output.** Each command writes exactly one line on standard output and
+//!   nothing else there. It exits with status 0 when that line is a
+//!   [`SettingsView`] or a [`RoutesReply`], including
+//!   [`RoutesReply::Invalid`], and with status 1 when it is a
+//!   [`SettingsFailure`].
+//! - **Input.** One line of at most
+//!   [`MAX_LINE_BYTES`](crate::protocol::MAX_LINE_BYTES). A missing, longer
+//!   or undecodable line is [`SettingsFailureCode::BadInput`].
+//! - **No `settings.json`.** `get` answers with the default settings.
+//!   `set-routes` creates the file, and its folder if needed.
+//! - **A `settings.json` that cannot be read or understood.** `get` and
+//!   `set-routes` fail with [`SettingsFailureCode::Unreadable`] and leave it
+//!   alone. `check-routes` does not read the file, so it cannot fail this
+//!   way.
+//! - **A policy that is missing or invalid.** No command fails for this.
+//!   `get` says so in [`SettingsView::policy_readable`]. `check-routes` and
+//!   `set-routes` then check everything but the allow-list. The service
+//!   refuses to connect without a valid policy, so nothing is tunnelled on
+//!   the strength of that weaker check.
+//! - **Saving fails.** [`SettingsFailureCode::Unwritable`]; the old file is
+//!   unchanged, because the new one is written beside it and renamed.
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::Policy;
 use crate::routes::{Ipv4Net, MAX_ROUTES, MIN_PREFIX_LEN, RouteSet, is_valid_domain};
 use crate::settings::Settings;
 
 /// The longest entry [`check_input`] will look at. Anything longer is reported
-/// without being examined or echoed in full.
+/// as a problem without being examined.
 pub const MAX_ENTRY_BYTES: usize = 253;
 
 /// The answer to `settings get`.
@@ -32,9 +54,11 @@ pub const MAX_ENTRY_BYTES: usize = 253;
 pub struct SettingsView {
     /// The user's settings as stored.
     pub settings: Settings,
+    /// Whether the policy file could be read and is valid. When it is not,
+    /// the app cannot connect, and `allowed_routes` says nothing.
+    pub policy_readable: bool,
     /// When the policy limits routes, the only networks they may fall inside.
-    /// `None` means the policy sets no limit, or could not be read; the
-    /// service still applies the real policy when connecting.
+    /// `None` means the policy sets no limit, or was not readable.
     #[cfg_attr(test, ts(type = "Array<string> | null"))]
     pub allowed_routes: Option<Vec<Ipv4Net>>,
     /// The widest subnet a route may be, as a prefix length.
@@ -45,11 +69,13 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    /// A view of `settings` under a policy's allow-list.
-    pub fn new(settings: Settings, allowed_routes: Option<Vec<Ipv4Net>>) -> Self {
+    /// A view of `settings` under a policy, or under none when the policy
+    /// could not be read.
+    pub fn new(settings: Settings, policy: Option<&Policy>) -> Self {
         Self {
             settings,
-            allowed_routes,
+            policy_readable: policy.is_some(),
+            allowed_routes: policy.and_then(|p| p.allowed_routes.clone()),
             min_prefix_len: MIN_PREFIX_LEN,
             max_routes: MAX_ROUTES,
         }
@@ -205,6 +231,32 @@ pub fn check_input(
         subnets,
         dns_domains: input.dns_domains.clone(),
     })
+}
+
+/// The new text of `settings.json` with its routes replaced.
+///
+/// `current` is the file's text, or `None` when there is no file yet. Only
+/// the `routes` field changes. Every other field is kept exactly, including
+/// ones this version does not know, so saving routes with an older version
+/// does not delete what a newer one stored.
+///
+/// Fails with [`SettingsFailureCode::Unreadable`] when `current` is not
+/// settings this version can load.
+pub fn replace_routes(
+    current: Option<&str>,
+    routes: &RouteSet,
+) -> Result<String, SettingsFailureCode> {
+    let unreadable = |_| SettingsFailureCode::Unreadable;
+    let text = current.unwrap_or("{}");
+    // Loading it as settings first refuses anything `get` would refuse.
+    serde_json::from_str::<Settings>(text).map_err(unreadable)?;
+    let mut file: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(text).map_err(unreadable)?;
+    let routes = serde_json::to_value(routes).map_err(unreadable)?;
+    file.insert("routes".to_string(), routes);
+    let mut text = serde_json::to_string_pretty(&file).map_err(unreadable)?;
+    text.push('\n');
+    Ok(text)
 }
 
 fn check_subnet(entry: &str, allow_list: Option<&[Ipv4Net]>) -> Result<Ipv4Net, RouteProblemCode> {
@@ -421,9 +473,97 @@ mod tests {
         assert_eq!(
             encode(&view).unwrap(),
             "{\"settings\":{\"username\":null,\"routes\":{\"subnets\":[],\"dns_domains\":[]},\
-             \"save_password\":false},\"allowed_routes\":null,\"min_prefix_len\":8,\
-             \"max_routes\":256}\n"
+             \"save_password\":false},\"policy_readable\":false,\"allowed_routes\":null,\
+             \"min_prefix_len\":8,\"max_routes\":256}\n"
         );
+    }
+
+    // The app must be able to tell "the policy sets no limit" from "there is
+    // no usable policy".
+    #[test]
+    fn the_view_tells_no_limit_from_no_policy() {
+        let policy = |allowed_routes| Policy {
+            gateway: "vpn.example.test".to_string(),
+            pins: Vec::new(),
+            allowed_routes,
+        };
+        let limit = vec!["142.103.0.0/16".parse().unwrap()];
+
+        let none = SettingsView::new(Settings::default(), None);
+        assert!(!none.policy_readable);
+        assert_eq!(none.allowed_routes, None);
+
+        let open = policy(None);
+        let open = SettingsView::new(Settings::default(), Some(&open));
+        assert!(open.policy_readable);
+        assert_eq!(open.allowed_routes, None);
+
+        let limited = policy(Some(limit.clone()));
+        let limited = SettingsView::new(Settings::default(), Some(&limited));
+        assert!(limited.policy_readable);
+        assert_eq!(limited.allowed_routes, Some(limit));
+    }
+
+    fn routes(subnet: &str) -> RouteSet {
+        check_input(&input(&[subnet], &["ece.ubc.ca"]), None).unwrap()
+    }
+
+    // Settings files are shared between versions. Saving routes with this
+    // version must not delete what another version stored.
+    #[test]
+    fn saving_routes_changes_nothing_else_in_the_file() {
+        let before = r#"{"username":"jdoe","routes":{"subnets":["10.19.0.0/16"],"old":1},
+            "save_password":true,"theme":"dark","future":{"a":[1,2]}}"#;
+        let after = replace_routes(Some(before), &routes("142.103.0.0/16")).unwrap();
+
+        let saved: Settings = serde_json::from_str(&after).unwrap();
+        assert_eq!(saved.username.as_deref(), Some("jdoe"));
+        assert!(saved.save_password);
+        assert_eq!(saved.routes, routes("142.103.0.0/16"));
+
+        let mut expected: serde_json::Value = serde_json::from_str(before).unwrap();
+        expected["routes"] = serde_json::json!({
+            "subnets": ["142.103.0.0/16"],
+            "dns_domains": ["ece.ubc.ca"],
+        });
+        let got: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(got, expected);
+        assert!(after.ends_with('\n'));
+    }
+
+    #[test]
+    fn saving_routes_with_no_file_makes_one() {
+        let after = replace_routes(None, &routes("142.103.0.0/16")).unwrap();
+        let saved: Settings = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            saved,
+            Settings {
+                routes: routes("142.103.0.0/16"),
+                ..Settings::default()
+            }
+        );
+    }
+
+    // A file this version cannot load is left for the user to look at, not
+    // overwritten with something that happens to parse.
+    #[test]
+    fn a_file_that_does_not_load_is_not_rewritten() {
+        let unreadable = Err(SettingsFailureCode::Unreadable);
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            "null",
+            r#"{"routes":{"subnets":["10.0.0.1/8"]}}"#,
+            r#"{"save_password":"yes"}"#,
+            r#"{"username":"jdoe""#,
+        ] {
+            assert_eq!(
+                replace_routes(Some(bad), &routes("10.19.0.0/16")),
+                unreadable,
+                "{bad:?}"
+            );
+        }
     }
 
     // The input comes from the app. An unknown field means the app and the
