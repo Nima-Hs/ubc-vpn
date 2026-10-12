@@ -48,6 +48,9 @@ jobs:
       # On every OS: a dev-mode service runs on that OS's real channel, so its
       # tests do different things on each.
       - name: The service's dev mode builds and passes its tests
+        # PowerShell, the default on Windows, carries on after a failing
+        # command and reports only the last one.
+        shell: bash
         run: |
           cargo clippy --locked -p ubc-vpn-service --features dev-mode --all-targets -- -D warnings
           cargo test --locked -p ubc-vpn-service --features dev-mode
