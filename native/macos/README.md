@@ -11,9 +11,9 @@ Builds `libopenconnect` for macOS 13 or later on Apple silicon, from source, as 
 | Nettle | 4.0 | LGPL-3.0-or-later or GPL-2.0-or-later | `libnettle.9.dylib`, `libhogweed.7.dylib` |
 | GMP | 6.3.0 | LGPL-3.0-or-later or GPL-2.0-or-later | `libgmp.10.dylib` |
 
-Download addresses and SHA-256 checksums are in `versions.env`. Every archive is checked before it is unpacked. There are no patches.
+Download addresses and SHA-256 checksums are in `versions.env`. Every archive is checked before it is unpacked. There is one patch, in `patches/openconnect/`: it stops the library closing file descriptor 0 when a handle is freed that never made a command pipe. The Windows and Linux builds apply the same one.
 
-The openconnect source is the upstream release archive, `openconnect-9.21.tar.gz`, not a git checkout: the archive comes with its build files already generated, so autoconf, automake and libtool are not needed. The commit that tag `v9.21` points at is recorded in `versions.env` for reference. The archive's PGP signature was checked by hand when the checksum was pinned; the build checks the checksum only.
+The openconnect source is the upstream release archive, `openconnect-9.21.tar.gz`, not a git checkout: the archive comes with its build files already generated, so autoconf, automake and libtool are not needed. The commit that tag `v9.21` points at is recorded in `versions.env` for reference. The archive's PGP signature was checked by hand when the checksum was pinned; the build checks the checksum only. Built with the patch below, the library reports `v9.21-unknown`, as the Windows and Linux builds do; the workflow expects exactly that.
 
 Everything else comes from macOS itself: `libxml2`, `zlib`, `libiconv`, and the Security and CoreFoundation frameworks.
 

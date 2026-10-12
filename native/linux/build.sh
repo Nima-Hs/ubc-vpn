@@ -27,6 +27,7 @@ ALLOWED_NEEDED="libc.so.6 libm.so.6 libgnutls.so.30 libz.so.1"
 : "${SOURCE_COMMIT:?set SOURCE_COMMIT to the commit of this repository}"
 : "${BUILD_IMAGE:?set BUILD_IMAGE to the container image reference}"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+patches=$(dirname "$script")/patches/openconnect
 mkdir -p "$1"
 out=$(cd "$1" && pwd)
 work=$(mktemp -d)
@@ -61,7 +62,7 @@ stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
 [ -z "$stray" ] || fail "these packages are not from the snapshot: $stray"
 apt-get install -y --no-install-recommends $BUILD_PACKAGES
 
-mkdir -p "$out/lib/pkgconfig" "$out/include" "$out/source" \
+mkdir -p "$out/lib/pkgconfig" "$out/include" "$out/source/patches/openconnect" \
     "$out/licenses/openconnect" "$out/licenses/json-parser" "$out/licenses/libxml2"
 # The script that controls the build is part of the source we ship.
 cp "$script" "$out/source/build.sh"
@@ -82,8 +83,8 @@ make -j"$(nproc)"
 make install
 cp Copyright "$out/licenses/libxml2/"
 
-# openconnect, from the pinned commit. It is built in the git checkout
-# because its version string comes from `git describe`.
+# openconnect, from the pinned commit. The checkout is only used to verify
+# the commit and to make the archive that ships.
 cd "$work"
 git init -q openconnect
 cd openconnect
@@ -98,6 +99,17 @@ git archive --format=tar.gz --prefix="openconnect-$OPENCONNECT_VERSION/" \
     -o "$out/source/openconnect-$OPENCONNECT_VERSION.tar.gz" HEAD
 cp COPYING.LGPL "$out/licenses/openconnect/"
 cp json/LICENSE "$out/licenses/json-parser/"
+
+# It is built from that archive with our patches applied, and both ship, so
+# what ships is exactly what was built. With no git history beside it the
+# library reports its version as v9.21-unknown, as the Windows build does.
+cp "$patches"/*.patch "$out/source/patches/openconnect/"
+cd "$work"
+tar -xzf "$out/source/openconnect-$OPENCONNECT_VERSION.tar.gz"
+cd "openconnect-$OPENCONNECT_VERSION"
+for p in "$out"/source/patches/openconnect/*.patch; do
+    git apply "$p"
+done
 
 ./autogen.sh
 # The two ac_cv_func settings turn off features that have no configure switch
@@ -161,6 +173,8 @@ json_list() {
     done
 }
 
+openconnect_patches=$(cd "$out" && json_list source/patches/openconnect/*.patch)
+
 cat > "$out/manifest.json" <<EOF
 {
   "target": "x86_64-unknown-linux-gnu",
@@ -183,7 +197,7 @@ $packages
       "licence": "LGPL-2.1-only",
       "licence_file": "licenses/openconnect/COPYING.LGPL",
       "source": "source/openconnect-$OPENCONNECT_VERSION.tar.gz",
-      "patches": [],
+      "patches": [$openconnect_patches],
       "file": "lib/libopenconnect.so.5",
       "file_sha256": "$lib_sha256"
     },

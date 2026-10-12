@@ -50,17 +50,24 @@ fetch() { # <url> <sha256>
     echo "$2  $file" | shasum -a 256 -c -
 }
 
-# Builds one component, unless an earlier run already did.
+# Builds one component, unless an earlier run already did, with the patches
+# in patches/<name>/ applied. A change to its patches is a new build.
 component() { # <name> <version> <url> <sha256> <check|nocheck> [configure options]
-    local name=$1 version=$2 url=$3 sha256=$4 check=$5
+    local name=$1 version=$2 url=$3 sha256=$4 check=$5 patch patched
     shift 5
     fetch "$url" "$sha256"
 
-    local stamp=$prefix/.built-$name-$version
+    # A component with no patches has no such files, and that is not a failure.
+    patched=$(cat "$here/patches/$name"/*.patch 2>/dev/null | shasum -a 256 | cut -c1-12 || true)
+    local stamp=$prefix/.built-$name-$version-$patched
     [ -f "$stamp" ] && return 0
 
     rm -rf "$src/$name-$version"
     tar -xf "$sources/${url##*/}" -C "$src"
+    for patch in "$here/patches/$name"/*.patch; do
+        [ -f "$patch" ] || continue
+        patch -p1 -d "$src/$name-$version" < "$patch"
+    done
     (
         cd "$src/$name-$version"
         ./configure --prefix="$prefix" --libdir="$prefix/lib" \

@@ -154,9 +154,18 @@ components=""
 listed=0
 component() { # <name> <version> <licence> <url> "<licence files>" <library>...
     local name=$1 version=$2 licence=$3 archive=${4##*/} files=$5 file lib libs="" sha256
+    local patch patches=""
     shift 5
     cp "$sources/$archive" "$out/sources/"
     sha256=$(shasum -a 256 "$sources/$archive" | cut -d' ' -f1)
+
+    # Our patches to it, which build.sh applied, ship with the recipe.
+    for patch in "$here/patches/$name"/*.patch; do
+        [ -f "$patch" ] || continue
+        mkdir -p "$out/sources/recipe/patches/$name"
+        cp "$patch" "$out/sources/recipe/patches/$name/"
+        patches="$patches${patches:+, }\"sources/recipe/patches/$name/${patch##*/}\""
+    done
 
     mkdir -p "$out/licenses/$name"
     for file in $files; do
@@ -177,7 +186,8 @@ component() { # <name> <version> <licence> <url> "<licence files>" <library>...
       \"min_macos\": \"$MACOS_MIN\",
       \"libraries\": [$libs],
       \"source\": \"sources/$archive\",
-      \"source_sha256\": \"$sha256\"
+      \"source_sha256\": \"$sha256\",
+      \"patches\": [$patches]
     }"
 }
 component openconnect "$OPENCONNECT_VERSION" "LGPL-2.1-only AND BSD-2-Clause" "$OPENCONNECT_URL" \
