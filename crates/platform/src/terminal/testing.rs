@@ -68,8 +68,13 @@ pub fn spawn_in_terminal(command: &mut Command) -> Result<(Child, Screen)> {
 
 impl Screen {
     /// What the child has written so far, from the start, waiting until it
-    /// contains `text` or `within` has passed. Check the result for `text`:
-    /// running out of time is not an error.
+    /// contains `text`, `within` has passed, or the terminal has gone with
+    /// the child. Check the result for `text`: running out of time is not
+    /// an error.
+    ///
+    /// The screen is read all the while, whether or not a test is waiting,
+    /// so a child is never held up by output nobody takes, and what it
+    /// wrote before it ended can still be read afterwards.
     ///
     /// It is what a screen would be sent, so a line ends in `\r\n`, and what
     /// the terminal shows of the typing is in it too.
@@ -82,8 +87,9 @@ impl Screen {
         self.0.type_text(text)
     }
 
-    /// Whether the terminal shows what is typed. On macOS this fails once
-    /// the child has ended, because its terminal goes with it.
+    /// Whether the terminal shows what is typed. Ask while the child runs:
+    /// its terminal goes with it, and the answer afterwards is not to be
+    /// relied on.
     pub fn echoes(&self) -> Result<bool> {
         self.0.echoes()
     }
@@ -119,6 +125,13 @@ mod tests {
             !screen.echoes().expect("the mode"),
             "the question shows typing"
         );
+        // Waiting for what does not come gives up, and is not an error.
+        let started = Instant::now();
+        let brief = Duration::from_millis(300);
+        let shown = screen.wait_for("never shown", brief).expect("read");
+        assert!(!shown.contains("never shown"));
+        assert!(started.elapsed() >= brief && started.elapsed() < WAIT);
+
         screen.type_text("s3cret fake\r").expect("type");
         let shown = screen.wait_for("own terminal", WAIT).expect("read");
         let said = "SAYS 11 bytes, streams [true, true, true], own terminal true";
@@ -134,13 +147,19 @@ mod tests {
             2,
             "typed and said: {shown:?}"
         );
+        // The child ends though nobody is looking at its screen just then,
+        // and what it wrote on the way out is there to read afterwards.
         assert!(child.wait().expect("wait").success(), "{shown:?}");
-
-        // Waiting for what never comes gives up, and is not an error.
+        let shown = screen.wait_for("test result: ok", WAIT).expect("read");
+        assert!(shown.contains("test result: ok"), "{shown:?}");
+        // Once the terminal has gone there is nothing to wait for.
         let started = Instant::now();
-        let shown = screen.wait_for("never shown", Duration::from_millis(300));
-        assert!(!shown.expect("read").contains("never shown"));
-        assert!(started.elapsed() < WAIT, "did not give up");
+        let shown = screen.wait_for("never shown", WAIT).expect("read");
+        assert!(!shown.contains("never shown"));
+        assert!(
+            started.elapsed() < WAIT,
+            "waited for a terminal that is gone"
+        );
     }
 
     // Not a test of its own: the test above runs it in a terminal.
