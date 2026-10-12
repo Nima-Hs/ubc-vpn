@@ -16,6 +16,9 @@ use client::{Client, ClientError};
 mod bridge;
 mod client;
 mod connect;
+mod connect_json;
+#[cfg(test)]
+mod connect_json_tests;
 #[cfg(test)]
 mod connect_tests;
 mod settings;
@@ -36,7 +39,7 @@ const HELP: &str = "\
 Usage: ubc-vpn <command>
 
 Commands:
-  connect           Log in and connect the VPN, using the saved routes
+  connect [--json]  Log in and connect the VPN, using the saved routes
   disconnect        Disconnect the VPN
   status [--json]   Show whether the VPN is connected
   bridge            Carry messages between the app and the service
@@ -54,6 +57,11 @@ commands do not talk to the service at all.
 connect asks for the password and the one-time code in the terminal. They are
 never taken from an argument, a variable or a file. A connect that is
 interrupted after the login may still complete; disconnect undoes it.
+
+With --json, connect is for the app: it writes each question as one line of
+JSON, reads each answer as one line from standard input, and ends with a
+done line once the service has accepted the request, or with an error line. A
+cancel line, or standard input closing, stops the login.
 
 With --json, status prints the connection state as one line of JSON. Each
 settings command prints one line of JSON, and exits with status 1 only when
@@ -162,6 +170,13 @@ fn main() -> ExitCode {
         };
         let mut input = std::io::stdin().lock();
         return ExitCode::from(settings::run(command, &chosen, &mut input, &mut out));
+    }
+    if args == ["connect", "--json"] {
+        let engines = |policy: &Policy| login_engine(dev, policy);
+        let input = std::io::BufReader::new(std::io::stdin());
+        let limits = client::Limits::default();
+        let status = connect_json::connect(&chosen, &engines, input, limits, &mut out, &mut err);
+        return ExitCode::from(status);
     }
     if args == ["connect"] {
         let engines = |policy: &Policy| login_engine(dev, policy);

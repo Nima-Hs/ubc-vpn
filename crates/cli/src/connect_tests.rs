@@ -18,21 +18,22 @@ use crate::connect::{Ask, BUSY, CANCELLED, LOGIN_REFUSED, connect, disconnect};
 use crate::tests::Rig;
 use crate::{FAILED, NOT_RUNNING};
 
-const PASSWORD: &str = "correct-horse-battery";
-const CODE: &str = "246810";
-const COOKIE: &str = "Zq7-made-up-0123456789";
-const ROUTES: &str = r#""routes":{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}"#;
+pub(crate) const PASSWORD: &str = "correct-horse-battery";
+pub(crate) const CODE: &str = "246810";
+pub(crate) const COOKIE: &str = "Zq7-made-up-0123456789";
+pub(crate) const ROUTES: &str =
+    r#""routes":{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}"#;
 
 /// The person at the terminal: answers in order, and keeps what was asked.
 #[derive(Default)]
-struct Typist {
+pub(crate) struct Typist {
     answers: VecDeque<Option<&'static str>>,
     asked: Vec<PromptKind>,
     unusable: Option<String>,
 }
 
 impl Typist {
-    fn typing(answers: &[Option<&'static str>]) -> Self {
+    pub(crate) fn typing(answers: &[Option<&'static str>]) -> Self {
         Self {
             answers: answers.iter().copied().collect(),
             ..Self::default()
@@ -53,22 +54,22 @@ impl Ask for Typist {
 
 /// A machine with a policy, saved settings, a running service, and a pretend
 /// gateway that asks for a username, a password and a one-time code.
-struct Scene {
-    rig: Rig,
-    gateway: FakeEngine,
-    service: Option<Service>,
+pub(crate) struct Scene {
+    pub(crate) rig: Rig,
+    pub(crate) gateway: FakeEngine,
+    pub(crate) service: Option<Service>,
 }
 
 /// A short wait for the outcome, so that a connect whose outcome never
 /// comes fails its test soon and does not hang it.
-fn brief() -> Limits {
+pub(crate) fn brief() -> Limits {
     Limits {
         outcome: std::time::Duration::from_secs(5),
         ..Limits::default()
     }
 }
 
-fn pin() -> ubc_vpn_core::policy::Pin {
+pub(crate) fn pin() -> ubc_vpn_core::policy::Pin {
     format!("pin-sha256:{}=", "A".repeat(43))
         .try_into()
         .unwrap()
@@ -77,7 +78,7 @@ fn pin() -> ubc_vpn_core::policy::Pin {
 impl Scene {
     /// With `settings` as the text of the settings file, and `policy_extra`
     /// appended to the fields of a valid policy.
-    fn new(settings: Option<&str>, policy_extra: &str) -> Self {
+    pub(crate) fn new(settings: Option<&str>, policy_extra: &str) -> Self {
         let rig = Rig::new();
         let policy = format!(
             r#"{{"gateway":"vpn.example.test","pins":["{}"]{policy_extra}}}"#,
@@ -102,12 +103,12 @@ impl Scene {
     }
 
     /// The usual one: a saved username and routes the policy allows.
-    fn usual() -> Self {
+    pub(crate) fn usual() -> Self {
         Self::new(Some(&format!(r#"{{"username":"alice",{ROUTES}}}"#)), "")
     }
 
     /// Runs `connect` with `typist` at the terminal.
-    fn connect(&self, typist: &mut Typist) -> (u8, String, String) {
+    pub(crate) fn connect(&self, typist: &mut Typist) -> (u8, String, String) {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
         let engines = |_: &Policy| Some(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -116,13 +117,13 @@ impl Scene {
         (code, text(out), text(err))
     }
 
-    fn state(&self) -> String {
+    pub(crate) fn state(&self) -> String {
         self.rig.run(&["status", "--json"]).1
     }
 
     /// Whether the gateway was sent anything, which is what costs the user
     /// an MFA request.
-    fn gateway_was_asked(&self) -> bool {
+    pub(crate) fn gateway_was_asked(&self) -> bool {
         !self.gateway.answers().is_empty()
     }
 }
