@@ -157,6 +157,9 @@ pub(crate) fn new_terminal() -> io::Result<(File, File)> {
     #[cfg(target_os = "linux")]
     let flags = flags | OpenptFlags::CLOEXEC;
     let ours = openpt(flags)?;
+    // macOS cannot set it as it opens, so there is a moment between these
+    // two lines in which a program started by another thread would get this
+    // end too; it is for tests only, which is why that is lived with.
     fcntl_setfd(&ours, FdFlags::CLOEXEC)?;
     grantpt(&ours)?;
     unlockpt(&ours)?;
