@@ -153,7 +153,7 @@ fn create_private(path: &Path) -> io::Result<File> {
     // unsafe code, and a platform operation for it would be more code than
     // these lines.
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
     options.open(path)
 }
 
