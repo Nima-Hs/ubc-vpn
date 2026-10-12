@@ -122,12 +122,12 @@ jobs:
 
           # Callbacks only.
           python3 fake_server.py cert.pem key.pem 4444 &
-          ../macos/wait-for-server.sh 4444 $!
+          ./wait-for-server.sh 4444 $!
           DYLD_PRINT_LIBRARIES=1 target/release/oc-probe probe https://127.0.0.1:4444 2>&1 | tee probe.log
           check probe.log
 
           # Login, connect and tunnel device. sudo drops DYLD_ variables, so pass it through env.
           python3 fake_server.py cert.pem key.pem 4445 &
-          ../macos/wait-for-server.sh 4445 $!
+          ./wait-for-server.sh 4445 $!
           sudo env DYLD_PRINT_LIBRARIES=1 target/release/oc-probe connect https://127.0.0.1:4445 testuser testpass 2>&1 | tee connect.log
           check connect.log
