@@ -1,0 +1,130 @@
+name: App system
+
+# The app, the command-line client and the service as real programs, together:
+# the production build of the app, started unpackaged in dev mode, driven
+# through its real window against `ubc-vpn --dev` and `ubc-vpn-service --dev`.
+# Every other test of the app runs it against a stand-in. This workflow fails
+# if the test was skipped.
+
+on:
+  pull_request:
+    paths:
+      - app/**
+      - crates/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/app-system.yml
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - crates/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/app-system.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-system-${{ github.ref }}
+  cancel-in-progress: true
+
+# Named outright, because only then does a failing test at the head of a
+# pipe fail the step, on Windows too.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  together:
+    name: together (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      # Each program is built by itself (-p), as a release is, so that
+      # neither is given features only the other asked for.
+      - name: Build the service and the client in dev mode
+        run: |
+          cargo build --locked -p ubc-vpn-service --features dev-mode
+          cargo build --locked -p ubc-vpn-cli --features dev-mode
+      # The pnpm version comes from `packageManager` in app/package.json, and
+      # the Node version from app/.node-version.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: app
+      - name: Download Electron
+        run: node node_modules/electron/install.js
+        working-directory: app
+      # Ubuntu stops unprivileged programs from creating the namespaces
+      # Chromium's sandbox is built on. Lift that for this job, so the app
+      # runs with the sandbox on, as it ships.
+      - name: Allow the Chromium sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Run the app against them
+        working-directory: app
+        run: |
+          # The workspace's path as this OS writes it, for the test to start.
+          service="$GITHUB_WORKSPACE/target/debug/ubc-vpn-service"
+          client="$GITHUB_WORKSPACE/target/debug/ubc-vpn"
+          if [ "$RUNNER_OS" = Windows ]; then
+            service="$service.exe"
+            client="$client.exe"
+          fi
+          test -x "$service"
+          test -x "$client"
+          # Linux runners have no display, so give the app a virtual one.
+          display=""
+          [ "$RUNNER_OS" = Linux ] && display="xvfb-run --auto-servernum"
+          UBC_VPN_SYSTEM_SERVICE="$service" UBC_VPN_SYSTEM_CLI="$client" \
+            $display pnpm test:system 2>&1 | tee system.log
+      # A test that is skipped passes, so prove from the log that it ran.
+      - name: The test ran and was not skipped
+        working-directory: app
+        run: |
+          if grep "SKIPPED:" system.log; then
+            echo "The app system test was skipped."
+            exit 1
+          fi
+          grep -qx "RAN: app-system" system.log
+      # Also when the test failed: it must clean up after itself then too.
+      - name: Nothing of it is left behind
+        if: always()
+        run: |
+          # The service, the client the app starts, and the app itself.
+          if [ "$RUNNER_OS" = Windows ]; then
+            running=$(tasklist | grep -ciE '^(ubc-vpn-service|ubc-vpn|electron)\.exe' || true)
+            folders=$( (ls -d "$LOCALAPPDATA/Temp"/ubcvpn-app-* 2>/dev/null || true) | wc -l)
+          else
+            running=$( (pgrep -x 'ubc-vpn-service|ubc-vpn|[Ee]lectron' || true) | wc -l)
+            folders=$( (ls -d /tmp/ubcvpn-app-* 2>/dev/null || true) | wc -l)
+          fi
+          echo "programs still running: $running; folders left: $folders"
+          [ "$running" -eq 0 ] && [ "$folders" -eq 0 ]
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-system-screenshots-${{ matrix.os }}
+          path: app/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
