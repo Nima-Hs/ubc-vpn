@@ -268,7 +268,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 
 /// Stands in for the service on `rig`'s channel: accepts one connection and
 /// hands it to `script`. Its own reads give up after [`PATIENCE`].
-fn scripted(
+pub(crate) fn scripted(
     rig: &Rig,
     script: impl FnOnce(&Connection) + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
@@ -281,7 +281,7 @@ fn scripted(
 }
 
 /// Reads the hello and answers it as an owned service of this version.
-fn greet(conn: &Connection) {
+pub(crate) fn greet(conn: &Connection) {
     conn.read_line().unwrap();
     let reply = HelloReply {
         protocol_version: PROTOCOL_VERSION,
@@ -292,7 +292,7 @@ fn greet(conn: &Connection) {
 }
 
 /// Sends one message from the pretend service. False once the client is gone.
-fn tell(conn: &Connection, message: &ServerMessage) -> bool {
+pub(crate) fn tell(conn: &Connection, message: &ServerMessage) -> bool {
     conn.write_line(encode(message).unwrap().trim_end()).is_ok()
 }
 

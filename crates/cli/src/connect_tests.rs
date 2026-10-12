@@ -311,9 +311,18 @@ fn a_gateway_that_is_wrong_or_away_is_explained() {
     let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
     let (code, out, err) = scene.connect(&mut typist);
     assert_eq!((code, out.as_str()), (FAILED, ""));
-    assert!(err.contains("ubc-vpn: The gateway could not be reached."), "{err}");
-    assert!(err.contains("ubc-vpn: Failed to connect to the gateway"), "{err}");
-    assert!(typist.asked.is_empty(), "nothing is asked of a gateway that is away");
+    assert!(
+        err.contains("ubc-vpn: The gateway could not be reached."),
+        "{err}"
+    );
+    assert!(
+        err.contains("ubc-vpn: Failed to connect to the gateway"),
+        "{err}"
+    );
+    assert!(
+        typist.asked.is_empty(),
+        "nothing is asked of a gateway that is away"
+    );
 
     // A gateway whose key the policy does not pin is sent nothing.
     let mut scene = Scene::usual();
@@ -334,7 +343,11 @@ fn a_gateway_that_is_wrong_or_away_is_explained() {
 fn in_dev_mode_a_second_connect_works_after_a_disconnect() {
     let mut scene = Scene::usual();
     scene.service = None;
-    scene.service = Some(scene.rig.service_on(FakeEngine::for_dev_mode(Script::new(pin()))));
+    scene.service = Some(
+        scene
+            .rig
+            .service_on(FakeEngine::for_dev_mode(Script::new(pin()))),
+    );
     for round in 1..=2 {
         let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
         let (code, out, err) = scene.connect(&mut typist);
@@ -352,4 +365,50 @@ fn in_dev_mode_a_second_connect_works_after_a_disconnect() {
     assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
     let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
     assert_eq!(scene.connect(&mut typist).0, LOGIN_REFUSED);
+}
+
+// A disconnect waits for what the service makes of it, and a teardown that
+// left something behind is a failure, not "Disconnected".
+#[test]
+fn a_disconnect_that_leaves_something_behind_is_a_failure() {
+    let scene = Scene::usual();
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, 0);
+    let denied = Some(Error::PermissionDenied);
+    scene.rig.fake.set_failure(Op::RemoveAllRoutes, denied);
+    let (code, out, err) = scene.rig.run(&["disconnect"]);
+    assert_eq!((code, out.as_str()), (FAILED, ""));
+    assert!(err.contains("could not be removed"), "{err}");
+}
+
+// A service that accepts a request and then never says how it ended does
+// not hang the command: the wait for the outcome has an end.
+#[test]
+fn the_wait_for_the_outcome_has_an_end() {
+    use ubc_vpn_core::protocol::{Outcome, Request, Response, ResponseBody, ServerMessage, decode};
+
+    let rig = Rig::new();
+    let service = crate::tests::scripted(&rig, |conn| {
+        crate::tests::greet(conn);
+        let asked: Request = decode(&conn.read_line().unwrap().unwrap()).unwrap();
+        let outcome = Outcome::Ok(ResponseBody::Accepted);
+        let id = asked.id;
+        crate::tests::tell(conn, &ServerMessage::Response(Response { id, outcome }));
+        // Accepted, and then nothing, until the client goes or patience ends.
+        drop(conn.read_line());
+    });
+    let platform = || Ok(rig.fake.platform(&rig.root));
+    let limits = Limits {
+        outcome: std::time::Duration::from_millis(600),
+        ..Limits::default()
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let started = std::time::Instant::now();
+    let code = disconnect(&platform, limits, &mut out, &mut err);
+    let waited = started.elapsed();
+    service.join().unwrap();
+    assert_eq!((code, out.is_empty()), (FAILED, true));
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("did not answer in time"), "{err}");
+    assert!(waited < std::time::Duration::from_secs(3), "{waited:?}");
 }
