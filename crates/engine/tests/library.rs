@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::{env, fs};
 
 use ubc_vpn_engine::ffi::{self, Handle, Library, LoadError};
+use ubc_vpn_engine::{Role, prepare_environment};
 
 const LIBS: &str = env!("UBC_VPN_NATIVE_LIBS");
 /// The loader's search variable on this OS.
@@ -102,6 +103,11 @@ fn child_output(dir: &Path, cwd: &Path, set: &[(&str, &OsStr)]) -> std::process:
     child.output().unwrap()
 }
 
+/// What the start-up step gives for a client, which `load` asks for.
+fn prepared() -> ubc_vpn_engine::Prepared {
+    prepare_environment(Role::Client, None).expect("the environment is clean")
+}
+
 /// The result alone, without what Windows adds about the DLLs.
 fn outcome(dir: &Path, cwd: &Path, set: &[(&str, &OsStr)]) -> String {
     let report = run(dir, cwd, set);
@@ -133,6 +139,14 @@ fn child() {
     let Some(dir) = env::var_os("UBC_VPN_TEST_LOAD").map(PathBuf::from) else {
         return;
     };
+    // First, as in a real program: the environment step.
+    let prepared = prepared();
+    // Windows: puts a variable back the way a C library would, after the
+    // step removed it, to show what the library does when it is there.
+    #[cfg(windows)]
+    if env::var_os("UBC_VPN_TEST_PUT_BACK").is_some() {
+        raw::put_in_c_runtime(c"GNUTLS_DEBUG_LEVEL", c"9");
+    }
     if let Some(first) = env::var_os("UBC_VPN_TEST_CARELESS") {
         assert!(
             raw::careless_load(&first),
@@ -157,7 +171,7 @@ fn child() {
     };
     #[cfg(windows)]
     let before = modules().len();
-    let loaded = Library::load(&dir);
+    let loaded = Library::load(&dir, prepared);
     let result = loaded.clone().map(Library::version);
     #[cfg(windows)]
     let report = format!(
@@ -366,7 +380,7 @@ fn a_folder_that_is_not_a_plain_absolute_path_is_refused() {
     }
     for dir in bad {
         assert_eq!(
-            Library::load(&dir).err(),
+            Library::load(&dir, prepared()).err(),
             Some(LoadError::BadFolder),
             "{dir:?}"
         );
@@ -446,6 +460,31 @@ fn a_library_loaded_before_the_folder_was_chosen_is_refused() {
     }
 }
 
+// Security rule, Windows: the environment step removes a variable where the
+// library reads it, which is the C runtime's copy and not the one Rust
+// reads. So this watches the library: GnuTLS logs to standard error as it
+// loads when `GNUTLS_DEBUG_LEVEL` is set. Reading the variable back would
+// pass even if nothing the library sees had changed.
+#[cfg(windows)]
+#[test]
+fn the_environment_step_changes_what_the_library_sees() {
+    let libs = Path::new(LIBS);
+    let logs = |set: &[(&str, &OsStr)]| {
+        let output = child_output(libs, libs, set);
+        let report = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(report.contains("LOAD: Ok("), "{report}");
+        String::from_utf8_lossy(&output.stderr).contains("gnutls[")
+    };
+    let debug = ("GNUTLS_DEBUG_LEVEL", OsStr::new("9"));
+    assert!(!logs(&[debug]), "GnuTLS still saw the variable");
+    // The control: put back in the C runtime after the step, it is seen.
+    let put_back = ("UBC_VPN_TEST_PUT_BACK", OsStr::new("1"));
+    assert!(
+        logs(&[debug, put_back]),
+        "GnuTLS logs nothing even when it is set"
+    );
+}
+
 /// What a careless or hostile program does, for the child to act out. None
 /// of it belongs in the engine.
 mod raw {
@@ -457,7 +496,7 @@ mod raw {
 
     #[cfg(windows)]
     mod windows {
-        use std::ffi::{OsStr, OsString, c_void};
+        use std::ffi::{CStr, OsStr, OsString, c_char, c_int, c_void};
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
         use std::path::PathBuf;
         use std::ptr;
@@ -467,6 +506,10 @@ mod raw {
             fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
             fn GetModuleHandleW(name: *const u16) -> *mut c_void;
             fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, size: u32) -> u32;
+        }
+
+        unsafe extern "C" {
+            fn _putenv_s(name: *const c_char, value: *const c_char) -> c_int;
         }
 
         fn wide(text: &OsStr) -> Vec<u16> {
@@ -498,6 +541,14 @@ mod raw {
             };
             let known = !module.is_null() && length > 0 && length < buffer.len();
             known.then(|| OsString::from_wide(&buffer[..length]).into())
+        }
+
+        /// Sets a variable in this program's C runtime, the one the
+        /// libraries share with it in a test build.
+        pub fn put_in_c_runtime(name: &CStr, value: &CStr) {
+            // SAFETY: both are NUL-terminated strings that outlive the call,
+            // which copies them. The child runs this one test.
+            assert_eq!(unsafe { _putenv_s(name.as_ptr(), value.as_ptr()) }, 0);
         }
     }
 

@@ -45,6 +45,8 @@ use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
+use crate::environment::{EnvironmentError, Role, check_environment};
+
 /// The version string of the one release this binding is written for.
 const PINNED: &str = "v9.21";
 
@@ -215,7 +217,11 @@ impl Library {
     /// Loads `libopenconnect` from `dir`, looks up every function, and
     /// checks the version. Call it once per process. The module
     /// documentation says what this does and does not control.
-    pub fn load(dir: &Path) -> Result<Self, LoadError> {
+    ///
+    /// It takes the [`Prepared`] that only [`prepare_environment`] gives,
+    /// so the environment has been dealt with first: GnuTLS reads some of
+    /// its variables in the start-up code that loading runs.
+    pub fn load(dir: &Path, _environment: Prepared) -> Result<Self, LoadError> {
         let file = dir.join(os::FILE);
         // A NUL would make the loader read a shorter path than the one given.
         if !os::is_plain(dir) || file.as_os_str().as_encoded_bytes().contains(&0) {
@@ -352,6 +358,47 @@ impl Drop for Handle {
     }
 }
 
+/// Proof that [`prepare_environment`] ran and found the environment safe.
+/// [`Library::load`] takes one, so the two cannot be called in the wrong
+/// order. Nothing else can make one.
+#[derive(Debug)]
+pub struct Prepared(());
+
+/// Makes the process's environment safe for the library. Call it once, first
+/// thing in `main`, before any thread exists and before [`Library::load`].
+///
+/// - **Windows:** removes every one of
+///   [`DANGEROUS_VARIABLES`](crate::environment::DANGEROUS_VARIABLES). With
+///   `temp`, also points `TMP` and `TEMP` at that folder, where the library
+///   makes the socket file of its command pipe. The service passes a folder
+///   only the system and administrators can write. The changes are made in
+///   the C runtime the libraries use as well as in the process environment:
+///   the libraries read the runtime's copy, which the Rust standard library
+///   does not change.
+/// - **macOS and Linux:** changes nothing, because a variable cannot be
+///   removed safely there, and fails as [`check_environment`] does for the
+///   role. `temp` is not used; the command pipe is a plain pipe.
+pub fn prepare_environment(role: Role, temp: Option<&Path>) -> Result<Prepared, EnvironmentError> {
+    #[cfg(windows)]
+    {
+        for (name, _) in crate::environment::DANGEROUS_VARIABLES {
+            os::set_variable(name, None)?;
+        }
+        if let Some(temp) = temp {
+            if !temp.is_absolute() || !temp.is_dir() {
+                return Err(EnvironmentError::BadTemp);
+            }
+            os::set_variable("TMP", Some(temp))?;
+            os::set_variable("TEMP", Some(temp))?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = temp;
+    // On Windows this confirms the removal, as far as Rust can see it.
+    // Elsewhere it is the whole step.
+    check_environment(role).map(|()| Prepared(()))
+}
+
 /// Whether `version` is the pinned release. Ubuntu, for one, ships an older
 /// release with known bugs.
 ///
@@ -364,12 +411,13 @@ pub fn is_pinned(version: &str) -> bool {
 
 #[cfg(windows)]
 mod os {
-    use std::ffi::{CStr, OsStr, c_char, c_void};
+    use std::ffi::{CStr, OsStr, c_char, c_int, c_void};
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Component, Path, Prefix};
     use std::ptr;
 
     use super::LoadError;
+    use crate::environment::EnvironmentError;
 
     pub(super) const FILE: &str = "libopenconnect-5.dll";
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0100;
@@ -433,6 +481,65 @@ mod os {
 
     /// Windows loaded the file by its full path; there is nothing to confirm.
     pub(super) fn confirm(_function: *mut c_void, _dir: &Path) -> Result<(), LoadError> {
+        Ok(())
+    }
+
+    /// Sets a variable, or removes it, where the bundled libraries read it.
+    ///
+    /// They are built against the Universal C Runtime and read its copy of
+    /// the environment, with `getenv` and `_wgetenv`. That copy is made when
+    /// the runtime starts, and `SetEnvironmentVariable`, which is all the
+    /// Rust standard library calls, does not change it. So the change goes
+    /// through `ucrtbase.dll` itself, asked for by name: this program's own
+    /// C runtime may be a private one. The runtime passes the change on to
+    /// the process environment; that is repeated here in case it did not.
+    pub(super) fn set_variable(name: &str, value: Option<&Path>) -> Result<(), EnvironmentError> {
+        let value = value.map_or(OsStr::new(""), Path::as_os_str);
+        let (wide_name, wide_value) = (wide(OsStr::new(name)), wide(value));
+        if wide_value.iter().filter(|unit| **unit == 0).count() != 1 {
+            return Err(EnvironmentError::BadTemp);
+        }
+        let runtime = wide(OsStr::new("ucrtbase.dll"));
+        // SAFETY: `runtime` is NUL-terminated UTF-16 and outlives the call;
+        // the second argument is reserved. Only System32 is searched.
+        let runtime = unsafe {
+            LoadLibraryExW(
+                runtime.as_ptr(),
+                ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        };
+        if runtime.is_null() {
+            return Err(EnvironmentError::Runtime);
+        }
+        // SAFETY: `runtime` is a loaded module, and the name is a
+        // NUL-terminated string.
+        let put = unsafe { GetProcAddress(runtime, c"_wputenv_s".as_ptr()) };
+        if put.is_null() {
+            return Err(EnvironmentError::Runtime);
+        }
+        // SAFETY: `put` is the runtime's
+        // `errno_t _wputenv_s(const wchar_t *, const wchar_t *)`.
+        let put = unsafe {
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const u16, *const u16) -> c_int>(
+                put,
+            )
+        };
+        // SAFETY: both strings are NUL-terminated UTF-16 that outlive the
+        // call, which copies them. An empty value removes the variable.
+        if unsafe { put(wide_name.as_ptr(), wide_value.as_ptr()) } != 0 {
+            return Err(EnvironmentError::Runtime);
+        }
+        // SAFETY: the standard library documents `set_var` and `remove_var`
+        // as always safe to call on Windows, in single-threaded and
+        // multi-threaded programs. They are `unsafe` because of other systems.
+        unsafe {
+            if value.is_empty() {
+                std::env::remove_var(name);
+            } else {
+                std::env::set_var(name, value);
+            }
+        }
         Ok(())
     }
 }

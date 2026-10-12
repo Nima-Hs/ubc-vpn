@@ -8,7 +8,7 @@ use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ubc_vpn_service::args::FORBIDDEN_ENV;
+use ubc_vpn_engine::DANGEROUS_VARIABLES;
 
 /// A refusal is immediate, so a run still going after this is a failure, and
 /// is not left running for long.
@@ -24,12 +24,20 @@ impl Drop for Running {
     }
 }
 
-/// Runs the binary with none of the forbidden variables but `set`. Returns
+/// Runs the binary with none of the forbidden variables but `set`, and none
+/// that steers the loader: Cargo sets one of those for the tests it runs. Returns
 /// whether it ended by itself with an error, and what it printed to standard
 /// error. One that is still running at the limit is stopped.
 fn run(args: &[&str], set: Option<&str>) -> (bool, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ubc-vpn-service"));
-    for name in FORBIDDEN_ENV {
+    for (name, _) in DANGEROUS_VARIABLES {
+        command.env_remove(name);
+    }
+    let loader = |name: &std::ffi::OsString| {
+        let name = name.to_string_lossy();
+        name.starts_with("LD_") || name.starts_with("DYLD_")
+    };
+    for (name, _) in std::env::vars_os().filter(|(name, _)| loader(name)) {
         command.env_remove(name);
     }
     command.args(args).envs(set.map(|name| (name, "1")));
@@ -85,17 +93,33 @@ fn a_build_with_dev_mode_knows_the_dev_flag() {
 // makes a TLS library write out session keys or weaken its settings.
 #[test]
 fn refuses_to_start_while_a_tls_variable_is_set() {
-    // Spelled out here, so that dropping one from the list is noticed.
-    let names = [
+    // The four the service has always refused, spelled out so that dropping
+    // one from the engine's list is noticed here too.
+    let always = [
         "SSLKEYLOGFILE",
         "GNUTLS_KEYLOGFILE",
         "GNUTLS_SYSTEM_PRIORITY_FILE",
         "GNUTLS_DEBUG_LEVEL",
     ];
-    assert_eq!(names, FORBIDDEN_ENV);
+    let names: Vec<&str> = DANGEROUS_VARIABLES.iter().map(|(name, _)| *name).collect();
+    assert!(always.iter().all(|name| names.contains(name)), "{names:?}");
     for name in names {
         let (refused, stderr) = run(&[], Some(name));
         let because = format!("refusing to start while {name} is set");
         assert!(refused && stderr.contains(&because), "{stderr}");
+    }
+}
+
+// Security rule, macOS and Linux: the installed service does not start while
+// a variable that steers the system loader is set, and does not repeat the
+// variable's name, which whoever set it chose.
+#[cfg(unix)]
+#[test]
+fn refuses_to_start_while_a_loader_variable_is_set() {
+    for name in ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"] {
+        let (refused, stderr) = run(&[], Some(name));
+        let because = "refusing to start while a variable that steers the system loader is set";
+        assert!(refused && stderr.contains(because), "{name}: {stderr}");
+        assert!(!stderr.contains(name), "{stderr}");
     }
 }

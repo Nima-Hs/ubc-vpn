@@ -2,6 +2,8 @@
 
 use std::ffi::OsString;
 
+use ubc_vpn_engine::{EnvironmentError, Role};
+
 /// How the binary was asked to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Run {
@@ -26,20 +28,45 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Run, String> {
     args.into_iter().try_fold(Run::Installed, read)
 }
 
-/// Variables that would expose or weaken the tunnel's TLS: the two names
-/// under which a TLS library writes out session keys, and two that GnuTLS
-/// takes its settings and debug output from.
-pub const FORBIDDEN_ENV: [&str; 4] = [
-    "SSLKEYLOGFILE",
-    "GNUTLS_KEYLOGFILE",
-    "GNUTLS_SYSTEM_PRIORITY_FILE",
-    "GNUTLS_DEBUG_LEVEL",
-];
+/// How strictly a run checks its environment. The engine crate holds the one
+/// list of variables that would expose or weaken the tunnel's TLS, and both
+/// levels refuse every one of them.
+///
+/// The installed service also refuses any variable that steers the system
+/// loader. Dev mode does not: it runs unprivileged on the fake engine, and
+/// Cargo, which starts it, sets such a variable itself.
+pub fn environment_role(run: Run) -> Role {
+    match run {
+        Run::Installed => Role::Service,
+        #[cfg(feature = "dev-mode")]
+        Run::Dev => Role::Client,
+    }
+}
 
-/// The first of [`FORBIDDEN_ENV`] that is set, if any. The service refuses to
-/// start while one is: this crate forbids unsafe code and so cannot remove a
-/// variable itself.
-pub fn forbidden_env() -> Option<&'static str> {
-    let is_set = |name: &&str| std::env::var_os(name).is_some();
-    FORBIDDEN_ENV.into_iter().find(is_set)
+/// Checks the environment for this run. The service refuses to start while
+/// it is not safe: this crate forbids unsafe code and so cannot remove a
+/// variable itself. The message names a variable only when the name is one
+/// of the engine's own list, never text taken from the environment.
+pub fn check_environment(run: Run) -> Result<(), String> {
+    ubc_vpn_engine::check_environment(environment_role(run)).map_err(|error| match error {
+        EnvironmentError::Set(name) => format!("refusing to start while {name} is set"),
+        EnvironmentError::LoaderVariable => "refusing to start while a variable that steers \
+            the system loader is set (LD_* or DYLD_*)"
+            .to_string(),
+        _ => "refusing to start: the environment is not safe".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Security rule: the installed service checks its environment at the
+    // strict level, which also refuses the loader's variables.
+    #[test]
+    fn the_installed_service_checks_at_the_service_level() {
+        assert_eq!(environment_role(Run::Installed), Role::Service);
+        #[cfg(feature = "dev-mode")]
+        assert_eq!(environment_role(Run::Dev), Role::Client);
+    }
 }

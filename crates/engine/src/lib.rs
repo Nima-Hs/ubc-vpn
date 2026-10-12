@@ -244,6 +244,7 @@ use ubc_vpn_core::routes::Ipv4Net;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 // Private in anything that ships; see "The binding is private" above.
+mod environment;
 #[cfg(all(feature = "libopenconnect", not(feature = "fake")))]
 mod ffi;
 #[cfg(all(feature = "libopenconnect", feature = "fake"))]
@@ -255,6 +256,9 @@ mod prompts;
 #[cfg(test)]
 mod tests;
 
+pub use environment::{DANGEROUS_VARIABLES, EnvironmentError, Role, check_environment};
+#[cfg(feature = "libopenconnect")]
+pub use ffi::{Prepared, prepare_environment};
 pub use gateway::Gateway;
 pub use log::{DEBUG_LINES, LogLevel, LogSink, MIN_HIDDEN_LEN};
 
