@@ -36,7 +36,7 @@ The `Native library (Windows)` workflow runs the same two scripts on GitHub's Wi
 ## What is pinned
 
 - **OpenConnect.** `build.sh` names the commit that tag `v9.21` points to and stops if the tag has moved. The build is made from the archive of that commit, with the one patch in `patches/openconnect/`.
-- **GnuTLS.** `common.sh` names the release and `sources.lock` its SHA-256. It is the release the macOS build uses, with the one patch in `patches/gnutls/`. `gnutls.sh` also requires a signature by the maintainer whose key is in `keys/` and whose full fingerprint it names. That key is one of the four in the keyring gnutls.org publishes for its releases.
+- **GnuTLS.** `common.sh` names the release and `sources.lock` its SHA-256. It is the release the macOS build uses, with the one patch in `patches/gnutls/`. `gnutls.sh` also requires a signature by the maintainer whose key is in `keys/` and whose full fingerprint it names. That key is one of the four in the keyring gnutls.org publishes for its releases. It expires on 2027-01-01. After that a GnuTLS build stops at the signature check until `keys/gnutls-release.asc` is replaced with the renewed key, or with another maintainer's key and its fingerprint in `gnutls.sh`.
 - **The compiler and the libraries.** `packages.lock` lists every MinGW package file with its SHA-256. `setup.sh` downloads exactly those files from `repo.msys2.org`, which keeps old versions, checks them and installs them. `build.sh` stops if the installed MinGW packages are not exactly the locked ones.
 - **The build tools.** `tools.lock` does the same for autoconf, automake, libtool, make, patch, perl, git and what they need. `build.sh` stops if one is missing or at another version.
 - **The MSYS2 source packages.** `sources.lock` lists each one with its SHA-256.
@@ -71,6 +71,8 @@ The workflow runs these on every build output, reused GnuTLS or not. The scripts
 
 `manifest.json` is written with `"shippable": false`. The workflow's last step before the upload (`approve.sh`) sets it to `true`. It only runs if every test passed on that same output, and it leaves the flag alone if GnuTLS was not built in that run. Anything that consumes the output must refuse it unless the flag is `true`.
 
+The flag alone is not enough. Any run that builds GnuTLS and passes the tests marks its output shippable, and that includes a run started by hand on a branch. A consumer must take the artifact only from a run of `main`, and check that `recipe.commit` in the manifest is a commit on `main`.
+
 ## The output
 
 | Path | Holds |
@@ -78,8 +80,7 @@ The workflow runs these on every build output, reused GnuTLS or not. The scripts
 | `bin/` | The DLLs above |
 | `licenses/` | The licence text of OpenConnect, GnuTLS, each MSYS2 package a DLL came from, and the MinGW runtime linked into the DLLs built here |
 | `source/` | The OpenConnect archive, the GnuTLS release, and the MSYS2 source package of each MSYS2 DLL |
-| `source/patches/` | Our patches to OpenConnect and GnuTLS |
-| `source/recipe/` | The scripts and lock files that made this output, configure options included |
+| `source/recipe/` | A copy of this folder as it was built: the scripts with their configure options, our patches to OpenConnect and GnuTLS, the lock files, lists and key. The workflow checks it matches the repository |
 | `manifest.json` | Whether the output is shippable, the commit of this repository it was built from, and each component with its origin, version, licence, source and checksums |
 | `build-packages.txt` | Every MSYS2 package installed during the build |
 
@@ -95,11 +96,12 @@ The build removes the paths; these remain the job of the program that loads the 
 
 - Install the DLLs in a folder only administrators can write, and its parent likewise. libxml2 looks for a catalogue at `..\etc\xml\catalog` relative to its own DLL if a document ever asks for one.
 - Load them from that folder only: a full path or `SetDefaultDllDirectories`, never the current directory or `PATH`.
-- Remove these environment variables before loading the DLLs. They are the ones the string scan finds the libraries reading:
+- Remove these environment variables before loading the DLLs. They are the ones the string scan and a reading of the source find the libraries reading:
   - `SSLKEYLOGFILE`: GnuTLS writes session keys to the file it names.
   - `GNUTLS_DEBUG_LEVEL`, `GNUTLS_CPUID_OVERRIDE`, `GNUTLS_BUFFER_RECLAIM`, `GNUTLS_NO_EXPLICIT_INIT`, `GNUTLS_NO_IMPLICIT_INIT`: change how GnuTLS logs, picks processor-specific code and starts up.
   - `NETTLE_FAT_VERBOSE`: makes Nettle print to standard error.
   - `XML_CATALOG_FILES`, `XML_DEBUG_CATALOG`: libxml2's catalogue files.
+  - `NTLMUSER`, `USER`: OpenConnect takes a user name from them when a proxy asks for NTLM authentication.
   - `GNUTLS_SYSTEM_PRIORITY_FILE`: this build does not read it, but remove it anyway.
 - Do not call GnuTLS's trust-on-first-use functions. They keep a file in `.gnutls` under the folder named by `HOME`, or `HOMEDRIVE` and `HOMEPATH`. OpenConnect does not call them.
 - Set `TMP` and `TEMP` to a folder that already exists and that only administrators can write, before calling `openconnect_setup_cmd_pipe()`. OpenConnect makes a short-lived socket file there. If that folder is unusable it falls back to `C:\Windows\Temp`, then `C:\Temp`, which any user may be able to create, then the current folder. Tracked for the engine as [issue #18](https://github.com/Nima-Hs/ubc-vpn/issues/18).

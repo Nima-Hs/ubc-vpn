@@ -80,6 +80,8 @@ jobs:
           # Every DLL is listed, and Wintun is not bundled.
           for dll in bin/*.dll; do grep -qF "\"$dll\"" manifest.json; done
           test ! -e bin/wintun.dll
+          # The recipe shipped with the source is this folder of the repository, whole.
+          diff -r --exclude=cache --exclude=work --exclude=out .. source/recipe
           # Nothing is shippable until the tests below have passed.
           python -c "import json; assert json.load(open('manifest.json'))['shippable'] is False"
 
