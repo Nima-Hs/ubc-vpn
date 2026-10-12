@@ -65,9 +65,23 @@ pub enum Stop {
 /// Before a request is delivered the terminal is put back as
 /// [`crate::terminal::restore_after_signal`] does.
 ///
-/// Once per process: a second call fails with [`crate::Error::AlreadyExists`].
+/// Once per process: a second call fails with [`crate::Error::AlreadyExists`],
+/// and so does a call after one that failed for any other reason. A failed
+/// `watch` cannot be tried again; a program that needs it should give up.
 /// Keep the receiver for as long as the program runs: see the module's notes
 /// on a second request and on a dropped receiver.
+///
+/// On any [`Stop`], stop asking questions or exit. The request has put the
+/// terminal back, so a hidden question that is still open from then on
+/// shows what is typed into it.
+///
+/// On Windows there is a limit to how long the caller has. When the console
+/// closes, Windows ends the program after 5 seconds; the same at log-off and
+/// at shutdown (20 seconds for a service, which this is not), which by
+/// Microsoft's account only services live to see. Those are Windows'
+/// defaults, a setting of the system and not of this code. The handler holds
+/// on for those 5 seconds and no longer, so that is what the caller has, at
+/// most. Ctrl-C and Ctrl-Break have no limit.
 pub fn watch() -> Result<Receiver<Stop>> {
     os::watch()
 }
@@ -95,7 +109,34 @@ pub const ACCEPT_CTRL_C: &str = "UBC_VPN_FAKE_ACCEPT_CTRL_C";
 /// own (`CREATE_NEW_PROCESS_GROUP`), on the test's own console, with
 /// [`ACCEPT_CTRL_C`] set, and the child calls [`watch`]. Under CI a test has
 /// a console; a program with none cannot send the event.
+///
+/// What it sends is a request to stop, which the child hears as a [`Stop`]
+/// from [`watch`]. It is not the key: a person pressing Ctrl-C at a hidden
+/// question types a key, and the question fails with
+/// [`crate::Error::Interrupted`]. A test of that types the key into the
+/// terminal.
+///
+/// The ID zero is refused. It does not name a child: on Windows it would
+/// send Ctrl-C to everything on the caller's console, a developer's shell
+/// included, and on Linux and macOS to the caller's whole process group.
 #[cfg(feature = "fake")]
 pub fn send_interrupt(child: u32) -> Result<()> {
+    // Security rule: only ever one chosen process, never everything.
+    if child == 0 {
+        return Err(crate::Error::Failed("not a process ID".to_string()));
+    }
     os::send_interrupt(child)
+}
+
+#[cfg(all(test, feature = "fake"))]
+mod tests {
+    use super::*;
+
+    // Zero would reach every program on the console, or in the group. The
+    // refusal comes before any call to the OS, so this is safe to run.
+    #[test]
+    fn an_interrupt_is_never_sent_to_everything() {
+        let refused = crate::Error::Failed("not a process ID".to_string());
+        assert_eq!(send_interrupt(0), Err(refused));
+    }
 }

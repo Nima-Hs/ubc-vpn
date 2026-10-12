@@ -16,6 +16,8 @@ static WATCHING: AtomicBool = AtomicBool::new(false);
 /// The end of the pipe the handler writes to. Never closed, so the handler
 /// can use it at any moment.
 static PIPE: AtomicI32 = AtomicI32::new(-1);
+/// The process that watches. A child made by `fork` is not it.
+static WATCHER: AtomicI32 = AtomicI32::new(0);
 
 pub(crate) fn exit_status(stop: Stop) -> i32 {
     match stop {
@@ -32,6 +34,7 @@ pub(crate) fn watch() -> Result<Receiver<Stop>> {
     // The handler must never wait: a full pipe drops the byte instead.
     handlers_end.set_nonblocking(true)?;
     PIPE.store(handlers_end.into_raw_fd(), Ordering::SeqCst);
+    WATCHER.store(std::process::id() as i32, Ordering::SeqCst);
     let (requests, receiver) = mpsc::channel();
     let forwarder = thread::Builder::new().name("stop requests".to_string());
     forwarder.spawn(move || forward(pipe, &requests))?;
@@ -110,6 +113,22 @@ extern "C" fn on_signal(signal: c_int) {
     // SAFETY: `errno` returns a valid pointer of this thread's own. What the
     // handler interrupted may be about to read the value.
     let before = unsafe { *errno() };
+    // A child this program has made, in the moment before it becomes
+    // another program, still has this handler and the pipe. The signal was
+    // sent to the child, not to this program: no request comes of it, and
+    // the child ends as it would have with no handler at all.
+    // SAFETY: the call is safe in a signal handler and has no conditions.
+    let me = unsafe { libc::getpid() };
+    if me != WATCHER.load(Ordering::SeqCst) {
+        // SAFETY: both calls are safe in a signal handler and have no other
+        // conditions. The signal raised is held back until this handler
+        // returns, and then meets its default action.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+        return;
+    }
     // Security rule: the terminal is put back before anyone hears of the
     // request, so that no exit, however quick, leaves it silent.
     terminal::restore_after_signal();
@@ -258,6 +277,21 @@ mod tests {
         assert_eq!(program.ended(), 130);
     }
 
+    // A child the program makes still has the handler in the moment before
+    // it becomes another program. A signal sent to it then is the child's
+    // own: it ends the child, and the program hears of no request.
+    #[test]
+    fn a_signal_to_a_forked_child_is_not_a_request() {
+        let program = Program::start("fork", |_| {});
+        let forked = program.says();
+        let forked = forked.strip_prefix("FORKED ").expect("its ID");
+        let forked: i32 = forked.parse().expect("a number");
+        // SAFETY: the call has no memory-safety conditions, and the ID is
+        // of a process the child has not waited for yet.
+        assert_eq!(unsafe { libc::kill(forked, SIGINT) }, 0, "send");
+        assert_eq!(program.says(), format!("FORK ENDED by={SIGINT} requests=0"));
+    }
+
     // A program started with a signal ignored, as under `nohup`, keeps
     // ignoring it.
     #[test]
@@ -332,6 +366,33 @@ mod tests {
             let now = tcgetattr(&terminal).expect("its mode").local_modes;
             println!("SAYS GOT {stop:?} restored={}", now.contains(shown));
             std::process::exit(exit_status(stop));
+        }
+        if kind == "fork" {
+            // SAFETY: the child of the fork only waits, with a call that is
+            // safe after a fork in a program with threads.
+            let forked = unsafe { libc::fork() };
+            assert!(forked >= 0, "fork");
+            if forked == 0 {
+                loop {
+                    // SAFETY: as above.
+                    unsafe { libc::pause() };
+                }
+            }
+            println!("SAYS FORKED {forked}");
+            let mut status = 0;
+            // SAFETY: `status` is a live integer, and the ID is a child's
+            // that has not been waited for.
+            unsafe { libc::waitpid(forked, &mut status, 0) };
+            let by = match libc::WIFSIGNALED(status) {
+                true => libc::WTERMSIG(status),
+                false => 0,
+            };
+            thread::sleep(Duration::from_millis(300));
+            println!(
+                "SAYS FORK ENDED by={by} requests={}",
+                stops.try_iter().count()
+            );
+            return;
         }
         if kind == "dropped" {
             drop(stops);

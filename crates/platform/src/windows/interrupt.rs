@@ -19,8 +19,11 @@ static REQUESTS: Mutex<Option<Sender<Stop>>> = Mutex::new(None);
 
 /// How long the handler holds on when the console closes, at log-off and at
 /// shutdown. Windows ends the program the moment the handler returns, and
-/// after about five seconds anyway.
-const LAST_MOMENTS: Duration = Duration::from_secs(10);
+/// after its own limit anyway: 5 seconds by default for each of the three
+/// (`SPI_GETHUNGAPPTIMEOUT` for a close, `SPI_GETWAITTOKILLTIMEOUT` for the
+/// others; 20 seconds at shutdown for a service, which this is not). Holding
+/// on longer than the limit would gain nothing.
+const LAST_MOMENTS: Duration = Duration::from_secs(5);
 
 /// What Windows gives a program it ends for a console event.
 const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
