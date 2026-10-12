@@ -237,6 +237,27 @@ fn a_gateway_needs_pins_and_a_valid_host() {
     assert!(good.accepts(&pin('A')) && !good.accepts(&pin('B')));
 }
 
+// Security rule: only a test build can say where the gateway is, and then
+// only on this machine. Everything else still comes from the policy.
+#[test]
+fn a_test_gateway_is_local_and_still_checked_against_the_policy() {
+    let good = policy("vpn.example.test", &[pin('a')]);
+    assert_eq!(Gateway::from_policy(&good).unwrap().test_endpoint(), None);
+    let local = "127.0.0.1:8443".parse().unwrap();
+    let gateway = Gateway::for_test(&good, local).unwrap();
+    assert_eq!(gateway.test_endpoint(), Some(local));
+    assert_eq!(gateway.host(), "vpn.example.test");
+    for remote in ["192.0.2.1:443", "0.0.0.0:443", "10.0.0.1:8443"] {
+        let remote = remote.parse().unwrap();
+        assert_eq!(
+            Gateway::for_test(&good, remote),
+            Err(PolicyError::BadGateway)
+        );
+    }
+    let no_pins = policy("vpn.example.test", &[]);
+    assert_eq!(Gateway::for_test(&no_pins, local), Err(PolicyError::NoPins));
+}
+
 #[test]
 fn login_reports_an_unreachable_gateway() {
     let mut script = Script::new(pin('A'));
@@ -812,7 +833,14 @@ fn guard_files_hold_only_the_guard_with_private_fields() {
     // Every public function, so that adding one (a `forget`, say) is a
     // visible, deliberate change to this list.
     let allowed = [
-        vec!["from_policy", "host", "pins", "accepts"],
+        vec![
+            "for_test",
+            "test_endpoint",
+            "from_policy",
+            "host",
+            "pins",
+            "accepts",
+        ],
         vec!["new", "ask", "asked"],
         vec!["new", "none", "hide", "log"],
     ];

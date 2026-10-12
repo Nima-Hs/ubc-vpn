@@ -125,5 +125,8 @@ jobs:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
         run: |
           cargo test --locked -p ubc-vpn-engine --features libopenconnect --tests -- --nocapture | tee test.log
+          # The examples that show the binding is private only mean something
+          # in this configuration: the feature on and the fake off.
+          cargo test --locked -p ubc-vpn-engine --features libopenconnect --doc
           # A test that is skipped passes, so prove from the log that it ran.
           grep -E '^RAN: Ok\("v9\.21(-unknown)?"\)' test.log

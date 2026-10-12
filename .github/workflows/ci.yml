@@ -45,6 +45,12 @@ jobs:
           cargo test --locked -p ubc-vpn-platform --features dev-mode
           cargo clippy --locked -p ubc-vpn-engine --features fake,debug-logs --all-targets -- -D warnings
           cargo test --locked -p ubc-vpn-engine --features fake,debug-logs
+      # The workspace run above builds the engine with its fake feature, which
+      # the service's tests ask for. The examples that show what a shipped
+      # engine cannot reach only mean something without it.
+      - name: The engine's examples hold without the fake feature
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --locked -p ubc-vpn-engine --doc
       # On every OS: a dev-mode service runs on that OS's real channel, so its
       # tests do different things on each.
       - name: The service's dev mode builds and passes its tests
