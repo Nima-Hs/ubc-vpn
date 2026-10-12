@@ -6,13 +6,15 @@ import { type SpawnOptions, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { inspect } from "node:util";
 import type { RouteInput } from "@shared/protocol/RouteInput";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { settingsCommand } from "../src/main/channel/cli";
 import { MAX_LINE_BYTES } from "../src/main/channel/framing";
-import { SETTINGS_ARGS, SettingsRunner } from "../src/main/channel/settings";
+import { MAX_SHOWN_LENGTH, SETTINGS_ARGS, SettingsRunner } from "../src/main/channel/settings";
 import { isRoutesReply, isSettingsFailure, isSettingsView } from "../src/main/channel/validate";
 import { MAX_ROUTE_ENTRIES, MAX_ROUTE_ENTRY_LENGTH, takeRouteInput } from "../src/main/ipc";
+import { stopForQuit } from "../src/main/quit";
 import { alive, pause, until } from "./bridge-harness";
 
 // The real `spawn`, watched: some tests read how the client was started.
@@ -196,6 +198,68 @@ describe("the output of a command", () => {
     });
 });
 
+describe("text from the user's own files", () => {
+    // Anything running as the user can write these files, so what they hold
+    // is cleaned before the interface sees it, as text from a login is.
+    const BACKWARDS = "\u202e";
+    const dirty = (text: string) => `${BACKWARDS}${text}\n\tmore\u0007`;
+
+    it("is made plain in a view: the username, the routes and the allowed routes", async () => {
+        const view = {
+            ...VIEW,
+            settings: {
+                ...VIEW.settings,
+                username: dirty("someone"),
+                routes: { subnets: [dirty("203.0.113.0/24")], dns_domains: [dirty("a.example")] },
+            },
+            allowed_routes: [dirty("198.51.100.0/24"), "x".repeat(MAX_SHOWN_LENGTH + 50)],
+        };
+        const { runner } = client({ get: { line: view, exit: 0 } });
+        await expect(runner.getSettings()).resolves.toEqual({
+            ok: true,
+            value: {
+                ...VIEW,
+                settings: {
+                    ...VIEW.settings,
+                    username: "someone more",
+                    routes: { subnets: ["203.0.113.0/24 more"], dns_domains: ["a.example more"] },
+                },
+                allowed_routes: ["198.51.100.0/24 more", "x".repeat(MAX_SHOWN_LENGTH)],
+            },
+        });
+    });
+
+    it("is made plain in the routes a check or a save answers with", async () => {
+        const reply = { type: "ok", routes: { subnets: [dirty("a")], dns_domains: [dirty("b")] } };
+        const plain = { type: "ok", routes: { subnets: ["a more"], dns_domains: ["b more"] } };
+        const { runner } = client({
+            check: { line: reply, exit: 0 },
+            save: { line: reply, exit: 0 },
+        });
+        await expect(runner.checkRoutes(INPUT)).resolves.toEqual({ ok: true, value: plain });
+        await expect(runner.saveRoutes(INPUT)).resolves.toEqual({ ok: true, value: plain });
+    });
+
+    it("keeps every entry in its place, so a problem still points at the right one", async () => {
+        const view = {
+            ...VIEW,
+            settings: {
+                ...VIEW.settings,
+                routes: { subnets: [BACKWARDS, "203.0.113.0/24"], dns_domains: [] },
+            },
+        };
+        const { runner } = client({ get: { line: view, exit: 0 } });
+        const result = await runner.getSettings();
+        expect(result.ok && result.value.settings.routes.subnets).toEqual(["", "203.0.113.0/24"]);
+        // No username stays no username.
+        const none = client({
+            get: { line: { ...VIEW, settings: { ...VIEW.settings, username: null } }, exit: 0 },
+        });
+        const answer = await none.runner.getSettings();
+        expect(answer.ok && answer.value.settings.username).toBeNull();
+    });
+});
+
 describe("the input of a command", () => {
     it("is one line on standard input, and never on the command line", async () => {
         const typed = {
@@ -318,6 +382,31 @@ describe("a client that does not behave", () => {
         await until(() => !alive(pid), "the client ending");
     });
 
+    it("is given up on when the limit passes, even if it ignores being ended", async () => {
+        const real =
+            await vi.importActual<typeof import("node:child_process")>("node:child_process");
+        const { runner, pids } = client({ save: { hang: true } }, { timeoutMs: 400 });
+        vi.mocked(spawn).mockImplementationOnce(((...args: Parameters<typeof real.spawn>) => {
+            const child = real.spawn(...args);
+            child.kill = () => true;
+            return child;
+        }) as typeof spawn);
+        await expect(runner.saveRoutes(INPUT)).resolves.toEqual({
+            ok: false,
+            error: "unavailable",
+        });
+        await until(() => pids().length === 1, "the client starting");
+        const [stubborn = 0] = pids();
+        expect(alive(stubborn)).toBe(true);
+        // The save it held is over: the next one is taken, not turned away.
+        await expect(runner.saveRoutes(INPUT)).resolves.toEqual({
+            ok: false,
+            error: "unavailable",
+        });
+        process.kill(stubborn);
+        await until(() => !alive(stubborn), "the stubborn client ending");
+    });
+
     it("is ended as soon as it writes more than a line may hold, without waiting out the limit", async () => {
         const { runner, pids } = client(
             { get: { raw: "x".repeat(MAX_LINE_BYTES + 10), stay: true } },
@@ -367,7 +456,47 @@ describe("a client that does not behave", () => {
     });
 });
 
+describe("when the app quits", () => {
+    it("stops the controller, then the settings clients, then the tray", () => {
+        const order: string[] = [];
+        const part = (name: string) => () => void order.push(name);
+        stopForQuit(
+            { dispose: part("controller") },
+            { stop: part("settings") },
+            { destroy: part("tray") },
+        );
+        expect(order).toEqual(["controller", "settings", "tray"]);
+        // Where there is no tray, the rest still stops.
+        stopForQuit({ dispose: part("controller") }, { stop: part("settings") }, null);
+        expect(order).toHaveLength(5);
+    });
+});
+
 describe("one thing at a time", () => {
+    it("starts one client for everyone reading the settings at once", async () => {
+        const { runner, pids } = client({ get: { line: VIEW, exit: 0 } });
+        const answers = await Promise.all(Array.from({ length: 60 }, () => runner.getSettings()));
+        expect(pids()).toHaveLength(1);
+        expect(answers.every((answer) => answer.ok)).toBe(true);
+        // A read after that one is a fresh read, not an old answer kept.
+        await runner.getSettings();
+        expect(pids()).toHaveLength(2);
+    });
+
+    it("never ends a save under way to make room for a check", async () => {
+        const { runner, pids } = client({ save: { hang: true }, check: { line: OK, exit: 0 } });
+        const saving = runner.saveRoutes(INPUT);
+        await until(() => pids().length === 1, "the save starting");
+        const [save = 0] = pids();
+        await expect(runner.checkRoutes(INPUT)).resolves.toMatchObject({ ok: true });
+        const burst = Array.from({ length: 5 }, () => runner.checkRoutes(INPUT));
+        await expect(burst.at(-1)).resolves.toMatchObject({ ok: true });
+        expect(alive(save)).toBe(true);
+        await expect(runner.saveRoutes(INPUT)).resolves.toEqual({ ok: false, error: "busy" });
+        runner.stop();
+        await expect(saving).resolves.toEqual({ ok: false, error: "unavailable" });
+    });
+
     it("refuses a second save while one is under way, and takes the next after it", async () => {
         const { runner, received } = client({ save: { line: OK, exit: 0 } });
         const first = runner.saveRoutes(INPUT);
@@ -490,8 +619,39 @@ describe("what the interface may send", () => {
             "an entry that is too long",
             [{ subnets: [], dns_domains: ["x".repeat(MAX_ROUTE_ENTRY_LENGTH + 1)] }],
         ],
+        // A gap is not an entry, though `every` would pass over it.
+        ["a list that is all gaps", [{ subnets: new Array(3), dns_domains: [] }]],
+        [
+            "a list with a gap in it",
+            [{ subnets: [], dns_domains: Object.assign(new Array(3), { 0: "a", 2: "c" }) }],
+        ],
     ] as [string, unknown[]][])("is refused when it is %s", (_name, args) => {
-        expect(() => takeRouteInput(args)).toThrow("refused");
+        expect(() => takeRouteInput(args)).toThrow(/^refused$/);
+    });
+
+    it("is refused without a word about what was sent", () => {
+        // Electron prints a handler's error to the app's standard error, and
+        // the routes someone uses are theirs to keep.
+        const MARK = "192.0.2.77";
+        for (const args of [
+            [{ subnets: [`${MARK}/32`], dns_domains: [], path: MARK }],
+            [{ subnets: [`${MARK}/${"9".repeat(MAX_ROUTE_ENTRY_LENGTH)}`], dns_domains: [] }],
+            [{ subnets: MARK, dns_domains: [] }],
+            [MARK],
+        ]) {
+            let thrown: unknown;
+            try {
+                takeRouteInput(args);
+            } catch (error) {
+                thrown = error;
+            }
+            expect(thrown).toBeInstanceOf(Error);
+            const error = thrown as Error;
+            expect(error.message).toBe("refused");
+            expect(
+                `${error.stack} ${JSON.stringify(error)} ${inspect(error, { depth: 8 })}`,
+            ).not.toContain(MARK);
+        }
     });
 });
 

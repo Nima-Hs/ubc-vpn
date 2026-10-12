@@ -19,6 +19,7 @@ const out = fileURLToPath(new URL(`../${folder}/`, import.meta.url));
 const markers = [
     "connected-crowded",
     "login-password-again",
+    "routes-too-long-to-save",
     "demo:set-scenario",
     "demo:list-scenarios",
     "Show a state",

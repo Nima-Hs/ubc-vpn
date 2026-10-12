@@ -7,6 +7,7 @@ import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
+import { stopForQuit } from "./quit";
 import {
     allowsRemoteDebugging,
     applicationMenu,
@@ -55,10 +56,13 @@ async function start(): Promise<void> {
     // to log in, and both go to the one controller below.
     let link: ServiceLink;
     let login: LoginFactory;
+    let demoSettings: SettingsService | undefined;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
         const { createDemoLogin, DEMO_LOGIN_SCENARIOS } = await import("./demo/demo-login");
+        const { createDemoSettings } = await import("./demo/demo-settings");
+        demoSettings = createDemoSettings();
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
         const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
         const demo = createDemoLink(step);
@@ -93,9 +97,9 @@ async function start(): Promise<void> {
     }
     const controller = new Controller(link, login);
     // The user's settings are read and written by the command-line client.
-    const settings: SettingsService = new SettingsRunner({
-        command: settingsCommand(app, process),
-    });
+    // A demo build has a fake of its own, made above.
+    const settings: SettingsService =
+        demoSettings ?? new SettingsRunner({ command: settingsCommand(app, process) });
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.
@@ -152,11 +156,7 @@ async function start(): Promise<void> {
     app.on("second-instance", show);
     app.on("activate", show);
     app.on("window-all-closed", () => app.quit());
-    app.on("will-quit", () => {
-        controller.dispose();
-        settings.stop();
-        tray?.destroy();
-    });
+    app.on("will-quit", () => stopForQuit(controller, settings, tray));
 
     // If the interface's process dies, start it again, but not in a loop.
     let restarts = 0;
