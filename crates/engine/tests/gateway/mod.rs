@@ -22,6 +22,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, fs};
 
+/// How long a gateway may take to start and print its ports.
+const START_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A running gateway. Dropping it stops it, also when a test panics.
 pub struct Gateway {
     child: Child,
@@ -83,8 +86,19 @@ impl Gateway {
             other_port: 0,
             log,
         };
-        let mut first = String::new();
-        BufReader::new(stdout).read_line(&mut first).unwrap();
+        // Read on a thread of its own, so that a gateway that starts and
+        // never says where it listens fails the test and does not hold it.
+        // When the test gives up, dropping `gateway` kills the child, which
+        // ends the read.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut first = String::new();
+            let _ = BufReader::new(stdout).read_line(&mut first);
+            let _ = sender.send(first);
+        });
+        let first = receiver
+            .recv_timeout(START_LIMIT)
+            .expect("the gateway said where it listens in time");
         let ports = first.strip_prefix("PORTS ").unwrap_or_default();
         let mut ports = ports.split_whitespace().map(str::parse);
         let (Some(Ok(port)), Some(Ok(other))) = (ports.next(), ports.next()) else {

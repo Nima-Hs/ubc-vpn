@@ -77,6 +77,16 @@ class Gateway(http.server.BaseHTTPRequestHandler):
     other_port = 0
     log_path = ""
     log_lock = threading.Lock()
+    context = None
+
+    def setup(self):
+        # The TLS handshake happens here, on this connection's own thread,
+        # and not where connections are accepted: a client that connects and
+        # then says nothing holds up only itself, and only for ten seconds.
+        self.request.settimeout(10)
+        self.request = self.context.wrap_socket(self.request, server_side=True)
+        self.request.settimeout(None)
+        super().setup()
 
     def log_message(self, *_):
         pass
@@ -136,12 +146,18 @@ class Gateway(http.server.BaseHTTPRequestHandler):
     do_GET = do_POST
 
 
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A client that gives up during the handshake, as one does when the
+        # key is not the one it pins, is not worth a traceback.
+        pass
+
+
 def listen(listener, context):
-    handler = type("Handler", (Gateway,), {"listener": listener})
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    server.daemon_threads = True
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    return server
+    handler = type("Handler", (Gateway,), {"listener": listener, "context": context})
+    return Server(("127.0.0.1", 0), handler)
 
 
 def main(cert, key, scenario, log_path):
