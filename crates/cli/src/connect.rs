@@ -20,7 +20,7 @@ use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{
     ClientKind, ConnectParams, ErrorCode, Event, RequestBody, ResponseBody,
 };
-use ubc_vpn_core::redact::Secret;
+use ubc_vpn_core::redact::{REDACTED, Secret};
 use ubc_vpn_core::settings::Settings;
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{
@@ -223,11 +223,15 @@ fn login(
     };
     let mut prompts = Prompts::new(&mut answer);
     let result = engine.login(gateway, &mut prompts, &Cancel::new(), &logs);
-    if let Ok(session) = &result {
-        logs.hide(&session.cookie);
-    }
+    // The engine held the cookie before this code did, so a line it wrote on
+    // the way may show it. The lines are printed only now, with it removed.
+    let cookie = result.as_ref().ok().map(|session| session.cookie.expose());
     for line in lines.lock().unwrap().iter() {
-        let _ = writeln!(err, "ubc-vpn: {}", clean(line));
+        let line = match cookie {
+            Some(cookie) if !cookie.is_empty() => line.replace(cookie, REDACTED),
+            _ => line.clone(),
+        };
+        let _ = writeln!(err, "ubc-vpn: {}", clean(&line));
     }
     result.map_err(|error| {
         let code = match error {

@@ -173,6 +173,27 @@ fn no_secret_is_ever_printed() {
     }
 }
 
+// Security rule: the same holds when the library is careless. This gateway
+// writes every answer and the cookie in error lines, which connect prints,
+// and registers none of them: only connect's own care keeps them out.
+#[test]
+fn a_library_that_leaks_secrets_has_them_removed() {
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    script.leaks = true;
+    scene.gateway = FakeEngine::new(script);
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD)]);
+    let (code, out, err) = scene.connect(&mut typist);
+    assert_eq!(code, 0, "{err}");
+    // The lines did arrive: two answers and the cookie, each blanked.
+    assert_eq!(err.matches("ubc-vpn: > [redacted]\n").count(), 2, "{err}");
+    assert_eq!(err.matches("ubc-vpn: < [redacted]\n").count(), 1, "{err}");
+    let shown = [out, err, scene.state()].concat();
+    for secret in ["alice", PASSWORD, COOKIE] {
+        assert!(!shown.contains(secret), "{secret} was printed");
+    }
+}
+
 // Security rule: a connect that cannot succeed asks nothing and sends the
 // gateway nothing, so it costs the user no MFA request.
 #[test]

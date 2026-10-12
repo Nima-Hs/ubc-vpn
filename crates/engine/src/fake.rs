@@ -50,6 +50,12 @@ pub struct Script {
     pub cookie: Secret,
     /// What a tunnel is given. Its `gateway_addr` is where the gateway lives.
     pub assigned: Assigned,
+    /// Whether logging in behaves like a careless library: each answer it is
+    /// sent and the cookie it issues are written in error-level lines, and
+    /// none of them is registered with the sink first. Off unless a test
+    /// turns it on, to show that a caller keeps its own secrets out of what
+    /// it prints.
+    pub leaks: bool,
 }
 
 impl Script {
@@ -81,6 +87,7 @@ impl Script {
                 mtu: 1300,
                 split_includes: Vec::new(),
             },
+            leaks: false,
         }
     }
 }
@@ -269,6 +276,13 @@ impl LoginEngine for FakeEngine {
         // The gateway judges a whole form at once. On a wrong answer it shows
         // the form again with an error, which `Prompts` stops as soon as a
         // username or password would be asked twice.
+        // A careless library says at error level what a careful one says at
+        // debug level, and registers nothing.
+        let said = if script.leaks {
+            LogLevel::Error
+        } else {
+            LogLevel::Debug
+        };
         let mut message = None;
         let mut accepted = false;
         for _ in 0..2 {
@@ -280,9 +294,11 @@ impl LoginEngine for FakeEngine {
                 let mut shown = prompt.clone();
                 shown.message = message.clone().or(shown.message);
                 let answer = prompts.ask(&shown)?;
-                logs.hide(&answer);
+                if !script.leaks {
+                    logs.hide(&answer);
+                }
                 // A real library can echo what it posts, with no marker word.
-                logs.log(LogLevel::Debug, &format!("> {}", answer.expose()));
+                logs.log(said, &format!("> {}", answer.expose()));
                 accepted &= answer == *wanted;
                 self.shared.lock().answers.push((prompt.kind, answer));
             }
@@ -300,10 +316,12 @@ impl LoginEngine for FakeEngine {
         }
         // What the real library does at debug level, with and without a
         // word the redactor knows.
-        logs.hide(&script.cookie);
+        if !script.leaks {
+            logs.hide(&script.cookie);
+        }
         let cookie = script.cookie.expose();
         logs.log(LogLevel::Debug, &format!("Set-Cookie: webvpn={cookie}"));
-        logs.log(LogLevel::Debug, &format!("< {cookie}"));
+        logs.log(said, &format!("< {cookie}"));
         logs.log(LogLevel::Info, "Login succeeded");
         self.shared.lock().session_alive = true;
         Ok(Session {
