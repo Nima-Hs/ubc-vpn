@@ -56,17 +56,11 @@ fn failed(message: &str) -> Option<Error> {
     Some(Error::Failed(message.to_string()))
 }
 
-/// Whether a test that needs root may run. It says so either way, and CI
-/// checks what it said.
-fn root(test: &str) -> bool {
-    if me() == 0 {
-        eprintln!("RAN AS ROOT: {test}");
-        return true;
-    }
-    let required = std::env::var_os("UBC_VPN_REQUIRE_ROOT").is_some();
-    assert!(!required, "{test} needs root");
-    eprintln!("SKIPPED, needs root: {test}");
-    false
+/// The turn to use the file system, and to ask or change who the process
+/// runs as. Asking first would race with a test that is another user for a
+/// moment.
+fn turn() -> MutexGuard<'static, ()> {
+    lock(&SERIAL)
 }
 
 /// Runs `act` with the process's effective user set to `user`. Only root can.
@@ -106,7 +100,10 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(mode: Mode) -> Self {
-        let turn = lock(&SERIAL);
+        Self::make(turn(), mode)
+    }
+
+    fn make(turn: MutexGuard<'static, ()>, mode: Mode) -> Self {
         let base = match me() {
             0 => PathBuf::from(os::ROOT_ONLY),
             _ => std::env::temp_dir(),
@@ -125,6 +122,7 @@ impl Sandbox {
     /// With the installed rules as root, or dev mode's otherwise. Without
     /// either there is nowhere this user may listen.
     fn any(test: &str) -> Option<Self> {
+        let turn = turn();
         let mode = if me() == 0 {
             Some(Mode::Installed)
         } else {
@@ -133,7 +131,21 @@ impl Sandbox {
         if mode.is_none() {
             eprintln!("SKIPPED, needs dev mode or root: {test}");
         }
-        mode.map(Self::new)
+        mode.map(|mode| Self::make(turn, mode))
+    }
+
+    /// For a test that needs root. It says whether it ran, and CI checks
+    /// what it said.
+    fn root(test: &str, mode: Mode) -> Option<Self> {
+        let turn = turn();
+        if me() == 0 {
+            eprintln!("RAN AS ROOT: {test}");
+            return Some(Self::make(turn, mode));
+        }
+        let required = std::env::var_os("UBC_VPN_REQUIRE_ROOT").is_some();
+        assert!(!required, "{test} needs root");
+        eprintln!("SKIPPED, needs root: {test}");
+        None
     }
 
     fn transport(&self) -> SocketTransport {
@@ -440,10 +452,9 @@ fn an_installed_client_refuses_a_socket_in_a_folder_that_is_not_roots() {
 // that is not the service's file, or not answered by the service, is refused.
 #[test]
 fn a_client_refuses_a_squatted_socket() {
-    if !root("squatted socket") {
+    let Some(sandbox) = Sandbox::root("squatted socket", Mode::Installed) else {
         return;
-    }
-    let sandbox = Sandbox::new(Mode::Installed);
+    };
     let transport = sandbox.transport();
 
     // Someone else's socket file, though root answers it.
@@ -478,10 +489,9 @@ fn a_client_refuses_a_squatted_socket() {
 // the identity on every request.
 #[test]
 fn narrowing_admits_the_owner_and_refuses_everyone_else() {
-    if !root("narrowing") {
+    let Some(sandbox) = Sandbox::root("narrowing", Mode::Installed) else {
         return;
-    }
-    let sandbox = Sandbox::new(Mode::Installed);
+    };
     let (transport, name) = (sandbox.transport(), sandbox.name());
     let listener = transport.listen(&name).expect("listen");
     let _queued = kernel_connect(STRANGER, &name).expect("open before an owner exists");
@@ -507,10 +517,9 @@ fn narrowing_admits_the_owner_and_refuses_everyone_else() {
 
 #[test]
 fn the_installed_channel_passes_the_suite_with_a_second_user() {
-    if !root("suite") {
+    let Some(sandbox) = Sandbox::root("suite", Mode::Installed) else {
         return;
-    }
-    let sandbox = Sandbox::new(Mode::Installed);
+    };
     let transport = sandbox.transport();
     let stranger = |name: &str| as_user(STRANGER, || transport.connect(name));
     suite::check_transport(&transport, &sandbox.name(), &stranger);
@@ -521,10 +530,9 @@ fn the_installed_channel_passes_the_suite_with_a_second_user() {
 #[cfg(feature = "dev-mode")]
 #[test]
 fn a_dev_channel_refuses_another_user_from_the_start() {
-    if !root("dev") {
+    let Some(sandbox) = Sandbox::root("dev", Mode::Dev) else {
         return;
-    }
-    let sandbox = Sandbox::new(Mode::Dev);
+    };
     let transport = sandbox.transport();
     let shared = sandbox.folder("shared", 0o777);
     let name = socket_in(&shared.join("ch"));
@@ -621,6 +629,8 @@ fn dev_paths_never_collide_with_the_installed_ones() {
         ("XDG_RUNTIME_DIR", "/run/ubc-vpn"),
         ("TMPDIR", "relative"),
     ];
+    // The dev socket's folder is named after whoever the process runs as.
+    let _turn = turn();
     for pairs in [PLAIN, HOSTILE, INSIDE] {
         let installed = os::paths(Mode::Installed, &env(pairs)).expect("paths");
         match os::paths(Mode::Dev, &env(pairs)) {
@@ -657,6 +667,7 @@ fn native_has_a_real_channel_and_nothing_else_yet() {
         resolvers: vec![gateway],
         domains: vec!["ece.example".to_string()],
     };
+    let _turn = turn();
     let modes = [Some(Mode::Installed), DEV];
     for mode in modes.into_iter().flatten() {
         let native = Platform::native(mode).expect("a platform");
