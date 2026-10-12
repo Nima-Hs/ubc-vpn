@@ -737,6 +737,24 @@ fn what_a_failed_login_wrote_is_handed_to_the_service() {
     assert_eq!(logs, ["Failed to connect to the gateway"]);
 }
 
+// A user who gave up is leaving: the login's lines are printed, since they
+// were written, but the program does not stay to hand them over. The
+// careless gateway writes a line for the username before the password is
+// asked for, so there is a line that could have been handed over.
+#[test]
+fn a_login_the_user_gave_up_hands_nothing_over() {
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    script.leaks = true;
+    scene.gateway = FakeEngine::new(script);
+    let mut typist = Typist::typing(&[Some("alice"), None]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!(code, CANCELLED, "{err}");
+    assert!(err.contains("ubc-vpn: > [redacted]\n"), "{err}");
+    let logs = scene.service.as_ref().unwrap().logs();
+    assert_eq!(logs, [""; 0], "a line was handed over");
+}
+
 // No more is handed over than one connection may add: the last lines, which
 // are the nearest to how it ended. A blank line is passed over, and a line
 // too long to keep is not cut: the marker goes in its place.
