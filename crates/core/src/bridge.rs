@@ -15,9 +15,13 @@
 //! for the app. It then writes exactly one first [`BridgeLine`]:
 //! [`Ready`](BridgeLine::Ready), or the reason there is no channel. Every
 //! line other than `ready` and `server` is the bridge's last: it exits after
-//! writing it. A handshake reply the bridge cannot read counts as
-//! `service_unavailable`. The bridge does not read standard input until it
-//! has written `ready`.
+//! writing it. The bridge does not read standard input until it has written
+//! `ready`.
+//!
+//! A handshake reply that shows another protocol version is
+//! [`UpdateNeeded`](BridgeLine::UpdateNeeded), even when the rest of it
+//! cannot be read, which is likely between versions. A reply in which not
+//! even the version can be read counts as `service_unavailable`.
 //!
 //! # While running
 //!
@@ -27,6 +31,12 @@
 //!   [`BridgeLine::Server`].
 //! - The bridge sends no requests of its own. In particular it does not claim
 //!   ownership: the app sends `claim` itself.
+//! - The service may answer a request with a `not_owner` error and then hang
+//!   up, which the app sees as that `server` line followed by
+//!   `service_unavailable`. This happens where the system could not narrow
+//!   the channel to the owner. For the app it means the same as
+//!   [`BridgeLine::NotOwner`]: a new bridge will not help, so it does not
+//!   start one.
 //! - A `connect` request is not forwarded (see [`bridge_allows`]): the app
 //!   must never hold a session cookie. The bridge answers it itself with a
 //!   `server` line holding a response with the request's id and a
@@ -73,7 +83,8 @@ pub enum BridgeLine {
     ServiceUnavailable,
     /// The service speaks a different protocol version.
     UpdateNeeded {
-        /// The service's product version, to show the user.
+        /// The service's product version, to show the user, or the word
+        /// `unknown` when the reply did not show one the bridge could read.
         service_version: String,
     },
     /// Something is listening where the service should be, but it is not the
