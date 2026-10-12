@@ -381,6 +381,69 @@ fn an_owner_cannot_pin_the_socket_file() {
         .expect("listen over a pinned leftover");
 }
 
+// Security rule: nor can an owner who keeps marking the file. Clearing the
+// mark and then acting are two calls, and a program that marks in a loop
+// gets between them nearly every time; the file has to be taken back first.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_who_keeps_pinning_cannot_stop_the_service() {
+    struct Child(libc::pid_t);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            // SAFETY: plain system calls on a process this test started.
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+                libc::waitpid(self.0, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+    let Some(sandbox) = Sandbox::root("flags loop", Mode::Installed) else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    drop(transport.listen(&name).expect("make the folder"));
+    let path = std::ffi::CString::new(name.as_str()).expect("no NUL");
+    // SAFETY: the child only makes system calls, on memory made before the
+    // fork, and never returns.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork");
+    if pid == 0 {
+        // SAFETY: as above.
+        unsafe {
+            libc::setuid(OWNER);
+            loop {
+                libc::chflags(path.as_ptr(), libc::UF_IMMUTABLE);
+            }
+        }
+    }
+    let _child = Child(pid);
+    for round in 0..300 {
+        // The leftover of a run that crashed, the owner's and soon marked.
+        drop(UnixListener::bind(&name).expect("leave a socket file behind"));
+        chown(&name, Some(OWNER), None).expect("hand over");
+        thread::sleep(Duration::from_micros(200));
+        let listener = transport.listen(&name);
+        let listener = listener.unwrap_or_else(|error| panic!("listen, round {round}: {error}"));
+        // The owner's again, marked again, then handed on and closed.
+        listener.restrict_to(&id(OWNER)).expect("narrow");
+        thread::sleep(Duration::from_micros(200));
+        let handed_on = listener.restrict_to(&id(STRANGER));
+        handed_on.unwrap_or_else(|error| panic!("narrow again, round {round}: {error}"));
+        listener.restrict_to(&id(OWNER)).expect("narrow back");
+        thread::sleep(Duration::from_micros(200));
+        listener.close();
+        assert!(!Path::new(&name).exists(), "close left it, round {round}");
+    }
+}
+
+// A client's socket must not stay open in a program the client starts.
+#[test]
+fn a_clients_socket_is_closed_on_exec() {
+    let socket = os::socket().expect("a socket");
+    let flags = rustix::io::fcntl_getfd(&socket).expect("its flags");
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+}
+
 // Security rule: the socket's folder cannot be changed by anyone else.
 #[test]
 fn listen_refuses_a_folder_others_could_change() {

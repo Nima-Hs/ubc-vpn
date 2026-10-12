@@ -22,9 +22,22 @@
 //!   kernel checks that when a client connects, so it only affects later
 //!   connections. Root is still let in. The file is then the owner's, so the
 //!   owner can open it to others again: narrowing is a first line only, and
-//!   the service's check of the caller on every request is the guard. On
-//!   macOS the owner can also mark the file unchangeable, so its flags are
-//!   cleared before the file is changed or removed.
+//!   the service's check of the caller on every request is the guard.
+//! - **The owner cannot keep the service from listening.** On macOS a file's
+//!   owner can mark it unchangeable, which holds off even root. So before the
+//!   socket file is removed or handed on, it is taken back: the mark is
+//!   cleared and the file made root's, repeated until that works once, after
+//!   which it is no longer the owner's to mark. This defeats a mark set once
+//!   and a program that sets it in a loop. It is bounded: an owner who won
+//!   every try for a second would get an error reported, by `listen` and
+//!   `restrict_to`; `close` has nobody to tell, and the next `listen` tries
+//!   again. The lock file is never anyone's but the listener's, and no
+//!   release may ever make it open to others: a user who opened it then
+//!   could hold the lock for as long as their program runs.
+//! - **A busy service does not hold a client for ever.** `connect` gives up
+//!   after five seconds. With a full queue Linux makes the caller wait, so
+//!   that limit ends it with [`Error::TimedOut`]; macOS refuses at once,
+//!   which reads as [`Error::NotFound`].
 //! - **A client checks the server**: the folder rule above, a socket file
 //!   that belongs to the service or to the caller, and a peer that is the
 //!   service (root when installed, the current user in dev mode). The peer
@@ -56,19 +69,19 @@ use std::fs::{self, DirBuilder, File, OpenOptions, Permissions, TryLockError};
 use std::io;
 use std::net::Shutdown;
 use std::os::unix::fs::{
-    DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown,
+    DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown, lchown,
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::OFlags;
 use rustix::io::Errno;
-use rustix::net::{RecvFlags, recv};
+use rustix::net::sockopt::{self, Timeout};
+use rustix::net::{RecvFlags, SocketAddrUnix, connect, recv};
 use rustix::process::geteuid;
 
 use crate::unsupported::Native;
@@ -220,32 +233,63 @@ fn open_lock(path: &Path) -> io::Result<File> {
     }
 }
 
+/// How long [`take_back`] keeps trying against an owner who keeps marking the
+/// file. One try takes microseconds, and one win is enough.
+const TAKE_BACK_WAIT: Duration = Duration::from_secs(1);
+
+/// Makes a socket file this process's own again, before it is removed or
+/// handed to someone else. Only for the holder of its lock.
+///
+/// Security rule: the owner a socket was narrowed to cannot stop the service
+/// by marking the file unchangeable (macOS, see `clear_flags` there). Clearing
+/// the mark is not enough, because the owner can set it again before the next
+/// call. So the mark is cleared and the file taken back, again and again,
+/// until taking it back works once: from then on it is not the owner's to
+/// mark. An owner who wins every try for [`TAKE_BACK_WAIT`] gets an error
+/// reported, not a service that waits for ever.
+fn take_back(path: &Path) -> io::Result<()> {
+    let me = geteuid().as_raw();
+    let deadline = Instant::now() + TAKE_BACK_WAIT;
+    loop {
+        os::clear_flags(path)?;
+        match lchown(path, Some(me), None) {
+            Err(error) if refused(&error) && Instant::now() < deadline => {}
+            taken => return taken,
+        }
+    }
+}
+
+fn refused(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+}
+
 /// Removes a socket file. Only for the holder of its lock.
 fn remove_socket(path: &Path) -> io::Result<()> {
-    os::clear_flags(path)?;
+    take_back(path)?;
     fs::remove_file(path)
 }
 
 /// Connects, giving up after [`CONNECT_WAIT`]: a service that has stopped
-/// accepting would otherwise hold a client for ever. The attempt runs on its
-/// own thread, because connecting a socket has no time limit of its own.
+/// accepting would otherwise hold a client for ever.
+///
+/// The limit is the socket's own send timeout, which a connect obeys. What a
+/// full queue does differs: Linux makes the caller wait, so the limit is what
+/// ends it, with [`Error::TimedOut`]; macOS refuses at once, which reads as
+/// [`Error::NotFound`], the same as nothing listening.
 fn connect_within(path: &Path) -> Result<UnixStream> {
-    let (done, wait) = mpsc::channel();
-    let path = path.to_path_buf();
-    thread::Builder::new().spawn(move || {
-        let connected = loop {
-            match UnixStream::connect(&path) {
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                connected => break connected,
-            }
-        };
-        let _ = done.send(connected);
-    })?;
-    match wait.recv_timeout(CONNECT_WAIT) {
-        // A leftover socket file with no listener behind it.
-        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => Err(Error::NotFound),
-        Ok(connected) => Ok(connected?),
-        Err(_) => Err(Error::TimedOut),
+    let address = SocketAddrUnix::new(path).map_err(io::Error::from)?;
+    let socket = os::socket()?;
+    let limit = sockopt::set_socket_timeout(&socket, Timeout::Send, Some(CONNECT_WAIT));
+    limit.map_err(io::Error::from)?;
+    loop {
+        match connect(&socket, &address) {
+            Ok(()) => return Ok(UnixStream::from(socket)),
+            Err(Errno::INTR) => {}
+            Err(Errno::AGAIN) => return Err(Error::TimedOut),
+            // A leftover socket file with no listener behind it.
+            Err(Errno::CONNREFUSED) => return Err(Error::NotFound),
+            Err(error) => return Err(io::Error::from(error).into()),
+        }
     }
 }
 
@@ -387,9 +431,9 @@ impl Listener for SocketListener {
         if claim.is_none() {
             return Err(Error::Closed);
         }
-        // Closed to everyone but root first, then handed over. An earlier
-        // owner may have marked the file unchangeable.
-        os::clear_flags(&self.path)?;
+        // Taken back from an earlier owner, closed to everyone but root,
+        // then handed over.
+        take_back(&self.path)?;
         set_mode(&self.path, 0o600)?;
         Ok(chown(&self.path, Some(user), None)?)
     }

@@ -4,12 +4,13 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use rustix::net::SendFlags;
+use rustix::io::{FdFlags, fcntl_setfd};
+use rustix::net::{AddressFamily, SendFlags, SocketType, sockopt};
 
 use crate::unix::{self, Env};
 use crate::{Mode, Paths, Platform, Result};
@@ -27,10 +28,11 @@ pub(crate) const LONGEST_PATH: usize = 103;
 /// Clears the file's flags, of the file itself and not of what a link points
 /// to.
 ///
-/// Security rule: the owner a socket was narrowed to must not be able to
-/// stop the service. On macOS a file's owner can mark it unchangeable
-/// (`chflags uchg`), and then even root can neither remove it nor change its
-/// owner or mode until the mark is cleared.
+/// On macOS a file's owner can mark it unchangeable (`chflags uchg`, or
+/// `uappnd`), and then even root can neither remove it nor change its owner
+/// or mode until the mark is cleared. Clearing it does not by itself stop
+/// the owner, who can set it again at once: `unix::take_back` repeats this
+/// call and a change of owner until the file is no longer theirs.
 pub(crate) fn clear_flags(path: &Path) -> io::Result<()> {
     let path = CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: `path` is a NUL-terminated string that outlives the call.
@@ -80,14 +82,23 @@ pub(crate) fn peer_user(stream: &UnixStream) -> io::Result<u32> {
     }
 }
 
-/// Sends what the socket has room for, without waiting.
+/// A new socket for a client to connect with, closed in any program this one
+/// starts.
 ///
 /// Security rule: a peer that went away is an error, not a signal that kills
-/// the service. macOS has no flag for that on a send; it is a setting of the
-/// socket (`SO_NOSIGPIPE`), which the standard library turns on for every
-/// socket it creates and an accepted socket takes from its listener. Setting
-/// it again here would be a line no test could miss, so the test of this rule
-/// covers both a connected and an accepted socket instead.
+/// the program. macOS has no flag for that on a send; it is a setting of the
+/// socket (`SO_NOSIGPIPE`). It is set here because nothing else sets it on a
+/// socket made here. An accepted socket takes it from its listener, which
+/// the standard library made with it set; the test of this rule covers both.
+pub(crate) fn socket() -> io::Result<OwnedFd> {
+    let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+    fcntl_setfd(&socket, FdFlags::CLOEXEC)?;
+    sockopt::set_socket_nosigpipe(&socket, true)?;
+    Ok(socket)
+}
+
+/// Sends what the socket has room for, without waiting. See [`socket`] for
+/// how a peer that went away is kept from raising a signal.
 pub(crate) fn send(stream: &UnixStream, bytes: &[u8]) -> rustix::io::Result<usize> {
     rustix::net::send(stream, bytes, SendFlags::DONTWAIT)
 }

@@ -3,10 +3,11 @@
 //! are not implemented yet and report that they are unsupported.
 
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use rustix::net::{SendFlags, sockopt};
+use rustix::net::{AddressFamily, SendFlags, SocketFlags, SocketType, socket_with, sockopt};
 
 #[cfg(feature = "dev-mode")]
 use crate::Error;
@@ -25,6 +26,13 @@ pub(crate) const LONGEST_PATH: usize = 107;
 /// Nothing to do: on Linux a file's owner cannot make it unchangeable.
 pub(crate) fn clear_flags(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+/// A new socket for a client to connect with, closed in any program this one
+/// starts.
+pub(crate) fn socket() -> io::Result<OwnedFd> {
+    let (family, kind) = (AddressFamily::UNIX, SocketType::STREAM);
+    Ok(socket_with(family, kind, SocketFlags::CLOEXEC, None)?)
 }
 
 /// Where a test running as root can make folders only root can change.
