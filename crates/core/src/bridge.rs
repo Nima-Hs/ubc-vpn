@@ -34,12 +34,11 @@
 //!   ownership: the app sends `claim` itself.
 //! - The service may answer a request with a `not_owner` error and then hang
 //!   up, which the app sees as that `server` line followed by
-//!   `service_unavailable`. This happens where the system could not narrow
-//!   the channel to the owner, and to a connection that was being set up at
+//!   `service_unavailable`. There are two causes: the system could not
+//!   narrow the channel to the owner, or the connection was being set up at
 //!   the moment someone else claimed the service. For the app it means the
-//!   same as
-//!   [`BridgeLine::NotOwner`]: a new bridge will not help, so it does not
-//!   start one.
+//!   same as [`BridgeLine::NotOwner`]: a new bridge will not help, so it
+//!   does not start one.
 //! - A `connect` request is not forwarded (see [`bridge_allows`]): the app
 //!   must never hold a session cookie. The bridge answers it itself with a
 //!   `server` line holding a response with the request's id and a

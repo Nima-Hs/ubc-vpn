@@ -77,23 +77,26 @@
 //!   - The Windows temporary folder is a plain ASCII path on a local drive.
 //!     The library asks for it through an interface that mangles other
 //!     characters. Newer Windows may ignore the setting for the SYSTEM
-//!     account and use a folder of its own, so the tunnel work must check
-//!     where the library's files really land when run as SYSTEM.
+//!     account and use a folder of its own. Whoever binds the tunnel must
+//!     test where the library's files really land when run as SYSTEM.
 //!   - On macOS and Linux remove nothing, because changing the environment
 //!     is only sound while no other thread exists: refuse to start while
-//!     one of them is set, naming it. That applies to the command-line
-//!     client as well as the service, so a user with such a variable set is
-//!     told to unset it. The list for the client leaves out variables that
-//!     common developer set-ups export and that the engine's use of the
-//!     libraries cannot be steered by.
+//!     one of them is set, and say which, using the name as the list spells
+//!     it. That applies to the command-line client as well as the service,
+//!     so a user with such a variable set is told to unset it.
+//!   - The one list marks the few entries the client does not refuse on
+//!     macOS and Linux: variables that common developer set-ups export and
+//!     that cannot affect how the engine uses the libraries. The service
+//!     refuses every entry.
 //!   - Change the environment at most once in a process.
 //!   - The privileged service also refuses to start while a variable that
 //!     steers the system loader is set (`LD_*`, and `DYLD_*` other than
 //!     the two `DYLD_FALLBACK_*` ones). Nothing may ever remove a `DYLD_*`
 //!     variable: the loader read its value at process start and still uses
 //!     it, so removing it only hides that from the check made at loading.
-//!   - A name found in the environment was chosen by whoever set it. Do not
-//!     put it in a public error, and filter it before it is logged or shown.
+//!   - A loader variable is matched by its prefix, so its full name was
+//!     chosen by whoever set it. Do not put that name in a public error, and
+//!     filter it before it is logged or shown.
 //! - Loading. Load once, from the folder the program itself was installed
 //!   in. The folder never comes from configuration, the environment or a
 //!   client. Treat every loading error as fatal: after some of them a
