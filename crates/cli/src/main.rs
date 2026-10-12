@@ -25,6 +25,7 @@ mod connect_tests;
 mod interrupt;
 #[cfg(test)]
 mod interrupt_tests;
+mod logs;
 mod settings;
 mod settings_lock;
 #[cfg(test)]
@@ -52,6 +53,8 @@ Commands:
   connect [--json]  Log in and connect the VPN, using the saved routes
   disconnect        Disconnect the VPN
   status [--json]   Show whether the VPN is connected
+  logs [--json] [--follow]  Show what the service has logged
+  diagnostics [--json]      Show the service's version, state and last failure
   bridge            Carry messages between the app and the service
   settings get --json            Print the settings and the route limits
   settings check-routes --json   Check the routes given on standard input
@@ -74,6 +77,12 @@ With --json, connect is for the app: it writes each question as one line of
 JSON, reads each answer as one line from standard input, and ends with a
 done line once the service has accepted the request, or with an error line. A
 cancel line, or standard input closing, stops the login.
+
+logs and diagnostics are for the owner and only read: they do not make
+anyone the owner. The log holds no password, code or session cookie. With
+--follow, logs goes on printing lines as the service writes them, until it
+is interrupted. With --json, logs prints each line of the log as one line of
+JSON, and diagnostics prints one line of JSON.
 
 With --json, status prints the connection state as one line of JSON. Each
 settings command prints one line of JSON, and exits with status 1 only when
@@ -245,6 +254,14 @@ fn run(
         ["version" | "--version" | "-V"] => return say(out, &format!("ubc-vpn {VERSION}"), 0),
         ["disconnect"] => {
             return connect::disconnect(platform, client::Limits::default(), out, err);
+        }
+        ["diagnostics"] => return logs::diagnostics(false, platform, out, err),
+        ["diagnostics", "--json"] => return logs::diagnostics(true, platform, out, err),
+        ["logs", options @ ..] => {
+            return match logs::Options::parse(options) {
+                Some(options) => logs::logs(options, platform, out, err),
+                None => say(err, HELP, USAGE),
+            };
         }
         ["status"] => false,
         ["status", "--json"] => true,

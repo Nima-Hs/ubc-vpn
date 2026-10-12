@@ -172,6 +172,9 @@ fn each_failure_has_its_own_exit_code_and_message() {
         "connect [--json]  Log in and connect",
         "A\ncancel line, or standard input closing, stops the login.",
         "bridge            Carry messages",
+        "logs [--json] [--follow]  Show what the service has logged",
+        "they do not make
+anyone the owner",
         "settings reset [--force] --json  Start afresh",
     ] {
         assert!(help.contains(line), "{help}");
