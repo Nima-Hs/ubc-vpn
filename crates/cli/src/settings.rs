@@ -8,7 +8,9 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
 use ubc_vpn_core::policy::Policy;
@@ -21,7 +23,9 @@ use ubc_vpn_core::settings_cli::{
 use ubc_vpn_platform::{Paths, Platform};
 
 const SETTINGS: &str = "settings.json";
-const PARTIAL: &str = "settings.json.tmp";
+/// How long a partial file is left alone. No save takes this long, so an
+/// older one was left by a save that was cut short.
+const STALE: Duration = Duration::from_secs(3600);
 
 /// The three commands. Each is spelled with `--json`, the only form so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,8 +115,12 @@ fn answer(
         current = stored(dir)?;
         if let Some(text) = &current {
             settings = understood(text)?;
-            // A file `get` cannot show is unreadable here as well.
-            encode(&SettingsView::new(settings.clone(), policy.as_ref())).map_err(unencodable)?;
+            // A file `get` cannot show is unreadable here as well, unless
+            // its own routes are what makes it too long. Those are about to
+            // be replaced, and saving shorter ones is how it is repaired.
+            let mut kept = settings.clone();
+            kept.routes = Settings::default().routes;
+            encode(&SettingsView::new(kept, policy.as_ref())).map_err(unencodable)?;
         }
     }
     settings.routes = routes.clone();
@@ -181,25 +189,81 @@ fn create_private(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// A name for one save's partial file, unlike that of any other save in
+/// this process or another.
+pub(crate) fn partial_name() -> String {
+    static SAVES: AtomicU64 = AtomicU64::new(0);
+    let (pid, nth) = (std::process::id(), SAVES.fetch_add(1, Ordering::Relaxed));
+    let since = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
+    let nanos = since.map_or(0, |d| d.subsec_nanos());
+    format!("{SETTINGS}.{pid}-{nth}-{nanos:08x}.tmp")
+}
+
 /// Replaces `settings.json` with `text` in one step: the new file is written
 /// beside the old one, synced, and renamed over it. If anything fails the
 /// old file is untouched.
 fn save(dir: &Path, text: &str) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let partial = dir.join(PARTIAL);
-    // Whatever is at the partial file's name goes first: one a crash left,
-    // or a link, which is removed and never written through.
-    match fs::remove_file(&partial) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    let written = create_private(&partial).and_then(|mut file| {
-        file.write_all(text.as_bytes())?;
-        file.sync_all()
-    });
-    let saved = written.and_then(|()| fs::rename(&partial, dir.join(SETTINGS)));
-    if saved.is_err() {
+    sweep(dir);
+    let partial = write_partial(dir, text, &mut partial_name)?;
+    place(&partial, dir)
+}
+
+/// Writes `text` to a new file beside the settings and returns its path.
+/// The file is this save's alone: its name comes from `name`, and a name
+/// that is taken belongs to another save, or is a link someone put there.
+/// What is there is left alone, never written through, and another name is
+/// tried.
+pub(crate) fn write_partial(
+    dir: &Path,
+    text: &str,
+    name: &mut dyn FnMut() -> String,
+) -> io::Result<PathBuf> {
+    let mut tries = 0;
+    let (partial, mut file) = loop {
+        let partial = dir.join(name());
+        match create_private(&partial) {
+            Ok(file) => break (partial, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries < 4 => tries += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
         let _ = fs::remove_file(&partial);
+        return Err(error);
     }
-    saved
+    Ok(partial)
+}
+
+/// Makes the finished `partial` the settings file. If that fails the
+/// partial file is removed.
+pub(crate) fn place(partial: &Path, dir: &Path) -> io::Result<()> {
+    let placed = fs::rename(partial, dir.join(SETTINGS));
+    if placed.is_err() {
+        let _ = fs::remove_file(partial);
+    }
+    placed
+}
+
+/// Removes the partial files that saves cut short have left in `dir`. One
+/// that is not yet [`STALE`] may be a save in progress and is left alone.
+fn sweep(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let partial = name.starts_with("settings.json.") && name.ends_with(".tmp");
+        // The age of the entry itself: a link is not followed.
+        let changed = fs::symlink_metadata(entry.path()).and_then(|m| m.modified());
+        let age = changed.ok().and_then(|at| at.elapsed().ok());
+        if partial && age.is_some_and(|age| age > STALE) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }

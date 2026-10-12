@@ -11,7 +11,7 @@ use ubc_vpn_core::settings_cli::{
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
 
-use crate::settings::{Command, run};
+use crate::settings::{Command, partial_name, place, run, write_partial};
 
 const GOOD: &str =
     r#"{"subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test"]}"#;
@@ -286,32 +286,110 @@ fn the_policy_limits_routes_only_when_it_can_be_read() {
     }
 }
 
-// When saving fails the old file is exactly as it was.
+/// The partial files in the machine's settings folder.
+fn partials(machine: &Machine) -> Vec<String> {
+    let entries = std::fs::read_dir(machine.root.join("settings")).unwrap();
+    let names = entries.map(|entry| entry.unwrap().file_name().into_string().unwrap());
+    names.filter(|name| name.ends_with(".tmp")).collect()
+}
+
+// When saving fails the old file is exactly as it was, and nothing is left
+// beside it.
 #[test]
 fn a_failed_save_leaves_the_old_file_unchanged() {
     let machine = Machine::new();
     let before = r#"{"username":"jdoe"}"#;
     machine.write_settings(before);
-    // The new file is written beside the old one. A folder in its place
-    // cannot be removed as a file, so the save cannot begin.
-    let partial = machine.root.join("settings/settings.json.tmp");
-    std::fs::create_dir_all(&partial).unwrap();
-    let why = machine.fails(Command::SetRoutes, GOOD);
-    assert_eq!(why, SettingsFailureCode::Unwritable);
+    let dir = machine.root.join("settings");
+    // Every name the save tries is taken, by a file that is another's.
+    std::fs::write(dir.join("taken"), "theirs").unwrap();
+    let mut tried = 0;
+    let mut taken = || {
+        tried += 1;
+        assert!(tried < 100, "the save never gives up");
+        "taken".to_string()
+    };
+    let failed = write_partial(&dir, "new", &mut taken).unwrap_err();
+    assert_eq!(failed.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        (2..10).contains(&tried),
+        "tried {tried} names, then gave up"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("taken")).unwrap(),
+        "theirs"
+    );
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, before);
+    // A partial file that cannot be put in place does not stay.
+    let partial = write_partial(&dir, "new", &mut || "mine.tmp".to_string()).unwrap();
+    std::fs::remove_file(machine.settings_file()).unwrap();
+    std::fs::create_dir_all(machine.settings_file().join("in the way")).unwrap();
+    assert!(place(&partial, &dir).is_err());
+    assert!(partials(&machine).is_empty());
+}
+
+// Two saves at once each write a file of their own, so neither can put the
+// other's half-written file in place, and both succeed.
+#[test]
+fn two_saves_at_once_do_not_touch_each_others_files() {
+    let machine = Machine::new();
+    machine.write_settings("{}");
+    let dir = machine.root.join("settings");
+    let first = write_partial(&dir, "first", &mut partial_name).unwrap();
+    let second = write_partial(&dir, "second", &mut partial_name).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+    place(&second, &dir).unwrap();
+    place(&first, &dir).unwrap();
     assert_eq!(
         std::fs::read_to_string(machine.settings_file()).unwrap(),
-        before
+        "first"
     );
+    assert!(partials(&machine).is_empty());
 
-    // A partial file a crash left behind is no obstacle and does not stay.
-    std::fs::remove_dir(&partial).unwrap();
-    std::fs::write(&partial, "half a file").unwrap();
+    // Through the command: a save in progress beside it is no obstacle and
+    // is left alone, and the command leaves nothing of its own behind.
+    let theirs = write_partial(&dir, "theirs", &mut partial_name).unwrap();
+    machine.write_settings("{}");
     assert!(matches!(
         machine.routes(Command::SetRoutes, GOOD),
         RoutesReply::Ok { .. }
     ));
-    assert!(!partial.exists());
-    assert_eq!(machine.view().settings.username.as_deref(), Some("jdoe"));
+    assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+    assert_eq!(partials(&machine).len(), 1);
+}
+
+// What a save that was cut short left behind does not stay for ever: the
+// next save removes it once it is old. The name an older version used
+// counts too.
+#[test]
+fn old_partial_files_are_swept_away() {
+    let machine = Machine::new();
+    machine.write_settings("{}");
+    let dir = machine.root.join("settings");
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    for old in ["settings.json.tmp", "settings.json.1-2-3.tmp"] {
+        std::fs::write(dir.join(old), "half a file").unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(dir.join(old))
+            .unwrap();
+        file.set_modified(long_ago).unwrap();
+    }
+    // Old, but not a partial file of the settings.
+    std::fs::write(dir.join("notes.tmp"), "kept").unwrap();
+    let notes = std::fs::File::options()
+        .write(true)
+        .open(dir.join("notes.tmp"))
+        .unwrap();
+    notes.set_modified(long_ago).unwrap();
+    drop(notes);
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    assert_eq!(partials(&machine), ["notes.tmp"]);
 }
 
 // A system with nowhere to keep files has no settings to show or to save,
@@ -369,15 +447,16 @@ fn link_to_file(target: &std::path::Path, link: &std::path::Path) -> std::io::Re
 }
 
 // Security rule: the settings are never written through a link. A link at
-// the partial file's name is replaced, and what it pointed at is untouched.
+// the name a save would use is left alone, what it points at is untouched,
+// and the save uses another name.
 #[test]
 fn settings_are_never_written_through_a_link() {
     let machine = Machine::new();
     machine.write_settings("{}");
+    let dir = machine.root.join("settings");
     let target = machine.root.join("someone-elses-file");
     std::fs::write(&target, "precious").unwrap();
-    let partial = machine.root.join("settings/settings.json.tmp");
-    if let Err(error) = link_to_file(&target, &partial) {
+    if let Err(error) = link_to_file(&target, &dir.join("first.tmp")) {
         // Windows lets only an admin, or anyone in Developer Mode, make one.
         // Written past the test harness's capture, so that a CI log shows
         // whether this test ran or not.
@@ -385,11 +464,12 @@ fn settings_are_never_written_through_a_link() {
         std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes()).unwrap();
         return;
     }
-    assert!(matches!(
-        machine.routes(Command::SetRoutes, GOOD),
-        RoutesReply::Ok { .. }
-    ));
+    let mut names = ["first.tmp", "second.tmp"].into_iter();
+    let mut name = || names.next().unwrap().to_string();
+    let partial = write_partial(&dir, "new", &mut name).unwrap();
+    assert_eq!(partial, dir.join("second.tmp"));
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+    place(&partial, &dir).unwrap();
     let saved = std::fs::symlink_metadata(machine.settings_file()).unwrap();
     assert!(saved.is_file());
 }
@@ -535,5 +615,38 @@ fn set_routes_reckons_with_what_is_already_stored() {
     assert_eq!(
         std::fs::read_to_string(machine.settings_file()).unwrap(),
         huge
+    );
+}
+
+// A file that is too long to show because of its own routes is repaired by
+// saving shorter ones. One that is too long for another reason is not: it
+// stays unreadable, and is left as it is.
+#[test]
+fn routes_that_are_too_long_can_be_replaced_by_shorter_ones() {
+    let machine = Machine::new();
+    let long = format!(
+        r#"{{"username":"jdoe","routes":{}}}"#,
+        routes_filling(MAX_LINE_BYTES)
+    );
+    machine.write_settings(&long);
+    assert_eq!(
+        machine.fails(Command::Get, ""),
+        SettingsFailureCode::Unreadable
+    );
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    let view = machine.view();
+    assert_eq!(view.settings.username.as_deref(), Some("jdoe"));
+    assert_eq!(view.settings.routes.dns_domains.len(), 1);
+
+    let long = format!(r#"{{"username":"{}"}}"#, "u".repeat(MAX_LINE_BYTES));
+    machine.write_settings(&long);
+    let why = machine.fails(Command::SetRoutes, GOOD);
+    assert_eq!(why, SettingsFailureCode::Unreadable);
+    assert_eq!(
+        std::fs::read_to_string(machine.settings_file()).unwrap(),
+        long
     );
 }
