@@ -36,7 +36,31 @@ export function handleFromInterface(
     });
 }
 
-/** The fixed set of things the interface can ask for. None takes an argument. */
+/** The longest answer a login prompt may be given, in characters. */
+export const MAX_ANSWER_LENGTH = 1024;
+
+/**
+ * Whether the arguments of an "answer the prompt" message are what they must
+ * be: a prompt id and the text the user typed. The interface is not trusted
+ * to send only that, so anything else is refused before it goes further.
+ */
+export function isPromptAnswer(args: readonly unknown[]): args is [number, string] {
+    const [id, value] = args;
+    return (
+        args.length === 2 &&
+        typeof id === "number" &&
+        Number.isInteger(id) &&
+        id >= 0 &&
+        id <= 0xffffffff &&
+        typeof value === "string" &&
+        value.length <= MAX_ANSWER_LENGTH
+    );
+}
+
+/**
+ * The fixed set of things the interface can ask for. Only one takes
+ * arguments, and it checks them.
+ */
 export function registerIpc(
     window: BrowserWindow,
     controller: Controller,
@@ -49,6 +73,15 @@ export function registerIpc(
     handle(IPC.connect, () => controller.connect());
     handle(IPC.disconnect, () => controller.disconnect());
     handle(IPC.retry, () => controller.retry());
+    handle(IPC.cancelLogin, () => controller.cancelLogin());
+    handleFromInterface(window, devServerUrl, IPC.answerPrompt, (...args) => {
+        // Handed straight on. An answer may be a password: nothing here
+        // keeps it, and a refusal says nothing about what was sent.
+        if (!isPromptAnswer(args)) {
+            throw new Error("refused");
+        }
+        controller.answerPrompt(args[0], args[1]);
+    });
     handle(IPC.minimizeWindow, () => window.minimize());
     handle(IPC.closeWindow, () => window.close());
 

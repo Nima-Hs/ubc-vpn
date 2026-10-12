@@ -102,6 +102,8 @@ test("the window renders, locked down", async () => {
     expect(exposed.require).toBe("undefined");
     expect(exposed.process).toBe("undefined");
     expect(exposed.api).toEqual([
+        "answerPrompt",
+        "cancelLogin",
         "closeWindow",
         "connect",
         "demo",
@@ -112,6 +114,35 @@ test("the window renders, locked down", async () => {
         "platform",
         "retry",
     ]);
+});
+
+test("a login answer is checked before the main process takes it", async () => {
+    // The one function that takes arguments. Anything but a prompt id and
+    // text is refused, whatever the page sends.
+    const sent = await page.evaluate(async () => {
+        const answer = window.ubcVpn.answerPrompt as (...args: unknown[]) => Promise<void>;
+        const outcome = (...args: unknown[]) =>
+            answer(...args).then(
+                () => "taken",
+                () => "refused",
+            );
+        return {
+            proper: await outcome(1, "an answer"),
+            noText: await outcome(1, { toString: () => "an answer" }),
+            noId: await outcome("1", "an answer"),
+            tooLong: await outcome(1, "x".repeat(5000)),
+        };
+    });
+    expect(sent).toEqual({
+        proper: "taken",
+        noText: "refused",
+        noId: "refused",
+        tooLong: "refused",
+    });
+    // The state the interface is sent has a place for a login, and it is idle.
+    expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toMatchObject({
+        login: { phase: "idle" },
+    });
 });
 
 test("the interface's process is confined", async () => {

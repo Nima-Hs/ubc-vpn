@@ -43,3 +43,15 @@ export function bridgeCommand(
     }
     return { command, args: ["bridge"] };
 }
+
+/**
+ * The program and arguments that log in and connect. The same client as the
+ * bridge, found the same way. The app passes it no routes and no address:
+ * the client reads the user's settings and the service's policy itself.
+ */
+export function connectCommand(...where: Parameters<typeof bridgeCommand>): {
+    command: string;
+    args: readonly string[];
+} {
+    return { command: bridgeCommand(...where).command, args: ["connect", "--json"] };
+}

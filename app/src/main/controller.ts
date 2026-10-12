@@ -1,21 +1,48 @@
-import type { ActionResult, Snapshot } from "@shared/api";
+import type { ActionResult, LoginState, Snapshot } from "@shared/api";
+import type { LoginRunner } from "./channel/connect";
 import type { ServiceLink } from "./link";
+
+/** Makes the thing that runs a login, given where to report its progress. */
+export type LoginFactory = (onState: (state: LoginState) => void) => LoginRunner;
 
 /**
  * The one place actions are taken, whether the user asked in the window or
  * from the tray, so both see the same state and the same explanation when an
  * action does not start.
+ *
+ * What the user types at a login prompt passes through here on its way to
+ * the command-line client. It is handed on and not kept: it never becomes
+ * part of the snapshot the interface is sent.
  */
 export class Controller {
     private snapshot: Snapshot;
     private readonly listeners = new Set<(snapshot: Snapshot) => void>();
     private readonly unsubscribe: () => void;
+    private readonly loginRunner: LoginRunner | null;
     private closeHides = false;
+    private login: LoginState = { phase: "idle" };
 
-    constructor(private readonly link: ServiceLink) {
-        this.snapshot = { state: link.getState(), notice: null, closeHides: false };
+    /**
+     * Without `login`, pressing Connect explains that this build cannot log
+     * in. That is the case until the login screens exist.
+     */
+    constructor(
+        private readonly link: ServiceLink,
+        login?: LoginFactory,
+    ) {
+        this.snapshot = {
+            state: link.getState(),
+            notice: null,
+            login: this.login,
+            closeHides: false,
+        };
         // A change of state makes any earlier notice out of date.
         this.unsubscribe = link.subscribe((state) => this.publish({ state, notice: null }));
+        this.loginRunner =
+            login?.((state) => {
+                this.login = state;
+                this.publish({ state: this.link.getState(), notice: null });
+            }) ?? null;
     }
 
     getSnapshot(): Snapshot {
@@ -27,8 +54,27 @@ export class Controller {
         return () => this.listeners.delete(listener);
     }
 
+    /** Starts a login, which ends with the service being asked to connect. */
     connect(): Promise<void> {
-        return this.run(() => this.link.connect());
+        if (this.loginRunner === null) {
+            return this.run(() => this.link.connect());
+        }
+        // One at a time: a second press while a login is under way does nothing.
+        this.loginRunner.start();
+        return Promise.resolve();
+    }
+
+    /**
+     * Passes the user's answer to the login prompt with this `id` on to the
+     * command-line client. The value is not stored, logged or published.
+     */
+    answerPrompt(id: number, value: string): void {
+        this.loginRunner?.answer(id, value);
+    }
+
+    /** Gives up a login, or dismisses one that failed. */
+    cancelLogin(): void {
+        this.loginRunner?.cancel();
     }
 
     disconnect(): Promise<void> {
@@ -47,6 +93,7 @@ export class Controller {
 
     dispose(): void {
         this.unsubscribe();
+        this.loginRunner?.stop();
         this.link.dispose();
     }
 
@@ -58,7 +105,12 @@ export class Controller {
     }
 
     private publish(next: Pick<Snapshot, "state" | "notice">): void {
-        const snapshot = { state: next.state, notice: next.notice, closeHides: this.closeHides };
+        const snapshot: Snapshot = {
+            state: next.state,
+            notice: next.notice,
+            login: this.login,
+            closeHides: this.closeHides,
+        };
         this.snapshot = snapshot;
         for (const listener of this.listeners) {
             listener(snapshot);

@@ -3,10 +3,13 @@
 // confirms that a value really is one of them.
 
 import type { BridgeLine } from "@shared/protocol/BridgeLine";
+import type { CliMessage } from "@shared/protocol/CliMessage";
 import type { ConnState } from "@shared/protocol/ConnState";
 import type { ErrorCode } from "@shared/protocol/ErrorCode";
 import type { ErrorInfo } from "@shared/protocol/ErrorInfo";
+import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import type { Outcome } from "@shared/protocol/Outcome";
+import type { PromptKind } from "@shared/protocol/PromptKind";
 import type { ResponseBody } from "@shared/protocol/ResponseBody";
 import type { ServerMessage } from "@shared/protocol/ServerMessage";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
@@ -145,6 +148,52 @@ export function isBridgeLine(value: unknown): value is BridgeLine {
             return true;
         case "server":
             return isServerMessage(value.message);
+        default:
+            return false;
+    }
+}
+
+// Typed against the generated unions, so a kind or code added to the protocol
+// fails the type check here until it is listed.
+const PROMPT_KINDS: Record<PromptKind, true> = {
+    username: true,
+    password: true,
+    code: true,
+    text: true,
+};
+
+const LOGIN_ERROR_CODES: Record<LoginErrorCode, true> = {
+    wrong_password: true,
+    pin_mismatch: true,
+    cancelled: true,
+    gateway_unreachable: true,
+    route_refused: true,
+    service_unavailable: true,
+    internal: true,
+};
+
+/** Whether a parsed line from `ubc-vpn connect --json` is one the contract allows. */
+export function isCliMessage(value: unknown): value is CliMessage {
+    if (!isObject(value)) {
+        return false;
+    }
+    switch (value.type) {
+        case "prompt":
+            return (
+                isU32(value.id) &&
+                typeof value.kind === "string" &&
+                Object.hasOwn(PROMPT_KINDS, value.kind) &&
+                typeof value.label === "string" &&
+                (value.message === undefined || typeof value.message === "string")
+            );
+        case "done":
+            return true;
+        case "error":
+            return (
+                typeof value.code === "string" &&
+                Object.hasOwn(LOGIN_ERROR_CODES, value.code) &&
+                typeof value.message === "string"
+            );
         default:
             return false;
     }
