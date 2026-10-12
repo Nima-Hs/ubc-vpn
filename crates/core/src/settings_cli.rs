@@ -259,6 +259,24 @@ pub fn replace_routes(
     replace_field(current, "routes", Some(routes))
 }
 
+/// Whether `c` can make text read as something other than what it is: a
+/// control character, which can do anything to a terminal, or a character
+/// that is not seen and hides or reorders the text around it.
+///
+/// This is the one rule for text that is shown to the user but was not
+/// written by this program. The command-line client removes these
+/// characters from whatever it prints, and a username that holds one is
+/// not saved.
+///
+/// The zero-width joiner and non-joiner (U+200C, U+200D) are not among
+/// them: they are ordinary in Persian, Arabic and Indic text and in emoji,
+/// and neither reorder nor hide anything.
+pub fn misleads(c: char) -> bool {
+    let unseen = matches!(c, '\u{061c}' | '\u{200b}' | '\u{200e}' | '\u{200f}')
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}');
+    c.is_control() || unseen
+}
+
 /// The longest username that is saved, in bytes.
 pub const MAX_USERNAME_BYTES: usize = 256;
 
@@ -271,15 +289,16 @@ pub const MAX_USERNAME_BYTES: usize = 256;
 ///
 /// Fails with [`SettingsFailureCode::Unreadable`] when `current` is not
 /// settings this version can load, and with
-/// [`SettingsFailureCode::BadInput`] for a username that is empty, longer
-/// than [`MAX_USERNAME_BYTES`] or holds a control character: nothing a
-/// person would type as a name, and not worth keeping.
+/// [`SettingsFailureCode::BadInput`] for a username that is empty or only
+/// spaces, longer than [`MAX_USERNAME_BYTES`], or holds a character that
+/// [`misleads`]. None is a name a person would type, and the last kind could
+/// be shown as a name it is not.
 pub fn replace_username(
     current: Option<&str>,
     username: Option<&str>,
 ) -> Result<String, SettingsFailureCode> {
     let odd = |name: &str| {
-        name.is_empty() || name.len() > MAX_USERNAME_BYTES || name.chars().any(char::is_control)
+        name.trim().is_empty() || name.len() > MAX_USERNAME_BYTES || name.chars().any(misleads)
     };
     if username.is_some_and(odd) {
         return Err(SettingsFailureCode::BadInput);
@@ -661,12 +680,44 @@ mod tests {
         let longest = "u".repeat(MAX_USERNAME_BYTES);
         assert!(replace_username(None, Some(&longest)).is_ok());
         let too_long = format!("{longest}u");
-        for odd in ["", &too_long, "j\ndoe", "jdoe\u{1b}[2J", "j\u{0}doe"] {
+        let odd_names = [
+            "",
+            " ",
+            " \u{3000}\u{a0} ",
+            &too_long,
+            "j\ndoe",
+            "jdoe\u{1b}[2J",
+            "j\u{0}doe",
+            // Shown, this one reads "jdoe" followed by something else.
+            "jdoe\u{202e}nimda",
+            "j\u{200b}doe",
+            "\u{feff}jdoe",
+            "jdoe\u{2066}",
+        ];
+        for odd in odd_names {
             let refused = replace_username(Some("{}"), Some(odd));
             assert_eq!(refused, Err(SettingsFailureCode::BadInput), "{odd:?}");
         }
-        assert!(replace_username(None, Some("jdoe@example.test")).is_ok());
-        assert!(replace_username(None, Some("Zoë Müller")).is_ok());
+        let plain_names = [
+            "jdoe@example.test",
+            "Zoë Müller",
+            " jdoe",
+            // A joiner inside a Persian name is part of how it is written.
+            "می\u{200c}خواهم",
+        ];
+        for plain in plain_names {
+            assert!(replace_username(None, Some(plain)).is_ok(), "{plain:?}");
+        }
+    }
+
+    // One rule says which characters mislead, for what is printed and for
+    // what is saved. This holds it to the list.
+    #[test]
+    fn the_characters_that_mislead_are_these() {
+        let misleading = "\u{0}\u{1b}\u{7f}\u{85}\u{061c}\u{200b}\u{200e}\u{200f}\u{202a}\u{202e}\u{2060}\u{2069}\u{feff}";
+        assert!(misleading.chars().all(misleads));
+        let ordinary = "a Zé\u{200c}\u{200d}\u{2029}\u{202f}\u{206a}\u{fefe}\u{1f512}";
+        assert!(!ordinary.chars().any(misleads));
     }
 
     // The input comes from the app. An unknown field means the app and the

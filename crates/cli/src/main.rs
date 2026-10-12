@@ -230,15 +230,12 @@ fn status(
 /// characters, which could do anything to a terminal, and without the
 /// invisible characters that reorder or hide text, which could make a line
 /// read differently from what it says. Other Unicode is kept.
+///
+/// Which characters those are is said once, by
+/// [`ubc_vpn_core::settings_cli::misleads`], which also decides what may be
+/// saved as a username.
 fn clean(text: &str) -> String {
-    // Not the zero-width joiner and non-joiner (U+200C, U+200D): they are
-    // ordinary in Persian, Arabic and Indic text and in emoji, and neither
-    // reorder nor hide anything.
-    let invisible = |c: char| {
-        matches!(c, '\u{061c}' | '\u{200b}' | '\u{200e}' | '\u{200f}')
-            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
-    };
-    let shown = |c: &char| !c.is_control() && !invisible(*c);
+    let shown = |c: &char| !ubc_vpn_core::settings_cli::misleads(*c);
     text.chars().filter(shown).collect()
 }
 
