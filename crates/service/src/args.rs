@@ -33,8 +33,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Run, String> {
 /// levels refuse every one of them.
 ///
 /// The installed service also refuses any variable that steers the system
-/// loader. Dev mode does not: it runs unprivileged on the fake engine, and
-/// Cargo, which starts it, sets such a variable itself.
+/// loader. Dev mode does not: it runs unprivileged on the fake engine and
+/// loads no native library, and Cargo, which starts it, sets such a variable
+/// (`LD_LIBRARY_PATH` on Linux) for everything it runs.
 pub fn environment_role(run: Run) -> Role {
     match run {
         Run::Installed => Role::Service,

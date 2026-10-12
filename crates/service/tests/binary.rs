@@ -116,10 +116,21 @@ fn refuses_to_start_while_a_tls_variable_is_set() {
 #[cfg(unix)]
 #[test]
 fn refuses_to_start_while_a_loader_variable_is_set() {
-    for name in ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"] {
+    // Names the loader itself does nothing with when the value is no path.
+    for name in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "LD_ANYTHING"] {
         let (refused, stderr) = run(&[], Some(name));
         let because = "refusing to start while a variable that steers the system loader is set";
         assert!(refused && stderr.contains(because), "{name}: {stderr}");
         assert!(!stderr.contains(name), "{stderr}");
     }
+}
+
+// Dev mode is not that strict: Cargo sets such a variable for whatever it
+// runs, and dev mode loads no native library. Whether the run then goes on
+// or stops for another reason, it is not refused for the variable.
+#[cfg(all(unix, feature = "dev-mode"))]
+#[test]
+fn dev_mode_is_not_refused_for_a_loader_variable() {
+    let (_, stderr) = run(&["--dev"], Some("LD_LIBRARY_PATH"));
+    assert!(!stderr.contains("steers the system loader"), "{stderr}");
 }
