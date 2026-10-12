@@ -67,12 +67,25 @@ The workflow runs these on every build output, reused GnuTLS or not. The scripts
 - **Planted files** (`planted-files.sh`). Writes GnuTLS configurations that turn off every cipher, key exchange and TLS version. They are named in `GNUTLS_SYSTEM_PRIORITY_FILE`, then planted at the path the old build read and its neighbours. The probe must pass in both modes every time. Each case is also tried on MSYS2's stock GnuTLS (`control.sh` unpacks it from the packages in `control.lock`; it is never installed or shipped), and there it must fail. Without that the test would prove nothing.
 - **No PKCS#11** (`no-pkcs11.sh`, and checks in `build.sh`). GnuTLS and OpenConnect must both have been configured without it, no DLL may import or mention p11-kit, and `libgnutls-30.dll` may hold no library name to load at run time other than Windows' `crypt32.dll` and `ncrypt.dll`.
 - **Trace** (`trace.sh`). Runs the probe under Process Monitor and follows it and every process it starts. Files must be in the probe's own folder, or under `C:\Windows` where ordinary users cannot write; `user-writable.ps1` decides that by reading the permissions, which is how it knows `C:\Windows\Temp` is not such a place. Every registry key must match a rule in `trace-allow.txt`, and none may name a bundled library. Today the only file rule is for NTFS's own bookkeeping, and the registry keys are all Windows' own.
-- **Nothing changed during the trace** (`seal.sh`). Process Monitor cannot be pinned, and it runs as administrator on the machine that holds the output. So before it is downloaded, the workflow records the SHA-256 of every file of the output and uploads the record as the `libopenconnect-windows-x64-checksums` artifact. The last step before the output is uploaded fetches that record back and fails if any file differs, is missing or was added. The script first shows that it notices each of those. This catches a tool that alters the output by accident or in passing. It does not stop a program running as administrator that sets out to defeat it: such a program could change the check itself, or the files between the check and the upload. Anyone can repeat the check on a downloaded artifact against the checksums artifact of the same run.
 - **String scan** (`scan-strings.sh`). Searches every DLL for absolute paths, for `ucrt64`, `msys64`, `/etc/`, `\etc\`, `pkcs11` and `.gnutls`, and for names that look like environment variables. Each hit must match a rule in `strings-allow.txt`, with the reason it is harmless or what the service must do about it.
 
-`manifest.json` is written with `"shippable": false`. The workflow's last step before the upload (`approve.sh`) sets it to `true`. It only runs if every test passed on that same output, and it leaves the flag alone if GnuTLS was not built in that run. It fails if the manifest does not name the commit of this repository the output was built from. Anything that consumes the output must refuse it unless the flag is `true`.
+`manifest.json` is written with `"shippable": false`. The workflow's last job (`approve.sh`) sets it to `true`. It only runs if every test passed on that same output, and it leaves the flag alone if GnuTLS was not built in that run. It fails if the manifest does not name the commit of this repository the output was built from. Anything that consumes the output must refuse it unless the flag is `true`.
 
 The flag alone is not enough. Any run that builds GnuTLS and passes the tests marks its output shippable, and that includes a run started by hand on a branch. A consumer must take the artifact only from a run of `main`, and check that `recipe.commit` in the manifest is a commit on `main`. On a pull-request run that commit is GitHub's temporary merge commit, which is never on `main`, so those artifacts fail the check by design.
+
+### Three machines
+
+Process Monitor cannot be pinned to a version, and it runs as administrator. So the trace does not run on the machine that uploads the output. The workflow has three jobs, each on a machine of its own:
+
+1. **Build.** Builds the output and runs every test but the trace. `seal.sh` records the SHA-256 of every file. The job uploads the output as `libopenconnect-windows-x64-unapproved`, still marked not shippable, and the record as `libopenconnect-windows-x64-checksums`. It gives out the record's own SHA-256 as a job output.
+2. **Trace.** Fetches that output, checks it against the record, and runs the trace. Nothing on this machine is uploaded. The job passes or fails, and that is all the others learn from it.
+3. **Approve.** Starts only if the first two passed. On a machine that has run neither the build nor Process Monitor, it fetches the output, marks it shippable, and checks every file against the record. It checks the record against the SHA-256 the build job gave out, because a later job could upload another artifact under the same name, but cannot change another job's output. Then it uploads `libopenconnect-windows-x64`.
+
+What this still leaves:
+
+- **The trace's verdict.** A tampered Process Monitor could report a clean trace. It can no longer change what ships.
+- **GitHub.** We trust its runner images, that a job's outputs and result reach the next job unchanged, and its artifact store to the extent of the checksums above.
+- **The build machine.** It still runs the unpinned MSYS2 base and the runner's own tools while it makes the output and the record.
 
 ## The output
 

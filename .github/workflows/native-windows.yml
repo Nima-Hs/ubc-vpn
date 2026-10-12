@@ -32,6 +32,10 @@ jobs:
     name: Build and probe libopenconnect
     runs-on: windows-latest
     timeout-minutes: 60
+    outputs:
+      list-sha256: ${{ steps.record.outputs.list-sha256 }}
+      wintun-url: ${{ steps.wintun.outputs.url }}
+      wintun-sha256: ${{ steps.wintun.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,6 +129,7 @@ jobs:
       # checksum are written down. It must be exactly these two lines, so it
       # cannot set anything else in the environment.
       - name: Read the Wintun pin
+        id: wintun
         run: |
           read_pin() {
             local url='^WINTUN_URL=https://www\.wintun\.net/builds/[A-Za-z0-9._-]+\.zip$'
@@ -155,6 +160,8 @@ jobs:
           printf "WINTUN_URL=$good\nWINTUN_SHA256=$digest\n" > "$bad"
           read_pin "$bad" > /dev/null
           read_pin native/windows/wintun.pin >> "$GITHUB_ENV"
+          # The trace job needs the same pin; it takes it from here, checked.
+          read_pin native/windows/wintun.pin | sed 's/^WINTUN_URL=/url=/; s/^WINTUN_SHA256=/sha256=/' >> "$GITHUB_OUTPUT"
 
       # Wintun is used for the tests only. It is not part of the build output.
       - name: Connect (login, connection and Wintun tunnel device)
@@ -175,21 +182,95 @@ jobs:
       - name: Planted configuration files are ignored
         run: native/windows/tests/planted-files.sh
 
-      # The trace downloads Process Monitor, which cannot be pinned, and runs it
-      # as administrator on the machine that holds the output. Record what the
-      # output contains first, and upload the record so that it is out of this
-      # machine's reach.
-      - name: Record the output before the trace
+      # The jobs after this one work on a copy of the output fetched from
+      # GitHub. Record what the output holds, so they can check their copy. The
+      # record's own checksum leaves as a job output: an artifact can be
+      # replaced by a later job that uploads the same name, a job output cannot.
+      - name: Record the output
+        id: record
         run: |
           native/windows/tests/seal.sh self-test
-          native/windows/tests/seal.sh record "$(cygpath -u "$RUNNER_TEMP")/seal/checksums.txt"
-          cat "$(cygpath -u "$RUNNER_TEMP")/seal/checksums.txt"
+          list=$(cygpath -u "$RUNNER_TEMP")/seal/checksums.txt
+          native/windows/tests/seal.sh record "$list"
+          cat "$list"
+          echo "list-sha256=$(sha256sum "$list" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: libopenconnect-windows-x64-checksums
           path: ${{ runner.temp }}/seal/checksums.txt
           if-no-files-found: error
+
+      # Not the artifact to use: its manifest says it is not shippable. The
+      # approve job makes the one to use from it.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libopenconnect-windows-x64-unapproved
+          path: native/windows/out
+          # The recipe has a .gitignore, which would otherwise be left out.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # Process Monitor cannot be pinned and runs as administrator, so the trace
+  # has a machine to itself. Nothing on this machine is uploaded: the job gives
+  # the others only its result, pass or fail.
+  trace:
+    name: Trace what the probe touches
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-windows-x64-unapproved
+          path: native/windows/out
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-windows-x64-checksums
+          path: ${{ runner.temp }}/sealed
+
+      - name: Check this is the output the build recorded
+        env:
+          LIST_SHA256: ${{ needs.build.outputs.list-sha256 }}
+        run: native/windows/tests/seal.sh verify "$(cygpath -u "$RUNNER_TEMP")/sealed/checksums.txt" "$LIST_SHA256" before-approval
+
+      - name: Build the probe (MSVC target)
+        working-directory: native/probe
+        run: |
+          rustup toolchain install
+          rustc -vV | grep '^host: x86_64-pc-windows-msvc$'
+          cargo build --release --locked
+
+      - name: Make a certificate and fetch Wintun
+        working-directory: native/probe
+        env:
+          WINTUN_URL: ${{ needs.build.outputs.wintun-url }}
+          WINTUN_SHA256: ${{ needs.build.outputs.wintun-sha256 }}
+        run: |
+          [ -n "$WINTUN_URL" ] && [ -n "$WINTUN_SHA256" ]
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "//CN=localhost"
+          curl -fsSLo wintun.zip "$WINTUN_URL"
+          echo "$WINTUN_SHA256 *wintun.zip" | sha256sum -c -
+          unzip -q wintun.zip
+          cp wintun/bin/amd64/wintun.dll target/release/
+
+      # The first connection on a machine makes Wintun install its driver,
+      # which unpacks files into temporary folders. That is Wintun setting
+      # itself up, not our libraries at work, so let it happen before the trace.
+      - name: Connect once before tracing
+        working-directory: native/probe
+        run: |
+          windows=/c/Windows/System32:/c/Windows
+          ours=$(cd ../windows/out/bin && pwd)
+          python fake_server.py cert.pem key.pem 4445 &
+          ./wait-for-server.sh 4445 $!
+          PATH="$ours:$windows" ./target/release/oc-probe.exe connect https://127.0.0.1:4445 testuser testpass | tee connect.txt
+          grep -qx 'RESULT: PASS' connect.txt
 
       - name: Trace the files and registry keys the probe touches
         timeout-minutes: 10
@@ -205,16 +286,40 @@ jobs:
           path: native/windows/work/procmon/probe-trace.tsv
           if-no-files-found: ignore
 
-      # Reached only if every step above passed on this output. An output whose
-      # GnuTLS was reused is uploaded too, but it is not shippable and its name
-      # says so.
+  # Marks the output shippable and uploads it, on a machine that has run
+  # neither the build nor the trace tool. It starts only if both of those jobs
+  # passed, and takes nothing from the trace job. Its copy of the output must
+  # match the build's record, and the record must have the checksum the build
+  # job gave out.
+  approve:
+    name: Approve and upload the output
+    needs: [build, trace]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-windows-x64-unapproved
+          path: native/windows/out
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-windows-x64-checksums
+          path: ${{ runner.temp }}/sealed
+
+      # An output whose GnuTLS was reused is uploaded too, but it is not
+      # shippable and its name says so.
       - name: Mark the output shippable
         id: approve
         env:
           EVENT: ${{ github.event_name }}
         run: |
           native/windows/tests/approve.sh
-          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
           m = json.load(open('native/windows/out/manifest.json'))
           built = next(c for c in m['components'] if c['name'] == 'gnutls')['built_in_this_run']
@@ -223,17 +328,11 @@ jobs:
           print('suffix=' + ('' if built else '-reused-gnutls'))
           EOF
 
-      # The last thing before the upload: the output must still be exactly
-      # what was recorded before the trace, apart from the manifest being
-      # marked as the record expected. The record is fetched back from GitHub
-      # rather than read from where this machine kept it.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: libopenconnect-windows-x64-checksums
-          path: ${{ runner.temp }}/sealed
-
-      - name: Check the output is what was recorded before the trace
-        run: native/windows/tests/seal.sh verify "$(cygpath -u "$RUNNER_TEMP")/sealed/checksums.txt"
+      # The last thing before the upload.
+      - name: Check the output is what the build recorded
+        env:
+          LIST_SHA256: ${{ needs.build.outputs.list-sha256 }}
+        run: native/windows/tests/seal.sh verify "$RUNNER_TEMP/sealed/checksums.txt" "$LIST_SHA256"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
