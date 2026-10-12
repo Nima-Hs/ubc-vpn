@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
 import { app, type BrowserWindow, Menu, protocol, session } from "electron";
-import { serviceChannelPath } from "./channel/endpoint";
+import { bridgeCommand } from "./channel/cli";
 import { Controller } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
@@ -50,7 +50,13 @@ async function start(): Promise<void> {
             });
         };
     } else {
-        link = createServiceLink({ path: serviceChannelPath(), appVersion: app.getVersion() });
+        link = createServiceLink({
+            ...bridgeCommand(app, process),
+            appVersion: app.getVersion(),
+            // The text is fixed and holds nothing that was sent or received.
+            // biome-ignore lint/suspicious/noConsole: the app's only log line, for a bug in the app itself.
+            onFault: (fault) => console.error(`ubc-vpn: ${fault}`),
+        });
     }
     const controller = new Controller(link);
 

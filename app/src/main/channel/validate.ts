@@ -2,10 +2,10 @@
 // rest of the app trusts it. The types are the generated ones; this file only
 // confirms that a value really is one of them.
 
+import type { BridgeLine } from "@shared/protocol/BridgeLine";
 import type { ConnState } from "@shared/protocol/ConnState";
 import type { ErrorCode } from "@shared/protocol/ErrorCode";
 import type { ErrorInfo } from "@shared/protocol/ErrorInfo";
-import type { HelloReply } from "@shared/protocol/HelloReply";
 import type { Outcome } from "@shared/protocol/Outcome";
 import type { ResponseBody } from "@shared/protocol/ResponseBody";
 import type { ServerMessage } from "@shared/protocol/ServerMessage";
@@ -125,11 +125,27 @@ export function isServerMessage(value: unknown): value is ServerMessage {
     }
 }
 
-export function isHelloReply(value: unknown): value is HelloReply {
-    return (
-        isObject(value) &&
-        isU32(value.protocol_version) &&
-        typeof value.service_version === "string" &&
-        typeof value.owner_claimed === "boolean"
-    );
+/** Whether a parsed line from the bridge is one the contract allows. */
+export function isBridgeLine(value: unknown): value is BridgeLine {
+    if (!isObject(value)) {
+        return false;
+    }
+    switch (value.type) {
+        case "ready":
+            return (
+                typeof value.service_version === "string" &&
+                typeof value.owner_claimed === "boolean"
+            );
+        case "update_needed":
+            return typeof value.service_version === "string";
+        case "service_unavailable":
+        case "untrusted_service":
+        case "not_owner":
+        case "bad_line":
+            return true;
+        case "server":
+            return isServerMessage(value.message);
+        default:
+            return false;
+    }
 }

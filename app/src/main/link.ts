@@ -4,7 +4,7 @@
 import type { ActionResult, LinkState } from "@shared/api";
 import type { ConnState } from "@shared/protocol/ConnState";
 import type { Outcome } from "@shared/protocol/Outcome";
-import { ChannelClient, type ChannelStatus } from "./channel/client";
+import { BridgeClient, type BridgeFault, type BridgeStatus } from "./channel/bridge";
 
 /** What the rest of the main process needs from a service, real or fake. */
 export interface ServiceLink {
@@ -40,8 +40,11 @@ export class LinkStore {
 }
 
 export interface ServiceLinkOptions {
-    path: string;
+    /** The command-line client and its arguments; see `bridgeCommand`. */
+    command: string;
+    args: readonly string[];
     appVersion: string;
+    onFault?(fault: BridgeFault): void;
     initialRetryDelayMs?: number;
     maxRetryDelayMs?: number;
     replyTimeoutMs?: number;
@@ -60,7 +63,7 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
         }
     };
 
-    const onStatus = (status: ChannelStatus) => {
+    const onStatus = (status: BridgeStatus) => {
         claimed = false;
         conn = null;
         switch (status.status) {
@@ -77,20 +80,32 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
                     serviceVersion: status.serviceVersion,
                 });
                 break;
+            case "untrusted_service":
+                store.set({ link: "untrusted_service" });
+                break;
+            case "not_owner":
+                store.set({ link: "not_owner" });
+                break;
             case "ready":
                 void claim();
                 break;
         }
     };
 
-    // The app claims the service on every connection: the first user to run
-    // it becomes the owner, and the owner's later claims are accepted.
+    // The bridge sends no requests of its own, so the app claims the service
+    // itself, every time a bridge is ready: the first user to run it becomes
+    // the owner, and the owner's later claims are accepted.
+    //
+    // "Not the owner" can arrive two ways and means the same either way. The
+    // bridge says it when the channel is reserved for the owner; the service
+    // says it in answer to a request when the channel was not narrowed.
     const claim = async () => {
         let outcome: Outcome;
         try {
             outcome = await client.request({ method: "claim" });
         } catch {
-            // The connection dropped; the client is already reconnecting.
+            // The bridge ended or never answered. Either way the client has
+            // already reported it and is starting another.
             return;
         }
         if (outcome.status === "error") {
@@ -118,10 +133,11 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
         }
     };
 
-    const client = new ChannelClient({
-        path: options.path,
-        clientVersion: options.appVersion,
+    const client = new BridgeClient({
+        command: options.command,
+        args: options.args,
         onStatus,
+        ...(options.onFault !== undefined && { onFault: options.onFault }),
         onEvent: (event) => {
             conn = event.value;
             publishReady();
@@ -143,9 +159,13 @@ export function createServiceLink(options: ServiceLinkOptions): ServiceLink {
         disconnect: async () => {
             try {
                 const outcome = await client.request({ method: "disconnect" });
-                return outcome.status === "ok"
-                    ? { ok: true }
-                    : { ok: false, error: { kind: "refused", ...outcome.value } };
+                if (outcome.status === "ok") {
+                    return { ok: true };
+                }
+                if (outcome.value.code === "not_owner") {
+                    store.set({ link: "not_owner" });
+                }
+                return { ok: false, error: { kind: "refused", ...outcome.value } };
             } catch {
                 return { ok: false, error: { kind: "service_unavailable" } };
             }

@@ -222,6 +222,14 @@ export function describe(state: LinkState): StateCopy {
                 working: false,
             };
         }
+        case "untrusted_service":
+            return {
+                tone: "problem",
+                title: "Service not verified",
+                body: "The app could not confirm that UBC VPN’s background service is the one answering, so it sent it nothing. Do not use the VPN on this computer. Install UBC VPN again, then restart your computer.",
+                action: null,
+                working: false,
+            };
         case "not_owner":
             return {
                 tone: "problem",

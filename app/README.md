@@ -22,7 +22,7 @@ pnpm dev    # the interface against the real service
 
 Demo mode replaces the service with an in-memory fake, so you can see every state. It adds a **Components** screen that shows each shared component and has a button for every state. Demo code is left out of production builds, and `pnpm check:build` fails if any is found.
 
-`pnpm dev` shows "Service not running" until the service exists. Connecting needs login, which is a later feature.
+`pnpm dev` reaches the service through the command-line client, which it starts as `ubc-vpn bridge`. Set `UBC_VPN_CLI` to the client you built, for example `UBC_VPN_CLI=../target/debug/ubc-vpn pnpm dev`. Without it, or without a running service, the app shows "Service not running". An installed app ignores `UBC_VPN_CLI`. Connecting needs login, which is a later feature.
 
 ## Check it
 
@@ -43,18 +43,20 @@ The end-to-end test saves a screenshot of every state to `test-results/screens`,
 
 | Folder | What it is |
 | --- | --- |
-| `src/main` | The main process: window, tray, and the channel to the service |
-| `src/main/channel` | The channel client: JSON lines over a named pipe or Unix socket |
+| `src/main` | The main process: window, tray, and the way to the service |
+| `src/main/channel` | The bridge client: starts `ubc-vpn bridge` and exchanges JSON lines with it |
 | `src/main/demo` | The fake service. Demo builds only |
 | `src/preload` | The only bridge to the interface: a short, fixed list of functions |
 | `src/renderer` | The interface: React, Tailwind, and the design system |
 | `src/shared` | Types and wording both sides use |
 | `src/shared/protocol` | Generated from the Rust types. Never edit these |
-| `tests` | Unit tests, a mock service that speaks the protocol, and `e2e` |
+| `tests` | Unit tests, a mock bridge that follows the contract, and `e2e` |
 
-The interface runs sandboxed with no Node access, loads only the app's own files under a strict Content-Security-Policy, and cannot navigate, open windows, or make a network request. The channel client never logs a line it sends or receives, because a line can hold a session cookie.
+The interface runs sandboxed with no Node access, loads only the app's own files under a strict Content-Security-Policy, and cannot navigate, open windows, or make a network request. The bridge client never logs a line it sends or receives.
 
-The pipe or socket name the app connects to is in [`src/main/channel/endpoint.ts`](src/main/channel/endpoint.ts) and nowhere else. It must equal the name `crates/platform` uses, and is a placeholder until that crate's transports land.
+The app never opens the service's pipe or socket itself. It starts the command-line client as `ubc-vpn bridge` and talks to it over standard input and output; the client is what checks that the other end really is the service. The contract is [`crates/core/src/bridge.rs`](../crates/core/src/bridge.rs), and `tests/mock-bridge.mjs` follows it. The app never sends `connect` through the bridge, so it never holds a session cookie. The bridge is started with no shell, its own short list of environment variables (`BRIDGE_ENV`), and its standard error discarded; it is ended when the app lets go of it.
+
+Where the client sits in an installed app is in [`src/main/channel/cli.ts`](src/main/channel/cli.ts) and nowhere else. That place is provisional until the installers exist.
 
 Ctrl or Cmd with plus, minus and zero enlarge, shrink and reset the interface. The window grows with it.
 

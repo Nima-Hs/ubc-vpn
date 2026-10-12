@@ -46,6 +46,8 @@ const STATES: LinkState[] = [
             conn: { state: "failed", code, message: "the service's own words" },
         }),
     ),
+    // Last, so the positions above stay as the tests below expect.
+    { link: "untrusted_service" },
 ];
 
 const failed = (code: ErrorCode, message = "m"): StateCopy =>
@@ -138,6 +140,19 @@ describe("the words for each state", () => {
         expect(copyFor(STATES[4] as LinkState).body).not.toContain("version .");
     });
 
+    it("tells the user to stop when something else answers for the service", () => {
+        const copy = copyFor({ link: "untrusted_service" });
+        expect(copy.tone).toBe("problem");
+        expect(copy.title).toBe("Service not verified");
+        expect(copy.body).toContain("Do not use the VPN on this computer");
+        expect(copy.body).toContain("sent it nothing");
+        expect(copy.body).toContain("Install UBC VPN again");
+        // Nothing to press: trying again is not the answer.
+        expect(copy.action).toBeNull();
+        // Plain words only.
+        expect(copy.body).not.toMatch(/pipe|socket|process|certificate|untrusted|listener/i);
+    });
+
     it("explains an action that did not start", () => {
         const errors: ActionError[] = [
             { kind: "login_unavailable" },
@@ -224,5 +239,11 @@ describe("the tray icon's state", () => {
         expect(trayKind({ link: "ready", conn: { state: "connecting" } })).toBe("busy");
         expect(trayKind({ link: "ready", conn: { state: "login_needed" } })).toBe("attention");
         expect(trayKind({ link: "unavailable", reason: "not_running" })).toBe("attention");
+        expect(trayKind({ link: "untrusted_service" })).toBe("attention");
+        // The tray's tooltip is "UBC VPN: " and the title, so a title must
+        // read as a state, not as an instruction.
+        expect(`UBC VPN: ${copyFor({ link: "untrusted_service" }).title}`).toBe(
+            "UBC VPN: Service not verified",
+        );
     });
 });

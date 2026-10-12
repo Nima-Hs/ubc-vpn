@@ -88,6 +88,7 @@ const SCENARIOS: Record<string, LinkState> = {
     "service-unavailable": { link: "unavailable", reason: "not_running" },
     "service-garbled": { link: "unavailable", reason: "protocol_error" },
     "update-needed": { link: "update_needed", appVersion: "0.1.0", serviceVersion: "0.2.0" },
+    "untrusted-service": { link: "untrusted_service" },
     "not-owner": { link: "not_owner" },
 };
 
