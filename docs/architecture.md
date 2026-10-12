@@ -237,7 +237,9 @@ v0.1.0 supports systemd-resolved only. The `.deb` and `.rpm` declare it as a dep
 
 `cargo deny` covers Rust crates only. npm packages get their own licence check in CI.
 
-Wintun, the Windows tunnel driver, ships as a prebuilt signed binary under its own licence, which is neither one of the permissive licences on our list nor LGPL. Bundling it needs the owner's explicit approval, recorded in `.claude/rules/dependencies.md`, before the Windows installer is built.
+Wintun, the Windows tunnel driver, ships as a prebuilt signed binary under its own licence, which is neither one of the permissive licences on our list nor LGPL. The owner has approved bundling it, on the conditions recorded in `.claude/rules/dependencies.md`. It is the one component of the Windows installer that is not open source, and packaging must leave it out of any code signing.
+
+The app's bundled fonts are under the SIL Open Font License 1.1, approved in the same place for font files only.
 
 ## Open points
 
