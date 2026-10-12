@@ -1,0 +1,10 @@
+# The app is its own pnpm project, separate from the Rust workspace.
+packages:
+  - .
+
+# pnpm runs no dependency's install script unless it is allowed here.
+# Electron needs none: it fetches its binary, and checks it against the
+# checksums in its package, the first time it is run.
+allowBuilds:
+  # Checks that its platform binary is in place. A build tool, not shipped.
+  esbuild: true

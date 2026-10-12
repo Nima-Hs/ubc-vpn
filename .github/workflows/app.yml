@@ -1,0 +1,106 @@
+name: App
+
+on:
+  pull_request:
+    paths:
+      - app/**
+      - .github/workflows/app.yml
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - .github/workflows/app.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes, so the token is not left in the checkout.
+          persist-credentials: false
+      # The pnpm version comes from `packageManager` in app/package.json, and
+      # the Node version from app/.node-version.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: The production build contains no demo code
+        run: pnpm check:build
+
+      # The end-to-end test drives the real app, built in demo mode.
+      # Electron fetches its binary on first use; do it as its own step so a
+      # failed download is not mistaken for a failed test.
+      - name: Download Electron
+        run: node node_modules/electron/install.js
+      # Ubuntu stops unprivileged programs from creating the namespaces
+      # Chromium's sandbox is built on. Lift that for this job, so the test
+      # runs with the sandbox on, as the app does.
+      - name: Allow the Chromium sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: End-to-end test
+        if: runner.os != 'Linux'
+        run: pnpm test:e2e
+      # Linux runners have no display, so give the app a virtual one.
+      - name: End-to-end test
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum pnpm test:e2e
+      # The demo build must contain every marker the no-demo-code check
+      # looks for, or that check would pass without checking anything.
+      - name: The demo markers still detect demo code
+        run: pnpm check:build:control
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: app/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  licences:
+    name: Licences
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      # Fails on any shipped package whose licence is not in app/allowed-licenses.json.
+      - run: pnpm check:licenses

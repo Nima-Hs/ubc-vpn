@@ -1,0 +1,180 @@
+/*
+ * Wires the design tokens into Tailwind. Tailwind's own palette, type scale,
+ * radii, shadows and easings are cleared first, so a class such as
+ * `bg-blue-500` or `rounded-2xl` does not exist: only token-backed names do.
+ */
+
+@import "tailwindcss";
+@import "@fontsource-variable/instrument-sans/wght.css";
+@import "@fontsource-variable/geist-mono/wght.css";
+@import "./tokens.css";
+
+@theme inline {
+    --color-*: initial;
+    --color-transparent: transparent;
+    --color-bg: var(--c-bg);
+    --color-surface: var(--c-surface);
+    --color-surface-raised: var(--c-surface-raised);
+    --color-overlay: var(--c-overlay);
+    --color-control: var(--c-control);
+    --color-control-hover: var(--c-control-hover);
+    --color-control-active: var(--c-control-active);
+    --color-quiet-hover: var(--c-quiet-hover);
+    --color-quiet-active: var(--c-quiet-active);
+    --color-border: var(--c-border);
+    --color-border-strong: var(--c-border-strong);
+    --color-field-border: var(--c-field-border);
+    --color-text: var(--c-text);
+    --color-text-secondary: var(--c-text-secondary);
+    --color-text-tertiary: var(--c-text-tertiary);
+    --color-accent: var(--c-accent);
+    --color-accent-hover: var(--c-accent-hover);
+    --color-accent-active: var(--c-accent-active);
+    --color-on-accent: var(--c-on-accent);
+    --color-accent-subtle: var(--c-accent-subtle);
+    --color-focus: var(--c-focus);
+    --color-positive: var(--c-positive);
+    --color-positive-subtle: var(--c-positive-subtle);
+    --color-attention: var(--c-attention);
+    --color-attention-subtle: var(--c-attention-subtle);
+    --color-danger: var(--c-danger);
+    --color-danger-hover: var(--c-danger-hover);
+    --color-danger-active: var(--c-danger-active);
+    --color-on-danger: var(--c-on-danger);
+    --color-danger-subtle: var(--c-danger-subtle);
+
+    --font-*: initial;
+    --font-ui: var(--f-ui);
+    --font-data: var(--f-data);
+
+    --font-weight-*: initial;
+    --font-weight-regular: var(--weight-regular);
+    --font-weight-medium: var(--weight-medium);
+    --font-weight-strong: var(--weight-strong);
+
+    --text-*: initial;
+    --text-caption: var(--type-caption-size);
+    --text-caption--line-height: var(--type-caption-line);
+    --text-label: var(--type-label-size);
+    --text-label--line-height: var(--type-label-line);
+    --text-body: var(--type-body-size);
+    --text-body--line-height: var(--type-body-line);
+    --text-title: var(--type-title-size);
+    --text-title--line-height: var(--type-title-line);
+    --text-display: var(--type-display-size);
+    --text-display--line-height: var(--type-display-line);
+    --text-display--letter-spacing: var(--type-display-tracking);
+
+    --spacing: var(--space-unit);
+    --spacing-control-xs: var(--size-control-xs);
+    --spacing-control-sm: var(--size-control-sm);
+    --spacing-mark-sm: var(--size-mark-sm);
+    --spacing-mark-dot-sm: var(--size-mark-dot-sm);
+    --spacing-mark-lg: var(--size-mark-lg);
+    --spacing-mark-dot-lg: var(--size-mark-dot-lg);
+    --spacing-control-md: var(--size-control-md);
+    --spacing-control-lg: var(--size-control-lg);
+
+    --radius-*: initial;
+    --radius-sm: var(--r-sm);
+    --radius-md: var(--r-md);
+    --radius-lg: var(--r-lg);
+    --radius-xl: var(--r-xl);
+    --radius-full: var(--r-full);
+
+    --shadow-*: initial;
+    --shadow-surface: var(--e-surface);
+    --shadow-control: var(--e-control);
+    --shadow-accent: var(--e-accent);
+    --shadow-overlay: var(--e-overlay);
+
+    --ease-*: initial;
+    --ease-out: var(--motion-ease-out);
+    --ease-in-out: var(--motion-ease-in-out);
+
+    --animate-*: initial;
+    --animate-arrive: arrive var(--dur-base) var(--motion-ease-out) both;
+    --animate-spin: spin var(--dur-spin) linear infinite;
+    --animate-flow: flow var(--dur-flow) linear infinite;
+    --animate-breathe: breathe var(--dur-flow) var(--motion-ease-in-out) infinite alternate;
+
+    /* New content settles into place. Runs once, when the element appears. */
+    @keyframes arrive {
+        from {
+            opacity: 0;
+            translate: 0 var(--motion-travel);
+        }
+    }
+    @keyframes spin {
+        to {
+            rotate: 360deg;
+        }
+    }
+    /* Moves a dash along a path whose length is normalised to 1. */
+    @keyframes flow {
+        to {
+            stroke-dashoffset: -1;
+        }
+    }
+    @keyframes breathe {
+        from {
+            opacity: var(--opacity-pulse-low);
+        }
+    }
+}
+
+@layer base {
+    html,
+    body,
+    #root {
+        height: 100%;
+    }
+
+    body {
+        overflow: hidden;
+        background-color: var(--c-bg);
+        color: var(--c-text);
+        font-family: var(--f-ui);
+        font-size: var(--type-body-size);
+        line-height: var(--type-body-line);
+        font-weight: var(--weight-regular);
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        cursor: default;
+    }
+
+    /* One focus ring for every control, shown for keyboard use only. */
+    :focus-visible {
+        outline: var(--focus-width) solid var(--c-focus);
+        outline-offset: var(--focus-offset);
+    }
+
+    ::selection {
+        background-color: var(--c-accent-subtle);
+        color: var(--c-text);
+    }
+}
+
+/* The parts of the window that drag it, and the controls inside them that do not. */
+@utility drag-region {
+    -webkit-app-region: drag;
+}
+
+@utility no-drag {
+    -webkit-app-region: no-drag;
+}
+
+/* A region that scrolls inside the window without moving anything behind it. */
+@utility scroll-region {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-border-strong) transparent;
+
+    /* Drawn inside the region: an outline outside it would be clipped by the
+       rounded surface it sits in, and keyboard focus would be invisible. */
+    &:focus-visible {
+        outline-offset: calc(-1 * var(--focus-width));
+    }
+}
