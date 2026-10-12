@@ -68,8 +68,22 @@ git -C "$work/git" -c core.autocrlf=false archive \
 # The recipe itself ships with the source: the LGPL asks for the scripts that
 # control the build. That is this whole folder, patches, keys and lists
 # included, without what a build leaves behind in it.
+#
+# In a checkout, only the files git tracks are copied, so nothing left lying in
+# the folder can end up in the output. Outside one, which is where someone
+# rebuilding from a shipped recipe is, the folder is all there is.
 mkdir -p "$out/source/recipe"
-tar -C "$here" -cf - --exclude=./cache --exclude=./work --exclude=./out . | tar -C "$out/source/recipe" -xf -
+repo_git() {
+    git -c safe.directory='*' -C "$here" "$@"
+}
+if repo_git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    repo_git ls-files -z | tar -C "$here" --null -T - -cf - | tar -C "$out/source/recipe" -xf -
+    # On GitHub the commit being built; elsewhere the one checked out.
+    commit=${GITHUB_SHA:-$(repo_git rev-parse HEAD)}
+else
+    tar -C "$here" -cf - --exclude=./cache --exclude=./work --exclude=./out . | tar -C "$out/source/recipe" -xf -
+    commit=unknown
+fi
 
 # --- Build it, from the archive and patches that ship ------------------------
 
@@ -225,8 +239,6 @@ json_list() {
 }
 openconnect_patches=$(cd "$out" && json_list source/recipe/patches/openconnect/*.patch)
 gnutls_patches=$(cd "$out" && json_list source/recipe/patches/gnutls/*.patch)
-# On GitHub the commit being built; elsewhere the one checked out.
-commit=${GITHUB_SHA:-$(git -c safe.directory='*' -C "$here" rev-parse HEAD)}
 # shellcheck disable=SC2086 # the file list is split on purpose
 cat >"$out/manifest.json" <<EOF
 {

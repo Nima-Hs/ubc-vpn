@@ -71,7 +71,7 @@ The workflow runs these on every build output, reused GnuTLS or not. The scripts
 
 `manifest.json` is written with `"shippable": false`. The workflow's last step before the upload (`approve.sh`) sets it to `true`. It only runs if every test passed on that same output, and it leaves the flag alone if GnuTLS was not built in that run. Anything that consumes the output must refuse it unless the flag is `true`.
 
-The flag alone is not enough. Any run that builds GnuTLS and passes the tests marks its output shippable, and that includes a run started by hand on a branch. A consumer must take the artifact only from a run of `main`, and check that `recipe.commit` in the manifest is a commit on `main`.
+The flag alone is not enough. Any run that builds GnuTLS and passes the tests marks its output shippable, and that includes a run started by hand on a branch. A consumer must take the artifact only from a run of `main`, and check that `recipe.commit` in the manifest is a commit on `main`. On a pull-request run that commit is GitHub's temporary merge commit, which is never on `main`, so those artifacts fail the check by design.
 
 ## The output
 
@@ -80,7 +80,7 @@ The flag alone is not enough. Any run that builds GnuTLS and passes the tests ma
 | `bin/` | The DLLs above |
 | `licenses/` | The licence text of OpenConnect, GnuTLS, each MSYS2 package a DLL came from, and the MinGW runtime linked into the DLLs built here |
 | `source/` | The OpenConnect archive, the GnuTLS release, and the MSYS2 source package of each MSYS2 DLL |
-| `source/recipe/` | A copy of this folder as it was built: the scripts with their configure options, our patches to OpenConnect and GnuTLS, the lock files, lists and key. The workflow checks it matches the repository |
+| `source/recipe/` | A copy of the files in this folder that are in the repository, as they were built: the scripts with their configure options, our patches to OpenConnect and GnuTLS, the lock files, lists and key. The workflow checks it matches the repository |
 | `manifest.json` | Whether the output is shippable, the commit of this repository it was built from, and each component with its origin, version, licence, source and checksums |
 | `build-packages.txt` | Every MSYS2 package installed during the build |
 
