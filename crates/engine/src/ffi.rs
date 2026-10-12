@@ -20,7 +20,7 @@
 //!   (the bundle), from the distribution on Linux (GnuTLS, zlib), and in both
 //!   cases the loader obeys its environment variables first. On macOS
 //!   `DYLD_*` variables can even replace the file named by a full path, so
-//!   `load` refuses to run with one set.
+//!   `load` refuses to run with one set, the two fallback ones apart.
 //!
 //! So a service that runs as root still needs what no code here can give: an
 //! install folder owned by root with no ancestor a user can write, and a
@@ -268,10 +268,19 @@ pub(crate) mod os {
     pub(super) fn open(file: &Path) -> Result<*mut c_void, LoadError> {
         // dyld tries the file's name in `DYLD_LIBRARY_PATH` before the full
         // path it was given, and other `DYLD_*` variables redirect it too.
-        if cfg!(target_os = "macos")
-            && std::env::vars_os().any(|(name, _)| name.as_bytes().starts_with(b"DYLD_"))
-        {
+        // The two fallback variables are allowed: Cargo sets one when it
+        // runs a program, and they only matter when the file is missing.
+        let redirects = |name: &OsStr| {
+            let name = name.as_bytes();
+            name.starts_with(b"DYLD_") && !name.starts_with(b"DYLD_FALLBACK_")
+        };
+        if cfg!(target_os = "macos") && std::env::vars_os().any(|(name, _)| redirects(&name)) {
             return Err(LoadError::UnsafeEnvironment);
+        }
+        // Without the file, dyld would go on to look for its name in the
+        // fallback folders, `/usr/local/lib` among them.
+        if !file.is_file() {
+            return Err(LoadError::NotFound);
         }
         // Asks for the name alone, then the file, without loading anything.
         let present = |name: &OsStr| !open_with(name, RTLD_LAZY | LOCAL_NOLOAD.1).is_null();
