@@ -451,8 +451,13 @@ impl Listener for SocketListener {
         // Dropping the claim then frees the name and wakes `accept`. There
         // is nobody to tell if removing fails: the next `listen` removes the
         // leftover the same way, and reports a failure.
-        if let Some(_claim) = lock(&self.claim).take() {
+        if let Some((claim, _waker)) = lock(&self.claim).take() {
             let _ = remove_socket(&self.path);
+            // Given up outright, not left to closing the file. A process
+            // started while the listener was open has a copy of every open
+            // file until it runs its own program, and the lock would last as
+            // long as that copy: the name would stay taken after the close.
+            let _ = claim.unlock();
         }
     }
 }

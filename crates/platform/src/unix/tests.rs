@@ -237,6 +237,49 @@ fn a_second_listener_is_refused_and_the_first_keeps_its_socket() {
     first.accept().expect("accept");
 }
 
+/// A process made by `fork`, ended when the test is done with it.
+struct Forked(libc::pid_t);
+
+impl Drop for Forked {
+    fn drop(&mut self) {
+        // SAFETY: plain system calls on a process this test started.
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+            libc::waitpid(self.0, std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+// Closing frees the name there and then. A process started while the
+// listener was open holds a copy of the open lock file, for a moment if it
+// goes on to run a program of its own and for good if it does not, and a
+// lock that was only let go by closing the file would last as long as the
+// copy. The tests start programs all the time, which is how this was found:
+// now and then the next `listen` on a name just closed was refused.
+#[test]
+fn closing_frees_the_name_whatever_a_started_process_still_holds() {
+    let Some(sandbox) = Sandbox::any("held by a child") else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    let listener = transport.listen(&name).expect("listen");
+    // SAFETY: the child only makes system calls and never returns.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork");
+    if pid == 0 {
+        loop {
+            // SAFETY: as above.
+            unsafe { libc::pause() };
+        }
+    }
+    let _child = Forked(pid);
+    // Security rule: while the listener is open the name is still taken.
+    assert_eq!(transport.listen(&name).err(), Some(Error::AlreadyExists));
+    listener.close();
+    let again = transport.listen(&name);
+    assert_eq!(again.err(), None, "the name stayed taken after the close");
+}
+
 // A crashed run leaves its socket file behind. It must not block the next
 // run, and nothing but a socket is ever removed to make room.
 #[test]
@@ -387,16 +430,6 @@ fn an_owner_cannot_pin_the_socket_file() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_owner_who_keeps_pinning_cannot_stop_the_service() {
-    struct Child(libc::pid_t);
-    impl Drop for Child {
-        fn drop(&mut self) {
-            // SAFETY: plain system calls on a process this test started.
-            unsafe {
-                libc::kill(self.0, libc::SIGKILL);
-                libc::waitpid(self.0, std::ptr::null_mut(), 0);
-            }
-        }
-    }
     let Some(sandbox) = Sandbox::root("flags loop", Mode::Installed) else {
         return;
     };
@@ -416,7 +449,7 @@ fn an_owner_who_keeps_pinning_cannot_stop_the_service() {
             }
         }
     }
-    let _child = Child(pid);
+    let _child = Forked(pid);
     for round in 0..300 {
         // The leftover of a run that crashed, the owner's and soon marked.
         drop(UnixListener::bind(&name).expect("leave a socket file behind"));
