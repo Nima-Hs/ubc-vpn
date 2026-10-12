@@ -90,6 +90,8 @@ struct State {
     reachable: bool,
     /// Whether the gateway still honours the scripted cookie.
     session_alive: bool,
+    /// Whether logging a session off ends it. False only for dev mode.
+    log_off_ends_session: bool,
     /// Whether calls stop at the gate, and how many are stopped there.
     held: bool,
     waiting: usize,
@@ -133,6 +135,7 @@ impl FakeEngine {
             answers: Vec::new(),
             reachable: script.reachable,
             session_alive: true,
+            log_off_ends_session: true,
             held: false,
             waiting: 0,
             live: None,
@@ -146,6 +149,24 @@ impl FakeEngine {
             script,
             shared: Arc::new(shared),
         }
+    }
+
+    /// An engine for the service's dev mode, where logging in and opening the
+    /// tunnel happen in two processes that share nothing.
+    ///
+    /// The command-line client logs in against a fake of its own, so the
+    /// service's fake never sees a login that could bring a session back.
+    /// This one therefore keeps honouring the scripted cookie after a
+    /// log-off: every login in the other process yields that same cookie, and
+    /// each must open a tunnel. A session still ends when the test hook
+    /// [`FakeEngine::expire_session`] says so.
+    ///
+    /// Use [`FakeEngine::new`] everywhere else. Tests of the service rely on
+    /// a log-off ending the session, as it does at a real gateway.
+    pub fn for_dev_mode(script: Script) -> Self {
+        let engine = Self::new(script);
+        engine.shared.lock().log_off_ends_session = false;
+        engine
     }
 
     /// Every answer the gateway was sent, in order.
@@ -353,7 +374,7 @@ impl Tunnel for FakeTunnel {
         let mut state = self.shared.lock();
         // A later tunnel from the same engine is not this one's to close.
         if state.live.as_ref().is_some_and(|(n, _)| *n == self.number) {
-            if how == CloseMode::LogOff {
+            if how == CloseMode::LogOff && state.log_off_ends_session {
                 state.session_alive = false;
             }
             Shared::end(&mut state, TunnelEvent::Closed);
