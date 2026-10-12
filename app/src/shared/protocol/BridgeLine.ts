@@ -16,7 +16,7 @@ owner_claimed: boolean, } | { "type": "service_unavailable" } | { "type": "updat
 /**
  * The service's product version, to show the user.
  */
-service_version: string, } | { "type": "untrusted_service" } | { "type": "server", 
+service_version: string, } | { "type": "untrusted_service" } | { "type": "not_owner" } | { "type": "bad_line" } | { "type": "server", 
 /**
  * The response or event.
  */

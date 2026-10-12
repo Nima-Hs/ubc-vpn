@@ -1,5 +1,8 @@
-//! The channel protocol between a client (the app or the command-line client)
-//! and the service.
+//! The channel protocol between a client and the service.
+//!
+//! The client is always the command-line client. It opens the channel for
+//! itself, or for the app when run as `ubc-vpn bridge` (see
+//! [`crate::bridge`]); the app never opens the channel.
 //!
 //! Messages are JSON, one per line. The client opens with a [`Hello`] and the
 //! service answers with a [`HelloReply`]. After that the client sends
@@ -40,14 +43,14 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// connection that sends more.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
-/// Which program is on the client end.
+/// Which program the client end is working for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum ClientKind {
-    /// The Electron app.
+    /// The Electron app, through `ubc-vpn bridge`.
     App,
-    /// The command-line client.
+    /// The command-line client run by itself, or to log in and connect.
     Cli,
 }
 

@@ -37,8 +37,7 @@ flowchart LR
     subgraph admin["Runs with admin rights"]
         SVC["Service"]
     end
-    GUI -- "login" --> CLI
-    GUI -- "channel" --> SVC
+    GUI -- "login, bridge" --> CLI
     CLI -- "channel" --> SVC
     CLI -- "password, MFA" --> GW["UBC gateway"]
     SVC -- "session cookie, tunnel" --> GW
@@ -84,12 +83,12 @@ Only our Rust code opens the pipe or socket. The command-line client does it, an
 The reason is what a safe client has to do, which the platform crate's `connect` does and a general-purpose networking library does not:
 
 - **Check who is listening before sending anything.** While the service is stopped, another local user could create a pipe or socket with its name. The client refuses anything not owned by the system.
-- **Not hand over its identity.** On Windows a pipe server can act as a client that connects without asking for identification-only access. Node's networking does not ask for it. This was tested: a test server opened a file as the connecting user.
+- **Not hand over its identity.** On Windows a pipe server can act as a client that connects without asking for identification-only access. Node's networking does not ask for it. This was tested with Node 24: a test server opened a file as the connecting user. The experiment is recorded in pull request 20.
 - **Connect with the least access.** The service's pipe grants ordinary users only what a client needs. Node asks for more and is refused.
 
 So the bridge keeps all of this in one tested place, and the app's TypeScript needs no knowledge of pipes, sockets or permissions.
 
-The bridge forwards everything except `connect`, which carries the session cookie; the app must never hold one. The exact lines are defined in `crates/core/src/bridge.rs`.
+The bridge forwards everything except `connect`, which carries the session cookie; the app must never hold one. It sends nothing of its own, so the app still claims ownership itself. It tells the app apart the cases the app must not retry: something other than the service is listening, or the service belongs to another user of the computer. The exact lines and the rules for every edge case are defined in `crates/core/src/bridge.rs`.
 
 ## Keeping OS-specific code small
 

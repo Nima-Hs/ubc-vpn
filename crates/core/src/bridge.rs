@@ -7,17 +7,47 @@
 //! service before sending anything, and it opens the channel in a way that
 //! does not let the other end act as the user.
 //!
-//! - The client writes [`BridgeLine`]s on its standard output. The first one
-//!   says whether the channel is ready; if it is not, it is also the last.
-//! - Once ready, the app writes [`Request`](crate::protocol::Request)s on the
-//!   client's standard input, and every message from the service arrives as a
-//!   [`BridgeLine::Server`].
-//! - The bridge refuses a `connect` request (see [`bridge_allows`]): the app
-//!   must never hold a session cookie. Connecting goes through
+//! # Starting
+//!
+//! The bridge opens the channel and sends a
+//! [`Hello`](crate::protocol::Hello) with
+//! [`ClientKind::App`](crate::protocol::ClientKind::App), because it speaks
+//! for the app. It then writes exactly one first [`BridgeLine`]:
+//! [`Ready`](BridgeLine::Ready), or the reason there is no channel. Every
+//! line other than `ready` and `server` is the bridge's last: it exits after
+//! writing it.
+//!
+//! # While running
+//!
+//! - The app writes [`Request`](crate::protocol::Request)s on the bridge's
+//!   standard input. The bridge forwards them unchanged, ids included, and
+//!   every message from the service arrives as a [`BridgeLine::Server`].
+//! - The bridge sends no requests of its own. In particular it does not claim
+//!   ownership: the app sends `claim` itself.
+//! - A `connect` request is not forwarded (see [`bridge_allows`]): the app
+//!   must never hold a session cookie. The bridge answers it itself with a
+//!   `server` line holding a response with the request's id and a
+//!   `bad_request` error, and carries on. Connecting goes through
 //!   `ubc-vpn connect --json`, described in [`crate::login`].
-//! - When the service goes away the client writes
-//!   [`BridgeLine::ServiceUnavailable`] and exits. The app starts a new bridge
-//!   after a pause.
+//! - A line on standard input that is longer than
+//!   [`MAX_LINE_BYTES`](crate::protocol::MAX_LINE_BYTES), or is not a valid
+//!   request, is a bug in the app. No id can be recovered from it, so the
+//!   bridge writes [`BridgeLine::BadLine`] and exits. It never echoes the
+//!   line.
+//!
+//! # Stopping
+//!
+//! - When the service goes away the bridge writes
+//!   [`BridgeLine::ServiceUnavailable`] and exits. The app starts a new
+//!   bridge after a pause.
+//! - When standard input closes, the app has gone. The bridge closes the
+//!   channel and exits without writing anything.
+//!
+//! The exit status is 0 when standard input closed and 1 in every other case.
+//! The app acts on the last line, not on the status; an exit with no line at
+//! all is treated as `service_unavailable`.
+//!
+//! Standard output carries nothing but these lines.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,27 +58,31 @@ use crate::protocol::{RequestBody, ServerMessage};
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum BridgeLine {
-    /// The channel is open and the handshake succeeded. Always the first line
-    /// when it comes at all. Requests may now be sent.
+    /// The channel is open and the handshake succeeded. Requests may now be
+    /// sent.
     Ready {
         /// The service's product version.
         service_version: String,
         /// Whether an owner has claimed the service.
         owner_claimed: bool,
     },
-    /// The service is not running, or the channel closed. The bridge exits
-    /// after this line.
+    /// The service is not running, or the channel closed.
     ServiceUnavailable,
-    /// The service speaks a different protocol version. The bridge exits
-    /// after this line.
+    /// The service speaks a different protocol version.
     UpdateNeeded {
         /// The service's product version, to show the user.
         service_version: String,
     },
     /// Something is listening where the service should be, but it is not the
-    /// service. Nothing was sent to it. The bridge exits after this line.
+    /// service. Nothing was sent to it.
     UntrustedService,
-    /// A message from the service, passed on unchanged.
+    /// The service is running but its channel is reserved for another user of
+    /// this computer, its owner. Starting a new bridge will not help.
+    NotOwner,
+    /// The app wrote a line that was too long or was not a valid request.
+    BadLine,
+    /// A message for the app: one the service sent, passed on unchanged, or
+    /// the bridge's own refusal of a `connect` request.
     Server {
         /// The response or event.
         message: ServerMessage,
@@ -57,11 +91,17 @@ pub enum BridgeLine {
 
 /// Whether the bridge will forward a request from the app.
 ///
-/// Everything but `connect` is forwarded. A `connect` carries the session
-/// cookie, and the app must never hold one, so the bridge answers it with a
-/// `bad_request` error and sends nothing to the service.
+/// A `connect` carries the session cookie, and the app must never hold one,
+/// so the bridge answers it with a `bad_request` error and sends nothing to
+/// the service.
+///
+/// Every request is listed, with no catch-all, so a request added later does
+/// not compile until someone decides whether the app may send it.
 pub fn bridge_allows(request: &RequestBody) -> bool {
-    !matches!(request, RequestBody::Connect(_))
+    match request {
+        RequestBody::Claim | RequestBody::Status | RequestBody::Disconnect => true,
+        RequestBody::Connect(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -84,14 +124,21 @@ mod tests {
             encode(&ready).unwrap(),
             "{\"type\":\"ready\",\"service_version\":\"0.1.0\",\"owner_claimed\":true}\n"
         );
+        let update_needed = BridgeLine::UpdateNeeded {
+            service_version: "0.2.0".to_string(),
+        };
         assert_eq!(
-            encode(&BridgeLine::ServiceUnavailable).unwrap(),
-            "{\"type\":\"service_unavailable\"}\n"
+            encode(&update_needed).unwrap(),
+            "{\"type\":\"update_needed\",\"service_version\":\"0.2.0\"}\n"
         );
-        assert_eq!(
-            encode(&BridgeLine::UntrustedService).unwrap(),
-            "{\"type\":\"untrusted_service\"}\n"
-        );
+        for (line, name) in [
+            (BridgeLine::ServiceUnavailable, "service_unavailable"),
+            (BridgeLine::UntrustedService, "untrusted_service"),
+            (BridgeLine::NotOwner, "not_owner"),
+            (BridgeLine::BadLine, "bad_line"),
+        ] {
+            assert_eq!(encode(&line).unwrap(), format!("{{\"type\":\"{name}\"}}\n"));
+        }
     }
 
     #[test]
