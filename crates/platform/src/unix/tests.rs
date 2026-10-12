@@ -609,11 +609,14 @@ fn a_client_refuses_a_squatted_socket() {
     transport
         .connect(&name)
         .expect("root's own socket is accepted");
+    // Open to all, so that the kernel would let the caller in and only the
+    // client's own check can refuse.
+    set_mode(Path::new(&name), 0o666).expect("open it");
     chown(&name, Some(STRANGER), None).expect("hand over");
-    assert_eq!(
-        transport.connect(&name).err(),
-        Some(Error::PermissionDenied)
-    );
+    let other = as_user(OWNER, || transport.connect(&name));
+    assert_eq!(other.err(), Some(Error::PermissionDenied));
+    // Root is let through, as after narrowing.
+    transport.connect(&name).expect("root");
 
     // Root's folder and root's file, but a stranger answers.
     let folder = sandbox.folder("peer", 0o777);
