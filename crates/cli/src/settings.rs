@@ -94,6 +94,11 @@ fn answer(
     // settings, would not fit in one line are refused here, before anything
     // is saved: a save must never be reported as a failure, and `get` must
     // never be left unable to answer by what `set-routes` accepted.
+    //
+    // The two commands can disagree here. `check-routes` does not read the
+    // file, so it reckons with default settings; `set-routes` reckons with
+    // the settings that are stored, and so may refuse routes that
+    // `check-routes` accepted when, say, the saved username is very long.
     let too_long = |_| SettingsFailureCode::BadInput;
     let line = encode(&RoutesReply::Ok {
         routes: routes.clone(),
@@ -106,6 +111,8 @@ fn answer(
         current = stored(dir)?;
         if let Some(text) = &current {
             settings = understood(text)?;
+            // A file `get` cannot show is unreadable here as well.
+            encode(&SettingsView::new(settings.clone(), policy.as_ref())).map_err(unencodable)?;
         }
     }
     settings.routes = routes.clone();

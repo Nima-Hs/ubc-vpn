@@ -491,3 +491,49 @@ fn routes_too_long_to_report_are_refused_before_anything_is_saved() {
     }
     panic!("no size was accepted");
 }
+
+// Security rule: `set-routes` reckons with the settings that are stored,
+// not with defaults. With a long username already in the file, routes that
+// `check-routes` accepts can be too long to show beside it; saving them
+// would leave `get` unable to answer, so they are refused and nothing is
+// saved.
+#[test]
+fn set_routes_reckons_with_what_is_already_stored() {
+    let machine = Machine::new();
+    let before = format!(r#"{{"username":"{}"}}"#, "u".repeat(1000));
+    machine.write_settings(&before);
+    // The longest routes `check-routes` accepts: they fit, but only just.
+    let sizes = (0..40).map(|step| MAX_LINE_BYTES - step * 16);
+    let fitting = sizes.map(routes_filling).find(|typed| {
+        let (status, _) = machine.run(Command::CheckRoutes, typed);
+        status == 0
+    });
+    let typed = fitting.expect("some size is accepted");
+    assert!(matches!(
+        machine.routes(Command::CheckRoutes, &typed),
+        RoutesReply::Ok { .. }
+    ));
+
+    let why = machine.fails(Command::SetRoutes, &typed);
+    assert_eq!(why, SettingsFailureCode::BadInput);
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, before, "nothing was saved");
+    assert_eq!(
+        machine.view().settings.username.map(|name| name.len()),
+        Some(1000)
+    );
+
+    // A file already too long for `get` to show is unreadable to both.
+    let huge = format!(r#"{{"username":"{}"}}"#, "u".repeat(MAX_LINE_BYTES));
+    machine.write_settings(&huge);
+    for command in [Command::Get, Command::SetRoutes] {
+        assert_eq!(
+            machine.fails(command, GOOD),
+            SettingsFailureCode::Unreadable
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(machine.settings_file()).unwrap(),
+        huge
+    );
+}
