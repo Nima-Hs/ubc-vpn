@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ubc_vpn_core::protocol::{Event, HelloReply, PROTOCOL_VERSION};
+use ubc_vpn_core::protocol::{Event, HelloReply, Outcome, PROTOCOL_VERSION, decode};
 use ubc_vpn_engine::fake::{FakeEngine, Script};
 use ubc_vpn_platform::fake::{Fake, Op, paths};
 use ubc_vpn_platform::{Error, Transport};
@@ -155,10 +155,10 @@ fn a_service_of_another_version_means_please_update() {
     );
 }
 
-// The state event a claim sets off arrives around the claim's own response.
-// The client gives each to the right caller.
+// Against the real service: a claim, a request the service answers, and a
+// request it refuses.
 #[test]
-fn responses_and_events_are_told_apart() {
+fn requests_are_answered_or_refused_with_the_services_reason() {
     let rig = Rig::new();
     let _service = rig.service();
     let name = paths(&rig.root).channel_name;
@@ -166,20 +166,65 @@ fn responses_and_events_are_told_apart() {
     client.claim_if_unowned().unwrap();
     let status = ResponseBody::Status(ConnState::Disconnected);
     assert_eq!(client.request(RequestBody::Status), Ok(status));
-    let first = Event::StateChanged(ConnState::Disconnected);
-    assert_eq!(client.next_event(), Ok(first));
-    let refused = client.request(RequestBody::Disconnect).and_then(|_| {
-        let nothing = ubc_vpn_core::routes::RouteSet::default();
-        client.request(RequestBody::Connect(
-            ubc_vpn_core::protocol::ConnectParams {
-                cookie: ubc_vpn_core::redact::Secret::new("made-up-cookie"),
-                gateway_addr: [192, 0, 2, 1].into(),
-                routes: nothing,
-            },
-        ))
+    let nothing = ubc_vpn_core::routes::RouteSet::default();
+    let refused = client.request(RequestBody::Connect(
+        ubc_vpn_core::protocol::ConnectParams {
+            cookie: ubc_vpn_core::redact::Secret::new("made-up-cookie"),
+            gateway_addr: [192, 0, 2, 1].into(),
+            routes: nothing,
+        },
+    ));
+    let Err(ClientError::Refused(why)) = refused else {
+        panic!("{refused:?}");
+    };
+    // This rig's service has no policy file.
+    assert_eq!(why.code, ubc_vpn_core::protocol::ErrorCode::PolicyInvalid);
+}
+
+// A response is matched to its request by id, and events that arrive while
+// a response is awaited are kept for whoever asks for them next. The service
+// here is scripted: an event, an answer to some other request, then the
+// answer, and then it hangs up.
+#[test]
+fn responses_are_matched_by_id_and_events_are_kept() {
+    use ubc_vpn_core::protocol::{Request, Response, ServerMessage};
+
+    let rig = Rig::new();
+    let listener = rig.fake.listen(&paths(&rig.root).channel_name).unwrap();
+    let service = std::thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let send = |line: String| conn.write_line(line.trim_end()).unwrap();
+        conn.read_line().unwrap();
+        send(
+            encode(&HelloReply {
+                protocol_version: PROTOCOL_VERSION,
+                service_version: "0.1.0".to_string(),
+                owner_claimed: true,
+            })
+            .unwrap(),
+        );
+        let asked: Request = decode(&conn.read_line().unwrap().unwrap()).unwrap();
+        let answer = |id, body| {
+            let outcome = Outcome::Ok(body);
+            encode(&ServerMessage::Response(Response { id, outcome })).unwrap()
+        };
+        let event = Event::StateChanged(ConnState::Connecting);
+        send(encode(&ServerMessage::Event(event)).unwrap());
+        send(answer(asked.id + 100, ResponseBody::Claimed));
+        send(answer(
+            asked.id,
+            ResponseBody::Status(ConnState::Connecting),
+        ));
     });
-    assert!(
-        matches!(refused, Err(ClientError::Refused(_))),
-        "{refused:?}"
-    );
+    let name = paths(&rig.root).channel_name;
+    let mut client = Client::connect(&rig.fake, &name, ClientKind::Cli).unwrap();
+    // Already owned, so nothing is claimed and the one request is the status.
+    client.claim_if_unowned().unwrap();
+    let status = ResponseBody::Status(ConnState::Connecting);
+    assert_eq!(client.request(RequestBody::Status), Ok(status));
+    service.join().unwrap();
+    let kept = Event::StateChanged(ConnState::Connecting);
+    assert_eq!(client.next_event(), Ok(kept));
+    // Nothing more was queued, and the service has gone.
+    assert!(matches!(client.next_event(), Err(ClientError::Lost(_))));
 }
