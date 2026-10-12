@@ -262,7 +262,7 @@ A trial packaged the app with pnpm and `electron-builder` on all three OSes, ins
 
 **Every OS**
 
-- The installed service and the libraries it loads run only from a folder that ordinary accounts cannot change: writable only by root on macOS and Linux, and only by SYSTEM and the Administrators group on Windows. The same holds for every folder above it, so the folder cannot be swapped either. The installed service checks this when it starts and refuses to run otherwise. Dev mode, which runs unprivileged from a build folder, is exempt.
+- The installed service and the libraries it loads run only from a folder that ordinary accounts cannot change: writable only by root on macOS and Linux, and only by SYSTEM, the Administrators group and Windows' own installer account (TrustedInstaller) on Windows. The same holds for every folder above it, so the folder cannot be swapped either. The installed service checks this when it starts and refuses to run otherwise. Dev mode, which runs unprivileged from a build folder, is exempt.
 - Extra files (the command-line client, the native libraries, licence texts) ship as separate files beside the app, outside the app archive. They arrive on the user's disk byte for byte as built.
 - Electron's fuses are set so that a packaged app cannot be run as plain Node, ignores `NODE_OPTIONS` and `--inspect`, and loads its code only from the app archive. No fuse covers `--remote-debugging-port`, so the main process removes the remote debugging switches itself before anything else.
 - The archive's integrity is checked at start on Windows and macOS. Electron has no such check on Linux, where root-owned files are the only protection.
@@ -272,7 +272,7 @@ A trial packaged the app with pnpm and `electron-builder` on all three OSes, ins
 **Windows**
 
 - The setup program installs for the whole machine into `Program Files` and does not let the folder be changed. Given the `/D=` option it stops with a message and installs nothing; in the trial that option installed, and registered the service, in a folder ordinary users could write to.
-- The data folder under `ProgramData` gets its owner and access list set by the installer on every install and update, never inherited: a folder made there by default lets users create files in it. A user can also create the folder before the first install, so on a first install the installer empties a folder it finds there. On an update it keeps the contents, so `state.json` survives. The service checks the folder's owner and access list when it starts.
+- The data folder under `ProgramData` gets its owner and access list set by the installer on every install and update, never inherited: a folder made there by default lets users create files in it. A user can also create the folder before the first install, so on a first install the installer empties a folder it finds there. On an update it keeps the contents, so `state.json` survives. The service checks the folder's owner and access list when it starts, and refuses to run if they are wrong.
 - The installer's script hooks run as an administrator and can register, start and remove the service. During an update the old version's removal hooks run before the new version's install hook, so the service is stopped before files are replaced.
 - With no certificate nothing is signed. If signing is added later, DLLs are never included in it, so `wintun.dll` keeps WireGuard's signature.
 
