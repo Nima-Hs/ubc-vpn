@@ -173,9 +173,13 @@
 //!   callback, and the answers are sent. The record only shows afterwards
 //!   that this happened, which is in time to refuse the cookie and too late
 //!   for the password.
-//! - Refuse a certificate hash that is empty or all zeros. If the library
-//!   cannot work the hash out it carries on, and what it then reports is
-//!   whatever the handle held before.
+//! - Refuse a certificate hash that is empty or that is the hash of nothing.
+//!   If the library cannot work the hash out it carries on, and what it then
+//!   reports is whatever the handle held before. On a fresh handle that is
+//!   thirty-two zero bytes, which it reports in the usual form: `pin-sha256:`
+//!   followed by forty-three `A`s and `=`. Compare against that, not against
+//!   a string of zeros. A reused handle would report the previous
+//!   certificate's hash, which is one reason a handle is never reused.
 //! - Reject inside the certificate callback, so that nothing, the cookie
 //!   least of all, is sent before the pin check has passed.
 //!
