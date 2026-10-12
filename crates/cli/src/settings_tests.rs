@@ -11,7 +11,7 @@ use ubc_vpn_core::settings_cli::{
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
 
-use crate::settings::{Command, partial_name, place, run, write_partial};
+use crate::settings::{Command, partial_name, place, run, sweep, write_partial};
 
 const GOOD: &str =
     r#"{"subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test"]}"#;
@@ -362,34 +362,99 @@ fn two_saves_at_once_do_not_touch_each_others_files() {
 
 // What a save that was cut short left behind does not stay for ever: the
 // next save removes it once it is old. The name an older version used
-// counts too.
+// counts too. Nothing else is removed: not a file with another name, not a
+// link, not a folder, and not a partial file that is still fresh.
 #[test]
-fn old_partial_files_are_swept_away() {
+fn only_old_partial_files_are_swept_away() {
     let machine = Machine::new();
     machine.write_settings("{}");
     let dir = machine.root.join("settings");
     let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
-    for old in ["settings.json.tmp", "settings.json.1-2-3.tmp"] {
-        std::fs::write(dir.join(old), "half a file").unwrap();
-        let file = std::fs::File::options()
-            .write(true)
-            .open(dir.join(old))
-            .unwrap();
-        file.set_modified(long_ago).unwrap();
+    let aged = |name: &str| {
+        std::fs::write(dir.join(name), "half a file").unwrap();
+        let file = std::fs::File::options().write(true).open(dir.join(name));
+        file.unwrap().set_modified(long_ago).unwrap();
+    };
+    let ours = partial_name();
+    for swept in ["settings.json.tmp", "settings.json.1-2-0000abcd.tmp", &ours] {
+        aged(swept);
     }
-    // Old, but not a partial file of the settings.
-    std::fs::write(dir.join("notes.tmp"), "kept").unwrap();
-    let notes = std::fs::File::options()
-        .write(true)
-        .open(dir.join("notes.tmp"))
-        .unwrap();
-    notes.set_modified(long_ago).unwrap();
-    drop(notes);
+    let mut kept = vec![
+        "notes.tmp",
+        "settings.json.backup.tmp",
+        "settings.json.1-2-0000abcd.tmp.tmp",
+        "settings.json.1-2-abcd.tmp",
+        "settings.json.1-x-0000abcd.tmp",
+        "settings.json.1-2-0000abcd-4.tmp",
+        "xsettings.json.tmp",
+    ];
+    for name in &kept {
+        aged(name);
+    }
+    // A folder with a partial file's name, as old as the rest.
+    std::fs::create_dir(dir.join("settings.json.3-4-0000abcd.tmp")).unwrap();
+    kept.push("settings.json.3-4-0000abcd.tmp");
+    // A link with one, to a file that is old too. Where links cannot be
+    // made the rest of the test still runs.
+    let target = machine.root.join("someone-elses-file");
+    std::fs::write(&target, "precious").unwrap();
+    let file = std::fs::File::options().write(true).open(&target).unwrap();
+    file.set_modified(long_ago).unwrap();
+    drop(file);
+    if link_to_file(&target, &dir.join("settings.json.5-6-0000abcd.tmp")).is_ok() {
+        kept.push("settings.json.5-6-0000abcd.tmp");
+    }
+    // Fresh: it may be a save in progress.
+    std::fs::write(dir.join("settings.json.7-8-0000abcd.tmp"), "theirs").unwrap();
+    kept.push("settings.json.7-8-0000abcd.tmp");
+
     assert!(matches!(
         machine.routes(Command::SetRoutes, GOOD),
         RoutesReply::Ok { .. }
     ));
-    assert_eq!(partials(&machine), ["notes.tmp"]);
+    let (mut left, mut kept) = (partials(&machine), kept);
+    left.sort();
+    kept.sort();
+    assert_eq!(left, kept);
+
+    // A link cannot be given an old date here, so the same again with
+    // everything counted as old: the link and the folder are still not
+    // removed, and what the link points at is untouched.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    sweep(&dir, std::time::Duration::ZERO);
+    let (mut left, fresh) = (partials(&machine), "settings.json.7-8-0000abcd.tmp");
+    left.sort();
+    kept.retain(|name| *name != fresh);
+    assert_eq!(left, kept);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+}
+
+// A save that fails after the file was read is reported as unwritable, and
+// the old file is as it was. The folder is made read-only for the save.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_written_to_is_unwritable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    let before = r#"{"username":"jdoe"}"#;
+    machine.write_settings(before);
+    let dir = machine.root.join("settings");
+    let mode = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+    mode(0o500).unwrap();
+    if std::fs::write(dir.join("probe"), "").is_ok() {
+        // Root writes where it likes. Said past the capture, so a log shows it.
+        mode(0o700).unwrap();
+        let skipped = "SKIPPED a_folder_that_cannot_be_written_to_is_unwritable: run as root\n";
+        std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes()).unwrap();
+        return;
+    }
+    let why = machine.fails(Command::SetRoutes, GOOD);
+    mode(0o700).unwrap();
+    assert_eq!(why, SettingsFailureCode::Unwritable);
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, before);
+    assert!(partials(&machine).is_empty());
 }
 
 // A system with nowhere to keep files has no settings to show or to save,

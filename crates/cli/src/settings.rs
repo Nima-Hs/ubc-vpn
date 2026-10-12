@@ -204,7 +204,7 @@ pub(crate) fn partial_name() -> String {
 /// old file is untouched.
 fn save(dir: &Path, text: &str) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    sweep(dir);
+    sweep(dir, STALE);
     let partial = write_partial(dir, text, &mut partial_name)?;
     place(&partial, dir)
 }
@@ -249,20 +249,37 @@ pub(crate) fn place(partial: &Path, dir: &Path) -> io::Result<()> {
     placed
 }
 
+/// Whether `name` is one [`partial_name`] makes, or the one name versions
+/// before it used. Nothing else in the folder is this program's to remove.
+fn is_partial_name(name: &str) -> bool {
+    let ours = || {
+        let middle = name.strip_prefix("settings.json.")?.strip_suffix(".tmp")?;
+        let mut parts = middle.split('-');
+        let (pid, nth, nanos) = (parts.next()?, parts.next()?, parts.next()?);
+        let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        let hex = nanos.len() == 8 && nanos.bytes().all(|b| b.is_ascii_hexdigit());
+        Some(parts.next().is_none() && digits(pid) && digits(nth) && hex)
+    };
+    name == "settings.json.tmp" || ours() == Some(true)
+}
+
 /// Removes the partial files that saves cut short have left in `dir`. One
-/// that is not yet [`STALE`] may be a save in progress and is left alone.
-fn sweep(dir: &Path) {
+/// that is not yet `stale` may be a save in progress and is left alone.
+pub(crate) fn sweep(dir: &Path, stale: Duration) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let partial = name.starts_with("settings.json.") && name.ends_with(".tmp");
-        // The age of the entry itself: a link is not followed.
-        let changed = fs::symlink_metadata(entry.path()).and_then(|m| m.modified());
-        let age = changed.ok().and_then(|at| at.elapsed().ok());
-        if partial && age.is_some_and(|age| age > STALE) {
+        // What is known of the entry itself. A link is not followed, and is
+        // not a regular file, so it is never removed.
+        let Ok(known) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let age = known.modified().ok().and_then(|at| at.elapsed().ok());
+        let old = age.is_some_and(|age| age > stale);
+        if known.is_file() && old && is_partial_name(&name.to_string_lossy()) {
+            // One that cannot be removed is left; the save goes on.
             let _ = fs::remove_file(entry.path());
         }
     }
