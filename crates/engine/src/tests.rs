@@ -870,3 +870,40 @@ fn guard_files_hold_only_the_guard_with_private_fields() {
         }
     }
 }
+
+// Dev mode runs the login and the tunnel in two processes. The service's
+// fake must accept the cookie that the client's fake issues, and go on
+// accepting it after a log-off, or dev mode would connect exactly once.
+#[test]
+fn a_dev_mode_fake_accepts_a_new_login_after_a_log_off() {
+    let pins = [pin('A')];
+    // Two engines that share nothing, as in two processes.
+    let service = FakeEngine::for_dev_mode(Script::new(pin('A')));
+    let client = FakeEngine::new(Script::new(pin('A')));
+
+    for _ in 0..3 {
+        let fresh = session(&client);
+        let (tunnel, events) = open(&service, &pins, &fresh);
+        tunnel.unwrap().close(CloseMode::LogOff);
+        assert_eq!(drain(&events), [TunnelEvent::Closed]);
+    }
+
+    // It is still a gateway: another cookie is refused, and so is the right
+    // one once the session has expired.
+    let wrong = Session {
+        cookie: Secret::new("not-the-dev-cookie"),
+        ..session(&client)
+    };
+    let refused = open(&service, &pins, &wrong).0.err();
+    assert_eq!(refused, Some(TunnelError::LoginNeeded));
+    service.expire_session();
+    let refused = open(&service, &pins, &session(&client)).0.err();
+    assert_eq!(refused, Some(TunnelError::LoginNeeded));
+
+    // The ordinary fake is unchanged: a log-off ends the session.
+    let ordinary = FakeEngine::new(Script::new(pin('A')));
+    let (tunnel, _events) = open(&ordinary, &pins, &session(&client));
+    tunnel.unwrap().close(CloseMode::LogOff);
+    let refused = open(&ordinary, &pins, &session(&client)).0.err();
+    assert_eq!(refused, Some(TunnelError::LoginNeeded));
+}
