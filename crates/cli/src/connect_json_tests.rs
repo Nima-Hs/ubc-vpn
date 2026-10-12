@@ -481,7 +481,17 @@ fn a_cancel_before_the_service_is_contacted_claims_nothing() {
         let (cancel, mut typist) = (Cancel::new(), Typist::typing(&[Some(PASSWORD)]));
         cancel.cancel();
         let mut err = Vec::new();
-        let ended = start(&platform, &engines, &mut typist, &cancel, brief(), &mut err);
+        let nobody = || true;
+        let limits = brief();
+        let ended = start(
+            &platform,
+            &engines,
+            &mut typist,
+            &cancel,
+            limits,
+            &nobody,
+            &mut err,
+        );
         let stop = ended.err().expect("cancelled");
         assert_eq!(
             (stop.exit, stop.code),

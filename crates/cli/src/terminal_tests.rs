@@ -85,7 +85,6 @@ fn a_read_that_fails_stops_the_login_once() {
     let cases = [
         (not_text.unwrap_err(), FAILED, "That username is not text"),
         (Error::Closed, CANCELLED, "Login was cancelled."),
-        (Error::Interrupted, CANCELLED, "Login was cancelled."),
         (Error::NotATerminal, FAILED, "Run it in a terminal"),
         (Error::LineTooLong, FAILED, "That answer is too long"),
         (unreadable, FAILED, "The terminal could not be read"),

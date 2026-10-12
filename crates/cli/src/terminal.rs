@@ -32,6 +32,8 @@ pub struct Terminal {
     hidden: ReadLine,
     /// Why the login had to stop, when that was not the user giving up.
     stopped: Option<&'static str>,
+    /// Whether the user pressed Ctrl-C at a question.
+    interrupted: bool,
 }
 
 impl Terminal {
@@ -60,6 +62,7 @@ impl Terminal {
             shown,
             hidden,
             stopped: None,
+            interrupted: false,
         }
     }
 }
@@ -84,8 +87,14 @@ impl Ask for Terminal {
         };
         match read {
             Ok(answer) => Some(answer),
-            // Ctrl-C or Ctrl-D at the question, or the terminal went away.
-            Err(Error::Closed | Error::Interrupted) => None,
+            // Ctrl-D at the question, or the terminal went away.
+            Err(Error::Closed) => None,
+            // Ctrl-C at a question whose answer is hidden. It comes as a key
+            // there, not as a signal; the program ends as for the signal.
+            Err(Error::Interrupted) => {
+                self.interrupted = true;
+                None
+            }
             Err(other) => {
                 self.stopped = Some(match other {
                     Error::NotATerminal => NOT_A_TERMINAL,
@@ -100,6 +109,10 @@ impl Ask for Terminal {
 
     fn failure(&self) -> Option<String> {
         self.stopped.map(str::to_string)
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted
     }
 }
 

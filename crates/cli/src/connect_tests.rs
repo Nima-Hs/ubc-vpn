@@ -14,7 +14,8 @@ use ubc_vpn_platform::fake::Op;
 use ubc_vpn_service::Service;
 
 use crate::client::Limits;
-use crate::connect::{Ask, BUSY, CANCELLED, LOGIN_REFUSED, connect, disconnect};
+use crate::connect::{Ask, BUSY, CANCELLED, Ended, LOGIN_REFUSED, connect, disconnect};
+use crate::interrupt::Progress;
 use crate::tests::Rig;
 use crate::{FAILED, NOT_RUNNING};
 
@@ -109,12 +110,28 @@ impl Scene {
 
     /// Runs `connect` with `typist` at the terminal.
     pub(crate) fn connect(&self, typist: &mut dyn Ask) -> (u8, String, String) {
+        let (ended, out, err) = self.connect_watched(typist, &Progress::default());
+        match ended {
+            Ended::Status(code) => (code, out, err),
+            other => panic!("the connect was stopped: {other:?}"),
+        }
+    }
+
+    /// The same, for a connect that may be stopped part-way.
+    pub(crate) fn connect_watched(
+        &self,
+        typist: &mut dyn Ask,
+        progress: &Progress,
+    ) -> (Ended, String, String) {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
         let engines = |_: &Policy| Some(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = connect(&platform, &engines, typist, brief(), &mut out, &mut err);
+        let limits = brief();
+        let ended = connect(
+            &platform, &engines, typist, progress, limits, &mut out, &mut err,
+        );
         let text = |bytes| String::from_utf8(bytes).unwrap();
-        (code, text(out), text(err))
+        (ended, text(out), text(err))
     }
 
     pub(crate) fn state(&self) -> String {
@@ -300,8 +317,18 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut typist = Typist::typing(&[Some(PASSWORD)]);
         let none = |_: &Policy| None;
-        let code = connect(&platform, &none, &mut typist, brief(), &mut out, &mut err);
-        assert_eq!((code, out.is_empty()), (FAILED, true));
+        let unwatched = Progress::default();
+        let limits = brief();
+        let ended = connect(
+            &platform,
+            &none,
+            &mut typist,
+            &unwatched,
+            limits,
+            &mut out,
+            &mut err,
+        );
+        assert_eq!((ended, out.is_empty()), (Ended::Status(FAILED), true));
         let err = String::from_utf8(err).unwrap();
         assert!(err.contains("no VPN engine yet"), "{err}");
         assert!(typist.asked.is_empty());
