@@ -39,6 +39,7 @@ use ubc_vpn_platform::Platform;
 use std::time::Instant;
 
 use crate::client::{Client, ClientError, Limits};
+use crate::interrupt::Progress;
 use crate::{FAILED, clean, describe, explain, say, settings};
 
 /// The VPN is connected, or a connect or disconnect is in progress.
@@ -65,6 +66,26 @@ pub trait Ask {
     fn failure(&self) -> Option<String> {
         None
     }
+
+    /// Whether the last `None` was the user pressing Ctrl-C at a question.
+    fn interrupted(&self) -> bool {
+        false
+    }
+}
+
+/// How a connect ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// With this exit status, having said what there was to say.
+    Status(u8),
+    /// The user pressed Ctrl-C at a question. Nothing was sent to the
+    /// service and nothing has been printed; the program ends with the
+    /// status that is usual for that.
+    Interrupted,
+    /// A request to stop came from outside while the connect was under way,
+    /// and whoever handles those is ending the program. Nothing has been
+    /// printed and nothing more should be done here.
+    Stopping,
 }
 
 /// The most of a question's label and of its message that is shown, in
@@ -154,18 +175,49 @@ fn busy() -> Stop {
     }
 }
 
-/// Runs `connect` and returns the exit status.
+/// Runs `connect` and says how it ended. `progress` is told when the
+/// connect request goes to the service, and is asked whether a request to
+/// stop has come.
 pub fn connect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
+    progress: &Progress,
     limits: Limits,
     out: &mut dyn Write,
     err: &mut dyn Write,
-) -> u8 {
-    let ended = start(platform, engines, ask, &Cancel::new(), limits, err)
-        .and_then(|mut client| follow(&mut client, &ConnState::Connecting));
-    report(ended, &ConnState::Connecting, out, err)
+) -> Ended {
+    let sending = || progress.sending();
+    let ended = start(
+        platform,
+        engines,
+        ask,
+        &Cancel::new(),
+        limits,
+        &sending,
+        err,
+    )
+    .and_then(|mut client| follow(&mut client, &ConnState::Connecting));
+    // A stop from outside is being handled elsewhere, and what this saw of
+    // it (a disconnect, say) is not news. Ctrl-C at a question is the user
+    // leaving. Neither is reported.
+    if progress.stopping() {
+        return Ended::Stopping;
+    }
+    if ask.interrupted() {
+        return Ended::Interrupted;
+    }
+    Ended::Status(report(ended, &ConnState::Connecting, out, err))
+}
+
+/// Tells the service to disconnect, for a connect that was stopped after
+/// its request had gone. It waits only for the service to take the request,
+/// and says nothing: the program is about to end.
+pub fn undo(platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>, limits: Limits) {
+    let _ = service(platform, limits).and_then(|mut client| {
+        let asked = client.request(RequestBody::Disconnect);
+        asked.map_err(stop)
+    });
 }
 
 /// Runs `disconnect` and returns the exit status.
@@ -223,13 +275,15 @@ fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
 }
 
 /// Does everything up to the service accepting the connect request: the
-/// checks, the login, and the request. `cancel` stops the login.
+/// checks, the login, and the request. `cancel` stops the login. `sending`
+/// is called just before the request goes to the service.
 pub(crate) fn start(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
     cancel: &Cancel,
     limits: Limits,
+    sending: &dyn Fn(),
     err: &mut dyn Write,
 ) -> Result<Client, Stop> {
     let internal = |message: &str| failed(LoginErrorCode::Internal, message);
@@ -298,6 +352,7 @@ pub(crate) fn start(
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
+    sending();
     client.request(RequestBody::Connect(params)).map_err(stop)?;
     // Only now, with the login good and the connect accepted, is a username
     // the user typed worth keeping.

@@ -9,6 +9,7 @@ use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{ClientKind, RequestBody, ResponseBody, encode};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::LoginEngine;
+use ubc_vpn_platform::interrupt::Stop;
 use ubc_vpn_platform::{Mode, Platform};
 
 use client::{Client, ClientError};
@@ -21,6 +22,9 @@ mod connect_json;
 mod connect_json_tests;
 #[cfg(test)]
 mod connect_tests;
+mod interrupt;
+#[cfg(test)]
+mod interrupt_tests;
 mod settings;
 #[cfg(test)]
 mod settings_tests;
@@ -59,8 +63,9 @@ The bridge claims nothing itself; it leaves that to the app. The settings
 commands do not talk to the service at all.
 
 connect asks for the password and the one-time code in the terminal. They are
-never taken from an argument, a variable or a file. A connect that is
-interrupted after the login may still complete; disconnect undoes it.
+never taken from an argument, a variable or a file. Ctrl-C stops a
+connect: at a question nothing has been sent, and after the login the service
+is told to disconnect before the program ends.
 
 With --json, connect is for the app: it writes each question as one line of
 JSON, reads each answer as one line from standard input, and ends with a
@@ -129,6 +134,44 @@ fn login_engine(dev: bool, policy: &Policy) -> Option<Box<dyn LoginEngine>> {
 #[cfg(feature = "dev-mode")]
 const DEV_CODE: &str = "123456";
 
+/// Ends the program as one stopped by `stop` ends, having printed nothing.
+fn leave(stop: Stop) -> ! {
+    std::process::exit(ubc_vpn_platform::interrupt::exit_status(stop))
+}
+
+const UNWATCHED: &str = "Ctrl-C cannot be handled cleanly here. If you interrupt this \
+                         connect, run `ubc-vpn disconnect` afterwards.";
+
+/// How long a connect that is being stopped waits for the service to take
+/// its disconnect. The user has asked to leave; this is not a time to hang.
+const UNDO: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Starts handling Ctrl-C and requests to end for a connect, and returns
+/// what the connect reports its progress to. See [`interrupt`].
+///
+/// If the platform cannot watch for them, they end the program where it
+/// stands, as they always did, and the user is told so once.
+fn watch_for_a_stop(dev: bool, err: &mut dyn Write) -> interrupt::Progress {
+    let progress = interrupt::Progress::default();
+    let Ok(requests) = ubc_vpn_platform::interrupt::watch() else {
+        let _ = writeln!(err, "ubc-vpn: {UNWATCHED}");
+        return progress;
+    };
+    {
+        let shared = progress.clone();
+        let undo = move || {
+            let limits = client::Limits {
+                answer: UNDO,
+                write: UNDO,
+                ..client::Limits::default()
+            };
+            connect::undo(&|| platform(dev), limits);
+        };
+        std::thread::spawn(move || interrupt::serve(requests, &shared, undo, |stop| leave(stop)));
+    }
+    progress
+}
+
 fn main() -> ExitCode {
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     // An argument that is not Unicode is no command this program has.
@@ -169,8 +212,19 @@ fn main() -> ExitCode {
     if args == ["connect"] {
         let engines = |policy: &Policy| login_engine(dev, policy);
         let (mut ask, limits) = (terminal::Terminal::real(), client::Limits::default());
-        let status = connect::connect(&chosen, &engines, &mut ask, limits, &mut out, &mut err);
-        return ExitCode::from(status);
+        let progress = watch_for_a_stop(dev, &mut err);
+        let ended = connect::connect(
+            &chosen, &engines, &mut ask, &progress, limits, &mut out, &mut err,
+        );
+        match ended {
+            connect::Ended::Status(status) => return ExitCode::from(status),
+            connect::Ended::Interrupted => leave(Stop::Interrupt),
+            // Whoever is handling the request ends the program, once the
+            // service has been told to disconnect. Until then, wait.
+            connect::Ended::Stopping => loop {
+                std::thread::park();
+            },
+        }
     }
     ExitCode::from(run(args, &chosen, &mut out, &mut err))
 }

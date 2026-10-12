@@ -77,7 +77,9 @@ pub fn connect(
         confused: false,
     };
     // A panic on the way, in an engine for one, still ends in a last line.
-    let run = || start(platform, engines, &mut app, &cancel, limits, err);
+    // The app stops a connect through its own channel, so nobody here needs
+    // to know when the request goes.
+    let run = || start(platform, engines, &mut app, &cancel, limits, &|| {}, err);
     let Ok(ended) = catch_unwind(AssertUnwindSafe(run)) else {
         let (code, message) = (LoginErrorCode::Internal, PANICKED.to_string());
         let _ = write_line(out, &CliMessage::Error { code, message });
