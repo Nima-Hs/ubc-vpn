@@ -1,7 +1,7 @@
 // Launches the real app in demo mode and looks at it. Screenshots of every
 // state go to `SCREENSHOT_DIR`, or `test-results/screens` when it is not set.
 
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -168,6 +168,10 @@ test("no permission is granted", async () => {
 });
 
 test("only the interface's own files are served, with their headers", async () => {
+    // A real file of a kind the interface is not made of, placed in its
+    // folder: only the list of allowed kinds stands between it and a reader.
+    const stray = resolve("out-demo/renderer/stray-notes.txt");
+    writeFileSync(stray, "not part of the interface");
     const fetched = await app.evaluate(async ({ session }) => {
         const get = async (url: string) => {
             try {
@@ -186,7 +190,7 @@ test("only the interface's own files are served, with their headers", async () =
             climbing: await get("app://ui/..%2f..%2fpackage.json"),
             otherMain: await get("app://ui/..%2fmain%2findex.js"),
             otherHost: await get("app://elsewhere/index.html"),
-            otherType: await get("app://ui/index.html.map"),
+            otherType: await get("app://ui/stray-notes.txt"),
         };
     });
     expect(fetched.index.status).toBe(200);
@@ -199,6 +203,7 @@ test("only the interface's own files are served, with their headers", async () =
     expect(fetched.climbing.status).toBe(404);
     // Refused before it is even looked up: no such host is ever requested.
     expect(fetched.otherHost.status).toBe(0);
+    rmSync(stray);
     expect(fetched.otherType.status).toBe(404);
 });
 
