@@ -413,15 +413,19 @@ fn writing_to_a_vanished_peer_is_an_error_and_not_sigpipe() {
     let Some(sandbox) = Sandbox::any("sigpipe") else {
         return;
     };
-    let (_listener, client, server) = sandbox.pair();
-    drop(client);
-    assert_eq!(server.read_line(), Ok(None), "the peer left");
+    // Both kinds of socket: one the listener accepted, one a client made.
+    let (listener, gone, accepted) = sandbox.pair();
+    let connected = sandbox.transport().connect(&sandbox.name());
+    let connected = connected.expect("connect");
+    drop(listener.accept().expect("accept"));
+    drop(gone);
+    assert_eq!(accepted.read_line(), Ok(None), "the peer left");
     // SAFETY: installing the default action runs no code of ours.
     let before = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-    let written = server.write_line("anyone there?");
+    let written = [accepted, connected].map(|end| end.write_line("anyone there?"));
     // SAFETY: puts back the action that was there before.
     unsafe { libc::signal(libc::SIGPIPE, before) };
-    assert_eq!(written, Err(Error::Closed));
+    assert_eq!(written, [Err(Error::Closed), Err(Error::Closed)]);
 }
 
 // Security rule: a socket in a folder that is not root's alone may be anyone's.

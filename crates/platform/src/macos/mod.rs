@@ -7,7 +7,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use rustix::net::{SendFlags, sockopt};
+use rustix::net::SendFlags;
 
 use crate::unix::{self, Env};
 use crate::{Mode, Paths, Platform, Result};
@@ -39,10 +39,9 @@ pub(crate) fn paths(mode: Mode, env: Env<'_>) -> Result<Paths> {
             channel_name: CHANNEL.to_string(),
         }),
         #[cfg(feature = "dev-mode")]
-        Mode::Dev => Ok(Paths {
-            channel_name: unix::dev_channel(env, "TMPDIR"),
-            ..unix::dev_folders(&support.join("UBC VPN Dev"), &[SYSTEM])?
-        }),
+        // A sibling of the user's own settings folder, so never inside the
+        // installed product's.
+        Mode::Dev => Ok(unix::dev_paths(&support.join("UBC VPN Dev"), env, "TMPDIR")),
     }
 }
 
@@ -60,13 +59,14 @@ pub(crate) fn peer_user(stream: &UnixStream) -> io::Result<u32> {
     }
 }
 
-/// Security rule: a peer that went away is an error, not a signal that kills
-/// the service. macOS has no per-send flag, so it is set on the socket.
-pub(crate) fn no_sigpipe(stream: &UnixStream) -> io::Result<()> {
-    Ok(sockopt::set_socket_nosigpipe(stream, true)?)
-}
-
 /// Sends what the socket has room for, without waiting.
+///
+/// Security rule: a peer that went away is an error, not a signal that kills
+/// the service. macOS has no flag for that on a send; it is a setting of the
+/// socket (`SO_NOSIGPIPE`), which the standard library turns on for every
+/// socket it creates and an accepted socket takes from its listener. Setting
+/// it again here would be a line no test could miss, so the test of this rule
+/// covers both a connected and an accepted socket instead.
 pub(crate) fn send(stream: &UnixStream, bytes: &[u8]) -> rustix::io::Result<usize> {
     rustix::net::send(stream, bytes, SendFlags::DONTWAIT)
 }

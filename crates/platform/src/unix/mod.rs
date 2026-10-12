@@ -77,32 +77,22 @@ pub(crate) fn home(env: Env<'_>) -> Result<PathBuf> {
         .ok_or_else(|| Error::Failed("HOME is not an absolute path".to_string()))
 }
 
-/// The dev-mode socket: in the per-user folder `variable` names, or in `/tmp`
-/// when it is unset or relative. The user ID in the folder's name keeps two
-/// users apart there, and `listen` refuses a folder someone else made.
+/// Dev mode's paths: its files under `dev`, and its socket in the per-user
+/// folder `variable` names, or in `/tmp` when that is unset or relative. The
+/// user ID in the socket folder's name keeps two users apart there, and
+/// `listen` refuses a folder someone else made.
 #[cfg(feature = "dev-mode")]
-pub(crate) fn dev_channel(env: Env<'_>, variable: &str) -> String {
+pub(crate) fn dev_paths(dev: &Path, env: Env<'_>, variable: &str) -> Paths {
     let base = env(variable).map(PathBuf::from);
     let base = base.filter(|base| base.is_absolute());
     let folder = format!("ubc-vpn-dev-{}", geteuid().as_raw());
     let socket = base.unwrap_or_else(|| PathBuf::from("/tmp")).join(folder);
-    socket.join("service.sock").to_string_lossy().into_owned()
-}
-
-/// Refuses dev-mode folders inside the installed product's, wherever the
-/// environment pointed.
-#[cfg(feature = "dev-mode")]
-pub(crate) fn dev_folders(dev: &Path, installed: &[&str]) -> Result<Paths> {
-    if installed.iter().any(|system| dev.starts_with(system)) {
-        let message = "dev mode cannot live in the installed product's folders";
-        return Err(Error::Failed(message.to_string()));
-    }
-    Ok(Paths {
+    Paths {
         policy_dir: dev.join("policy"),
         state_dir: dev.join("state"),
         settings_dir: dev.join("settings"),
-        channel_name: String::new(),
-    })
+        channel_name: socket.join("service.sock").to_string_lossy().into_owned(),
+    }
 }
 
 pub(crate) fn native(mode: Mode, paths: Paths) -> Platform {
@@ -263,7 +253,7 @@ impl Transport for SocketTransport {
         if os::peer_user(&stream)? != service {
             return Err(Error::NotTheService);
         }
-        Ok(Connection::new(Box::new(SocketConnection::new(stream)?)))
+        Ok(Connection::new(Box::new(SocketConnection::new(stream))))
     }
 }
 
@@ -302,16 +292,14 @@ impl Listener for SocketListener {
                 Err(error) if GONE.contains(&error.kind()) => continue,
                 Err(error) => return Err(error.into()),
             };
-            // A caller that fails from here on, such as one already gone, is
-            // dropped without ending the listener.
             // Security rule: the identity is the kernel's record of who
-            // connected, never anything the caller sent.
+            // connected, never anything the caller sent. A caller the kernel
+            // cannot name, such as one already gone, is dropped without
+            // ending the listener.
             let Ok(caller) = os::peer_user(&stream) else {
                 continue;
             };
-            let Ok(connection) = SocketConnection::new(stream) else {
-                continue;
-            };
+            let connection = SocketConnection::new(stream);
             return Ok((Connection::new(Box::new(connection)), user_id(caller)?));
         }
     }
@@ -369,14 +357,13 @@ struct SocketConnection {
 }
 
 impl SocketConnection {
-    fn new(stream: UnixStream) -> io::Result<Self> {
-        os::no_sigpipe(&stream)?;
-        Ok(Self {
+    fn new(stream: UnixStream) -> Self {
+        Self {
             stream,
             read_timeout: Mutex::default(),
             write_timeout: Mutex::default(),
             closed: AtomicBool::new(false),
-        })
+        }
     }
 
     /// Waits until the socket can take a read or a write, as `wanted` says,

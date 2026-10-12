@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use rustix::net::{SendFlags, sockopt};
 
+#[cfg(feature = "dev-mode")]
+use crate::Error;
 use crate::unix::{self, Env};
 use crate::{Mode, Paths, Platform, Result};
 
@@ -41,10 +43,16 @@ pub(crate) fn paths(mode: Mode, env: Env<'_>) -> Result<Paths> {
             channel_name: CHANNEL.to_string(),
         }),
         #[cfg(feature = "dev-mode")]
-        Mode::Dev => Ok(Paths {
-            channel_name: unix::dev_channel(env, "XDG_RUNTIME_DIR"),
-            ..unix::dev_folders(&config.join("ubc-vpn-dev"), &[POLICY, STATE])?
-        }),
+        Mode::Dev => {
+            let dev = config.join("ubc-vpn-dev");
+            // Security rule: dev mode never lives in the installed product's
+            // folders, wherever `XDG_CONFIG_HOME` points.
+            if [POLICY, STATE].iter().any(|system| dev.starts_with(system)) {
+                let message = "dev mode cannot live in the installed product's folders";
+                return Err(Error::Failed(message.to_string()));
+            }
+            Ok(unix::dev_paths(&dev, env, "XDG_RUNTIME_DIR"))
+        }
     }
 }
 
@@ -52,11 +60,6 @@ pub(crate) fn paths(mode: Mode, env: Env<'_>) -> Result<Paths> {
 /// recorded it when the connection was made (`SO_PEERCRED`).
 pub(crate) fn peer_user(stream: &UnixStream) -> io::Result<u32> {
     Ok(sockopt::socket_peercred(stream)?.uid.as_raw())
-}
-
-/// Linux asks for no `SIGPIPE` on each send instead of once per socket.
-pub(crate) fn no_sigpipe(_stream: &UnixStream) -> io::Result<()> {
-    Ok(())
 }
 
 /// Sends what the socket has room for, without waiting.
