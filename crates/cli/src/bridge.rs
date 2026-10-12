@@ -7,10 +7,12 @@
 //! forwarded, because the app must not hold a session cookie; and standard
 //! output carries nothing but [`BridgeLine`]s.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Instant;
 
 use ubc_vpn_core::bridge::{BridgeLine, bridge_allows};
 use ubc_vpn_core::protocol::{
@@ -20,7 +22,7 @@ use ubc_vpn_core::protocol::{
 use ubc_vpn_core::redact::redact_line;
 use ubc_vpn_platform::{Connection, Error, Platform};
 
-use crate::client::{ClientError, hello};
+use crate::client::{ClientError, Limits, hello};
 
 /// What reaches the bridge's one loop, from either side.
 enum Arrival {
@@ -38,13 +40,20 @@ type NoChannel = Box<(BridgeLine, String)>;
 
 /// Runs the bridge until either side goes away and returns the exit status:
 /// 0 when the app closed standard input, 1 in every other case.
+///
+/// The bridge lives as long as the app, so it waits without limit while
+/// nothing is asked: the service says nothing for hours when nothing
+/// changes. But each request it forwards must be answered within
+/// [`Limits::answer`]. A service that takes requests and does not answer
+/// them is reported as unavailable, so the app can start again.
 pub fn run(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     input: impl BufRead + Send + 'static,
+    limits: Limits,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
-    let (conn, ready) = match open(platform) {
+    let (conn, ready) = match open(platform, limits) {
         Ok(opened) => opened,
         Err(failed) => {
             let (last, why) = *failed;
@@ -65,19 +74,42 @@ pub fn run(
     let service = conn.clone();
     thread::spawn(move || read_service(&service, &from_service));
 
+    // The requests sent on and not yet answered, oldest first, each with
+    // the time its answer is due.
+    let mut unanswered: VecDeque<(u32, Instant)> = VecDeque::new();
     let status = loop {
-        match inbox.recv().unwrap_or(Arrival::ServiceGone) {
+        let arrival = match unanswered.front() {
+            None => inbox.recv().ok(),
+            Some((_, due)) => {
+                let left = due.saturating_duration_since(Instant::now());
+                match inbox.recv_timeout(left) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let late = "the service did not answer a request in time";
+                        let _ = writeln!(err, "ubc-vpn bridge: {late}");
+                        Some(Arrival::ServiceGone)
+                    }
+                    arrival => arrival.ok(),
+                }
+            }
+        };
+        match arrival.unwrap_or(Arrival::ServiceGone) {
             Arrival::AppGone => break 0,
             Arrival::App(Err(())) => {
                 write(out, &BridgeLine::BadLine);
                 break 1;
             }
             Arrival::App(Ok(request)) => {
+                if bridge_allows(&request.body) {
+                    unanswered.push_back((request.id, Instant::now() + limits.answer));
+                }
                 if !forward(&conn, request, out) {
                     break 1;
                 }
             }
             Arrival::Service(message) => {
+                if let ServerMessage::Response(response) = &message {
+                    unanswered.retain(|(id, _)| *id != response.id);
+                }
                 if !write(out, &BridgeLine::Server { message }) {
                     break 1;
                 }
@@ -96,6 +128,7 @@ pub fn run(
 /// the one line to write and, for standard error, the reason.
 fn open(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    limits: Limits,
 ) -> Result<(Arc<Connection>, BridgeLine), NoChannel> {
     let unavailable = |why: Error| Box::new((BridgeLine::ServiceUnavailable, why.to_string()));
     let platform = platform().map_err(unavailable)?;
@@ -107,8 +140,9 @@ fn open(
         Error::NotTheService => Box::new((BridgeLine::UntrustedService, why.to_string())),
         why => unavailable(why),
     })?;
-    let reply = hello(&conn, ClientKind::App).map_err(|why| match why {
+    let reply = hello(&conn, ClientKind::App, limits).map_err(|why| match why {
         ClientError::Mismatch(service_version) => {
+            let service_version = service_version.unwrap_or_else(|| "unknown".to_string());
             let why = format!("the service is version {service_version}");
             Box::new((BridgeLine::UpdateNeeded { service_version }, why))
         }

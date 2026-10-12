@@ -14,6 +14,7 @@ use ubc_vpn_platform::Transport;
 use ubc_vpn_platform::fake::{Op, paths};
 
 use super::*;
+use crate::client::Limits;
 use crate::tests::Rig;
 
 const COOKIE: &str = "Zq7-made-up-0123456789";
@@ -65,6 +66,10 @@ struct Bridge {
 }
 
 fn start(rig: &Rig) -> Bridge {
+    start_with(rig, Limits::default())
+}
+
+fn start_with(rig: &Rig, limits: Limits) -> Bridge {
     let (app, lines) = mpsc::channel();
     let (out, err) = (Captured::default(), Captured::default());
     let (fake, root) = (rig.fake.clone(), rig.root.clone());
@@ -72,7 +77,7 @@ fn start(rig: &Rig) -> Bridge {
     let exit = thread::spawn(move || {
         let platform = || Ok(fake.platform(&root));
         let input = BufReader::new(Feed(lines, VecDeque::new()));
-        run(&platform, input, &mut stdout, &mut stderr)
+        run(&platform, input, limits, &mut stdout, &mut stderr)
     });
     let app = Some(app);
     Bridge {
@@ -304,4 +309,63 @@ fn no_more_than_the_limit_is_read_for_one_line() {
     );
     let taken = input.get_ref().0;
     assert!(taken <= 2 * MAX_LINE_BYTES, "{taken} bytes were read");
+}
+
+// The bridge lives as long as the app. With nothing asked it waits without
+// limit, but a request it has sent on must be answered in time: a service
+// that takes requests and does not answer is reported, and the bridge ends.
+#[test]
+fn a_forwarded_request_must_be_answered_in_time() {
+    let brief = Limits {
+        answer: Duration::from_millis(600),
+        ..Limits::default()
+    };
+    // Idle for longer than the limit, the bridge is still there and works.
+    let rig = Rig::new();
+    let _service = rig.service();
+    let mut bridge = start_with(&rig, brief);
+    bridge.lines(1);
+    thread::sleep(2 * brief.answer);
+    bridge.say(r#"{"id":1,"body":{"method":"status"}}"#);
+    let refused = Err(ErrorCode::NotClaimed);
+    assert!(is_response(&bridge.lines(2)[1], 1, refused));
+    // An answered request leaves nothing to wait for.
+    thread::sleep(2 * brief.answer);
+    bridge.app = None;
+    let (status, lines, _) = bridge.end();
+    assert_eq!((status, lines.len()), (0, 2));
+
+    // A service that answers the hello and nothing after it.
+    let rig = Rig::new();
+    let reply = HelloReply {
+        protocol_version: PROTOCOL_VERSION,
+        service_version: "0.1.0".to_string(),
+        owner_claimed: true,
+    };
+    let listener = rig.fake.listen(&paths(&rig.root).channel_name).unwrap();
+    let stuck = thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        // Not for ever, so that a bridge with no deadline fails this test.
+        let patience = Some(Duration::from_secs(8));
+        conn.set_read_timeout(patience).unwrap();
+        conn.read_line().unwrap();
+        conn.write_line(encode(&reply).unwrap().trim_end()).unwrap();
+        // It takes the request, and then only waits for the bridge to go.
+        let asked = conn.read_line().ok().flatten();
+        drop(conn.read_line());
+        asked
+    });
+    let bridge = start_with(&rig, brief);
+    bridge.lines(1);
+    let started = Instant::now();
+    bridge.say(r#"{"id":1,"body":{"method":"status"}}"#);
+    let (status, lines, everything) = bridge.end();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "it waited too long"
+    );
+    assert_eq!(status, 1);
+    assert_eq!(lines[1..], [BridgeLine::ServiceUnavailable]);
+    assert!(everything.contains("did not answer a request in time"));
+    assert!(stuck.join().unwrap().is_some(), "the request was sent on");
 }

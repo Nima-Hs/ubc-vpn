@@ -41,7 +41,9 @@ fn main() -> ExitCode {
     // The one command that reads standard input, so it is started here.
     if args == ["bridge"] {
         let input = std::io::BufReader::new(std::io::stdin());
-        return ExitCode::from(bridge::run(&installed, input, &mut out, &mut err));
+        let limits = client::Limits::default();
+        let status = bridge::run(&installed, input, limits, &mut out, &mut err);
+        return ExitCode::from(status);
     }
     ExitCode::from(run(&args, &installed, &mut out, &mut err))
 }
