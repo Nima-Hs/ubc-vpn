@@ -7,7 +7,6 @@ Builds `libopenconnect` v9.21 (GnuTLS backend) for x64 from the pinned upstream 
 | `build.sh` | Builds the library and writes the output folder |
 | `check-probe.sh` | Runs the probe and requires the expected version and `RESULT: PASS` |
 | `load-test.sh` | Runs the probe in another distribution's container with only the declared packages installed |
-| `wait-for-port.sh` | Waits for a test server to start listening |
 
 There are no patches.
 

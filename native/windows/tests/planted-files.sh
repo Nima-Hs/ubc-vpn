@@ -29,7 +29,7 @@ run() {
     python fake_server.py cert.pem key.pem "$port" >/dev/null 2>&1 &
     server=$!
     # A gateway that never starts is a broken test, not a result: stop here.
-    "$here/tests/wait-for-server.sh" "$port" "$server" || exit 1
+    "$probe/wait-for-server.sh" "$port" "$server" || exit 1
     PATH="$dlls:$windows" ./target/release/oc-probe.exe "$mode" "https://127.0.0.1:$port" "$@" >run.txt 2>&1 || status=$?
     kill "$server" 2>/dev/null || true
     return "$status"
