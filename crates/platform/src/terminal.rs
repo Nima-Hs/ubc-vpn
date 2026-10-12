@@ -69,6 +69,19 @@ pub fn read_hidden_line(prompt: &str) -> Result<Secret> {
 /// lock and does not allocate. On Windows it may be called from a console
 /// control handler, which runs on a thread of its own, or from any thread.
 /// Nothing here installs a handler.
+///
+/// Two things for whoever does:
+///
+/// - A handler that returns to the program, rather than ending it, must
+///   save `errno` before this call and put it back after: the calls made
+///   here may change it.
+/// - There is a small window at the start of a call. The call marks itself
+///   in progress and then changes the mode. If this function runs between
+///   the two, on another thread or in a handler that returns, it puts back
+///   a mode that has not changed yet, and the call then goes on to quiet the
+///   terminal. A program that ends after that leaves the terminal quiet. A
+///   handler that ends the program itself, on the thread making the call,
+///   cannot hit it.
 pub fn restore_after_signal() {
     os::restore_after_signal();
 }
@@ -234,9 +247,10 @@ mod tests {
         assert_eq!(typed(b"\x1b[A[D\r"), Ok("[D".to_string()));
     }
 
-    // Security rule: what was typed does not stay in the buffer. The CI
-    // workflows run this in a release build too, where a wipe the compiler
-    // may remove is removed.
+    // Security rule: what was typed does not stay in the buffer. This shows
+    // that the wipe happens. It cannot show that a compiler may not remove
+    // it: reading the buffer back is itself a reason to keep the writes.
+    // That guarantee is the volatile writes in `wipe`.
     #[test]
     fn the_line_is_wiped_when_it_is_done_with() {
         let mut line = std::mem::ManuallyDrop::new(Line::new());

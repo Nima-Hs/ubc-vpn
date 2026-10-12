@@ -304,6 +304,16 @@ mod tests {
         let input = console("CONIN$").expect("the new console");
         let before = mode(&input);
         assert_ne!(before & ENABLE_ECHO_INPUT, 0, "a new console echoes");
+
+        // With no call in progress there is nothing to put back.
+        let odd = before & !ENABLE_ECHO_INPUT;
+        // SAFETY: plain calls on a console handle that is open.
+        assert_ne!(unsafe { SetConsoleMode(input.0, odd) }, 0, "set a mode");
+        restore_after_signal();
+        assert_eq!(mode(&input), odd, "changed when idle");
+        // SAFETY: as above.
+        assert_ne!(unsafe { SetConsoleMode(input.0, before) }, 0, "set it back");
+
         // Typed blind, before any prompt: no part of the secret.
         type_keys(&input, "blind");
         let typist = std::thread::spawn(|| type_when_quiet("s3cret fakx\u{8}e\rNEXT"));
@@ -327,6 +337,17 @@ mod tests {
         assert_eq!(read, Err(Error::Closed));
         assert_eq!(mode(&input), before, "the mode after Ctrl-C");
         assert_eq!(waiting(&input), 0, "keys left after giving up");
+
+        // The same after a line over the limit.
+        let long = format!(
+            "{}\rNEXT",
+            "a".repeat(crate::terminal::MAX_HIDDEN_LINE_BYTES + 1)
+        );
+        let typist = std::thread::spawn(move || type_when_quiet(&long));
+        let read = read_hidden_line("").map(|_| ());
+        typist.join().expect("the typist");
+        assert_eq!(read, Err(Error::LineTooLong));
+        assert_eq!(waiting(&input), 0, "keys left after a long line");
 
         // What a program told to stop calls: the mode is back as it was
         // though the call has not returned.
