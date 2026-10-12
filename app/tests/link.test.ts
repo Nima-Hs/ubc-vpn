@@ -280,6 +280,29 @@ describe("the link to the service", () => {
         expect(link.getState()).toEqual({ link: "ready", conn: { state: "login_needed" } });
     });
 
+    it("is not moved by an event of a kind it does not know", async () => {
+        const raw = `${JSON.stringify({
+            type: "server",
+            message: {
+                type: "event",
+                data: { kind: "comet_sighted", value: { state: "connected", tunnel: TUNNEL } },
+            },
+        })}\n`;
+        const { bridge, link, seen } = linkTo({
+            later: [
+                { afterMs: 40, raw },
+                { afterMs: 120, state: { state: "login_needed" } },
+            ],
+        });
+        await until(() => link.getState().link === "ready", "ready");
+        await until(() => JSON.stringify(link.getState()).includes("login_needed"), "the change");
+        // Ready and disconnected, then the one change it was really told of:
+        // never the state the unknown event carried, and never "unavailable".
+        expect(JSON.stringify(seen)).not.toContain('connected","tunnel');
+        expect(seen.some((state) => state.link === "unavailable")).toBe(false);
+        expect(bridge.starts()).toBe(1);
+    });
+
     it("claims even when the bridge says an owner already exists", async () => {
         const { bridge, link } = linkTo({ ownerClaimed: true });
         await until(() => link.getState().link === "ready", "ready");

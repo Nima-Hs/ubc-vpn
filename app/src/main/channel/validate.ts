@@ -130,7 +130,14 @@ export function isServerMessage(value: unknown): value is ServerMessage {
         case "response":
             return isU32(value.data.id) && isOutcome(value.data.outcome);
         case "event":
-            return value.data.kind === "state_changed" && isConnState(value.data.value);
+            // An event says what kind it is. A kind this app knows is checked
+            // in full. One it does not know is still an event, and is let
+            // through for its reader to ignore: a newer service may say
+            // things an older app has no use for, and that is no fault.
+            if (typeof value.data.kind !== "string") {
+                return false;
+            }
+            return value.data.kind !== "state_changed" || isConnState(value.data.value);
         default:
             return false;
     }
