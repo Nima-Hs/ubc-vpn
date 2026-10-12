@@ -15,10 +15,13 @@ run: number,
 lines: Array<LogLine>, 
 /**
  * Where to read on from: with `run`, the cursor for the next request.
+ * The `seq` of the last line here, or the cursor that was used when
+ * there is none: 0 if none was given or it was from another run.
  */
 next: number, 
 /**
- * Whether lines the cursor asked for are no longer there: they had
- * left the service's memory, or the cursor was from another run.
+ * Whether a line of this run with a `seq` greater than the cursor
+ * that was used existed and is no longer held. A cursor from another
+ * run does not make this true by itself; `run` shows that.
  */
 dropped: boolean, };

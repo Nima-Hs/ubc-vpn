@@ -18,12 +18,24 @@
 //!
 //! - Lines are numbered by `seq`, from 1, within one run of the service.
 //!   A service that restarts starts again at 1 with a new `run`, so a place
-//!   in the log is a [`LogCursor`]: a run and a number.
-//! - `logs` answers with a [`LogPage`]: lines after the cursor, oldest
-//!   first, as many as fit. Ask again from `next` until a page is empty.
-//!   `dropped` says that lines after the cursor had already left the
-//!   service's memory, or that the cursor was from another run and the page
-//!   starts from the oldest line there is.
+//!   in the log is a [`LogCursor`]: a run and a number. Numbers are given
+//!   out without gaps, but a page may skip the numbers of lines that are
+//!   no longer held.
+//! - `logs` answers with a [`LogPage`]: the lines whose `seq` is greater
+//!   than the cursor's, oldest first, as many as fit. No cursor means
+//!   after 0, and so does a cursor from another run: the page then starts
+//!   from the oldest line held, and the client sees the run changed by
+//!   comparing `run`. `next` is the `seq` of the last line in the page, or
+//!   the cursor that was used when the page is empty. Ask again from
+//!   `next` until a page is empty.
+//! - `dropped` means exactly this: at least one line of this run with a
+//!   `seq` greater than the cursor that was used existed and is no longer
+//!   held, whichever kind of line it was. So the first read of a run that
+//!   has already lost lines says `dropped`, and a cursor from another run
+//!   does not by itself.
+//! - Every number here stays below 2^53, so it is exact as a JavaScript
+//!   `number`, which is how the generated TypeScript carries it. A count
+//!   of milliseconds or of lines does not reach that in any real run.
 //! - `watch_logs` turns [`Event::Log`] on or off for one connection. To
 //!   miss nothing, turn it on first, then fetch with `logs`, and drop
 //!   whatever arrives twice, by `seq`.
@@ -416,7 +428,8 @@ impl From<LogText> for String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct LogLine {
-    /// Its number within this run of the service, from 1, with no gaps.
+    /// Its number within this run of the service, from 1. Numbers are given
+    /// out without gaps; a page may skip those of lines no longer held.
     #[cfg_attr(test, ts(type = "number"))]
     pub seq: u64,
     /// When the service took the line, by its own clock: milliseconds since
@@ -454,17 +467,22 @@ pub struct LogPage {
     /// The lines, oldest first. Empty when there are none after the cursor.
     pub lines: Vec<LogLine>,
     /// Where to read on from: with `run`, the cursor for the next request.
+    /// The `seq` of the last line here, or the cursor that was used when
+    /// there is none: 0 if none was given or it was from another run.
     #[cfg_attr(test, ts(type = "number"))]
     pub next: u64,
-    /// Whether lines the cursor asked for are no longer there: they had
-    /// left the service's memory, or the cursor was from another run.
+    /// Whether a line of this run with a `seq` greater than the cursor
+    /// that was used existed and is no longer held. A cursor from another
+    /// run does not make this true by itself; `run` shows that.
     pub dropped: bool,
 }
 
 impl LogPage {
     /// A page of the lines after `after` in this `run`: as many of `lines`,
     /// which must be in order, as fit in [`LOG_PAGE_BYTES`] once encoded.
-    /// `dropped` is for the service to say; see [`LogPage::dropped`].
+    /// `after` is the cursor that was used: 0 when the client gave none or
+    /// gave one from another run. `dropped` is for the service to say; see
+    /// [`LogPage::dropped`].
     pub fn after(
         run: u64,
         after: u64,
@@ -1103,6 +1121,39 @@ mod tests {
         let page = LogPage::after(7, 0, false, short);
         assert!(page.lines.len() > 400, "{}", page.lines.len());
         assert!(encode(&ResponseBody::Logs(page)).unwrap().len() <= LOG_PAGE_BYTES + 256);
+    }
+
+    // The app reads these as JavaScript numbers. The contract says they stay
+    // below 2^53; a `bigint` here would break the app's arithmetic on them.
+    #[test]
+    fn the_log_numbers_are_plain_numbers_for_the_app() {
+        use ts_rs::TS;
+        let how = ts_rs::Config::default();
+        let fields = [
+            (LogLine::decl(&how), "seq"),
+            (LogLine::decl(&how), "at_unix_ms"),
+            (LogCursor::decl(&how), "run"),
+            (LogCursor::decl(&how), "seq"),
+            (LogPage::decl(&how), "run"),
+            (LogPage::decl(&how), "next"),
+            (Diagnostics::decl(&how), "uptime_s"),
+        ];
+        for (declared, field) in fields {
+            let wanted = format!("{field}: number,");
+            let found = declared.lines().any(|line| line.starts_with(&wanted));
+            assert!(found, "{field} in {declared}");
+        }
+        // The largest value promised is carried without loss.
+        let most = (1u64 << 53) - 1;
+        let text = encode(&LogCursor {
+            run: most,
+            seq: most,
+        })
+        .unwrap();
+        assert_eq!(
+            text.trim_end(),
+            r#"{"run":9007199254740991,"seq":9007199254740991}"#
+        );
     }
 
     // The new requests refuse what they do not know, like the old ones.

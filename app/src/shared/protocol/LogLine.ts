@@ -8,7 +8,8 @@ import type { LogText } from "./LogText";
  */
 export type LogLine = { 
 /**
- * Its number within this run of the service, from 1, with no gaps.
+ * Its number within this run of the service, from 1. Numbers are given
+ * out without gaps; a page may skip those of lines no longer held.
  */
 seq: number, 
 /**
