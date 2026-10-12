@@ -74,6 +74,10 @@ pub enum Error {
     NotFound,
     /// The name is taken, such as a channel another process already holds.
     AlreadyExists,
+    /// Something listens on the channel, but it is not the service. Nothing
+    /// was sent to it. Trying again will not help until the real service
+    /// holds the name.
+    NotTheService,
     /// A line was longer than [`MAX_LINE_BYTES`]. Drop the connection.
     LineTooLong,
     /// A whole line did not arrive within the read timeout, or the peer did
@@ -97,6 +101,7 @@ impl fmt::Display for Error {
             Self::PermissionDenied => "permission denied",
             Self::NotFound => "not found",
             Self::AlreadyExists => "already exists",
+            Self::NotTheService => "the channel is held by a program that is not the service",
             Self::LineTooLong => "line too long",
             Self::TimedOut => "timed out",
             Self::Closed => "closed",
@@ -304,8 +309,9 @@ pub trait Transport: Send + Sync {
     ///
     /// In [`Mode::Installed`] it must also refuse a listener that is not the
     /// privileged service, such as another local user who claimed the name
-    /// while the service was down, and must never lend the caller's identity
-    /// to the listener. On Windows that means checking the pipe's owner and
+    /// while the service was down, with [`Error::NotTheService`] and before
+    /// anything is sent. It must never lend the caller's identity to the
+    /// listener. On Windows that means checking the pipe's owner and
     /// allowing identification-level impersonation only; elsewhere, a socket
     /// in a folder only root can write.
     fn connect(&self, name: &str) -> Result<Connection>;
@@ -322,6 +328,12 @@ pub trait Listener: Send + Sync {
     /// replacing any earlier narrowing. May be called while another thread
     /// waits in [`Listener::accept`].
     ///
+    /// The system's own administrative accounts are never shut out by this:
+    /// on Windows, SYSTEM and Administrators can still connect. Before any
+    /// narrowing, Windows admits users who are logged on interactively, which
+    /// leaves out sessions such as SSH, services and scheduled tasks; the
+    /// first claim cannot come from one of those.
+    ///
     /// It only affects connections made afterwards. One already accepted, or
     /// already waiting to be accepted, stays attached whoever made it. So the
     /// service must still compare the caller's [`UserId`] with the owner on
@@ -331,6 +343,10 @@ pub trait Listener: Send + Sync {
 
     /// Stops listening and releases the name. An [`Listener::accept`] waiting
     /// on another thread returns [`Error::Closed`]. Closing twice is fine.
+    ///
+    /// Connections already accepted may be closed too: Windows cannot
+    /// release the name while they are open. So close the listener only when
+    /// shutting down, never to turn new callers away while keeping old ones.
     fn close(&self);
 }
 

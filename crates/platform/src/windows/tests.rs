@@ -370,7 +370,7 @@ fn dev_mode_admits_and_trusts_only_the_current_user() {
         let _theirs = stranger
             .run(|| create_instance(&path, open_to_all, true))
             .unwrap();
-        let not_the_service = Some(Error::Failed(NOT_THE_SERVICE.to_string()));
+        let not_the_service = Some(Error::NotTheService);
         assert_eq!(dev.connect(&squatted).err(), not_the_service);
         ran("dev");
     });
@@ -411,7 +411,7 @@ fn a_squatted_name_is_refused_by_listen_and_by_connect() {
         let squat = format!("O:{}D:P(A;;FA;;;WD)", service.me);
         let _squatter = [true, false].map(|first| create_instance(&path, &squat, first).unwrap());
         assert_eq!(service.listener(&name).err(), Some(Error::AlreadyExists));
-        let refused = Some(Error::Failed(NOT_THE_SERVICE.to_string()));
+        let refused = Some(Error::NotTheService);
         assert_eq!(service.connect(&name).err(), refused);
         // The same pipe passes where its owner is the expected one, so it
         // was the owner check that refused it.

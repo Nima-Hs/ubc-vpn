@@ -54,6 +54,10 @@ pub enum Op {
     Listen,
     /// [`Listener::restrict_to`]. Not recorded.
     RestrictTo,
+    /// [`Transport::connect`] and [`Fake::connect_as`]. Not recorded. Fail
+    /// it with [`Error::NotTheService`] to play a listener that is not the
+    /// service.
+    Connect,
 }
 
 /// What is applied right now. After a full teardown it equals
@@ -138,7 +142,8 @@ impl Fake {
     /// Connects to `name` as `user`. [`Transport::connect`] on the fake
     /// connects as the user `fake-user`.
     pub fn connect_as(&self, name: &str, user: &UserId) -> Result<Connection> {
-        let state = self.state();
+        let (state, outcome) = self.start(Op::Connect);
+        outcome?;
         let endpoint = state.listeners.get(name).ok_or(Error::NotFound)?;
         if endpoint.owner.as_ref().is_some_and(|owner| owner != user) {
             return Err(Error::PermissionDenied);
@@ -157,7 +162,10 @@ impl Fake {
     /// told to fail.
     fn start(&self, op: Op) -> (MutexGuard<'_, State>, Result<()>) {
         let mut state = self.state();
-        if !matches!(op, Op::Subscribe | Op::Listen | Op::RestrictTo) {
+        if !matches!(
+            op,
+            Op::Subscribe | Op::Listen | Op::RestrictTo | Op::Connect
+        ) {
             state.calls.push(op);
         }
         let outcome = state.failures.get(&op).cloned().map_or(Ok(()), Err);
@@ -638,6 +646,13 @@ mod tests {
         assert_eq!(fake.listen("svc").err(), Some(Error::PermissionDenied));
         fake.set_failure(Op::Listen, None);
         let listener = fake.listen("svc").unwrap();
+        // A listener that is not the service: the caller gets no connection,
+        // so it cannot send anything, and the listener sees nobody.
+        fake.set_failure(Op::Connect, Some(Error::NotTheService));
+        assert_eq!(fake.connect("svc").err(), Some(Error::NotTheService));
+        fake.set_failure(Op::Connect, None);
+        let _first = fake.connect("svc").unwrap();
+        assert_eq!(listener.accept().unwrap().1, user("fake-user"));
         fake.set_failure(Op::RestrictTo, failed());
         assert_eq!(listener.restrict_to(&user("alice")).err(), failed());
         // The failed narrowing narrowed nothing.

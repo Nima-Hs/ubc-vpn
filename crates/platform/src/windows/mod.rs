@@ -75,8 +75,6 @@ const CLIENT_FLAGS: u32 = FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURIT
 const BUFFER_BYTES: u32 = 64 * 1024;
 /// How long a client waits for a free instance when the service is busy.
 const BUSY_WAIT: Duration = Duration::from_secs(5);
-/// What a client reports when the pipe is held by something else.
-const NOT_THE_SERVICE: &str = "the channel is held by a program that is not the service";
 
 pub(crate) fn native(mode: Mode) -> Result<Platform> {
     let me = security::process_user()?;
@@ -263,7 +261,7 @@ impl Transport for PipeTransport {
         };
         let owner = security::owner_of(handle.0)?;
         if !security::is_the_service(self.mode, &self.me, &owner) {
-            return Err(Error::Failed(NOT_THE_SERVICE.to_string()));
+            return Err(Error::NotTheService);
         }
         Ok(Connection::new(Box::new(End(Arc::new(Pipe::new(handle)?)))))
     }
