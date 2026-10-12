@@ -67,3 +67,57 @@ fn connect_for_the_app_ends_with_one_error_line() {
         assert_eq!(run(args).0, Some(2), "{args:?}");
     }
 }
+
+// A Windows profile that has no roaming folder yet has no settings yet:
+// `get` answers the defaults, and `set-routes` creates the folder and the
+// file. The profile is an empty folder made for the test.
+#[cfg(windows)]
+#[test]
+fn a_profile_with_no_roaming_folder_has_default_settings() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let profile = std::env::temp_dir().join(format!("ubc-vpn-cli-profile-{}", std::process::id()));
+    std::fs::create_dir_all(&profile).unwrap();
+    let settings = |command: &str, typed: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"))
+            .args(["settings", command, "--json"])
+            .env("USERPROFILE", &profile)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(typed.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+    let (status, shown) = settings("get", "");
+    let nothing_made = std::fs::read_dir(&profile).unwrap().next().is_none();
+    let typed = "{\"subnets\":[\"10.19.0.0/16\"],\"dns_domains\":[]}\n";
+    let (saved_status, saved) = settings("set-routes", typed);
+    let (_, after) = settings("get", "");
+    let file = profile.join(r"AppData\Roaming\UBC VPN\settings.json");
+    let written = std::fs::read_to_string(&file);
+    std::fs::remove_dir_all(&profile).unwrap();
+
+    assert_eq!(status, Some(0), "{shown}");
+    assert!(
+        shown.contains(r#""subnets":[]"#) && !shown.contains("error"),
+        "{shown}"
+    );
+    assert!(nothing_made, "get created something in the profile");
+    assert_eq!(saved_status, Some(0), "{saved}");
+    assert!(
+        written.is_ok_and(|text| text.contains("10.19.0.0/16")),
+        "{file:?}"
+    );
+    assert!(after.contains("10.19.0.0/16"), "{after}");
+}

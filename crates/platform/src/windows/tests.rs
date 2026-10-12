@@ -713,3 +713,35 @@ fn paths_follow_the_table_and_ignore_the_environment() {
         assert!(!dev.policy_dir.starts_with(r"C:\attacker"));
     }
 }
+
+// A profile that has no roaming folder yet still has a settings folder to
+// name, and naming it creates nothing. Windows builds that path from the
+// `USERPROFILE` of the process, so this test runs itself again as a child
+// whose profile is an empty folder, and leaves the real profile alone.
+#[test]
+fn the_settings_folder_is_named_before_the_roaming_folder_exists() {
+    const CHILD: &str = "UBC_VPN_TEST_EMPTY_PROFILE";
+    if std::env::var_os(CHILD).is_some() {
+        let found = paths(Mode::Installed, "me").map(|paths| paths.settings_dir);
+        println!("settings_dir={found:?}");
+        return;
+    }
+    let profile = std::env::temp_dir().join(format!("ubc-vpn-profile-{}", std::process::id()));
+    std::fs::create_dir_all(&profile).unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["the_settings_folder_is_named_before_the_roaming_folder_exists"])
+        .args(["--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .env("USERPROFILE", &profile)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&child.stdout).into_owned();
+    let expected = profile.join(r"AppData\Roaming\UBC VPN");
+    let nothing_made = std::fs::read_dir(&profile).unwrap().next().is_none();
+    std::fs::remove_dir_all(&profile).unwrap();
+    assert!(
+        said.contains(&format!("settings_dir=Ok({expected:?})")),
+        "{said}"
+    );
+    assert!(nothing_made, "the lookup created something in the profile");
+}

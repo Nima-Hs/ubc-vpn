@@ -52,7 +52,7 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_RoamingAppData, SHGetKnownFolderPath,
+    FOLDERID_ProgramData, FOLDERID_RoamingAppData, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
 };
 use windows_sys::core::GUID;
 
@@ -91,11 +91,19 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
 /// A folder as Windows itself locates it. For the machine-wide folders the
 /// service relies on, that does not involve environment variables, which
 /// whoever starts a process chooses. A per-user folder is the caller's own.
-fn known_folder(id: &GUID) -> Result<PathBuf> {
+///
+/// With `must_exist` the lookup fails for a folder that is not there. Without
+/// it the path is given all the same, and nothing is created.
+fn known_folder(id: &GUID, must_exist: bool) -> Result<PathBuf> {
+    let flags = if must_exist {
+        0
+    } else {
+        KF_FLAG_DONT_VERIFY as u32
+    };
     let mut path = null_mut();
     // SAFETY: `id` is a valid GUID, a null token means the current user, and
     // the out pointer is valid.
-    let status = unsafe { SHGetKnownFolderPath(id, 0, null_mut(), &mut path) };
+    let status = unsafe { SHGetKnownFolderPath(id, flags, null_mut(), &mut path) };
     let found = (status >= 0).then(|| {
         // SAFETY: on success `path` is a NUL-terminated string, so every
         // offset up to and including the NUL is readable.
@@ -115,17 +123,22 @@ fn paths(mode: Mode, me: &str) -> Result<Paths> {
     match mode {
         Mode::Installed => {
             let _ = me;
-            let machine = known_folder(&FOLDERID_ProgramData)?.join(FOLDER);
+            // The machine-wide folder must be there: an installed service
+            // that cannot find it should fail. The user's roaming folder
+            // need not be: a new profile may not have one yet, and whoever
+            // saves settings creates it.
+            let machine = known_folder(&FOLDERID_ProgramData, true)?.join(FOLDER);
+            let roaming = known_folder(&FOLDERID_RoamingAppData, false)?;
             Ok(Paths {
                 policy_dir: machine.clone(),
                 state_dir: machine,
-                settings_dir: known_folder(&FOLDERID_RoamingAppData)?.join(FOLDER),
+                settings_dir: roaming.join(FOLDER),
                 channel_name: INSTALLED_PIPE.to_string(),
             })
         }
         #[cfg(feature = "dev-mode")]
         Mode::Dev => {
-            let root = known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)?
+            let root = known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData, true)?
                 .join(format!("{FOLDER} Dev"));
             Ok(Paths {
                 policy_dir: root.join("policy"),
