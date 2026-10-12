@@ -5,12 +5,29 @@ import { bridgeCommand } from "./channel/cli";
 import { Controller } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
-import { applicationMenu, devServerUrlFor, registerAppScheme, secureSession } from "./security";
+import {
+    allowsRemoteDebugging,
+    applicationMenu,
+    devServerUrlFor,
+    refuseRemoteDebugging,
+    registerAppScheme,
+    secureSession,
+} from "./security";
 import { createTray, trayImage } from "./tray";
 import { closeHidesWindow } from "./tray-icon";
 import { createWindow, showWindow } from "./window";
 
 registerAppScheme(protocol);
+// Before anything else reads the command line: no fuse turns these switches
+// off, so the app takes them off itself.
+refuseRemoteDebugging(
+    app.commandLine,
+    allowsRemoteDebugging({
+        isPackaged: app.isPackaged,
+        demo: __DEMO__,
+        development: import.meta.env.DEV,
+    }),
+);
 
 // One copy of the app at a time: a second launch brings the first one's
 // window forward and exits.

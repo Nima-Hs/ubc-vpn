@@ -31,7 +31,7 @@ pnpm lint            # Biome: lint and format
 pnpm format          # the same, fixing what it can
 pnpm typecheck
 pnpm test            # unit tests (Vitest)
-pnpm test:e2e        # builds demo mode and drives the real app (Playwright)
+pnpm test:e2e        # builds both builds and drives the real app (Playwright)
 pnpm build           # production build, into out/
 pnpm check:build     # the production build contains no demo code
 pnpm check:licenses  # everything shipped has an allowed licence
@@ -61,6 +61,10 @@ Where the client sits in an installed app is in [`src/main/channel/cli.ts`](src/
 Ctrl or Cmd with plus, minus and zero enlarge, shrink and reset the interface. The window grows with it.
 
 Each of these protections has a test in `tests/security.test.ts` that fails when it is removed, and the end-to-end test checks them again in the running app. When you add a protection, add its test, then remove the protection and watch the test fail.
+
+### Remote debugging
+
+Chromium's `--remote-debugging-port`, `--remote-debugging-pipe` and `--remote-debugging-address` let anything on the computer take over the interface, and no Electron fuse turns them off. The app removes them from its own command line before anything reads it. A production build always does, packaged or not, and so does anything packaged. Only an unpackaged demo or development build keeps them, because Playwright drives the app through that port. `tests/e2e/remote-debugging.spec.ts` starts the production build with the switch and checks that nothing answers.
 
 ### The tray
 
