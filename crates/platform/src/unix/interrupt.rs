@@ -301,8 +301,11 @@ mod tests {
         assert_ne!(pty.mode(), before, "the question changed nothing");
         program.signal(SIGTERM);
         assert_eq!(program.says(), "GOT Terminate restored=true");
+        // The child looked at the mode itself when the request reached it.
+        // Looking again from here after it has ended is not possible on
+        // macOS, which takes a terminal away when its session's first
+        // process ends.
         assert_eq!(program.ended(), 143);
-        assert_eq!(pty.mode(), before, "the mode afterwards");
     }
 
     // Not a test of its own: the tests above run it in a new process.
