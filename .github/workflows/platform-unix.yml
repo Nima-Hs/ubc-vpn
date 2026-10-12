@@ -62,6 +62,8 @@ jobs:
         run: |
           cargo test --locked -p ubc-vpn-platform --doc 2>&1 | tee doc.log
           grep -q "interrupt (line [0-9]*) - compile fail ... ok" doc.log
+          # Nor a way to start a program in a terminal made for a test.
+          grep -q "terminal (line [0-9]*) - compile fail ... ok" doc.log
       # A record of what the channel's rules meet on this runner: every
       # folder on the way to the installed socket must be root's alone.
       - name: The folders the installed channel relies on

@@ -136,15 +136,46 @@ pub(crate) fn read_hidden_from(terminal: &File, prompt: &str) -> Result<Secret> 
     typed
 }
 
+/// For tests only: a new terminal, as the end a test types into and reads,
+/// and the end a program sees as its terminal. Neither becomes the calling
+/// process's own terminal.
+///
+/// Security rule: neither end is passed on to a program this process
+/// starts, except where the caller hands the program's end over on purpose.
+/// A child that held the test's end too would keep its own terminal alive:
+/// the terminal could never hang up on it.
+#[cfg(any(test, feature = "fake"))]
+pub(crate) fn new_terminal() -> io::Result<(File, File)> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    use rustix::io::{FdFlags, fcntl_setfd};
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+
+    let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
+    // Where the OS can set it as it opens, so that no other thread can
+    // start a program in between.
+    #[cfg(target_os = "linux")]
+    let flags = flags | OpenptFlags::CLOEXEC;
+    let ours = openpt(flags)?;
+    fcntl_setfd(&ours, FdFlags::CLOEXEC)?;
+    grantpt(&ours)?;
+    unlockpt(&ours)?;
+    let name = ptsname(&ours, Vec::new())?.into_string();
+    let name = name.map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    // The standard library opens with close-on-exec.
+    let mut theirs = OpenOptions::new();
+    theirs.read(true).write(true);
+    theirs.custom_flags(OFlags::NOCTTY.bits() as i32);
+    Ok((File::from(ours), theirs.open(name)?))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::os::unix::fs::OpenOptionsExt;
     use std::sync::{Mutex, MutexGuard, mpsc};
     use std::thread;
     use std::time::Duration;
 
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 
     use super::*;
     use crate::lock;
@@ -165,16 +196,9 @@ pub(crate) mod tests {
 
     pub(crate) fn pty() -> Pty {
         let turn = lock(&TURN);
-        let ours = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).expect("a pty");
-        grantpt(&ours).expect("grant");
-        unlockpt(&ours).expect("unlock");
-        let name = ptsname(&ours, Vec::new()).expect("its name");
-        let mut theirs = OpenOptions::new();
-        theirs.read(true).write(true);
-        theirs.custom_flags(OFlags::NOCTTY.bits() as i32);
-        let theirs = theirs.open(name.to_str().expect("UTF-8")).expect("open");
+        let (ours, theirs) = new_terminal().expect("a terminal");
         Pty {
-            ours: File::from(ours),
+            ours,
             theirs,
             _turn: turn,
         }
