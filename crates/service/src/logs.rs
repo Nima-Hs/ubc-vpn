@@ -27,9 +27,11 @@
 //!
 //! A line that the same cause can produce again and again, such as a
 //! request that cannot be read, goes through [`Logs::error_about`] or
-//! [`Logs::warn_about`]: it is kept when it differs from the last line
-//! about the same thing, and not otherwise. So nothing a client sends, and
-//! no fault that persists, can push the earlier lines out.
+//! [`Logs::warn_about`]: a repeat of the last line about the same thing is
+//! passed over for as long as that line is still in the log. So the log
+//! holds one copy of it at most, and never none once it has happened; and
+//! nothing a client sends, and no fault that persists, can push the
+//! earlier lines out.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,6 +69,8 @@ struct Shared {
     /// Which run of the service this is.
     run: u64,
     clock: Clock,
+    /// How long a secret lingers: [`LINGER`], unless a test put in less.
+    linger: Duration,
     inner: Mutex<Inner>,
 }
 
@@ -93,8 +97,9 @@ struct Inner {
     /// The secrets the service holds now.
     hidden: Vec<Hidden>,
     holds: u64,
-    /// The last line kept about each thing that can happen again and again.
-    about: Vec<(&'static str, LogText)>,
+    /// The number of the last line kept about each thing that can happen
+    /// again and again.
+    about: Vec<(&'static str, u64)>,
     tell: Option<Tell>,
 }
 
@@ -118,7 +123,7 @@ impl Held {
     /// Ends the hold, but leaves the secret to the cleaning for [`LINGER`]
     /// more, or until the next secret is held if that is sooner.
     pub(crate) fn linger(mut self) {
-        let until = (self.logs.0.clock)() + LINGER;
+        let until = (self.logs.0.clock)() + self.logs.0.linger;
         let mut inner = lock(&self.logs.0.inner);
         let this = |hidden: &&mut Hidden| hidden.hold == self.hold;
         if let Some(hidden) = inner.hidden.iter_mut().find(this) {
@@ -191,15 +196,34 @@ fn kept(level: ubc_vpn_engine::LogLevel) -> Option<LogLevel> {
 
 impl Default for Logs {
     fn default() -> Self {
-        Self::with_clock(Instant::now)
+        Self::with(Instant::now, LINGER)
     }
 }
 
 impl Logs {
-    /// A log that takes the time from `clock`.
-    fn with_clock(clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+    /// A log that takes the time from `clock` and lets a secret linger for
+    /// `linger`.
+    fn with(clock: impl Fn() -> Instant + Send + Sync + 'static, linger: Duration) -> Self {
         let (run, clock, inner) = (new_run(), Box::new(clock), Mutex::default());
-        Self(Arc::new(Shared { run, clock, inner }))
+        Self(Arc::new(Shared {
+            run,
+            clock,
+            linger,
+            inner,
+        }))
+    }
+
+    /// A log on the real clock that lets a secret linger only for `linger`.
+    #[cfg(test)]
+    pub(crate) fn lingering(linger: Duration) -> Self {
+        Self::with(Instant::now, linger)
+    }
+
+    /// How many secrets are held at this moment. It wipes nothing itself,
+    /// so that a test sees what was wiped without being asked.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        lock(&self.0.inner).hidden.len()
     }
 
     /// Keeps a line about something that failed and happens once.
@@ -213,7 +237,8 @@ impl Logs {
     }
 
     /// Keeps a line about a failure that can happen again and again, named
-    /// by `what`: only when it differs from the last line kept about it.
+    /// by `what`, unless it repeats the last line about it and that line is
+    /// still in the log.
     pub fn error_about(&self, what: &'static str, text: &str) {
         self.keep(LogLevel::Error, LogSource::Service, Some(what), text);
     }
@@ -240,11 +265,15 @@ impl Logs {
         inner.wipe((self.0.clock)());
         let text = safe(text, &inner.hidden);
         if let Some(what) = what {
+            // A repeat is passed over only while the line it repeats is
+            // still held: the log has one copy of it at most, and never
+            // none once other lines have pushed that copy out.
             let last = inner.about.iter_mut().find(|(about, _)| *about == what);
+            let held = |seq: u64| inner.own.iter().find(|line| line.seq == seq);
             match last {
-                Some((_, last)) if *last == text => return,
-                Some((_, last)) => *last = text.clone(),
-                None => inner.about.push((what, text.clone())),
+                Some((_, seq)) if held(*seq).is_some_and(|line| line.text == text) => return,
+                Some((_, seq)) => *seq = inner.newest + 1,
+                None => inner.about.push((what, inner.newest + 1)),
             }
         }
         inner.newest += 1;

@@ -246,12 +246,12 @@ fn each_line_is_told_as_it_is_kept() {
 fn with_a_clock() -> (Logs, impl Fn(Duration)) {
     let now = Arc::new(Mutex::new(Instant::now()));
     let read = now.clone();
-    let logs = Logs::with_clock(move || *read.lock().unwrap());
+    let logs = Logs::with(move || *read.lock().unwrap(), LINGER);
     (logs, move |by| *now.lock().unwrap() += by)
 }
 
 fn holds(logs: &Logs) -> usize {
-    lock(&logs.0.inner).hidden.len()
+    logs.held()
 }
 
 // Security rule: when everything for a connection has been torn down its
@@ -259,6 +259,9 @@ fn holds(logs: &Logs) -> usize {
 // longer. A client's lines about a connect that failed arrive just then.
 #[test]
 fn a_cookie_lingers_for_the_cleaning_and_is_then_wiped() {
+    // How long is part of the rule: long enough for a client's lines to
+    // arrive after a connect failed, and no longer.
+    assert_eq!(LINGER, Duration::from_secs(30));
     let said = LogText::new(&format!("the client says {COOKIE}")).unwrap();
     let (logs, pass) = with_a_clock();
     logs.hold(&Secret::new(COOKIE)).linger();
@@ -301,8 +304,8 @@ fn the_next_secret_held_wipes_one_that_lingered() {
 }
 
 // Security rule: nothing that can happen again and again can push the
-// earlier lines out of the log. A line about such a thing is kept only when
-// it differs from the last one about the same thing.
+// earlier lines out of the log. A line about such a thing that repeats the
+// last one about it is passed over while that one is still in the log.
 #[test]
 fn a_line_that_only_repeats_is_not_kept_again() {
     let logs = Logs::default();
@@ -328,4 +331,29 @@ fn a_line_that_only_repeats_is_not_kept_again() {
         ["accepting failed: no memory", "accepting failed: denied"]
     );
     assert_eq!(logs.page(None).lines[2].level, LogLevel::Warn);
+}
+
+// The other half of that rule: the log is never left without a line about
+// a fault that is still happening. A teardown step fails; other lines push
+// that line out; the step fails again the same way, and it is written
+// again, once.
+#[test]
+fn a_repeat_is_written_again_once_its_line_has_been_pushed_out() {
+    let logs = Logs::default();
+    let step = "clearing split DNS";
+    let failed = "teardown: clearing split DNS failed: permission denied";
+    let about_it = |logs: &Logs| texts(logs).iter().filter(|line| *line == failed).count();
+    logs.error_about(step, failed);
+    // One line short of pushing it out: it is still there, so a repeat is
+    // passed over.
+    (1..CAPACITY).for_each(|n| logs.error(&format!("another line {n}")));
+    logs.error_about(step, failed);
+    assert_eq!((about_it(&logs), texts(&logs)[0].as_str()), (1, failed));
+    // One more line and it is gone.
+    logs.error("the line that pushes it out");
+    assert_eq!(about_it(&logs), 0);
+    logs.error_about(step, failed);
+    logs.error_about(step, failed);
+    assert_eq!(about_it(&logs), 1, "written again, and once");
+    assert_eq!(texts(&logs).last().map(String::as_str), Some(failed));
 }

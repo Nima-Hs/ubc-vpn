@@ -364,3 +364,7 @@ impl Machine {
 }
 
 const LEFT_BEHIND: &str = "Some routes or DNS settings could not be removed.";
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

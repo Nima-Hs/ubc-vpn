@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -110,10 +110,6 @@ struct Shared {
     serving: Mutex<Serving>,
     /// Whether the OS has yet to be told to refuse everyone but the owner.
     narrowing_due: AtomicBool,
-    /// Requests from non-owners that could not be understood.
-    unreadable: AtomicUsize,
-    /// The same, from the owner.
-    unreadable_from_owner: AtomicUsize,
     logs: Logs,
     about: About,
     state_dir: PathBuf,
@@ -158,8 +154,6 @@ impl Service {
             session,
             serving: Mutex::default(),
             narrowing_due: AtomicBool::new(false),
-            unreadable: AtomicUsize::new(0),
-            unreadable_from_owner: AtomicUsize::new(0),
             listener,
             hub,
             logs,
@@ -373,20 +367,23 @@ impl Shared {
     }
 
     /// Notes a request that could not be understood, without its content.
-    /// They are counted, the owner's and everyone else's apart, with one
-    /// line for the first of each: no number of them, from anyone, can push
-    /// everything else out of the log.
+    /// The owner's and everyone else's each have one line, which is in the
+    /// log once however many there are: no number of them, from anyone, can
+    /// push everything else out of the log.
     fn unreadable(&self, user: &UserId) {
-        let (count, who) = match self.hub.owner().as_ref() == Some(user) {
-            true => (&self.unreadable_from_owner, "the owner"),
-            false => (&self.unreadable, "a user who is not the owner"),
+        let (what, line) = match self.hub.owner().as_ref() == Some(user) {
+            true => (
+                "the owner's request",
+                "a request from the owner could not be understood; later ones are not noted \
+                 while this line is in the log",
+            ),
+            false => (
+                "a stranger's request",
+                "a request from a user who is not the owner could not be understood; later \
+                 ones are not noted while this line is in the log",
+            ),
         };
-        if count.fetch_add(1, Ordering::SeqCst) == 0 {
-            let line = format!(
-                "a request from {who} could not be understood; later ones are only counted"
-            );
-            self.logs.warn(&line);
-        }
+        self.logs.warn_about(what, line);
     }
 
     fn not_owner(&self) -> Result<ResponseBody, ErrorInfo> {

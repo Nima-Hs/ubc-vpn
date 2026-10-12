@@ -187,7 +187,9 @@ fn nothing_of_a_line_that_is_not_kept_is_logged() {
     // That a request could not be read is noted, and nothing of it.
     assert_eq!(
         texts(&read),
-        ["a request from the owner could not be understood; later ones are only counted"]
+        [
+            "a request from the owner could not be understood; later ones are not noted while this line is in the log"
+        ]
     );
     let sent = [alice.lines, again.lines, rig.logs()].concat();
     assert!(!sent.join("\n").contains(VALUE), "{sent:?}");
