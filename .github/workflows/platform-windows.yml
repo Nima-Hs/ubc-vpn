@@ -60,6 +60,8 @@ jobs:
         run: |
           cargo test --locked -p ubc-vpn-platform --doc 2>&1 | tee doc.log
           grep -q "interrupt (line [0-9]*) - compile fail ... ok" doc.log
+          # Nor a way to start a program in a terminal made for a test.
+          grep -q "terminal (line [0-9]*) - compile fail ... ok" doc.log
       # The second user exists for this one step. Its random password stays in
       # this step's memory: it is handed to the tests through their
       # environment and never written to a file, a log or a command line.

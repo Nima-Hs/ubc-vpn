@@ -36,8 +36,26 @@
 //! returns, with writes the compiler may not remove. Not wiped, because out
 //! of reach: the copy inside the returned [`Secret`], which does not wipe
 //! itself, and whatever the OS keeps.
+//!
+//! For tests there is `testing`, which starts a program in a terminal of
+//! its own. It exists only with the `fake` feature, which no shipped build
+//! has:
+//!
+#![cfg_attr(not(feature = "fake"), doc = "```compile_fail")]
+#![cfg_attr(feature = "fake", doc = "```no_run")]
+//! use ubc_vpn_platform::terminal::testing::spawn_in_terminal;
+//! ```
+//!
+//! This much is always there:
+//!
+//! ```no_run
+//! use ubc_vpn_platform::terminal::read_hidden_line;
+//! ```
 
 use std::sync::atomic::{Ordering, compiler_fence};
+
+#[cfg(feature = "fake")]
+pub mod testing;
 
 use ubc_vpn_core::redact::Secret;
 
