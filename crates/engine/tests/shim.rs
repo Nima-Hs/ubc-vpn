@@ -1,5 +1,5 @@
 //! The C shim on its own, called the way the library calls it, with a
-//! `Lines` as `privdata` the way `Handle::new` passes one. No native library
+//! context as `privdata` the way `Handle::new` passes one. No native library
 //! is loaded.
 //!
 //! The `Engine` workflow runs these in a release build too: the wipe is
@@ -11,7 +11,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ubc_vpn_engine::ffi::{LineState, Lines};
+use ubc_vpn_engine::ffi::{Callbacks, Context, LineState, Lines};
 
 unsafe extern "C" {
     /// `shim.c`'s entry point, which the engine hands to the library.
@@ -29,13 +29,12 @@ fn through(fmt: &CStr, text: *const c_void) -> (usize, LineState) {
     let lines: Lines = Box::new(move |_, line: &CStr, state| {
         into.lock().unwrap().push((line.to_bytes().len(), state));
     });
-    let privdata = Box::into_raw(Box::new(lines));
-    // SAFETY: `privdata` is a live `Lines`, which is what the shim's
+    let context = Context::new(Callbacks::refusing(lines));
+    // SAFETY: the pointer is to a live context, which is what the shim's
     // callback expects; `fmt` takes one pointer argument and gets `text`,
-    // which the caller keeps valid for it; `privdata` is freed once.
+    // which the caller keeps valid for it.
     unsafe {
-        ubc_vpn_progress(privdata.cast(), 1, fmt.as_ptr(), text);
-        drop(Box::from_raw(privdata));
+        ubc_vpn_progress(context.privdata(), 1, fmt.as_ptr(), text);
     }
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "one call is one line");
@@ -67,6 +66,23 @@ fn a_long_line_is_cut_to_the_buffer_and_marked() {
     assert_eq!(of_length(1_000_000), (BUFFER - 1, LineState::Cut));
 }
 
+// The engine never gives the library a null pointer to hand back, and the
+// library would put its own handle in place of one. Should one arrive all
+// the same, the line is dropped and nothing is read through it.
+#[test]
+fn a_line_for_a_null_context_is_dropped() {
+    // SAFETY: the format takes one integer and gets one. A null context is
+    // the case under test.
+    unsafe {
+        ubc_vpn_progress(
+            std::ptr::null_mut(),
+            1,
+            c"to nobody %d".as_ptr(),
+            1 as c_int,
+        )
+    };
+}
+
 // Security rule: a line that could not be formatted is marked as such. A
 // wide string that cannot be converted makes the formatting fail.
 #[test]
@@ -96,7 +112,7 @@ fn the_buffer_is_wiped_before_the_shim_returns() {
     let lines: Lines = Box::new(move |_, line: &CStr, _| {
         WHERE.store(line.as_ptr() as usize, Ordering::SeqCst);
     });
-    let privdata = Box::into_raw(Box::new(lines));
+    let context = Context::new(Callbacks::refusing(lines));
     let secret = c"webvpn=NOT-A-REAL-COOKIE-0123456789";
     let mut left = [0xffu8; 44];
     // SAFETY: the call is as in `through`. What follows reads the shim's
@@ -105,12 +121,16 @@ fn the_buffer_is_wiped_before_the_shim_returns() {
     // called in between, so nothing has reused it; `read_volatile` keeps the
     // compiler from assuming what a dead frame holds.
     unsafe {
-        ubc_vpn_progress(privdata.cast(), 2, c"Cookie: %s".as_ptr(), secret.as_ptr());
+        ubc_vpn_progress(
+            context.privdata(),
+            2,
+            c"Cookie: %s".as_ptr(),
+            secret.as_ptr(),
+        );
         let at = WHERE.load(Ordering::Relaxed) as *const u8;
         for (index, byte) in left.iter_mut().enumerate() {
             *byte = std::ptr::read_volatile(at.add(index));
         }
-        drop(Box::from_raw(privdata));
     }
     assert_ne!(WHERE.load(Ordering::SeqCst), 0, "the callback did not run");
     let text = String::from_utf8_lossy(&left);

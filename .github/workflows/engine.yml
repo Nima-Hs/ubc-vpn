@@ -158,6 +158,9 @@ jobs:
           cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests -- --nocapture | tee test.log
           # Each of the gateway's eight scenarios ran.
           [ "$(grep -c '^RAN: gateway ' test.log)" = 8 ]
+          # The real library logged in to it, and was refused by it.
+          grep -q '^RAN: handle logs in' test.log
+          grep -q '^RAN: handle rejects' test.log
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
           # that need no binding run in it too.
