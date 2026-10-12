@@ -251,8 +251,8 @@ fn the_service_and_the_client_work_together() {
         "a service is running already"
     );
 
-    let service = home.command(Path::new(&service), &[]);
-    let _service = Running::start(service, &home.said);
+    let start = || Running::start(home.command(Path::new(&service), &[]), &home.said);
+    let running = start();
     // The first status that finds the service also makes this user its owner.
     let first = within("the service to listen", || {
         let (status, out) = home.run(&["status"], "");
@@ -326,6 +326,35 @@ fn the_service_and_the_client_work_together() {
     // The app quits: the bridge ends quietly, having passed on nothing else.
     let (status, rest) = bridge.end();
     assert_eq!((status, rest), (0, Vec::new()));
+
+    // A second service cannot take the place of the one that is running.
+    let (status, _) = start().end();
+    assert_ne!(status, 0, "a second service started");
+    assert_eq!(home.run(&["status"], ""), (0, "Disconnected".to_string()));
+
+    // The service is killed while connected, with a bridge open. The bridge
+    // says so and ends, and the client finds no service.
+    let mut bridge = home.client(&["bridge"]);
+    bridge.until(r#""type":"ready""#);
+    let (status, _) = home.connect(&[Some(USERNAME), Some(PASSWORD), Some(CODE)]);
+    assert_eq!(status, 0);
+    bridge.until(&state("connected"));
+    drop(running);
+    bridge.until(r#"{"type":"service_unavailable"}"#);
+    assert_eq!(bridge.end(), (1, Vec::new()));
+    assert_eq!(home.run(&["status"], "").0, 3);
+
+    // Started again, it listens where the killed one did, still belongs to
+    // this user, and holds no connection. The bridge claims nothing, so
+    // what it is told about the owner is what the service remembered.
+    let _running = start();
+    let ready = within("the service to listen again", || {
+        let mut bridge = home.client(&["bridge"]);
+        let first = bridge.until(r#""type":"#);
+        first.contains("ready").then_some(first)
+    });
+    assert!(ready.contains(r#""owner_claimed":true"#), "{ready}");
+    assert_eq!(home.run(&["status"], ""), (0, "Disconnected".to_string()));
 
     // Security rule: no password, code or cookie in anything any of the
     // programs wrote, on standard output or standard error.
