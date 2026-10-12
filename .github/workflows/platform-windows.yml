@@ -74,11 +74,12 @@ jobs:
             Remove-LocalUser -Name $env:TEST_USER
           }
       # A test that is skipped passes. So prove from the log that each test
-      # needing elevation, a second user or the loopback network really ran.
+      # needing elevation, a second user, the loopback network or a console
+      # of its own really ran.
       - name: The elevated tests really ran
         shell: bash
         run: |
-          for test in suite users dev remote; do
+          for test in suite users dev remote console; do
             if ! grep -q "RAN: $test" test.log; then
               echo "The elevated test '$test' did not run."
               exit 1

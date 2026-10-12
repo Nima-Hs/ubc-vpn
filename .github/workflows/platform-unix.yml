@@ -83,6 +83,11 @@ jobs:
             echo "A test that needs no root was skipped."
             exit 1
           fi
+          # A runner has no terminal of its own, so the real call is tried.
+          if ! grep -qx "RAN: no terminal" user.log; then
+            echo "The call without a terminal was not tried."
+            exit 1
+          fi
       # The variable turns every "SKIPPED, needs root" into a failure.
       - name: Tests as root, with other users to play the stranger
         run: sudo env UBC_VPN_REQUIRE_ROOT=1 "$TESTS" --nocapture 2>&1 | tee root.log
