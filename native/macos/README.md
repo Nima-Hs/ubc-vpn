@@ -25,7 +25,7 @@ On an Apple-silicon Mac with the Xcode version named in `versions.env`:
 
 ```sh
 native/macos/build.sh build
-native/macos/bundle.sh build libopenconnect-macos-arm64
+SOURCE_COMMIT=$(git rev-parse HEAD) native/macos/bundle.sh build libopenconnect-macos-arm64
 ```
 
 `build.sh` compiles everything into `build/prefix`. Nothing from Homebrew takes part: the scripts run with only the system folders on `PATH`, select the pinned Xcode themselves, and build their own `pkgconf` from a checksummed archive. `make` and `m4` are Xcode's.
@@ -47,7 +47,7 @@ The compiler also treats any use of a function newer than macOS 13 as an error.
 | `include/openconnect.h` | The header |
 | `licenses/` | Licence texts for each component |
 | `sources/` | The source archives the libraries were built from, and this recipe |
-| `manifest.json` | Each component's version, licence, minimum macOS and source checksum, and the tools used |
+| `manifest.json` | The commit of this repository the output was built from (`recipe.commit`, as in the Windows manifest), each component's version, licence, minimum macOS and source checksum, and the tools used |
 
 Each library finds the others next to itself (`@loader_path`), and `libopenconnect` is named `@rpath/libopenconnect.5.dylib`. A program that links it needs one search path pointing at the folder, for example `-Wl,-rpath,@executable_path/../Frameworks`.
 

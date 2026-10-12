@@ -51,6 +51,8 @@ jobs:
       - name: Build
         run: bash native/macos/build.sh build
       - name: Bundle and check
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
         run: |
           bash native/macos/bundle.sh build "$ARTIFACT"
           # A tarball keeps the symbolic link that a plain upload would lose.

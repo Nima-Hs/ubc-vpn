@@ -14,6 +14,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 export DEVELOPER_DIR=$XCODE/Contents/Developer
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
+# Recorded in the manifest: the commit of this repository the libraries were
+# built from. Whoever uses the output checks that it is a commit on main.
+: "${SOURCE_COMMIT:?set SOURCE_COMMIT to the commit of this repository}"
+if ! printf '%s' "$SOURCE_COMMIT" | grep -Eqx '[0-9a-f]{40}'; then
+    echo "FAIL: SOURCE_COMMIT is not a full commit hash." >&2
+    exit 1
+fi
+
 work=$(cd "${1:?usage: bundle.sh <work-dir> <out-dir>}" && pwd)
 prefix=$work/prefix
 sources=$work/sources
@@ -200,6 +208,11 @@ cat > "$out/manifest.json" <<EOF
 {
   "target": "macos-arm64",
   "min_macos": "$MACOS_MIN",
+  "recipe": {
+    "repository": "https://github.com/Nima-Hs/ubc-vpn",
+    "commit": "$SOURCE_COMMIT",
+    "files": "sources/recipe/"
+  },
   "components": [
 $components
   ],
