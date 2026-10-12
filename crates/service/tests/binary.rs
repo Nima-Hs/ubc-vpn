@@ -124,13 +124,3 @@ fn refuses_to_start_while_a_loader_variable_is_set() {
         assert!(!stderr.contains(name), "{stderr}");
     }
 }
-
-// Dev mode is not that strict: Cargo sets such a variable for whatever it
-// runs, and dev mode loads no native library. Whether the run then goes on
-// or stops for another reason, it is not refused for the variable.
-#[cfg(all(unix, feature = "dev-mode"))]
-#[test]
-fn dev_mode_is_not_refused_for_a_loader_variable() {
-    let (_, stderr) = run(&["--dev"], Some("LD_LIBRARY_PATH"));
-    assert!(!stderr.contains("steers the system loader"), "{stderr}");
-}

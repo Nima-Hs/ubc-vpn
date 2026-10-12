@@ -22,9 +22,21 @@ pub const DANGEROUS_VARIABLES: [(&str, &str); 11] = [
     ("GNUTLS_NO_EXPLICIT_INIT", "changes how GnuTLS starts up"),
     ("GNUTLS_NO_IMPLICIT_INIT", "changes how GnuTLS starts up"),
     ("NETTLE_FAT_VERBOSE", "makes Nettle print to standard error"),
-    ("XML_CATALOG_FILES", "names files for libxml2 to read"),
-    ("XML_DEBUG_CATALOG", "makes libxml2 print to standard error"),
+    (
+        "XML_CATALOG_FILES",
+        "names files for libxml2 to read; a client may keep it on macOS and Linux",
+    ),
+    (
+        "XML_DEBUG_CATALOG",
+        "makes libxml2 print; a client may keep it on macOS and Linux",
+    ),
 ];
+
+/// The listed variables a client may have set on macOS and Linux. Some
+/// Homebrew and Nix set-ups export them for every program, and the engine
+/// never loads an external DTD, which is what a catalogue is for. The service
+/// still refuses them, and on Windows they are removed for both.
+const CLIENT_MAY_KEEP: [&str; 2] = ["XML_CATALOG_FILES", "XML_DEBUG_CATALOG"];
 
 /// Which program is checking its environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,30 +57,39 @@ pub enum EnvironmentError {
     /// A variable that steers the system loader is set. Its name is left
     /// out: it is text chosen by whoever set the environment.
     LoaderVariable,
-    /// The temporary folder is not an absolute path to a folder that exists.
-    /// Windows only.
+    /// The temporary folder is not a folder that exists, given as an absolute
+    /// path on a drive letter. Windows only.
     BadTemp,
     /// The C runtime the libraries use could not be told of a change, so
     /// they may still see a variable that was to be removed. Windows only.
     Runtime,
+    /// The start-up step was already run in this process. It runs once.
+    AlreadyPrepared,
 }
 
 /// Whether a variable of this name steers the system loader on macOS or
 /// Linux: `LD_*`, and `DYLD_*` other than the two `DYLD_FALLBACK_*` ones,
-/// which Cargo sets and which the loader does not use for a full path.
+/// which Cargo sets and which the loader does not use for a full path. On
+/// Linux also `GCONV_PATH`, which makes the C library load code much as
+/// `LD_*` does.
 fn steers_the_loader(name: &str) -> bool {
-    name.starts_with("LD_") || (name.starts_with("DYLD_") && !name.starts_with("DYLD_FALLBACK_"))
+    name.starts_with("LD_")
+        || (name.starts_with("DYLD_") && !name.starts_with("DYLD_FALLBACK_"))
+        || (cfg!(target_os = "linux") && name == "GCONV_PATH")
 }
 
 /// Checks that the environment is safe for the library, and says what is
 /// wrong with it. It reads the environment and changes nothing.
 ///
-/// For both roles none of [`DANGEROUS_VARIABLES`] may be set. On macOS and
-/// Linux the service also refuses every variable that steers the loader.
-/// The client does not: loading the library refuses the `DYLD_*` ones for
-/// it, and an ordinary user's `LD_*` variables are that user's own business.
+/// None of [`DANGEROUS_VARIABLES`] may be set, except that on macOS and Linux
+/// a client may keep the two libxml2 ones. On macOS and Linux the service
+/// also refuses every variable that steers the loader. The client does not:
+/// loading the library refuses the `DYLD_*` ones for it, and an ordinary
+/// user's `LD_*` variables are that user's own business.
 pub fn check_environment(role: Role) -> Result<(), EnvironmentError> {
-    let listed = |(name, _): &&(&'static str, &str)| std::env::var_os(name).is_some();
+    let kept = |name: &str| cfg!(unix) && role == Role::Client && CLIENT_MAY_KEEP.contains(&name);
+    let listed =
+        |(name, _): &&(&'static str, &str)| !kept(name) && std::env::var_os(name).is_some();
     if let Some((name, _)) = DANGEROUS_VARIABLES.iter().find(listed) {
         return Err(EnvironmentError::Set(name));
     }

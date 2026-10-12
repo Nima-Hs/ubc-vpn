@@ -103,9 +103,12 @@ fn child_output(dir: &Path, cwd: &Path, set: &[(&str, &OsStr)]) -> std::process:
     child.output().unwrap()
 }
 
-/// What the start-up step gives for a client, which `load` asks for.
-fn prepared() -> ubc_vpn_engine::Prepared {
-    prepare_environment(Role::Client, None).expect("the environment is clean")
+/// What the start-up step gives for a client, which `load` asks for. The
+/// step runs once in a process, so its result is kept.
+fn prepared() -> &'static ubc_vpn_engine::Prepared {
+    static PREPARED: std::sync::OnceLock<ubc_vpn_engine::Prepared> = std::sync::OnceLock::new();
+    PREPARED
+        .get_or_init(|| prepare_environment(Role::Client, None).expect("the environment is clean"))
 }
 
 /// The result alone, without what Windows adds about the DLLs.
@@ -141,11 +144,12 @@ fn child() {
     };
     // First, as in a real program: the environment step.
     let prepared = prepared();
-    // Windows: puts a variable back the way a C library would, after the
-    // step removed it, to show what the library does when it is there.
+    // Windows: puts two variables back the way a C library would, after the
+    // step removed them, to show what the libraries do when they are there.
     #[cfg(windows)]
     if env::var_os("UBC_VPN_TEST_PUT_BACK").is_some() {
         raw::put_in_c_runtime(c"GNUTLS_DEBUG_LEVEL", c"9");
+        raw::put_in_c_runtime(c"NETTLE_FAT_VERBOSE", c"1");
     }
     if let Some(first) = env::var_os("UBC_VPN_TEST_CARELESS") {
         assert!(
@@ -462,27 +466,34 @@ fn a_library_loaded_before_the_folder_was_chosen_is_refused() {
 
 // Security rule, Windows: the environment step removes a variable where the
 // library reads it, which is the C runtime's copy and not the one Rust
-// reads. So this watches the library: GnuTLS logs to standard error as it
-// loads when `GNUTLS_DEBUG_LEVEL` is set. Reading the variable back would
-// pass even if nothing the library sees had changed.
+// reads. So this watches two libraries: as they load, GnuTLS logs to standard
+// error when `GNUTLS_DEBUG_LEVEL` is set, and Nettle when `NETTLE_FAT_VERBOSE`
+// is. Reading a variable back through Rust would pass even if nothing a
+// library sees had changed.
 #[cfg(windows)]
 #[test]
 fn the_environment_step_changes_what_the_library_sees() {
     let libs = Path::new(LIBS);
+    // Whether GnuTLS, and whether Nettle, wrote to standard error.
     let logs = |set: &[(&str, &OsStr)]| {
         let output = child_output(libs, libs, set);
         let report = String::from_utf8_lossy(&output.stdout).into_owned();
         assert!(report.contains("LOAD: Ok("), "{report}");
-        String::from_utf8_lossy(&output.stderr).contains("gnutls[")
+        let printed = String::from_utf8_lossy(&output.stderr).into_owned();
+        (printed.contains("gnutls["), printed.contains("libnettle:"))
     };
-    let debug = ("GNUTLS_DEBUG_LEVEL", OsStr::new("9"));
-    assert!(!logs(&[debug]), "GnuTLS still saw the variable");
-    // The control: put back in the C runtime after the step, it is seen.
-    let put_back = ("UBC_VPN_TEST_PUT_BACK", OsStr::new("1"));
-    assert!(
-        logs(&[debug, put_back]),
-        "GnuTLS logs nothing even when it is set"
+    let set = [
+        ("GNUTLS_DEBUG_LEVEL", OsStr::new("9")),
+        ("NETTLE_FAT_VERBOSE", OsStr::new("1")),
+    ];
+    assert_eq!(
+        logs(&set),
+        (false, false),
+        "a library still saw its variable"
     );
+    // The control: put back in the C runtime after the step, both are seen.
+    let put_back = ("UBC_VPN_TEST_PUT_BACK", OsStr::new("1"));
+    assert_eq!(logs(&[set[0], set[1], put_back]), (true, true));
 }
 
 /// What a careless or hostile program does, for the child to act out. None

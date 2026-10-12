@@ -28,7 +28,7 @@ fn run(label: &str, set: &[(&str, &str)], temp: Option<&Path>) -> String {
     let mut child = Command::new(env::current_exe().unwrap());
     child.args(["child", "--exact", "--nocapture", "--test-threads=1"]);
     let listed = DANGEROUS_VARIABLES.iter().map(|(name, _)| *name);
-    for name in listed.chain(LOADER) {
+    for name in listed.chain(LOADER).chain(["GCONV_PATH"]) {
         child.env_remove(name);
     }
     child.env(CHILD, "1").envs(set.iter().copied());
@@ -50,6 +50,18 @@ fn refusal(error: EnvironmentError) -> String {
     format!("{:?}", Err::<(), _>(error))
 }
 
+/// Whether a variable is set where the libraries would read it. On Windows
+/// that is the C runtime's copy as well as the process environment, and the
+/// first is the one that matters; elsewhere the two are one.
+#[cfg(feature = "libopenconnect")]
+fn is_set(name: &str) -> bool {
+    #[cfg(windows)]
+    if c_runtime::get(name).is_some() {
+        return true;
+    }
+    env::var_os(name).is_some()
+}
+
 /// Not a test of its own: the body of the child process.
 #[test]
 fn child() {
@@ -60,14 +72,26 @@ fn child() {
     println!("CLIENT: {:?}", check_environment(Role::Client));
     #[cfg(feature = "libopenconnect")]
     {
+        use ubc_vpn_engine::prepare_environment;
         let temp = env::var_os(TEMP).map(std::path::PathBuf::from);
-        let result = ubc_vpn_engine::prepare_environment(Role::Service, temp.as_deref());
-        let result = result.map(|_prepared| ());
+        let result = prepare_environment(Role::Service, temp.as_deref()).map(|_prepared| ());
         let left = DANGEROUS_VARIABLES.iter().map(|(name, _)| *name);
-        let left: Vec<&str> = left.filter(|name| env::var_os(name).is_some()).collect();
-        let now = (env::var_os("TMP"), env::var_os("TEMP"));
-        let moved = temp.is_some() && now.0 == temp.map(Into::into) && now.0 == now.1;
+        let left: Vec<&str> = left.filter(|name| is_set(name)).collect();
+        // Both names, in both views on Windows, now hold the folder given.
+        let folder = temp
+            .as_ref()
+            .map(|temp| temp.to_string_lossy().into_owned());
+        let holds = |name: &str| {
+            #[cfg(windows)]
+            if c_runtime::get(name) != folder {
+                return false;
+            }
+            env::var_os(name).map(|value| value.to_string_lossy().into_owned()) == folder
+        };
+        let moved = folder.is_some() && holds("TMP") && holds("TEMP");
         println!("STEP: {result:?} left={left:?} moved={moved}");
+        let again = prepare_environment(Role::Service, None).map(|_prepared| ());
+        println!("AGAIN: {again:?}");
     }
 }
 
@@ -94,50 +118,61 @@ fn every_dangerous_variable_is_on_the_list() {
     );
 }
 
-// Security rule: the check names any listed variable that is set, for both
-// roles, on every OS and in every build. It leaves `USER` and `NTLMUSER`
-// alone.
+// Security rule: the check names any listed variable that is set, on every
+// OS and in every build, and leaves `USER` and `NTLMUSER` alone. The service
+// refuses all of them. A client may keep the two libxml2 ones on macOS and
+// Linux, and nothing else: a key log would expose the login.
 #[test]
 fn the_check_names_each_dangerous_variable_that_is_set() {
     let clean = [("USER", "someone"), ("NTLMUSER", "someone")];
     for role in ["SERVICE: ", "CLIENT: "] {
         assert_eq!(run(role, &clean, None), "Ok(())");
         for (name, _) in DANGEROUS_VARIABLES {
-            let found = run(role, &[(name, "1")], None);
-            assert_eq!(found, refusal(EnvironmentError::Set(name)));
+            let kept = cfg!(unix) && role == "CLIENT: " && name.starts_with("XML_");
+            let expected = if kept {
+                "Ok(())".to_string()
+            } else {
+                refusal(EnvironmentError::Set(name))
+            };
+            assert_eq!(run(role, &[(name, "1")], None), expected, "{role}{name}");
         }
     }
 }
 
 // Security rule, macOS and Linux: the service refuses to start with a
-// variable that steers the loader, and its name is not repeated. The client
-// does not refuse; the two fallback variables are allowed for both.
+// variable that steers the loader, and its name is not repeated. On Linux
+// that includes `GCONV_PATH`. The client does not refuse; the two fallback
+// variables are allowed for both.
 #[test]
 fn the_service_refuses_loader_variables_and_the_client_does_not() {
-    let refused = if cfg!(unix) {
-        refusal(EnvironmentError::LoaderVariable)
-    } else {
-        "Ok(())".to_string()
-    };
-    for name in LOADER {
-        assert_eq!(
-            run("SERVICE: ", &[(name, "/somewhere")], None),
-            refused,
-            "{name}"
-        );
-        assert_eq!(
-            run("CLIENT: ", &[(name, "/somewhere")], None),
-            "Ok(())",
-            "{name}"
-        );
+    let refused = refusal(EnvironmentError::LoaderVariable);
+    let service = |name: &str| run("SERVICE: ", &[(name, "/somewhere")], None);
+    for name in LOADER.into_iter().chain(["GCONV_PATH"]) {
+        let steers = cfg!(unix) && (name != "GCONV_PATH" || cfg!(target_os = "linux"));
+        let expected = if steers { refused.as_str() } else { "Ok(())" };
+        assert_eq!(service(name), expected, "{name}");
+        let client = run("CLIENT: ", &[(name, "/somewhere")], None);
+        assert_eq!(client, "Ok(())", "{name}");
     }
-    for name in ["DYLD_FALLBACK_LIBRARY_PATH", "LDFLAGS", "OLD_PATH"] {
-        assert_eq!(
-            run("SERVICE: ", &[(name, "/somewhere")], None),
-            "Ok(())",
-            "{name}"
-        );
+    for name in [
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "LDFLAGS",
+        "OLD_PATH",
+        "GCONV_PATHS",
+    ] {
+        assert_eq!(service(name), "Ok(())", "{name}");
     }
+}
+
+// Security rule: the step runs once in a process. A second call would come
+// when other threads may be reading the environment.
+#[cfg(feature = "libopenconnect")]
+#[test]
+fn the_step_runs_only_once() {
+    assert_eq!(
+        run("AGAIN: ", &[], None),
+        refusal(EnvironmentError::AlreadyPrepared)
+    );
 }
 
 // Security rule, macOS and Linux: the step changes nothing and refuses to go
@@ -160,8 +195,9 @@ fn the_step_refuses_each_dangerous_variable() {
     assert_eq!(run("STEP: ", &[("LD_PRELOAD", "/somewhere")], None), loader);
 }
 
-// Security rule, Windows: the step removes every variable, and the temporary
-// folder becomes the one given.
+// Security rule, Windows: the step removes every variable where the libraries
+// read it, which is the C runtime's copy, and the temporary folder becomes
+// the one given there too. The child reads both through that runtime.
 #[cfg(all(feature = "libopenconnect", windows))]
 #[test]
 fn the_step_removes_every_dangerous_variable_and_sets_the_temp_folder() {
@@ -172,9 +208,55 @@ fn the_step_removes_every_dangerous_variable_and_sets_the_temp_folder() {
     assert_eq!(run("STEP: ", &all, None), "Ok(()) left=[] moved=false");
     let temp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     assert_eq!(run("STEP: ", &all, Some(temp)), "Ok(()) left=[] moved=true");
-    // A folder that is missing or not absolute is an error, and the
-    // variables are gone all the same.
+    // The folder must exist and be an absolute path on a drive letter: not
+    // relative, even when it exists, and not a share. The variables are gone
+    // all the same.
     let bad = format!("{} left=[] moved=false", refusal(EnvironmentError::BadTemp));
-    assert_eq!(run("STEP: ", &all, Some(&temp.join("missing"))), bad);
-    assert_eq!(run("STEP: ", &all, Some(Path::new("relative"))), bad);
+    let (drive, rest) = env!("CARGO_TARGET_TMPDIR").split_at(2);
+    let share = format!(r"\\localhost\{}${rest}", &drive[..1]);
+    for folder in [
+        temp.join("missing"),
+        "relative".into(),
+        ".".into(),
+        share.into(),
+    ] {
+        assert_eq!(run("STEP: ", &all, Some(&folder)), bad, "{folder:?}");
+    }
+}
+
+/// The C runtime's own view of the environment, read the way the bundled
+/// libraries read it.
+#[cfg(all(windows, feature = "libopenconnect"))]
+mod c_runtime {
+    use std::ffi::{CStr, CString, c_char, c_void};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    /// `getenv` of the Universal C Runtime, which the libraries are built
+    /// against, looked up by name in `ucrtbase.dll` as the engine's setter is.
+    pub fn get(name: &str) -> Option<String> {
+        let library: Vec<u16> = "ucrtbase.dll".encode_utf16().chain([0]).collect();
+        let name = CString::new(name).unwrap();
+        // SAFETY: the two names are NUL-terminated and outlive the calls;
+        // each result is checked before it is used. `getenv` takes a
+        // NUL-terminated name and returns null or a NUL-terminated string
+        // that stays valid while nothing changes the environment, and it is
+        // copied at once. The child runs this one test.
+        unsafe {
+            let module = GetModuleHandleW(library.as_ptr());
+            assert!(!module.is_null(), "the C runtime is not loaded");
+            let getenv = GetProcAddress(module, c"getenv".as_ptr());
+            assert!(!getenv.is_null(), "the C runtime has no getenv");
+            let getenv = std::mem::transmute::<
+                *mut c_void,
+                unsafe extern "C" fn(*const c_char) -> *const c_char,
+            >(getenv);
+            let value = getenv(name.as_ptr());
+            (!value.is_null()).then(|| CStr::from_ptr(value).to_string_lossy().into_owned())
+        }
+    }
 }

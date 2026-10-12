@@ -218,10 +218,10 @@ impl Library {
     /// checks the version. Call it once per process. The module
     /// documentation says what this does and does not control.
     ///
-    /// It takes the [`Prepared`] that only [`prepare_environment`] gives,
+    /// It takes a [`Prepared`], which only [`prepare_environment`] gives,
     /// so the environment has been dealt with first: GnuTLS reads some of
     /// its variables in the start-up code that loading runs.
-    pub fn load(dir: &Path, _environment: Prepared) -> Result<Self, LoadError> {
+    pub fn load(dir: &Path, _environment: &Prepared) -> Result<Self, LoadError> {
         let file = dir.join(os::FILE);
         // A NUL would make the loader read a shorter path than the one given.
         if !os::is_plain(dir) || file.as_os_str().as_encoded_bytes().contains(&0) {
@@ -365,7 +365,8 @@ impl Drop for Handle {
 pub struct Prepared(());
 
 /// Makes the process's environment safe for the library. Call it once, first
-/// thing in `main`, before any thread exists and before [`Library::load`].
+/// thing in `main`, before any thread exists and before [`Library::load`]. A
+/// second call in the same process is an error.
 ///
 /// - **Windows:** removes every one of
 ///   [`DANGEROUS_VARIABLES`](crate::environment::DANGEROUS_VARIABLES). With
@@ -379,13 +380,21 @@ pub struct Prepared(());
 ///   removed safely there, and fails as [`check_environment`] does for the
 ///   role. `temp` is not used; the command pipe is a plain pipe.
 pub fn prepare_environment(role: Role, temp: Option<&Path>) -> Result<Prepared, EnvironmentError> {
+    // Once, whatever comes of it: the C runtime's setter is not safe against
+    // another thread that is reading the environment, and a second call
+    // would come when threads exist.
+    static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if CALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err(EnvironmentError::AlreadyPrepared);
+    }
     #[cfg(windows)]
     {
         for (name, _) in crate::environment::DANGEROUS_VARIABLES {
             os::set_variable(name, None)?;
         }
         if let Some(temp) = temp {
-            if !temp.is_absolute() || !temp.is_dir() {
+            // A folder on a drive letter, as for the library's own: not a share.
+            if !os::is_plain(temp) || !temp.is_dir() {
                 return Err(EnvironmentError::BadTemp);
             }
             os::set_variable("TMP", Some(temp))?;
