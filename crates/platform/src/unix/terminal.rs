@@ -143,9 +143,13 @@ mod tests {
             (read, screen)
         }
 
+        /// The settings the call changes. `PENDIN` is left out: it is not a
+        /// setting but a note macOS makes for itself when line editing comes
+        /// back on, and drops at the next read.
         fn mode(&self) -> (LocalModes, u8) {
             let now = tcgetattr(&self.theirs).expect("its mode");
-            (now.local_modes, now.special_codes[SpecialCodeIndex::VMIN])
+            let local = now.local_modes.difference(LocalModes::PENDIN);
+            (local, now.special_codes[SpecialCodeIndex::VMIN])
         }
     }
 
