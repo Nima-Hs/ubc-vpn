@@ -235,17 +235,21 @@ export const REMOTE_DEBUGGING_SWITCHES = [
 ] as const;
 
 /**
- * Whether this run may be debugged from outside. Only a demo or development
- * build that has not been packaged: that is what the end-to-end test drives,
- * and its driver attaches through `--remote-debugging-port`. A production
- * build never may, packaged or not, and nothing packaged ever may.
+ * Whether this run may be debugged from outside. Only a run that has not
+ * been packaged and is a demo build, a development build, or in dev mode
+ * (talking to a pretend service, and saying so on every screen): those are
+ * what the end-to-end tests drive, and their driver attaches through
+ * `--remote-debugging-port`. A production build pointed at the real service
+ * never may, packaged or not, and nothing packaged ever may.
  */
 export function allowsRemoteDebugging(build: {
     isPackaged: boolean;
     demo: boolean;
     development: boolean;
+    /** Whether the client is run in dev mode; see `bridgeCommand`. */
+    devMode: boolean;
 }): boolean {
-    return !build.isPackaged && (build.demo || build.development);
+    return !build.isPackaged && (build.demo || build.development || build.devMode);
 }
 
 /**
