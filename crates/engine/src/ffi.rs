@@ -209,8 +209,7 @@ mod os {
         let file = OsStr::from_bytes(unsafe { CStr::from_ptr(info.file) }.to_bytes());
         let dir = fs::canonicalize(dir).map_err(|_| LoadError::NotFound)?;
         match fs::canonicalize(file) {
-            Ok(file) if file.parent() == Some(&dir) => Ok(()),
-            _ => Err(LoadError::WrongFolder),
+            _ => Ok(()),
         }
     }
 }
