@@ -126,6 +126,12 @@
 //!   system's `freeaddrinfo`. So the callback must return a list the
 //!   system's own `getaddrinfo` made, for example by calling it on the
 //!   address in numeric form. Never return a list built in Rust.
+//! - That callback is the only thing that ties a connection to a host. The
+//!   certificate check sees a key, not who presented it, and the library
+//!   follows a redirect, or a form's action address, to wherever it points.
+//!   So the callback answers for the policy's host and port (or the test
+//!   endpoint) and refuses every other host and port, an address written as
+//!   numbers included.
 //! - Never enable a software-token mode, an external-browser or
 //!   single-sign-on login, or a client certificate.
 //! - Let one thread own the library handle and make every library call on
@@ -133,6 +139,13 @@
 //!   `openconnect_setup_cmd_pipe`. On Windows that end is a socket, written
 //!   with `send`. The library closes that end when the handle is freed, so
 //!   never close it, and never write to it after the handle is dropped.
+//!   Make the pipe once for a handle: asked again, the library replaces it
+//!   without closing the first, and a cancel written to the first is lost.
+//! - Use a handle for one login attempt or one tunnel, and ask it for a
+//!   cookie once. Asked a second time it reports success without
+//!   connecting, and it reuses a connection that is still open without
+//!   checking the certificate again.
+//! - A callback never calls back into its own handle.
 //! - Give every handle a real `privdata` pointer. Given a null one, the
 //!   library passes the handle itself to the callbacks in its place.
 //! - Strings the library returns, such as the cookie and the certificate's
@@ -154,6 +167,15 @@
 //!   accepted, and fail the login or the tunnel if it did not. The library
 //!   forgets the certificate at each new connection, so clear the record
 //!   before every connection, reconnects included.
+//! - These two do different jobs and both are needed. Turning system trust
+//!   off is what keeps the password from a gateway the pin does not match:
+//!   with it on, a certificate the system trusts is accepted without the
+//!   callback, and the answers are sent. The record only shows afterwards
+//!   that this happened, which is in time to refuse the cookie and too late
+//!   for the password.
+//! - Refuse a certificate hash that is empty or all zeros. If the library
+//!   cannot work the hash out it carries on, and what it then reports is
+//!   whatever the handle held before.
 //! - Reject inside the certificate callback, so that nothing, the cookie
 //!   least of all, is sent before the pin check has passed.
 //!
@@ -180,7 +202,11 @@
 //!   [`Prompt::message`].
 //! - Read the cookie with `openconnect_get_cookie` after
 //!   `openconnect_obtain_cookie` succeeds, and register it with
-//!   [`LogSink::hide`] at once.
+//!   [`LogSink::hide`] at once. The string can hold more than the session
+//!   value, so treat all of it as the secret and register it whole.
+//! - Wipe the copy of an answer made to hand it to the library. The library
+//!   keeps its own copy until the form is freed, so free the handle as soon
+//!   as the login ends.
 //! - Treat a form shown again with its error set as a rejection: ask again
 //!   through [`Prompts::ask`], which stops the login, and never answer from
 //!   memory. Fill each field from one `ask` call and keep no copy of the
