@@ -6,12 +6,16 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
+use ubc_vpn_core::login::PromptKind;
+use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::redact::Secret;
 use ubc_vpn_engine::fake::{FakeEngine, Script};
+use ubc_vpn_engine::{Cancel, LoginEngine, Prompt};
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::interrupt::Stop;
 
-use crate::connect::{Ended, undo};
-use crate::connect_tests::{CODE, PASSWORD, Scene, Typist, brief, pin};
+use crate::connect::{Ask, Ended, start, undo};
+use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, pin};
 use crate::interrupt::{Progress, serve};
 use crate::terminal::Terminal;
 
@@ -71,10 +75,9 @@ fn a_stop_before_the_request_ends_the_program_at_once() {
     for stop in [Stop::Interrupt, Stop::Terminate] {
         let progress = Progress::default();
         let handler = handler(&progress);
-        assert!(!progress.stopping());
         handler.requests.send(stop).unwrap();
         assert_eq!(handler.next(), Did::Exit(stop));
-        assert!(progress.stopping());
+        assert!(!progress.sending(), "after a stop no request may go");
         // A second request is answered the same way, still with no undo.
         handler.requests.send(Stop::Interrupt).unwrap();
         assert_eq!(handler.next(), Did::Exit(Stop::Interrupt));
@@ -91,7 +94,7 @@ fn a_stop_after_the_request_undoes_it_first() {
     progress.sending();
     handler.requests.send(Stop::Terminate).unwrap();
     assert_eq!(handler.next(), Did::Undo);
-    assert!(progress.stopping());
+    assert!(!progress.finish(), "a stopped connect reports nothing");
     handler.nothing_more();
     handler.let_undo_end.send(()).unwrap();
     assert_eq!(handler.next(), Did::Exit(Stop::Terminate));
@@ -129,25 +132,118 @@ fn ctrl_c_at_a_hidden_question_ends_the_connect_in_silence() {
     // Nothing went to the service, so a stop would have nothing to undo.
     assert!(!progress.stop());
     assert!(scene.state().contains(r#""state":"disconnected""#));
+    // And nothing more went to the gateway: the saved username was all it
+    // had been given when the question was asked.
+    let given = scene.gateway.answers();
+    let kinds: Vec<PromptKind> = given.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(kinds, [PromptKind::Username]);
 }
 
-// The connect says when its request goes to the service, and not before:
-// a login that fails never gets there.
+/// Answers like a [`Typist`], and notes a request to stop as it gives its
+/// last answer: the moment a real one could come between the login and the
+/// connect request.
+struct StoppedAtTheLastAnswer {
+    typist: Typist,
+    left: usize,
+    progress: Progress,
+}
+
+impl Ask for StoppedAtTheLastAnswer {
+    fn unusable(&self) -> Option<String> {
+        None
+    }
+
+    fn ask(&mut self, prompt: &Prompt) -> Option<Secret> {
+        self.left -= 1;
+        if self.left == 0 {
+            assert!(!self.progress.stop(), "nothing has gone yet");
+        }
+        self.typist.ask(prompt)
+    }
+}
+
+// Security rule: a request to stop that came before the connect request
+// went found nothing to undo, so the request must never go. Otherwise the
+// program ends and the service connects with nobody watching.
 #[test]
-fn the_connect_reports_when_its_request_goes() {
+fn a_stop_noted_before_the_request_keeps_it_from_going() {
     let scene = Scene::usual();
     let progress = Progress::default();
-    let mut typist = Typist::typing(&[Some("wrong-password-0000"), Some(CODE)]);
-    let (ended, _, _) = scene.connect_watched(&mut typist, &progress);
-    assert!(matches!(ended, Ended::Status(8)), "{ended:?}");
-    assert!(!progress.stop(), "nothing was sent, so nothing is undone");
+    let mut asked = StoppedAtTheLastAnswer {
+        typist: Typist::typing(&[Some(PASSWORD), Some(CODE)]),
+        left: 2,
+        progress: progress.clone(),
+    };
+    let (ended, out, err) = scene.connect_watched(&mut asked, &progress);
+    assert_eq!(
+        (ended, out.as_str(), err.as_str()),
+        (Ended::Stopping, "", "")
+    );
+    // The stop is still noted: a late request did not wipe it.
+    assert!(!progress.sending() && !progress.finish());
+    // The login was made, and the service heard nothing of it.
+    assert_eq!(scene.gateway.answers().len(), 3);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(scene.state().contains(r#""state":"disconnected""#));
+}
 
+// The request counts as sent from just before it leaves, not from when the
+// service answers: a stop in between has a request to undo. Here the
+// service refuses the request, and the mark is there all the same. A login
+// that fails never gets that far.
+#[test]
+fn the_request_is_marked_as_sent_before_it_leaves() {
+    let begins = |scene: &Scene, typed: &[Option<&'static str>]| {
+        let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+        let engines = |_: &Policy| Some(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
+        let (progress, mut typist) = (Progress::default(), Typist::typing(typed));
+        let sending = || progress.sending();
+        let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
+        let accepted = start(
+            &platform,
+            &engines,
+            &mut typist,
+            &cancel,
+            limits,
+            &sending,
+            &mut err,
+        );
+        (accepted.is_ok(), progress.stop())
+    };
+    // The policy the service read when it started does not allow routes
+    // that the policy file now does.
+    let narrow = r#","allowed_routes":["142.103.0.0/16"]"#;
+    let settings = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let scene = Scene::new(Some(&settings), narrow);
+    let open = format!(
+        r#"{{"gateway":"vpn.example.test","pins":["{}"]}}"#,
+        pin().as_str()
+    );
+    std::fs::write(scene.rig.root.join("policy/policy.json"), open).unwrap();
+    let refused = begins(&scene, &[Some(PASSWORD), Some(CODE)]);
+    assert_eq!(refused, (false, true), "refused, and marked as sent");
+
+    let scene = Scene::usual();
+    let failed = begins(&scene, &[Some("wrong-password-0000"), Some(CODE)]);
+    assert_eq!(failed, (false, false), "nothing was sent");
+}
+
+// Once the connect has told the user how it ended, a stop undoes nothing:
+// Ctrl-C in the last instant must not take down the VPN the user has just
+// been told is connected.
+#[test]
+fn a_stop_after_the_outcome_is_reported_leaves_the_vpn_alone() {
     let scene = Scene::usual();
     let progress = Progress::default();
     let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
-    let (ended, _, _) = scene.connect_watched(&mut typist, &progress);
+    let (ended, out, _) = scene.connect_watched(&mut typist, &progress);
     assert_eq!(ended, Ended::Status(0));
-    assert!(progress.stop(), "the request went, so there is one to undo");
+    assert!(out.starts_with("Connected"), "{out}");
+    let handler = handler(&progress);
+    handler.requests.send(Stop::Interrupt).unwrap();
+    assert_eq!(handler.next(), Did::Exit(Stop::Interrupt));
+    handler.nothing_more();
+    assert!(scene.state().contains(r#""state":"connected""#));
 }
 
 // A stop while the service is connecting: the service is told to disconnect

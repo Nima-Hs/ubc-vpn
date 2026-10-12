@@ -12,11 +12,20 @@
 //!   question must not stay open.
 //! - **After it has gone** the service would carry on connecting with nobody
 //!   watching, so it is told to disconnect first, and then the program ends.
+//! - **Once the connect has its outcome** and is telling the user, there is
+//!   again nothing to undo. A Ctrl-C in that last instant ends the program
+//!   and leaves the VPN as the user was just told it is.
 //! - **A second request** means "now": the program ends at once, whatever
 //!   it was in the middle of.
 //!
+//! The connect and the handler of requests run on different threads, so
+//! each of these is decided in one step, under one lock: a request either
+//! comes before the connect request is marked as going, and then it is
+//! never sent; or after, and then it is undone.
+//!
 //! Either way the program ends with the status that is usual for a program
-//! stopped that way, and prints nothing.
+//! stopped that way, and says nothing more. What the login had already
+//! printed by then, such as an error line from the gateway's side, stays.
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -30,6 +39,8 @@ enum Stage {
     Before,
     /// The connect request has gone, or is about to.
     Sent,
+    /// The connect has its outcome and is reporting it.
+    Finished,
     /// A request to stop has come.
     Stopping,
 }
@@ -44,24 +55,35 @@ impl Progress {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The connect request is about to go to the service. From here on a
-    /// request to stop has something to undo.
-    pub fn sending(&self) {
+    /// The connect request is about to go to the service. Returns whether
+    /// it may: not when a request to stop has already come, for that
+    /// request found nothing to undo and nobody will undo this. From here
+    /// on a request to stop has something to undo.
+    pub fn sending(&self) -> bool {
         let mut stage = self.stage();
         if *stage == Stage::Before {
             *stage = Stage::Sent;
         }
+        *stage == Stage::Sent
     }
 
-    /// Whether a request to stop has come. A connect that sees this says
-    /// nothing more: the one handling the request ends the program.
-    pub fn stopping(&self) -> bool {
-        *self.stage() == Stage::Stopping
+    /// The connect has its outcome and is about to tell the user. Returns
+    /// whether it may: not when a request to stop has come, for then the
+    /// one handling it ends the program and nothing more is said. From here
+    /// on a request to stop has nothing to undo: the user is being told how
+    /// it ended, and a Ctrl-C now must not change that behind their back.
+    pub fn finish(&self) -> bool {
+        let mut stage = self.stage();
+        if *stage != Stage::Stopping {
+            *stage = Stage::Finished;
+        }
+        *stage == Stage::Finished
     }
 
     /// Takes note of a request to stop, and returns whether the service has
     /// to be told to disconnect before the program ends. That is so for the
-    /// first request after the connect request has gone, and for no other.
+    /// first request while the connect request is out and its outcome is
+    /// not yet known, and for no other.
     pub fn stop(&self) -> bool {
         std::mem::replace(&mut *self.stage(), Stage::Stopping) == Stage::Sent
     }

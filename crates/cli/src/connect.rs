@@ -79,12 +79,12 @@ pub enum Ended {
     /// With this exit status, having said what there was to say.
     Status(u8),
     /// The user pressed Ctrl-C at a question. Nothing was sent to the
-    /// service and nothing has been printed; the program ends with the
+    /// service and the outcome is not reported; the program ends with the
     /// status that is usual for that.
     Interrupted,
     /// A request to stop came from outside while the connect was under way,
-    /// and whoever handles those is ending the program. Nothing has been
-    /// printed and nothing more should be done here.
+    /// and whoever handles those is ending the program. The outcome is not
+    /// reported and nothing more should be done here.
     Stopping,
 }
 
@@ -200,8 +200,9 @@ pub fn connect(
     .and_then(|mut client| follow(&mut client, &ConnState::Connecting));
     // A stop from outside is being handled elsewhere, and what this saw of
     // it (a disconnect, say) is not news. Ctrl-C at a question is the user
-    // leaving. Neither is reported.
-    if progress.stopping() {
+    // leaving. Neither is reported. Otherwise the outcome is the user's to
+    // see, and from this step on a stop no longer undoes it.
+    if !progress.finish() {
         return Ended::Stopping;
     }
     if ask.interrupted() {
@@ -276,14 +277,15 @@ fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
 
 /// Does everything up to the service accepting the connect request: the
 /// checks, the login, and the request. `cancel` stops the login. `sending`
-/// is called just before the request goes to the service.
+/// is asked just before the request would go to the service, and the
+/// request goes only if it says so.
 pub(crate) fn start(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
     cancel: &Cancel,
     limits: Limits,
-    sending: &dyn Fn(),
+    sending: &dyn Fn() -> bool,
     err: &mut dyn Write,
 ) -> Result<Client, Stop> {
     let internal = |message: &str| failed(LoginErrorCode::Internal, message);
@@ -352,7 +354,11 @@ pub(crate) fn start(
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
-    sending();
+    // A request to stop that has come by now found nothing to undo, so
+    // there must be nothing: the request is not sent.
+    if !sending() {
+        return Err(cancelled());
+    }
     client.request(RequestBody::Connect(params)).map_err(stop)?;
     // Only now, with the login good and the connect accepted, is a username
     // the user typed worth keeping.
