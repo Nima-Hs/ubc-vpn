@@ -4,10 +4,14 @@
 #
 # Files need a rule only when they are outside the probe's folder and either
 # outside C:\Windows or somewhere under it that ordinary users can write.
-# None are touched today, so there are no file rules.
 #
 # Every registry key needs a rule. trace.sh separately refuses any key that
 # names one of the bundled libraries, whatever the rules say.
+
+# NTFS's own bookkeeping, such as the change journal. Windows writes it on
+# behalf of whichever process changed the disk, here while Wintun installs its
+# driver, and not on every run. No user can create or replace these files.
+^[A-Z]:\\\$Extend\\
 
 # The roots of the registry, opened by Windows on the way to a key.
 ^(HKLM|HKCU|HKU|HKU\\\.DEFAULT|HKU\\S-1-5-(18|19|20))$
