@@ -35,6 +35,8 @@ pub(crate) fn watch() -> Result<Receiver<Stop>> {
     handlers_end.set_nonblocking(true)?;
     PIPE.store(handlers_end.into_raw_fd(), Ordering::SeqCst);
     WATCHER.store(std::process::id() as i32, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    find_ask_kernel();
     let (requests, receiver) = mpsc::channel();
     let forwarder = thread::Builder::new().name("stop requests".to_string());
     forwarder.spawn(move || forward(pipe, &requests))?;
@@ -105,6 +107,93 @@ fn errno() -> *mut c_int {
     return unsafe { libc::__errno_location() };
 }
 
+/// The C library's `syscall` function on macOS, found by name when watching
+/// starts, or null where there is none.
+///
+/// Found by name, and not linked to as any other function is, because Apple
+/// discourages it and may take it away: a program that links to a function
+/// that is gone does not start at all, and this code is in the service. A
+/// program that looks for it and does not find it only loses what
+/// [`process_id`] says it loses.
+#[cfg(target_os = "macos")]
+static ASK_KERNEL: std::sync::atomic::AtomicPtr<libc::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(target_os = "macos")]
+fn find_ask_kernel() {
+    // SAFETY: the name is a NUL-terminated string, and the handle is the one
+    // that means "wherever this program would find it".
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"syscall".as_ptr()) };
+    ASK_KERNEL.store(found, Ordering::SeqCst);
+}
+
+/// This process's ID, as the kernel has it.
+///
+/// A signal can reach a child made by `fork` in its very first moment,
+/// before the C library has done what it does in a new process. On macOS
+/// the library remembers the process's ID and what it knows of the thread,
+/// and for that moment both are still the parent's: `getpid` answers with
+/// the parent's ID, and raising a signal on "this thread" goes nowhere. So
+/// there the kernel is asked directly, through the library's `syscall`.
+///
+/// Where that function is not to be found, `getpid` is used after all. What
+/// is lost then is only that first moment: a signal that reaches a new
+/// child before the library has caught up is taken for a request to the
+/// program, and the child lives on. Everything later is told apart as
+/// before.
+fn process_id() -> c_int {
+    #[cfg(target_os = "macos")]
+    return process_id_through(ASK_KERNEL.load(Ordering::SeqCst));
+    // SAFETY: the call has no conditions and is safe in a signal handler.
+    // On Linux the library asks the kernel each time.
+    #[cfg(not(target_os = "macos"))]
+    return unsafe { libc::getpid() };
+}
+
+#[cfg(target_os = "macos")]
+fn process_id_through(ask_kernel: *mut libc::c_void) -> c_int {
+    // The number of `getpid` among macOS's system calls, which the `libc`
+    // crate does not name.
+    const GETPID: c_int = 20;
+    if ask_kernel.is_null() {
+        // SAFETY: the call has no conditions and is safe in a signal
+        // handler.
+        return unsafe { libc::getpid() };
+    }
+    // SAFETY: the address is the one `dlsym` gave for `syscall`, which is a
+    // C function of this type, and stays valid for the life of the program.
+    let ask: unsafe extern "C" fn(c_int, ...) -> c_int = unsafe { std::mem::transmute(ask_kernel) };
+    // SAFETY: this system call takes no arguments and passes no pointers,
+    // and the call is safe in a signal handler.
+    unsafe { ask(GETPID) }
+}
+
+/// Whose signal the handler has been given, going by the ID of the process
+/// it runs in.
+#[derive(Debug, PartialEq, Eq)]
+enum Whose {
+    /// The watching program's: a request to stop.
+    Watcher,
+    /// A child's that the program made and that is not yet another program.
+    Child,
+    /// There is no telling: the ID could not be had.
+    Unknown,
+}
+
+/// Security rule: an ID that is not a process's own is never acted on. The
+/// call that asks for the ID answers -1 when it is refused, and a signal
+/// sent to -1 goes to every process the user may signal, which for root is
+/// nearly all of them; sent to 0 it goes to the whole process group.
+fn whose(me: c_int, watcher: c_int) -> Whose {
+    if me <= 0 {
+        Whose::Unknown
+    } else if me == watcher {
+        Whose::Watcher
+    } else {
+        Whose::Child
+    }
+}
+
 /// The signal handler. It may run at any moment on any thread, so it makes
 /// only calls that are safe then: the terminal's (see
 /// `terminal::restore_after_signal`) and one `write`. It takes no lock and
@@ -117,17 +206,31 @@ extern "C" fn on_signal(signal: c_int) {
     // another program, still has this handler and the pipe. The signal was
     // sent to the child, not to this program: no request comes of it, and
     // the child ends as it would have with no handler at all.
-    // SAFETY: the call is safe in a signal handler and has no conditions.
-    let me = unsafe { libc::getpid() };
-    if me != WATCHER.load(Ordering::SeqCst) {
-        // SAFETY: both calls are safe in a signal handler and have no other
-        // conditions. The signal raised is held back until this handler
-        // returns, and then meets its default action.
-        unsafe {
-            libc::signal(signal, libc::SIG_DFL);
-            libc::raise(signal);
+    let me = process_id();
+    match whose(me, WATCHER.load(Ordering::SeqCst)) {
+        Whose::Watcher => {}
+        Whose::Child => {
+            // SAFETY: a zeroed `sigaction` is a valid value of that plain C
+            // struct, and the pointers passed are to it or null where the
+            // call allows. Both calls are safe in a signal handler, and
+            // `me` is this process's own ID, greater than zero. The signal
+            // sent is held back until this handler returns, and then meets
+            // its default action. It is sent to the process by its ID and
+            // not raised on the thread: see `process_id` for why nothing
+            // that knows about threads can be trusted here.
+            unsafe {
+                let mut default: libc::sigaction = std::mem::zeroed();
+                default.sa_sigaction = libc::SIG_DFL;
+                libc::sigaction(signal, &default, std::ptr::null_mut());
+                libc::kill(me, signal);
+            }
+            return;
         }
-        return;
+        // Nothing can be sent to an ID that is not known, so the process
+        // ends here, as the signal asked, with the status a shell gives a
+        // program a signal ended.
+        // SAFETY: the call is safe in a signal handler and does not return.
+        Whose::Unknown => unsafe { libc::_exit(128 + signal) },
     }
     // Security rule: the terminal is put back before anyone hears of the
     // request, so that no exit, however quick, leaves it silent.
@@ -173,6 +276,8 @@ mod tests {
     const CHILD: &str = "UBC_VPN_INTERRUPT_CHILD";
     const TERMINAL: &str = "UBC_VPN_INTERRUPT_TERMINAL";
     const WAIT: Duration = Duration::from_secs(20);
+    /// Has the forking child send the signal itself, straight after the fork.
+    const AT_ONCE: &str = "UBC_VPN_INTERRUPT_AT_ONCE";
 
     /// A child process running `child` below as `kind`, and what it prints.
     struct Program {
@@ -277,11 +382,38 @@ mod tests {
         assert_eq!(program.ended(), 130);
     }
 
+    // Security rule: a signal is only ever sent to this process's own ID.
+    // An ID that could not be had, which reads as -1 or 0, would name every
+    // process the user may signal, or the whole group.
+    #[test]
+    fn an_id_that_is_not_a_process_is_never_acted_on() {
+        let watcher = std::process::id() as c_int;
+        assert_eq!(whose(-1, watcher), Whose::Unknown);
+        assert_eq!(whose(0, watcher), Whose::Unknown);
+        assert_eq!(whose(watcher, watcher), Whose::Watcher);
+        assert_eq!(whose(watcher + 1, watcher), Whose::Child);
+        assert_eq!(whose(1, watcher), Whose::Child);
+    }
+
+    // The function the kernel is asked through may not be there one day.
+    // The ID is then had the ordinary way, and with it too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_id_is_had_with_and_without_the_way_to_ask_the_kernel() {
+        let me = std::process::id() as c_int;
+        assert_eq!(process_id_through(std::ptr::null_mut()), me, "without");
+        // SAFETY: the name is a NUL-terminated string.
+        let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"syscall".as_ptr()) };
+        assert!(!found.is_null(), "this macOS has no such function");
+        assert_eq!(process_id_through(found), me, "with");
+    }
+
     // A child the program makes still has the handler in the moment before
     // it becomes another program. A signal sent to it then is the child's
     // own: it ends the child, and the program hears of no request.
     #[test]
     fn a_signal_to_a_forked_child_is_not_a_request() {
+        let ended = format!("FORK ENDED by={SIGINT} requests=0");
         let program = Program::start("fork", |_| {});
         let forked = program.says();
         let forked = forked.strip_prefix("FORKED ").expect("its ID");
@@ -289,7 +421,20 @@ mod tests {
         // SAFETY: the call has no memory-safety conditions, and the ID is
         // of a process the child has not waited for yet.
         assert_eq!(unsafe { libc::kill(forked, SIGINT) }, 0, "send");
-        assert_eq!(program.says(), format!("FORK ENDED by={SIGINT} requests=0"));
+        assert_eq!(program.says(), ended);
+
+        // The same with the signal sent the instant the child exists, by
+        // the process that made it. That is the hard case: the child may
+        // meet the signal before it has run a single line of its own, and
+        // on macOS one time in five it did, and was mistaken for its
+        // parent. Many times over, because it is a matter of timing.
+        for round in 0..25 {
+            let program = Program::start("fork", |child| {
+                child.env(AT_ONCE, "1");
+            });
+            assert!(program.says().starts_with("FORKED "));
+            assert_eq!(program.says(), ended, "round {round}");
+        }
     }
 
     // A program started with a signal ignored, as under `nohup`, keeps
@@ -377,6 +522,11 @@ mod tests {
                     // SAFETY: as above.
                     unsafe { libc::pause() };
                 }
+            }
+            if std::env::var_os(AT_ONCE).is_some() {
+                // SAFETY: the call has no memory-safety conditions, and the
+                // ID is of a child not yet waited for.
+                unsafe { libc::kill(forked, SIGINT) };
             }
             println!("SAYS FORKED {forked}");
             let mut status = 0;
