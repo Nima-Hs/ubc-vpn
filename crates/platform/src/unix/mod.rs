@@ -256,7 +256,9 @@ fn take_back<T>(path: &Path, act: impl Fn() -> io::Result<T>) -> io::Result<T> {
     loop {
         os::clear_flags(path)?;
         match lchown(path, Some(me), None).and_then(|()| act()) {
-            Err(error) if refused(&error) && Instant::now() < deadline => {}
+            // Only root is refused for a reason that passes. Anyone else is
+            // refused for good, and is told so at once.
+            Err(error) if me == 0 && refused(&error) && Instant::now() < deadline => {}
             done => return done,
         }
     }

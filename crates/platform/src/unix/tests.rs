@@ -436,6 +436,36 @@ fn an_owner_who_keeps_pinning_cannot_stop_the_service() {
     }
 }
 
+// Taking a file back is tried again only while that can help, and never for
+// ever. Root keeps trying for a bounded time, because a mark on the file
+// can pass. Anyone else is refused for good, and is told so at once.
+#[test]
+fn taking_a_file_back_gives_up() {
+    let Some(sandbox) = Sandbox::any("take-back bound") else {
+        return;
+    };
+    let name = sandbox.name();
+    let listener = sandbox.transport().listen(&name).expect("listen");
+    let path = PathBuf::from(&name);
+    let started = Instant::now();
+    let outcome = within("taking a file back", move || {
+        let refuse = || Err::<(), _>(std::io::Error::from(ErrorKind::PermissionDenied));
+        super::take_back(&path, refuse).map_err(|error| error.kind())
+    });
+    assert_eq!(outcome, Err(ErrorKind::PermissionDenied));
+    let waited = started.elapsed();
+    if me() == 0 {
+        assert!(waited >= super::TAKE_BACK_WAIT, "root gave up at once");
+    } else {
+        assert!(waited < super::TAKE_BACK_WAIT, "kept trying to no purpose");
+        // The real thing: only root can hand a file to someone else.
+        let started = Instant::now();
+        let narrowed = listener.restrict_to(&id(STRANGER));
+        assert_eq!(narrowed, Err(Error::PermissionDenied));
+        assert!(started.elapsed() < super::TAKE_BACK_WAIT, "kept trying");
+    }
+}
+
 // A client's socket must not stay open in a program the client starts.
 #[test]
 fn a_clients_socket_is_closed_on_exec() {
