@@ -9,7 +9,7 @@ Builds `libopenconnect` v9.21 (GnuTLS backend) for x64 from the pinned upstream 
 | `load-test.sh` | Runs the probe in another distribution's container with only the declared packages installed |
 | `wait-for-port.sh` | Waits for a test server to start listening |
 
-There are no patches.
+There is one patch, in `patches/openconnect/`: it stops the library closing file descriptor 0 when a handle is freed that never made a command pipe. The Windows and macOS builds apply the same one.
 
 ## Building
 
@@ -31,7 +31,7 @@ lib/libopenconnect.so.5      the library (plus the usual symlinks)
 lib/pkgconfig/openconnect.pc relocatable; point PKG_CONFIG_PATH here
 include/openconnect.h
 licenses/                    licence text for each component
-source/                      the exact source archives that were built, and build.sh
+source/                      the exact source archives that were built, our patches, and build.sh
 manifest.json                components, versions, licences, system libraries, build details
 ```
 
@@ -41,7 +41,7 @@ manifest.json                components, versions, licences, system libraries, b
 | json-parser | the copy inside openconnect | BSD-2-Clause | compiled into the library |
 | libxml2 | 2.15.4, pinned by SHA-256 | MIT | linked statically into the library |
 
-The openconnect archive is made with `git archive` from the verified commit. The library takes its version string from `git describe`, so build from a checkout as `build.sh` does; a build from the archive alone reports `v9.21-unknown`.
+The openconnect archive is made with `git archive` from the verified commit, and the library is built from that archive with the patches applied, so what ships is what was built. The library takes its version string from `git describe`; built from an archive, with no git history beside it, it reports `v9.21-unknown`, as the Windows build does.
 
 ## Decisions
 
@@ -89,7 +89,7 @@ The loader then finds our `libopenconnect.so.5` before it looks in the system pa
 
 The service must never be made setuid or given file capabilities. glibc ignores an `$ORIGIN` rpath for such programs, so the library would not be found, or a system one would be loaded instead. A service started as root by systemd is not affected.
 
-The workflow proves this: the probe is laid out this way, runs under `sudo` on a system with no distribution `libopenconnect`, and must report `v9.21`.
+The workflow proves this: the probe is laid out this way, runs under `sudo` on a system with no distribution `libopenconnect`, and must report `v9.21-unknown`.
 
 ## Updating
 

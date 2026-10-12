@@ -47,7 +47,7 @@ jobs:
           path: |
             build/prefix
             build/sources
-          key: native-${{ steps.image.outputs.id }}-${{ hashFiles('native/macos/versions.env', 'native/macos/build.sh') }}
+          key: native-${{ steps.image.outputs.id }}-${{ hashFiles('native/macos/versions.env', 'native/macos/build.sh', 'native/macos/patches/**') }}
       - name: Build
         run: bash native/macos/build.sh build
       - name: Bundle and check
@@ -109,7 +109,7 @@ jobs:
           # The run must pass, report the version we built, load every one of
           # our libraries from the unpacked folder, and load nothing from Homebrew.
           check() {
-            grep -qx 'version  = v9.21' "$1"
+            grep -qxE 'version  = v9\.21(-unknown)?' "$1"
             grep -qx 'RESULT: PASS' "$1"
             for lib in "$APP"/lib/*.*.dylib; do
               grep -qF " $lib" "$1"
