@@ -1,81 +1,94 @@
 //! The raw binding to `libopenconnect` v9.21, and the only place in the
 //! workspace that loads it. All `unsafe` code of the engine belongs here.
 //!
-//! Declarations are written by hand from `include/openconnect.h` of the
-//! pinned build. So far there is one, enough to prove the library links and
-//! loads on every OS. Nothing logs in or opens a tunnel yet.
+//! Nothing links the library. [`Library::load`] loads it at run time from a
+//! full path and looks up each function by name, so no program that uses the
+//! engine needs a link argument, and no `libopenconnect` is in the process
+//! before `load` is called. Signatures are written by hand from
+//! `include/openconnect.h` of the pinned build. So far there is one function.
 //!
-//! # Where the library comes from
+//! # What `load` controls, and what it does not
 //!
-//! At build time, from the folder `build.rs` checks. At run time, only from
-//! the one folder given to [`Library::load`], which must be called before
-//! anything else here:
+//! It controls which `libopenconnect` file is loaded: the one in the folder
+//! it is given, or none.
 //!
-//! - **Windows.** The import is `raw-dylib` and delay-loaded, so the process
-//!   starts with no `libopenconnect` in it. `load` limits the process's DLL
-//!   search to System32, then loads the DLL by its full path with its
-//!   dependencies taken from its own folder or System32. The working
-//!   directory and `PATH` are never searched.
-//! - **macOS and Linux.** The system loader has already loaded the library
-//!   through the program's rpath when `load` runs, so `load` checks which
-//!   file that was and refuses any other folder. On Linux the library's own
-//!   dependencies (GnuTLS, zlib) are the distribution's, by design.
+//! - **Windows.** It also controls where that file's own dependencies come
+//!   from: its folder or System32, never the program's folder, the working
+//!   directory or `PATH`.
+//! - **macOS and Linux.** It does not control the file's dependencies. The
+//!   system loader resolves those: from the library's own folder on macOS
+//!   (the bundle), from the distribution on Linux (GnuTLS, zlib), and in both
+//!   cases the loader obeys its environment variables first. On macOS
+//!   `DYLD_*` variables can even replace the file named by a full path, so
+//!   `load` refuses to run with one set.
 //!
-//! On every OS `load` then refuses a library that is not the pinned version.
-//!
-//! Cargo passes link arguments only to this crate's own tests. A program
-//! that uses the engine must pass its own: `/DELAYLOAD:libopenconnect-5.dll`
-//! and `delayimp.lib` on Windows, and an rpath that names the folder its
-//! libraries are installed in on macOS and Linux.
+//! So a service that runs as root still needs what no code here can give: an
+//! install folder owned by root with no ancestor a user can write, and a
+//! clean environment from systemd or launchd. It must never be setuid.
 
 // Nothing in the crate calls this yet. The login and tunnel code comes next.
 #![allow(dead_code)]
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
 
 /// The version string of the one release this binding is written for.
 const PINNED: &str = "v9.21";
 
-#[cfg_attr(windows, link(name = "libopenconnect-5", kind = "raw-dylib"))]
-#[cfg_attr(not(windows), link(name = "openconnect"))]
-unsafe extern "C" {
-    fn openconnect_get_version() -> *const c_char;
-}
-
 /// Why the library was not loaded. Nothing of it may be called then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoadError {
-    /// The folder was not given as an absolute path.
-    NotAbsolute,
-    /// The library, or something it needs, is not in the folder.
-    NotFound,
-    /// A `libopenconnect` was in the process before the folder was chosen,
-    /// so Windows found it by its usual search. The program was not linked
-    /// to delay-load it. Windows only.
+    /// The folder is not a plain absolute path. On Windows that means a
+    /// drive letter: network and device paths are refused.
+    BadFolder,
+    /// A loader variable is set that can replace the file. macOS only.
+    UnsafeEnvironment,
+    /// A `libopenconnect` was in the process before the folder was chosen.
     LoadedEarly,
-    /// The library the system loader picked is not the one in the folder.
-    /// macOS and Linux only.
+    /// The library, or something it needs, could not be loaded.
+    NotFound,
+    /// The loader answered with a file from another folder. macOS and Linux
+    /// only, where a library of the same name can stand in for the path.
     WrongFolder,
+    /// The library lacks a function this binding declares.
+    MissingFunction,
     /// The library is not the pinned version.
     WrongVersion,
 }
 
-/// Proof that the pinned library is loaded from the chosen folder. Safe
-/// wrappers hang off this, so nothing can call the library before it exists.
+/// The loaded library: one pointer per declared function, filled in by
+/// [`Library::load`]. Every call into the library is a method on this, so
+/// there is nothing to call before `load` has succeeded.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Library(());
+pub(crate) struct Library {
+    /// `const char *openconnect_get_version(void)`
+    get_version: unsafe extern "C" fn() -> *const c_char,
+}
 
 impl Library {
-    /// Loads the library from `dir` and nowhere else, and checks it is the
-    /// pinned version. Call it once, before anything else in this module and
-    /// before the process starts threads that may load libraries.
+    /// Loads `libopenconnect` from `dir`, looks up every function, and
+    /// checks the version. Call it once per process. The module
+    /// documentation says what this does and does not control.
     pub(crate) fn load(dir: &Path) -> Result<Self, LoadError> {
-        if !dir.is_absolute() {
-            return Err(LoadError::NotAbsolute);
+        let file = dir.join(os::FILE);
+        // A NUL would make the loader read a shorter path than the one given.
+        if !os::is_plain(dir) || file.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(LoadError::BadFolder);
         }
-        os::load(dir)?;
-        let library = Self(());
+        let handle = os::open(&file)?;
+        let get_version = os::symbol(handle, c"openconnect_get_version");
+        if get_version.is_null() {
+            return Err(LoadError::MissingFunction);
+        }
+        os::confirm(get_version, dir)?;
+        // SAFETY: the pointer is the address of the function of that name in
+        // the library just loaded, which is never unloaded. Its signature is
+        // the one in `openconnect.h`, and has been in every release.
+        let get_version = unsafe {
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> *const c_char>(get_version)
+        };
+        let library = Self { get_version };
+        // The other signatures hold for the pinned release only.
         if !is_pinned(&library.version()) {
             return Err(LoadError::WrongVersion);
         }
@@ -84,9 +97,9 @@ impl Library {
 
     /// The library's version string, such as `v9.21`.
     pub(crate) fn version(self) -> String {
-        // SAFETY: `self` proves the library is loaded. The function takes no
+        // SAFETY: `load` filled the pointer in. The function takes no
         // arguments and returns a NUL-terminated string that is never freed.
-        unsafe { CStr::from_ptr(openconnect_get_version()) }
+        unsafe { CStr::from_ptr((self.get_version)()) }
             .to_string_lossy()
             .into_owned()
     }
@@ -104,14 +117,14 @@ pub(crate) fn is_pinned(version: &str) -> bool {
 
 #[cfg(windows)]
 pub(crate) mod os {
-    use std::ffi::{OsStr, c_void};
+    use std::ffi::{CStr, OsStr, c_char, c_void};
     use std::os::windows::ffi::OsStrExt;
-    use std::path::Path;
+    use std::path::{Component, Path, Prefix};
     use std::ptr;
 
     use super::LoadError;
 
-    const DLL: &str = "libopenconnect-5.dll";
+    pub(crate) const FILE: &str = "libopenconnect-5.dll";
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0100;
     const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0800;
 
@@ -120,27 +133,36 @@ pub(crate) mod os {
         fn SetDefaultDllDirectories(flags: u32) -> i32;
         fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
         fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, size: u32) -> u32;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
     }
 
     fn wide(text: &OsStr) -> Vec<u16> {
         text.encode_wide().chain([0]).collect()
     }
 
-    pub(super) fn load(dir: &Path) -> Result<(), LoadError> {
-        let name = wide(OsStr::new(DLL));
+    /// An absolute path on a drive letter: not a share, not a `\\?\` form.
+    pub(super) fn is_plain(dir: &Path) -> bool {
+        let disk =
+            |first| matches!(first, Component::Prefix(p) if matches!(p.kind(), Prefix::Disk(_)));
+        dir.is_absolute() && dir.components().next().is_some_and(disk)
+    }
+
+    fn loaded(name: &str) -> *mut c_void {
+        let name = wide(OsStr::new(name));
         // SAFETY: `name` is NUL-terminated UTF-16 and outlives the call.
-        if !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null() {
+        unsafe { GetModuleHandleW(name.as_ptr()) }
+    }
+
+    pub(super) fn open(file: &Path) -> Result<*mut c_void, LoadError> {
+        if !loaded(FILE).is_null() {
             return Err(LoadError::LoadedEarly);
         }
-        let path = wide(dir.join(DLL).as_os_str());
-        // A NUL inside the path would make Windows read a shorter one.
-        if path.iter().filter(|unit| **unit == 0).count() != 1 {
-            return Err(LoadError::NotFound);
-        }
+        let path = wide(file.as_os_str());
         // From here on a library asked for by name alone, by anything in the
-        // process, comes from System32 only. That covers the delay-load
-        // helper and what GnuTLS loads later. It does not cover Wintun: the
-        // library asks for `wintun.dll` in the program's own folder.
+        // process, comes from System32 only. That covers what GnuTLS loads
+        // later. It does not cover Wintun: the library asks for `wintun.dll`
+        // in the program's own folder.
         // SAFETY: takes a flag and touches no memory of ours.
         if unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) } == 0 {
             return Err(LoadError::NotFound);
@@ -150,31 +172,70 @@ pub(crate) mod os {
         // SAFETY: `path` is NUL-terminated UTF-16 and outlives the call; the
         // second argument is reserved and must be null. Loading runs the
         // start-up code of the library and of what it needs.
-        if unsafe { LoadLibraryExW(path.as_ptr(), ptr::null_mut(), flags) }.is_null() {
+        let handle = unsafe { LoadLibraryExW(path.as_ptr(), ptr::null_mut(), flags) };
+        if handle.is_null() {
             return Err(LoadError::NotFound);
         }
+        Ok(handle)
+    }
+
+    pub(super) fn symbol(handle: *mut c_void, name: &CStr) -> *mut c_void {
+        // SAFETY: `handle` came from `open`, and `name` is a NUL-terminated
+        // string that outlives the call.
+        unsafe { GetProcAddress(handle, name.as_ptr()) }
+    }
+
+    /// Windows loaded the file by its full path; there is nothing to confirm.
+    pub(super) fn confirm(_function: *mut c_void, _dir: &Path) -> Result<(), LoadError> {
         Ok(())
     }
 
-    /// For tests: whether Windows finds a library asked for by name alone,
-    /// the way a program that is not careful asks.
-    pub(crate) fn finds_by_name(name: &str) -> bool {
-        let name = wide(OsStr::new(name));
+    /// For tests: asks Windows for a library the way a careless program
+    /// does, with the usual search.
+    #[cfg(test)]
+    pub(crate) fn careless_load(name: &OsStr) -> bool {
+        let name = wide(name);
         // SAFETY: `name` is NUL-terminated UTF-16 and outlives the call; the
         // second argument is reserved and must be null. Loading runs the
         // found library's start-up code; tests pass only our own libraries.
         !unsafe { LoadLibraryExW(name.as_ptr(), ptr::null_mut(), 0) }.is_null()
     }
+
+    /// For tests: the file a loaded library of this name came from.
+    #[cfg(test)]
+    pub(crate) fn module_path(name: &str) -> Option<std::path::PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        let module = loaded(name);
+        let mut buffer = [0u16; 1024];
+        // SAFETY: `module` is checked below before the result is used, and
+        // `buffer` is writable for the length given.
+        let length = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), 1024) } as usize;
+        let known = !module.is_null() && length > 0 && length < buffer.len();
+        known.then(|| std::ffi::OsString::from_wide(&buffer[..length]).into())
+    }
 }
 
 #[cfg(unix)]
-mod os {
-    use std::ffi::{CStr, OsStr, c_char, c_int, c_void};
+pub(crate) mod os {
+    use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::{fs, ptr};
 
     use super::LoadError;
+
+    #[cfg(target_os = "macos")]
+    pub(crate) const FILE: &str = "libopenconnect.5.dylib";
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) const FILE: &str = "libopenconnect.so.5";
+
+    const RTLD_LAZY: c_int = 1;
+    const RTLD_NOW: c_int = 2;
+    // `RTLD_LOCAL` then `RTLD_NOLOAD`, which differ between the two systems.
+    #[cfg(target_os = "macos")]
+    const LOCAL_NOLOAD: (c_int, c_int) = (4, 0x10);
+    #[cfg(not(target_os = "macos"))]
+    const LOCAL_NOLOAD: (c_int, c_int) = (0, 4);
 
     /// `Dl_info`, which has this layout on both macOS and Linux.
     #[repr(C)]
@@ -186,19 +247,60 @@ mod os {
     }
 
     unsafe extern "C" {
+        fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         fn dladdr(address: *const c_void, info: *mut DlInfo) -> c_int;
     }
 
-    /// The system loader chose the file before `main`. Find out which one,
-    /// and accept only the one in `dir`.
-    pub(super) fn load(dir: &Path) -> Result<(), LoadError> {
+    pub(super) fn is_plain(dir: &Path) -> bool {
+        dir.is_absolute()
+    }
+
+    fn open_with(path: &OsStr, mode: c_int) -> *mut c_void {
+        let Ok(path) = CString::new(path.as_bytes()) else {
+            return ptr::null_mut();
+        };
+        // SAFETY: `path` is a NUL-terminated string that outlives the call.
+        // Loading runs the start-up code of the library and of what it needs.
+        unsafe { dlopen(path.as_ptr(), mode) }
+    }
+
+    pub(super) fn open(file: &Path) -> Result<*mut c_void, LoadError> {
+        // dyld tries the file's name in `DYLD_LIBRARY_PATH` before the full
+        // path it was given, and other `DYLD_*` variables redirect it too.
+        if cfg!(target_os = "macos")
+            && std::env::vars_os().any(|(name, _)| name.as_bytes().starts_with(b"DYLD_"))
+        {
+            return Err(LoadError::UnsafeEnvironment);
+        }
+        // Asks for the name alone, then the file, without loading anything.
+        let present = |name: &OsStr| !open_with(name, RTLD_LAZY | LOCAL_NOLOAD.1).is_null();
+        if present(OsStr::new(FILE)) || present(file.as_os_str()) {
+            return Err(LoadError::LoadedEarly);
+        }
+        let handle = open_with(file.as_os_str(), RTLD_NOW | LOCAL_NOLOAD.0);
+        if handle.is_null() {
+            return Err(LoadError::NotFound);
+        }
+        Ok(handle)
+    }
+
+    pub(super) fn symbol(handle: *mut c_void, name: &CStr) -> *mut c_void {
+        // SAFETY: `handle` came from `dlopen`, and `name` is a NUL-terminated
+        // string that outlives the call.
+        unsafe { dlsym(handle, name.as_ptr()) }
+    }
+
+    /// The loader may answer a full path with a library of the same name
+    /// that is already loaded. So ask which file `function` is in, and
+    /// accept only a full path to a file in `dir`.
+    pub(super) fn confirm(function: *mut c_void, dir: &Path) -> Result<(), LoadError> {
         let mut info = DlInfo {
             file: ptr::null(),
             base: ptr::null_mut(),
             symbol: ptr::null(),
             address: ptr::null_mut(),
         };
-        let function = super::openconnect_get_version as *const c_void;
         // SAFETY: `dladdr` only looks the address up, and `info` is a valid
         // `Dl_info` for it to fill.
         if unsafe { dladdr(function, &mut info) } == 0 || info.file.is_null() {
@@ -206,11 +308,23 @@ mod os {
         }
         // SAFETY: `dladdr` succeeded, so `file` is the loader's own
         // NUL-terminated path of a library that is never unloaded.
-        let file = OsStr::from_bytes(unsafe { CStr::from_ptr(info.file) }.to_bytes());
-        let dir = fs::canonicalize(dir).map_err(|_| LoadError::NotFound)?;
-        match fs::canonicalize(file) {
-            Ok(file) if file.parent() == Some(&dir) => Ok(()),
+        let file = Path::new(OsStr::from_bytes(
+            unsafe { CStr::from_ptr(info.file) }.to_bytes(),
+        ));
+        // A relative answer would be resolved against the folder the process
+        // is in now, which need not be the one the loader used.
+        if !file.is_absolute() {
+            return Err(LoadError::WrongFolder);
+        }
+        match (fs::canonicalize(file), fs::canonicalize(dir)) {
+            (Ok(file), Ok(dir)) if file.parent() == Some(&dir) => Ok(()),
             _ => Err(LoadError::WrongFolder),
         }
+    }
+
+    /// For tests: loads a library the way a careless program does.
+    #[cfg(test)]
+    pub(crate) fn careless_load(name: &OsStr) -> bool {
+        !open_with(name, RTLD_NOW).is_null()
     }
 }

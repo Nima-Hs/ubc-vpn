@@ -31,7 +31,7 @@ gh run download <run-id> --name libopenconnect-windows-x64 --dir <folder>
 UBC_VPN_NATIVE_DIR=<folder> cargo test -p ubc-vpn-engine --features libopenconnect
 ```
 
-The macOS and Linux artifacts hold a tarball to unpack. `.github/workflows/engine.yml` has the exact steps.
+The macOS and Linux artifacts hold a tarball to unpack, and the tests there build a small stand-in library with the system's C compiler (`cc`). `.github/workflows/engine.yml` has the exact steps.
 
 ## Workflow
 

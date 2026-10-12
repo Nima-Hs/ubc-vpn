@@ -3,13 +3,14 @@ name: Engine
 # The real engine links libopenconnect, which the ordinary CI does not have.
 # This workflow takes our own build of it from the newest good run of the
 # native-library workflow on main, and proves on each OS that the engine
-# crate links it, loads it from one folder only, and can call it.
+# crate loads it at run time from the folder it is given, and can call it.
 
 on:
   pull_request:
     paths:
       - crates/engine/**
       - crates/core/**
+      - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/engine.yml
@@ -18,13 +19,17 @@ on:
     paths:
       - crates/engine/**
       - crates/core/**
+      - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/engine.yml
   workflow_dispatch:
 
+# `actions: read` is for listing the native-library runs and downloading
+# their artifacts.
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: engine-${{ github.ref }}
@@ -38,16 +43,16 @@ defaults:
 
 jobs:
   link:
-    name: link (${{ matrix.name }})
+    name: load (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # The runners the native-library workflows test on.
-          - { name: windows, os: windows-latest, artifact: libopenconnect-windows-x64, libs: bin }
-          - { name: macos, os: macos-14, artifact: libopenconnect-macos-arm64, libs: lib }
-          - { name: linux, os: ubuntu-22.04, artifact: libopenconnect-linux-x64, libs: lib }
+          - { name: windows, os: windows-latest, artifact: libopenconnect-windows-x64 }
+          - { name: macos, os: macos-14, artifact: libopenconnect-macos-arm64 }
+          - { name: linux, os: ubuntu-22.04, artifact: libopenconnect-linux-x64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -112,14 +117,13 @@ jobs:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
         run: cargo clippy --locked -p ubc-vpn-engine --features libopenconnect --all-targets -- -D warnings
 
-      # The library's folder goes on PATH, which is where a careless program
-      # would find it. The tests check that nothing is taken from there.
-      - name: Link, load and call the library
+      # The tests start themselves again with planted copies in the working
+      # directory and the loader's search path. On macOS and Linux they build
+      # a stand-in library with the runner's C compiler.
+      - name: Load and call the library
         env:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
-          LIBS: ${{ matrix.libs }}
         run: |
-          PATH="$(cd "$UBC_VPN_NATIVE_DIR/$LIBS" && pwd):$PATH"
           cargo test --locked -p ubc-vpn-engine --features libopenconnect --tests -- --nocapture | tee test.log
           # A test that is skipped passes, so prove from the log that it ran.
-          grep -E '^RAN: libopenconnect v9\.21(-unknown)? from ' test.log
+          grep -E '^RAN: Ok\("v9\.21(-unknown)?"\)' test.log

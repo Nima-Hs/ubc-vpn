@@ -1,28 +1,41 @@
-//! Finds the native library for the `libopenconnect` feature.
+//! Checks the native library for the `libopenconnect` feature.
 //!
 //! Without the feature this does nothing. With it, `UBC_VPN_NATIVE_DIR` must
 //! name an unpacked output of this repository's own build of the library
-//! (`native/`, the `libopenconnect-*` workflow artifacts). A library installed
-//! on the system is never used: nothing here asks pkg-config or looks in a
-//! system folder, and the build stops if the folder is not the pinned build.
+//! (`native/`, the `libopenconnect-*` workflow artifacts), and the build
+//! stops unless that output is the pinned one. Nothing is linked: the engine
+//! loads the library at run time (`src/ffi.rs`). The folder is handed to
+//! this crate's own tests and to nothing else.
 //!
-//! The rules are in [`check_manifest`], which `tests/native_manifest.rs` tests.
+//! Every rule is in [`check`], which `tests/native_manifest.rs` tests.
+
+#![cfg_attr(not(feature = "libopenconnect"), allow(dead_code, unused_imports))]
 
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
 /// The one OpenConnect release the binding is written against.
 const VERSION: &str = "9.21";
-/// The commit that tag `v9.21` points to. Every manifest records it.
+/// The commit that tag `v9.21` points to.
 const COMMIT: &str = "8b702bf2dbaf11302ed98629214b1df5d50a12aa";
 const DIR_VAR: &str = "UBC_VPN_NATIVE_DIR";
 /// For development only: set to `1` to accept a Windows output that its
 /// build did not mark shippable. Refused in a release build.
 pub(crate) const DEV_VAR: &str = "UBC_VPN_NATIVE_DEV_UNSHIPPABLE";
 
-/// What the manifest must say its target is, and where the library is.
-fn target(os: &str, arch: &str, env: &str) -> Option<(&'static str, &'static str)> {
-    match (os, arch, env) {
+/// What Cargo and the environment say about this build.
+pub(crate) struct Build<'a> {
+    /// `CARGO_CFG_TARGET_OS`, `_ARCH` and `_ENV`.
+    pub target: (&'a str, &'a str, &'a str),
+    /// `PROFILE`: `debug`, or `release` for every profile based on it.
+    pub profile: &'a str,
+    /// The value of [`DEV_VAR`], if it is set.
+    pub dev_override: Option<&'a str>,
+}
+
+/// For a target: what the manifest calls it, and where the library is.
+fn target(triple: (&str, &str, &str)) -> Option<(&'static str, &'static str)> {
+    match triple {
         ("windows", "x86_64", "msvc") => Some((
             "x86_64-w64-mingw32 (MSYS2 UCRT64)",
             "bin/libopenconnect-5.dll",
@@ -33,64 +46,67 @@ fn target(os: &str, arch: &str, env: &str) -> Option<(&'static str, &'static str
     }
 }
 
-/// What follows the first `"key":` in `json`. The manifests are written by
-/// our own build scripts in a fixed layout, so this is not a general JSON
-/// reader. Anything it cannot read counts as absent, and an absent value
-/// fails the check.
-fn after<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let key = format!("\"{key}\"");
-    let rest = json[json.find(&key)? + key.len()..].trim_start();
-    Some(rest.strip_prefix(':')?.trim_start())
-}
+/// Decides whether the native build output with this manifest may be used.
+/// `Ok` carries the library's place in the folder and a warning to print.
+///
+/// The manifest is parsed as JSON and read at exact places. A file that is
+/// not JSON, or lacks a field, or has it at another depth, is refused.
+#[cfg(feature = "libopenconnect")]
+pub(crate) fn check(json: &str, build: &Build) -> Result<(&'static str, Option<String>), String> {
+    use serde_json::Value;
 
-/// The contents of the string value of `key`.
-fn text<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    after(json, key)?.strip_prefix('"')?.split('"').next()
-}
-
-/// The bare value of `key`, such as `true`. A string is not one.
-fn word<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let end = |c: char| c == ',' || c == '}' || c.is_whitespace();
-    after(json, key)?.split(end).next()
-}
-
-/// Decides whether a native build output may be linked. `dev_override` is
-/// whether [`DEV_VAR`] is set. `Ok` carries a warning to print, if any.
-pub(crate) fn check_manifest(
-    json: &str,
-    want_target: &str,
-    windows: bool,
-    release: bool,
-    dev_override: bool,
-) -> Result<Option<String>, String> {
-    if text(json, "target") != Some(want_target) {
-        return Err(format!("it is not a build for {want_target}"));
+    let (name, library) =
+        target(build.target).ok_or("there is no native library for this target")?;
+    let manifest: Value = serde_json::from_str(json).map_err(|e| format!("not JSON: {e}"))?;
+    if manifest.get("target").and_then(Value::as_str) != Some(name) {
+        return Err(format!("it is not a build for {name}"));
     }
-    let openconnect = json.find("\"name\": \"openconnect\"").map(|at| &json[at..]);
-    if openconnect.and_then(|part| text(part, "version")) != Some(VERSION) || !json.contains(COMMIT)
+    let named = |c: &&Value| c.get("name").and_then(Value::as_str) == Some("openconnect");
+    let components = manifest.get("components").and_then(Value::as_array);
+    let mut found = components.into_iter().flatten().filter(named);
+    let (Some(openconnect), None) = (found.next(), found.next()) else {
+        return Err("it does not have exactly one openconnect component".into());
+    };
+    // Each OS's build records OpenConnect's commit in its own place.
+    let commit = match build.target.0 {
+        "windows" => openconnect
+            .get("source")
+            .and_then(|source| source.get("commit")),
+        "linux" => openconnect.get("commit"),
+        _ => manifest.get("openconnect_tag_commit"),
+    };
+    if openconnect.get("version").and_then(Value::as_str) != Some(VERSION)
+        || commit.and_then(Value::as_str) != Some(COMMIT)
     {
         return Err(format!("it is not OpenConnect {VERSION} (commit {COMMIT})"));
     }
     // Only the Windows build has tests that decide this. Anything but a plain
-    // `true` is a refusal, a missing flag included.
-    if windows && word(json, "shippable") != Some("true") {
-        if !dev_override {
+    // `true` at the top level is a refusal, a missing flag included.
+    if build.target.0 == "windows" && manifest.get("shippable") != Some(&Value::Bool(true)) {
+        if build.dev_override != Some("1") {
             return Err("its build did not mark it shippable".into());
         }
-        if release {
+        // Anything but a plain debug build counts as a release.
+        if build.profile != "debug" {
             return Err(format!("{DEV_VAR} is not allowed in a release build"));
         }
-        return Ok(Some(format!(
-            "linking a native library that is not shippable, because {DEV_VAR} is set"
-        )));
+        let warning = format!("using a native library that is not shippable: {DEV_VAR} is set");
+        return Ok((library, Some(warning)));
     }
-    Ok(None)
+    Ok((library, None))
 }
 
 /// Checks the folder and returns the folder inside it that holds the library.
-fn find(os: &str, arch: &str, env: &str) -> Result<(PathBuf, Option<String>), String> {
-    let (want_target, library) =
-        target(os, arch, env).ok_or("there is no native library for this target")?;
+#[cfg(feature = "libopenconnect")]
+fn find() -> Result<(PathBuf, Option<String>), String> {
+    let var = |name: &str| env::var(name).unwrap_or_default();
+    let target = ["OS", "ARCH", "ENV"].map(|part| var(&format!("CARGO_CFG_TARGET_{part}")));
+    let (profile, dev_override) = (var("PROFILE"), env::var(DEV_VAR).ok());
+    let build = Build {
+        target: (&target[0], &target[1], &target[2]),
+        profile: &profile,
+        dev_override: dev_override.as_deref(),
+    };
     let dir = env::var_os(DIR_VAR).ok_or(format!(
         "set {DIR_VAR} to an unpacked libopenconnect build output (see CONTRIBUTING.md)"
     ))?;
@@ -100,14 +116,8 @@ fn find(os: &str, arch: &str, env: &str) -> Result<(PathBuf, Option<String>), St
     println!("cargo:rerun-if-changed={}", manifest.display());
     let json = fs::read_to_string(&manifest)
         .map_err(|e| format!("{DIR_VAR}: {}: {e}", manifest.display()))?;
-    let warning = check_manifest(
-        &json,
-        want_target,
-        os == "windows",
-        env::var("PROFILE").as_deref() == Ok("release"),
-        env::var(DEV_VAR).as_deref() == Ok("1"),
-    )
-    .map_err(|why| format!("{DIR_VAR}: {} is refused: {why}", dir.display()))?;
+    let (library, warning) = check(&json, &build)
+        .map_err(|why| format!("{DIR_VAR}: {} is refused: {why}", dir.display()))?;
     let library = dir.join(library);
     if !library.is_file() {
         return Err(format!("{DIR_VAR}: {} is missing", library.display()));
@@ -119,33 +129,16 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={DIR_VAR}");
     println!("cargo:rerun-if-env-changed={DEV_VAR}");
-    if env::var_os("CARGO_FEATURE_LIBOPENCONNECT").is_none() {
-        return;
-    }
-    let cfg = |name: &str| env::var(format!("CARGO_CFG_TARGET_{name}")).unwrap_or_default();
-    let (os, arch, abi) = (cfg("OS"), cfg("ARCH"), cfg("ENV"));
-    let (libs, warning) = find(&os, &arch, &abi).unwrap_or_else(|why| {
-        eprintln!("error: the libopenconnect feature needs the native library.\n{why}");
-        process::exit(1);
-    });
-    if let Some(warning) = warning {
-        println!("cargo:warning={warning}");
-    }
-    let libs = libs.display();
-    // The folder this crate's own tests load the library from.
-    println!("cargo:rustc-env=UBC_VPN_NATIVE_LIBS={libs}");
-    if os == "windows" {
-        // The import is `raw-dylib`, so there is nothing to find at link
-        // time. It is delay-loaded, so that nothing is loaded before
-        // `Library::load` has chosen the folder. Link arguments reach only
-        // this crate's own tests; a program that uses the engine passes the
-        // same ones (see `src/ffi.rs`).
-        println!("cargo:rustc-link-arg-tests=/DELAYLOAD:libopenconnect-5.dll");
-        println!("cargo:rustc-link-arg-tests=delayimp.lib");
-        // A test that does not use the library has nothing to delay.
-        println!("cargo:rustc-link-arg-tests=/IGNORE:4199");
-    } else {
-        println!("cargo:rustc-link-search=native={libs}");
-        println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{libs}");
+    #[cfg(feature = "libopenconnect")]
+    {
+        let (libs, warning) = find().unwrap_or_else(|why| {
+            eprintln!("error: the libopenconnect feature needs the native library.\n{why}");
+            process::exit(1);
+        });
+        if let Some(warning) = warning {
+            println!("cargo:warning={warning}");
+        }
+        // The folder this crate's own tests load the library from.
+        println!("cargo:rustc-env=UBC_VPN_NATIVE_LIBS={}", libs.display());
     }
 }
