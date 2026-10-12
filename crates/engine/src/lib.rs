@@ -125,6 +125,8 @@
 //!   accepted, and fail the login or the tunnel if it did not. The library
 //!   forgets the certificate at each new connection, so clear the record
 //!   before every connection, reconnects included.
+//! - Reject inside the certificate callback, so that nothing, the cookie
+//!   least of all, is sent before the pin check has passed.
 //!
 //! **A gateway on this machine, for tests**
 //!
@@ -138,8 +140,6 @@
 //!   endpoint accepts exactly one address, the endpoint's own, in place of
 //!   calling [`check_gateway_addr`], which refuses loopback. A gateway
 //!   without one always calls [`check_gateway_addr`].
-//! - Reject inside the certificate callback, so that nothing, the cookie
-//!   least of all, is sent before the pin check has passed.
 //!
 //! **Login**
 //!
