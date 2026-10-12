@@ -129,6 +129,12 @@ fn child() {
     if let Some(first) = env::var_os("UBC_VPN_TEST_CARELESS") {
         assert!(os::careless_load(&first), "the careless load itself failed");
     }
+    #[cfg(unix)]
+    if let Some(name) = env::var_os("UBC_VPN_TEST_FORGET") {
+        // SAFETY: this child runs this one test, and nothing else in it
+        // touches the environment while the variable is removed.
+        unsafe { os::forget_variable(&name) };
+    }
     // Windows: which of the folder's DLLs are in the process, and from where.
     #[cfg(windows)]
     let modules = || -> Vec<PathBuf> {
@@ -209,9 +215,23 @@ fn nothing_is_loaded_with_a_dyld_variable_set() {
     ];
     assert_eq!(
         outcome(Path::new(LIBS), &planted, &set),
-        refused(LoadError::UnsafeEnvironment)
+        refused(LoadError::UnsafeEnvironment(SEARCH.into()))
     );
     assert!(!marker.exists(), "the stand-in's code ran");
+    // Not that one variable alone. This one makes dyld load the stand-in at
+    // start, which is harmless here: it is given no marker to write.
+    let inserted = planted.join(os::FILE);
+    let insert = [("DYLD_INSERT_LIBRARIES", inserted.as_os_str())];
+    let error = LoadError::UnsafeEnvironment("DYLD_INSERT_LIBRARIES".into());
+    assert_eq!(
+        outcome(Path::new(LIBS), &planted, &insert),
+        refused(error.clone())
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("DYLD_INSERT_LIBRARIES is set. Unset it")
+    );
     // The fallback variables are allowed, because dyld does not use them
     // for a full path. This fails if a later macOS does.
     let fallback = [set[0], ("DYLD_FALLBACK_LIBRARY_PATH", planted.as_os_str())];
@@ -221,6 +241,26 @@ fn nothing_is_loaded_with_a_dyld_variable_set() {
         refused(LoadError::NotFound)
     );
     assert!(!marker.exists(), "the stand-in's code ran");
+}
+
+// Security rule, macOS: dyld reads its variables when the process starts. If
+// one is removed before `load`, the refusal above sees nothing and dyld
+// still loads the copy it names. `load` must then say the file came from
+// the wrong folder. The copy's code has run by then; this only stops it
+// being used as the library.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_copy_loaded_through_a_removed_dyld_variable_is_refused() {
+    let copy = scratch("removed");
+    copy_libs(&copy);
+    let set = [
+        (SEARCH, copy.as_os_str()),
+        ("UBC_VPN_TEST_FORGET", OsStr::new(SEARCH)),
+    ];
+    assert_eq!(
+        outcome(Path::new(LIBS), &copy, &set),
+        refused(LoadError::WrongFolder)
+    );
 }
 
 // Security rule: the folder must be a plain absolute path with no NUL.

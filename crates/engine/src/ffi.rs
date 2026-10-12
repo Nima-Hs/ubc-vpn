@@ -21,10 +21,18 @@
 //!   cases the loader obeys its environment variables first. On macOS
 //!   `DYLD_*` variables can even replace the file named by a full path, so
 //!   `load` refuses to run with one set, the two fallback ones apart.
+//!   dyld reads those variables when the process starts, so `load` must run
+//!   before anything removes one. If one was removed, `load` can only tell
+//!   afterwards that the file came from another folder: by then the foreign
+//!   code has already run, and the error is all that is left to do.
 //!
 //! So a service that runs as root still needs what no code here can give: an
 //! install folder owned by root with no ancestor a user can write, and a
 //! clean environment from systemd or launchd. It must never be setuid.
+//!
+//! A program works out the folder from its own location. On Windows it must
+//! not canonicalize that path: the result is a `\\?\` form, which `load`
+//! refuses along with every other path that does not start at a drive letter.
 
 // Nothing in the crate calls this yet. The login and tunnel code comes next.
 #![allow(dead_code)]
@@ -36,13 +44,13 @@ use std::path::Path;
 const PINNED: &str = "v9.21";
 
 /// Why the library was not loaded. Nothing of it may be called then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoadError {
     /// The folder is not a plain absolute path. On Windows that means a
     /// drive letter: network and device paths are refused.
     BadFolder,
-    /// A loader variable is set that can replace the file. macOS only.
-    UnsafeEnvironment,
+    /// This loader variable is set, and it can replace the file. macOS only.
+    UnsafeEnvironment(String),
     /// A `libopenconnect` was in the process before the folder was chosen.
     LoadedEarly,
     /// The library, or something it needs, could not be loaded.
@@ -54,6 +62,24 @@ pub(crate) enum LoadError {
     MissingFunction,
     /// The library is not the pinned version.
     WrongVersion,
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadFolder => f.write_str("The VPN library's folder is not a usable path."),
+            Self::UnsafeEnvironment(name) => write!(
+                f,
+                "The environment variable {name} is set. Unset it and start again."
+            ),
+            Self::LoadedEarly => f.write_str("A VPN library was already loaded."),
+            Self::NotFound => f.write_str("The VPN library could not be loaded."),
+            Self::WrongFolder => f.write_str("The VPN library came from the wrong folder."),
+            Self::MissingFunction | Self::WrongVersion => {
+                f.write_str("The VPN library is not the expected version.")
+            }
+        }
+    }
 }
 
 /// The loaded library: one pointer per declared function, filled in by
@@ -275,8 +301,11 @@ pub(crate) mod os {
             let name = name.as_bytes();
             name.starts_with(b"DYLD_") && !name.starts_with(b"DYLD_FALLBACK_")
         };
-        if cfg!(target_os = "macos") && std::env::vars_os().any(|(name, _)| redirects(&name)) {
-            return Err(LoadError::UnsafeEnvironment);
+        let mut names = std::env::vars_os().map(|(name, _)| name);
+        if let Some(name) = names.find(|name| cfg!(target_os = "macos") && redirects(name)) {
+            return Err(LoadError::UnsafeEnvironment(
+                name.to_string_lossy().into_owned(),
+            ));
         }
         // Asks for the name alone, then the file, without loading anything.
         let present = |name: &OsStr| !open_with(name, RTLD_LAZY | LOCAL_NOLOAD.1).is_null();
@@ -325,6 +354,18 @@ pub(crate) mod os {
             (Ok(file), Ok(dir)) if file.parent() == Some(&dir) => Ok(()),
             _ => Err(LoadError::WrongFolder),
         }
+    }
+
+    /// For tests: removes a variable from the environment, as a program
+    /// that tidies up after its start would.
+    ///
+    /// # Safety
+    ///
+    /// No other thread may read or write the environment during the call.
+    #[cfg(test)]
+    pub(crate) unsafe fn forget_variable(name: &OsStr) {
+        // SAFETY: the caller keeps other threads off the environment.
+        unsafe { std::env::remove_var(name) };
     }
 
     /// For tests: loads a library the way a careless program does.
