@@ -330,6 +330,10 @@ impl Listener for PipeListener {
         Ok(())
     }
 
+    /// Also closes every connection this listener accepted. Windows keeps a
+    /// pipe's name taken while any instance of it is open, and each accepted
+    /// connection is one, so the name could not be released otherwise: a new
+    /// listener would be refused until the last old client had gone.
     fn close(&self) {
         if let Some(free) = lock(&self.free).take() {
             free.shut_down();
