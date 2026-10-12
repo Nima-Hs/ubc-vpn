@@ -403,6 +403,7 @@ fn writing_to_a_vanished_peer_is_an_error_and_not_sigpipe() {
     };
     let (_listener, client, server) = sandbox.pair();
     drop(client);
+    assert_eq!(server.read_line(), Ok(None), "the peer left");
     // SAFETY: installing the default action runs no code of ours.
     let before = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let written = server.write_line("anyone there?");

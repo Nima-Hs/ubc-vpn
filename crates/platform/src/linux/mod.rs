@@ -59,8 +59,10 @@ pub(crate) fn no_sigpipe(_stream: &UnixStream) -> io::Result<()> {
     Ok(())
 }
 
+/// Sends what the socket has room for, without waiting.
+///
 /// Security rule: a peer that went away is an error, not a signal that kills
 /// the service.
 pub(crate) fn send(stream: &UnixStream, bytes: &[u8]) -> rustix::io::Result<usize> {
-    rustix::net::send(stream, bytes, SendFlags::NOSIGNAL)
+    rustix::net::send(stream, bytes, SendFlags::DONTWAIT | SendFlags::NOSIGNAL)
 }

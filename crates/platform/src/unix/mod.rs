@@ -31,7 +31,7 @@ mod tests;
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions, TryLockError};
-use std::io::{self, Read};
+use std::io;
 use std::net::Shutdown;
 use std::os::unix::fs::{
     DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown,
@@ -42,8 +42,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rustix::event::{PollFd, PollFlags, poll};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::Errno;
+use rustix::net::{RecvFlags, recv};
 use rustix::process::geteuid;
 
 use crate::unsupported::Native;
@@ -303,8 +304,7 @@ impl Listener for SocketListener {
             let Ok(caller) = os::peer_user(&stream) else {
                 continue;
             };
-            let unblocked = stream.set_nonblocking(false);
-            let Ok(connection) = unblocked.and_then(|()| SocketConnection::new(stream)) else {
+            let Ok(connection) = SocketConnection::new(stream) else {
                 continue;
             };
             return Ok((Connection::new(Box::new(connection)), user_id(caller)?));
@@ -353,8 +353,12 @@ fn user_id(user: u32) -> Result<UserId> {
     user.to_string().parse()
 }
 
+/// No single wait is longer than this; a longer timeout is waited in parts.
+const LONGEST_WAIT: Duration = Duration::from_secs(3600);
+
 struct SocketConnection {
     stream: UnixStream,
+    read_timeout: Mutex<Option<Duration>>,
     write_timeout: Mutex<Option<Duration>>,
     closed: AtomicBool,
 }
@@ -364,43 +368,63 @@ impl SocketConnection {
         os::no_sigpipe(&stream)?;
         Ok(Self {
             stream,
+            read_timeout: Mutex::default(),
             write_timeout: Mutex::default(),
             closed: AtomicBool::new(false),
         })
     }
 
-    fn check_open(&self) -> Result<()> {
-        match self.closed.load(Ordering::SeqCst) {
-            true => Err(Error::Closed),
-            false => Ok(()),
+    /// Waits until the socket can take a read or a write, as `wanted` says,
+    /// or the peer is gone. Fails with [`Error::TimedOut`] at `deadline`.
+    ///
+    /// Timeouts are waited for here and never set on the socket: macOS
+    /// refuses to change a socket whose peer has gone. The reads and writes
+    /// themselves never wait.
+    fn wait(&self, wanted: PollFlags, deadline: Option<Instant>) -> Result<()> {
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(Error::Closed);
+            }
+            let left = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+            if left.is_some_and(|left| left.is_zero()) {
+                return Err(Error::TimedOut);
+            }
+            let part = left.map(|left| Timespec::try_from(left.min(LONGEST_WAIT)));
+            let part = part.transpose().map_err(|_| Error::TimedOut)?;
+            let mut ready = [PollFd::new(&self.stream, wanted)];
+            match poll(&mut ready, part.as_ref()) {
+                Ok(0) | Err(Errno::INTR) => {}
+                Ok(_) => return Ok(()),
+                Err(error) => return Err(io::Error::from(error).into()),
+            }
         }
     }
 }
 
+fn deadline(timeout: &Mutex<Option<Duration>>) -> Option<Instant> {
+    lock(timeout).map(|timeout| Instant::now() + timeout)
+}
+
 impl RawConnection for SocketConnection {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
+        let deadline = deadline(&self.read_timeout);
         loop {
-            self.check_open()?;
-            match (&self.stream).read(buf) {
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                read => return Ok(read?),
+            self.wait(PollFlags::IN, deadline)?;
+            match recv(&self.stream, &mut *buf, RecvFlags::DONTWAIT) {
+                Ok((read, _)) => return Ok(read),
+                Err(Errno::INTR | Errno::AGAIN) => {}
+                Err(error) => return Err(io::Error::from(error).into()),
             }
         }
     }
 
     fn write_all(&self, mut bytes: &[u8]) -> Result<()> {
-        let timeout = *lock(&self.write_timeout);
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = deadline(&self.write_timeout);
         while !bytes.is_empty() {
-            self.check_open()?;
-            let left = deadline.map(|at| at.saturating_duration_since(Instant::now()));
-            if left.is_some_and(|left| left.is_zero()) {
-                return Err(Error::TimedOut);
-            }
-            self.stream.set_write_timeout(left)?;
+            self.wait(PollFlags::OUT, deadline)?;
             match os::send(&self.stream, bytes) {
                 Ok(sent) => bytes = &bytes[sent..],
-                Err(Errno::INTR) => {}
+                Err(Errno::INTR | Errno::AGAIN) => {}
                 Err(error) => return Err(io::Error::from(error).into()),
             }
         }
@@ -408,7 +432,8 @@ impl RawConnection for SocketConnection {
     }
 
     fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<()> {
-        Ok(self.stream.set_read_timeout(timeout)?)
+        *lock(&self.read_timeout) = timeout;
+        Ok(())
     }
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<()> {

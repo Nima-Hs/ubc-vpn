@@ -27,6 +27,12 @@ concurrency:
   group: platform-unix-${{ github.ref }}
   cancel-in-progress: true
 
+# Named outright, because only then does a failing test at the head of a
+# pipe fail the step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   channel:
     name: channel (${{ matrix.os }}, ${{ matrix.profile }})

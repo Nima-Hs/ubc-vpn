@@ -66,6 +66,7 @@ pub(crate) fn no_sigpipe(stream: &UnixStream) -> io::Result<()> {
     Ok(sockopt::set_socket_nosigpipe(stream, true)?)
 }
 
+/// Sends what the socket has room for, without waiting.
 pub(crate) fn send(stream: &UnixStream, bytes: &[u8]) -> rustix::io::Result<usize> {
-    rustix::net::send(stream, bytes, SendFlags::empty())
+    rustix::net::send(stream, bytes, SendFlags::DONTWAIT)
 }
