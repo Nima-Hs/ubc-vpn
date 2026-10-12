@@ -1,4 +1,10 @@
-import { type ActionKind, describe, describeActionError, loginAnnouncement } from "@shared/copy";
+import {
+    type ActionKind,
+    describe,
+    describeActionError,
+    loginAnnouncement,
+    loginHasScreen,
+} from "@shared/copy";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
 import { useEffect, useRef } from "react";
 import { TunnelDiagram } from "@/components/tunnel-diagram";
@@ -55,7 +61,7 @@ export function ConnectionView() {
     const tunnel =
         state.link === "ready" && state.conn.state === "connected" ? state.conn.tunnel : null;
     const noticeCopy = notice === null ? null : describeActionError(notice);
-    const loggingIn = login.phase !== "idle";
+    const loggingIn = loginHasScreen(state, login);
 
     // When a login ends, the keyboard goes back to the one button, so the
     // next key press does something and focus is never left on nothing.
@@ -68,7 +74,7 @@ export function ConnectionView() {
         wasLoggingIn.current = loggingIn;
     }, [loggingIn]);
 
-    if (loggingIn) {
+    if (loggingIn && login.phase !== "idle") {
         return (
             <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
                 <TunnelDiagram

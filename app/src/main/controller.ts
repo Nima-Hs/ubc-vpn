@@ -80,6 +80,14 @@ export class Controller {
         this.loginRunner?.cancel();
     }
 
+    /**
+     * For when the app quits: a promise that ends once a login the user gave
+     * up has been wound up, or `limitMs` has passed; `null` if there is none.
+     */
+    windDown(limitMs: number): Promise<void> | null {
+        return this.loginRunner?.windDown(limitMs) ?? null;
+    }
+
     disconnect(): Promise<void> {
         return this.run(() => this.link.disconnect());
     }

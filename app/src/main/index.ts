@@ -2,13 +2,13 @@ import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
 import { app, type BrowserWindow, Menu, protocol, session } from "electron";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
-import { ConnectRunner } from "./channel/connect";
 import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
+import { clientLogin } from "./login";
 import { profileFolder } from "./profile";
-import { stopForQuit } from "./quit";
+import { holdQuitForCancel, stopForQuit } from "./quit";
 import {
     allowsRemoteDebugging,
     applicationMenu,
@@ -105,13 +105,16 @@ async function start(): Promise<void> {
             });
         };
     } else {
-        login = (onState) =>
-            new ConnectRunner({
-                ...connectCommand(app, process),
-                onState,
-                // A login given up after the service accepted it is undone.
+        // A login given up after the service accepted it is undone through
+        // the link, which is made just below and is there before any login.
+        login = clientLogin(
+            {
                 disconnect: () => link.disconnect(),
-            });
+                getState: () => link.getState(),
+                subscribe: (listener) => link.subscribe(listener),
+            },
+            connectCommand(app, process),
+        );
         link = createServiceLink({
             ...bridge,
             appVersion: app.getVersion(),
@@ -177,8 +180,11 @@ async function start(): Promise<void> {
             window.hide();
         }
     });
-    app.on("before-quit", () => {
+    // A login the user gave up is wound up before the app goes.
+    const holdQuit = holdQuitForCancel(controller, () => app.quit());
+    app.on("before-quit", (event) => {
         quitting = true;
+        holdQuit(event);
     });
     app.on("second-instance", show);
     app.on("activate", show);

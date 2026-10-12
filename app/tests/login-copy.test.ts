@@ -1,10 +1,11 @@
-import type { LoginState } from "@shared/api";
+import type { LinkState, LoginState } from "@shared/api";
 import {
     describe as describe_,
     describeLoginFailure,
     describePrompt,
     LOGIN_WORKING,
     loginAnnouncement,
+    loginHasScreen,
 } from "@shared/copy";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import type { PromptKind } from "@shared/protocol/PromptKind";
@@ -105,9 +106,26 @@ describe("the words around a login", () => {
         }
     });
 
+    it("gives a login the screen, except one being wound up while the service is gone", () => {
+        const ready: LinkState = { link: "ready", conn: { state: "disconnected" } };
+        const gone: LinkState = { link: "unavailable", reason: "not_running" };
+        expect(loginHasScreen(ready, { phase: "idle" })).toBe(false);
+        for (const link of [ready, gone]) {
+            expect(loginHasScreen(link, { phase: "working" })).toBe(true);
+            expect(loginHasScreen(link, { phase: "failed", code: "internal", message: "" })).toBe(
+                true,
+            );
+        }
+        expect(loginHasScreen(ready, { phase: "cancelling" })).toBe(true);
+        // "Service not running" is what the user needs to see then.
+        expect(loginHasScreen(gone, { phase: "cancelling" })).toBe(false);
+        expect(loginHasScreen({ link: "starting" }, { phase: "cancelling" })).toBe(false);
+    });
+
     it("has something to read out for every step", () => {
         const states: Exclude<LoginState, { phase: "idle" }>[] = [
             { phase: "working" },
+            { phase: "cancelling" },
             { phase: "prompt", prompt: { id: 1, kind: "password", label: "Password" } },
             {
                 phase: "prompt",
@@ -117,6 +135,7 @@ describe("the words around a login", () => {
         ];
         expect(states.map(loginAnnouncement)).toEqual([
             "Logging in. Waiting for UBC to answer. If you approve logins on your phone, check it now.",
+            "Cancelling. Stopping the login. This takes a moment.",
             "Your password. It is sent to UBC and nowhere else.",
             // The gateway's reason is what matters when a question comes back.
             "Your password. Login failed.",

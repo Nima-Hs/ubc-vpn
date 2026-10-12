@@ -533,16 +533,23 @@ describe("how often a login can start", () => {
     it("forgets a held-back start that is cancelled", async () => {
         const spawned = vi.mocked(spawn);
         const { runner, phase } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
-            minStartGapMs: 300,
+            // Long enough that giving the first login up, which waits for
+            // the client's last line, is over well inside it on a busy machine.
+            minStartGapMs: 2500,
         });
+        const firstStart = Date.now();
         runner.start();
         runner.cancel();
         await until(() => phase() === "idle", "the first being given up");
         spawned.mockClear();
+        // Held back: the gap has not passed.
+        expect(Date.now() - firstStart).toBeLessThan(2000);
         runner.start();
+        expect(spawned).not.toHaveBeenCalled();
         runner.cancel();
         expect(phase()).toBe("idle");
-        await pause(450);
+        // Past the moment the held-back start would have happened.
+        await pause(2500 - (Date.now() - firstStart) + 300);
         expect(spawned).not.toHaveBeenCalled();
     });
 });
@@ -717,7 +724,8 @@ describe("cancelling", () => {
         ]);
         runner.cancel();
         // Not given up yet: the client's last line says whether it was in time.
-        expect(phase()).toBe("working");
+        // The screen says it is being cancelled, not that a login is under way.
+        expect(phase()).toBe("cancelling");
         await until(() => phase() === "idle", "the login being given up");
         expect(cli.received()).toContain("cancel");
         // The client said "cancelled": nothing reached the service.
@@ -738,7 +746,7 @@ describe("cancelling", () => {
         await until(() => cli.received().includes("cancel"), "the client hearing of it");
         await pause(200);
         expect(cli.received()).not.toContain("input closed");
-        expect(phase()).toBe("working");
+        expect(phase()).toBe("cancelling");
     });
 
     it("closes the client's input once its last line has come", async () => {
@@ -762,10 +770,10 @@ describe("cancelling", () => {
         // Until the service has been told, the login is not shown as given up,
         // and another cannot begin.
         await pause(100);
-        expect(phase()).toBe("working");
+        expect(phase()).toBe("cancelling");
         expect(runner.start()).toBe(false);
         runner.cancel();
-        expect(phase()).toBe("working");
+        expect(phase()).toBe("cancelling");
         disconnects.release();
         await until(() => phase() === "idle", "the login being given up");
         expect(disconnects.asked).toBe(1);
@@ -854,6 +862,104 @@ describe("cancelling", () => {
         runner.cancel();
         await until(() => phase() === "idle", "the login being given up");
         expect(cli.received().filter((entry) => entry === "cancel")).toHaveLength(1);
+    });
+
+    it("disconnects when a cancelled client writes more than a line may hold: it cannot know", async () => {
+        const { cli, runner, phase, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            {
+                afterCancel: [{ raw: "x".repeat(MAX_LINE_BYTES + 10) }, { hang: true }],
+                exitGraceMs: 60_000,
+            },
+        );
+        const [pid = 0] = cli.pids();
+        runner.cancel();
+        // Long before the grace period: the over-long line itself ends it.
+        await until(() => phase() === "idle", "the login being given up", 5000);
+        expect(disconnects.asked).toBe(1);
+        runner.stop();
+        await until(() => !alive(pid), "the client ending");
+    });
+
+    it("takes no answer for a question that was waiting when Cancel was pressed", async () => {
+        const { cli, runner, states, phase } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { ignoresCancel: true, exitGraceMs: 600 },
+        );
+        const waiting = states.at(-1);
+        const id = waiting?.phase === "prompt" ? waiting.prompt.id : -1;
+        runner.cancel();
+        // The interface, a step behind, sends the password all the same.
+        expect(runner.answer(id, PASSWORD)).toBe(false);
+        expect(phase()).toBe("cancelling");
+        await until(() => phase() === "idle", "the login being given up");
+        expect(cli.received().filter((entry) => entry.startsWith("answer"))).toEqual([]);
+    });
+
+    it("sends no disconnect when the app simply quits in the middle of a login", async () => {
+        const { cli, runner, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { ignoresCancel: true, exitGraceMs: 60_000 },
+        );
+        const [pid = 0] = cli.pids();
+        // Nobody cancelled, so there is nothing to wind up and nothing to wait for.
+        expect(runner.windDown(1000)).toBeNull();
+        runner.stop();
+        await until(() => !alive(pid), "the client ending", 3000);
+        await pause(100);
+        expect(disconnects.asked).toBe(0);
+    });
+
+    it("on a quit after Cancel, waits for the login to be wound up and the disconnect to be sent", async () => {
+        const { runner, phase, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ done: true }] },
+        );
+        disconnects.hold = true;
+        runner.cancel();
+        const woundUp = runner.windDown(10_000);
+        expect(woundUp).not.toBeNull();
+        let done = false;
+        void woundUp?.then(() => {
+            done = true;
+        });
+        await until(() => disconnects.asked === 1, "the disconnect being asked for");
+        await pause(100);
+        expect(done).toBe(false);
+        disconnects.release();
+        await until(() => done, "the quit being let through");
+        expect(phase()).toBe("idle");
+    });
+
+    it("on a quit after Cancel, does not wait past the limit, and disconnects because it cannot know", async () => {
+        const { cli, runner, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { ignoresCancel: true, exitGraceMs: 60_000 },
+        );
+        const [pid = 0] = cli.pids();
+        runner.cancel();
+        const asked = Date.now();
+        await runner.windDown(300);
+        const waited = Date.now() - asked;
+        expect(waited).toBeGreaterThanOrEqual(290);
+        expect(waited).toBeLessThan(3000);
+        expect(disconnects.asked).toBe(1);
+        runner.stop();
+        await until(() => !alive(pid), "the client ending", 3000);
+    });
+
+    it("on a quit after Cancel, does not wait past the limit for a disconnect that is not answered", async () => {
+        const { runner, disconnects } = await atPrompt(
+            [{ prompt: PASSWORD_PROMPT }, { hang: true }],
+            { afterCancel: [{ done: true }] },
+        );
+        disconnects.hold = true;
+        runner.cancel();
+        await until(() => disconnects.asked === 1, "the disconnect being asked for");
+        const asked = Date.now();
+        await runner.windDown(300);
+        expect(Date.now() - asked).toBeLessThan(3000);
+        expect(disconnects.asked).toBe(1);
     });
 
     it("sends no disconnect for a login that simply succeeds", async () => {

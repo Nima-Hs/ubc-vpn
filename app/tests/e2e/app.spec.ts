@@ -224,6 +224,27 @@ test("an app that is not installed keeps its profile out of the installed produc
     await expect(page.getByText("Development mode")).toHaveCount(0);
 });
 
+test("a second copy with a profile of its own runs beside the first", async () => {
+    // One copy at a time is kept by a lock, which on macOS and Linux is a
+    // file in the profile folder. Were the profile chosen after the lock is
+    // taken, both copies would use Electron's own folder, and this second
+    // one would find the first one's lock and leave at once.
+    const other = await electron.launch({
+        ...launchOptions,
+        args: launchArgs(),
+        env: { ...launchEnv, UBC_VPN_PROFILE: newProfile() },
+    });
+    try {
+        const window = await other.firstWindow();
+        await window.waitForLoadState("domcontentloaded");
+        await expect(window.getByRole("heading", { level: 1 })).toHaveText("Not connected");
+        // And the first is still here.
+        await expect(heading()).toBeVisible();
+    } finally {
+        await other.close();
+    }
+});
+
 test("the window renders, locked down", async () => {
     await expect(heading()).toHaveText("Not connected");
     await expect(action()).toHaveText("Connect");
@@ -593,6 +614,23 @@ test("a failed login says why, and can be tried again or closed", async () => {
     await expect(page.getByRole("group", { name: "Message from UBC" })).toHaveText(
         "Login failed. Enter your password again.",
     );
+    await scenario("disconnected");
+});
+
+test("a login being wound up says so, or says what has happened to the service", async () => {
+    await scenario("disconnected");
+    await scenario("login-cancelling");
+    await expect(heading()).toHaveText("Cancelling");
+    await expect(page.getByRole("status")).toContainText("Cancelling. Stopping the login.");
+    // Nothing to press: it ends by itself.
+    await expect(page.getByRole("main").getByRole("button")).toHaveCount(0);
+    await shoot("login-cancelling");
+    // With the service gone the wind-up waits for it, and the screen says
+    // that the service is gone, which is what the user needs to know.
+    await scenario("service-unavailable");
+    await scenario("login-cancelling");
+    await expect(heading()).toHaveText("Service not running");
+    await shoot("login-cancelling-service-gone");
     await scenario("disconnected");
 });
 

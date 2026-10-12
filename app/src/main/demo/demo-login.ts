@@ -23,6 +23,7 @@ const FAILURES: Record<Exclude<LoginErrorCode, "cancelled">, string> = {
 
 const SCENARIOS: Record<string, LoginState> = {
     "login-working": { phase: "working" },
+    "login-cancelling": { phase: "cancelling" },
     "login-password": { phase: "prompt", prompt: PASSWORD },
     "login-password-again": {
         phase: "prompt",
@@ -105,6 +106,7 @@ export function createDemoLogin(
         },
         cancel: () => set({ phase: "idle" }),
         stop: () => set({ phase: "idle" }),
+        windDown: () => null,
         setScenario: (name) => {
             set(
                 Object.hasOwn(SCENARIOS, name)

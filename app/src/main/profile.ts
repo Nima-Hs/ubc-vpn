@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 /** The variable a development build or a test may use to say where its profile goes. */
 export const PROFILE_OVERRIDE = "UBC_VPN_PROFILE";
@@ -32,7 +32,7 @@ const SETTINGS_FOLDER_ELSEWHERE = "ubc-vpn";
 export function profileFolder(
     app: {
         readonly isPackaged: boolean;
-        getPath(name: "appData"): string;
+        getPath(name: "appData" | "home"): string;
     },
     process: {
         readonly platform: NodeJS.Platform;
@@ -41,10 +41,33 @@ export function profileFolder(
 ): string {
     const settings = SETTINGS_FOLDER[process.platform] ?? SETTINGS_FOLDER_ELSEWHERE;
     if (app.isPackaged) {
-        return join(app.getPath("appData"), settings, "app");
+        return join(settingsParent(app, process), settings, "app");
     }
     const chosen = process.env[PROFILE_OVERRIDE];
     return chosen !== undefined && chosen !== ""
         ? resolve(chosen)
         : join(app.getPath("appData"), "UBC VPN App Dev");
+}
+
+/**
+ * The folder the client's settings folder is in. On Windows and macOS that
+ * is where Electron says. On Linux the client follows the XDG rule exactly:
+ * `XDG_CONFIG_HOME` if it is an absolute path, and `~/.config` otherwise.
+ * Electron may take a relative value as given, so the rule is applied here,
+ * and the two cannot end up in different places.
+ */
+function settingsParent(
+    app: { getPath(name: "appData" | "home"): string },
+    process: {
+        readonly platform: NodeJS.Platform;
+        readonly env: Record<string, string | undefined>;
+    },
+): string {
+    if (process.platform === "win32" || process.platform === "darwin") {
+        return app.getPath("appData");
+    }
+    const config = process.env.XDG_CONFIG_HOME;
+    return config !== undefined && isAbsolute(config)
+        ? config
+        : join(app.getPath("home"), ".config");
 }

@@ -1,5 +1,10 @@
 import type { LoginPrompt, LoginState } from "@shared/api";
-import { describeLoginFailure, describePrompt, LOGIN_WORKING } from "@shared/copy";
+import {
+    describeLoginFailure,
+    describePrompt,
+    LOGIN_CANCELLING,
+    LOGIN_WORKING,
+} from "@shared/copy";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
@@ -98,6 +103,22 @@ export function LoginView({ login }: { login: Active }) {
     if (login.phase === "prompt") {
         // Keyed by the question, so each one starts with an empty field.
         return <Prompt key={login.prompt.id} prompt={login.prompt} />;
+    }
+
+    if (login.phase === "cancelling") {
+        // Nothing to press: it ends by itself, in a moment.
+        return (
+            <>
+                <section className="flex shrink-0 animate-arrive flex-col gap-2">
+                    <div className="flex items-center gap-3">
+                        <StatusIndicator tone="busy" size="lg" />
+                        <Heading>{LOGIN_CANCELLING.title}</Heading>
+                    </div>
+                    <Text tone="secondary">{LOGIN_CANCELLING.body}</Text>
+                </section>
+                <div className="flex min-h-24 flex-1 flex-col" />
+            </>
+        );
     }
 
     if (login.phase === "working") {

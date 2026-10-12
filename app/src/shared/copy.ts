@@ -255,6 +255,22 @@ export const LOGIN_WORKING = {
     body: "Waiting for UBC to answer. If you approve logins on your phone, check it now.",
 } as const;
 
+/**
+ * Whether the login has the screen. It does whenever one is under way, with
+ * one exception: a login being wound up waits for the service if the service
+ * has gone, and the screen then says what has happened to the service, which
+ * is what the user needs to know, and not "Cancelling" for as long as that
+ * lasts.
+ */
+export function loginHasScreen(state: LinkState, login: LoginState): boolean {
+    return login.phase !== "idle" && !(login.phase === "cancelling" && state.link !== "ready");
+}
+
+export const LOGIN_CANCELLING = {
+    title: "Cancelling",
+    body: "Stopping the login. This takes a moment.",
+} as const;
+
 const PROMPTS: Record<PromptKind, { title: string; body: string }> = {
     username: {
         title: "Your CWL username",
@@ -338,6 +354,8 @@ export function loginAnnouncement(login: Exclude<LoginState, { phase: "idle" }>)
     switch (login.phase) {
         case "working":
             return `${LOGIN_WORKING.title}. ${LOGIN_WORKING.body}`;
+        case "cancelling":
+            return `${LOGIN_CANCELLING.title}. ${LOGIN_CANCELLING.body}`;
         case "prompt": {
             const copy = describePrompt(login.prompt);
             return `${copy.title}. ${login.prompt.message ?? copy.body}`;
