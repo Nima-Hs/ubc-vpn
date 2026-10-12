@@ -5,12 +5,14 @@ on:
     paths:
       - native/windows/**
       - native/probe/**
+      - native/check-patches.sh
       - .github/workflows/native-windows.yml
   push:
     branches: [main]
     paths:
       - native/windows/**
       - native/probe/**
+      - native/check-patches.sh
       - .github/workflows/native-windows.yml
   workflow_dispatch:
 
@@ -38,6 +40,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
 
       # The GnuTLS build takes most of the time, so pull requests may reuse one
       # made from these same files. Every test below still runs on the output,

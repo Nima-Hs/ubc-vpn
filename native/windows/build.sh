@@ -92,6 +92,13 @@ cd "$work/openconnect-$VERSION"
 for p in "$out"/source/recipe/patches/openconnect/*.patch; do
     patch -p1 <"$p"
 done
+# The tree that is about to be built must hold the fix that stops the library
+# closing file descriptor 0. On Windows the fault does nothing, so no run-time
+# test can show the fix there; the Linux and macOS workflows run one.
+if ! grep -qF 'vpninfo->cmd_fd_write = -1;' library.c; then
+    echo "error: library.c does not initialise cmd_fd_write; the patch was not applied" >&2
+    exit 1
+fi
 ./autogen.sh
 # -ffile-prefix-map keeps this folder's path out of the DLL.
 PKG_CONFIG_PATH=$gnutls/lib/pkgconfig ./configure \
