@@ -11,7 +11,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Console::{
     ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
-    FlushConsoleInputBuffer, GetConsoleMode, ReadConsoleW, SetConsoleMode, WriteConsoleW,
+    FlushConsoleInputBuffer, GetConsoleMode, INPUT_RECORD, KEY_EVENT, PeekConsoleInputW,
+    ReadConsoleW, SetConsoleMode, WriteConsoleW,
 };
 
 use super::security::{Handle, last_error, os_error, wide};
@@ -115,6 +116,41 @@ fn unit(input: HANDLE) -> Result<Option<u16>> {
     }
 }
 
+/// How many of the events waiting in the console are looked at for a
+/// Ctrl-C. More than a person types in the instant after Enter; whatever
+/// waits beyond them is thrown away unseen by the caller.
+const LOOKED_AT: usize = 256;
+
+/// Whether Ctrl-C is among the keys already waiting in the console. It
+/// only looks: nothing is taken from the queue, nothing is shown, and the
+/// call never waits for a key.
+fn interrupted_since(input: HANDLE) -> bool {
+    // SAFETY: an all-zero input record is a valid one, of no kind.
+    let mut events: [INPUT_RECORD; LOOKED_AT] = unsafe { std::mem::zeroed() };
+    let mut seen = 0;
+    // SAFETY: the pointer and length describe `events`, which the call
+    // fills without removing anything from the queue; `seen` is live.
+    let looked =
+        unsafe { PeekConsoleInputW(input, events.as_mut_ptr(), LOOKED_AT as u32, &mut seen) };
+    if looked == 0 {
+        return false;
+    }
+    let ctrl_c = |event: &INPUT_RECORD| {
+        // SAFETY: the kind was checked first, so the key event is the
+        // member that was written; either member of the character is the
+        // same sixteen bits.
+        event.EventType == KEY_EVENT as u16
+            && unsafe { event.Event.KeyEvent.bKeyDown != 0 }
+            && unsafe { event.Event.KeyEvent.uChar.UnicodeChar } == 0x03
+    };
+    let found = events[..seen as usize].iter().any(ctrl_c);
+    // They may be the start of the next secret, typed early.
+    // SAFETY: an all-zero input record is a valid one, of no kind.
+    events = unsafe { std::mem::zeroed() };
+    std::hint::black_box(&events);
+    found
+}
+
 pub(crate) fn read_hidden_from(input: HANDLE, output: HANDLE, prompt: &str) -> Result<Secret> {
     let mut before = 0;
     // Anything that has no console mode is not a console.
@@ -163,12 +199,19 @@ pub(crate) fn read_hidden_from(input: HANDLE, output: HANDLE, prompt: &str) -> R
         })
     });
     wipe(&mut bytes);
-    // Security rule: unless a line was entered, the keys still waiting are
-    // thrown away. The shell would read them next: the rest of a password,
-    // run as a command.
-    if typed.is_err() {
-        forget_keys(input);
-    }
+    // A Ctrl-C typed just after Enter is waiting as a key: the console was
+    // not turning keys into events that end the program when it came. Left
+    // there, it would never interrupt anything, and the user who pressed
+    // it would see the program go on.
+    let typed = match typed {
+        Ok(_) if interrupted_since(input) => Err(Error::Interrupted),
+        typed => typed,
+    };
+    // Security rule: the keys still waiting are thrown away on every way
+    // out. After an error the shell would read them next: the rest of a
+    // password, run as a command. After an entered line they were typed
+    // while nothing was shown, and are not kept either.
+    forget_keys(input);
     // The newline that Enter did not show.
     let _ = write(output, "\r\n");
     typed
@@ -335,8 +378,21 @@ mod tests {
         let cooked = ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT;
         assert_eq!(quiet & cooked, 0, "the console's mode while reading");
 
-        // What follows an entered line stays for the next reader.
-        assert_ne!(waiting(&input), 0, "the keys after Enter were thrown away");
+        // What was typed after Enter, while nothing was shown, is not kept
+        // for the next reader either.
+        assert_eq!(waiting(&input), 0, "keys left after an entered line");
+
+        // A Ctrl-C typed just after Enter is waiting as a key by the time
+        // Enter is read. It still interrupts: the line is given up though
+        // it was entered, and nothing typed after it is kept.
+        for keys in ["123456\r\u{3}", "123456\rREST-OF-\u{3}FAKE-SECRET\r"] {
+            let typist = std::thread::spawn(move || type_when_quiet(keys));
+            let read = read_hidden_line("").map(|_| ());
+            typist.join().expect("the typist");
+            assert_eq!(read, Err(Error::Interrupted), "{keys:?}");
+            assert_eq!(mode(&input), before, "the mode after a late Ctrl-C");
+            assert_eq!(waiting(&input), 0, "keys left after a late Ctrl-C");
+        }
 
         // Ctrl-C comes as a key: the call gives up, the mode is put back,
         // and the rest of what was typed is not left for the shell.

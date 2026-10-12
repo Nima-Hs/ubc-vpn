@@ -200,6 +200,20 @@ fn an_interrupt_leaves_the_terminal_and_the_service_as_they_should_be() {
     session.hides_typing();
     session.types(CTRL_C);
     session.ended_by_the_interrupt();
+
+    // At the one-time code, with the code entered and Ctrl-C typed in the
+    // same instant, so that it is waiting as a key when Enter is read. The
+    // user changed their mind in time: it interrupts, and the code that
+    // was entered is used for nothing.
+    let mut session = Session::start(&home);
+    session.sees("Username: ");
+    session.types(&format!("{USERNAME}\r"));
+    session.sees("Password: ");
+    session.types(&format!("{PASSWORD}\r"));
+    session.sees("One-time code: ");
+    session.hides_typing();
+    session.types(&format!("{CODE}\r{CTRL_C}"));
+    session.ended_by_the_interrupt();
     // Nothing reached the service in any of these.
     assert_eq!(home.run(&["status"], ""), disconnected);
 
