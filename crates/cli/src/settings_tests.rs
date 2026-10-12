@@ -329,6 +329,91 @@ fn a_failed_save_leaves_the_old_file_unchanged() {
     assert!(partials(&machine).is_empty());
 }
 
+// A folder at the name a save would use is in the way like any file, and
+// the save uses another name.
+#[test]
+fn a_folder_at_the_partial_files_name_is_passed_over() {
+    let machine = Machine::new();
+    machine.write_settings("{}");
+    let dir = machine.root.join("settings");
+    std::fs::create_dir(dir.join("first.tmp")).unwrap();
+    let mut names = ["first.tmp", "second.tmp"].into_iter();
+    let mut name = || names.next().unwrap().to_string();
+    let partial = write_partial(&dir, "new", &mut name).unwrap();
+    assert_eq!(partial, dir.join("second.tmp"));
+    assert!(dir.join("first.tmp").is_dir());
+}
+
+// A partial file dated in the future is not old, whatever the clock did,
+// and is left alone.
+#[test]
+fn a_partial_file_from_the_future_is_not_swept() {
+    let machine = Machine::new();
+    machine.write_settings("{}");
+    let dir = machine.root.join("settings");
+    let later = dir.join("settings.json.1-2-0000abcd.tmp");
+    std::fs::write(&later, "theirs").unwrap();
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(2 * 3600);
+    let file = std::fs::File::options().write(true).open(&later).unwrap();
+    file.set_modified(ahead).unwrap();
+    drop(file);
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    sweep(&dir, std::time::Duration::ZERO);
+    assert_eq!(std::fs::read_to_string(&later).unwrap(), "theirs");
+}
+
+// An old partial file that cannot be removed is left, and the save goes on
+// as if it were not there.
+#[test]
+fn a_partial_file_that_cannot_be_removed_is_no_obstacle() {
+    let machine = Machine::new();
+    machine.write_settings("{}");
+    let dir = machine.root.join("settings");
+    let stuck = dir.join("settings.json.tmp");
+    std::fs::write(&stuck, "half a file").unwrap();
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    let file = std::fs::File::options().write(true).open(&stuck).unwrap();
+    file.set_modified(long_ago).unwrap();
+    drop(file);
+    // How a file is made impossible to remove differs. On Windows a file
+    // that someone holds open without sharing its removal cannot be
+    // removed, and the save still has its folder.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Shared for reading and writing, and not for deleting.
+        let (read, write) = (1, 2);
+        let mut held = std::fs::File::options();
+        let held = held.read(true).share_mode(read | write).open(&stuck);
+        let held = held.unwrap();
+        let saved = machine.routes(Command::SetRoutes, GOOD);
+        let left = stuck.exists();
+        drop(held);
+        assert!(matches!(saved, RoutesReply::Ok { .. }));
+        assert!(left, "the file that could not be removed is still there");
+    }
+    // Elsewhere nothing in a read-only folder can be removed, and nothing
+    // saved there either, so only the sweep is run. Root can remove it all
+    // the same; then there is nothing to see.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+        mode(0o500).unwrap();
+        let root = std::fs::write(dir.join("probe"), "").is_ok();
+        sweep(&dir, std::time::Duration::ZERO);
+        let left = stuck.exists();
+        mode(0o700).unwrap();
+        assert!(
+            left || root,
+            "the file that could not be removed is still there"
+        );
+    }
+}
+
 // Two saves at once each write a file of their own, so neither can put the
 // other's half-written file in place, and both succeed.
 #[test]
