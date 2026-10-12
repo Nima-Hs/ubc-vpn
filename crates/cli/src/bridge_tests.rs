@@ -721,7 +721,13 @@ fn messages_are_not_read_faster_than_the_app_takes_them() {
         let (mut out, mut err) = (Stuck(held, 0), Captured::default());
         run(&platform, input, Limits::default(), &mut out, &mut err)
     });
-    // Time enough to read a great many messages, were nothing in the way.
+    // Once it has started reading, time enough to read a great many
+    // messages, were nothing in the way.
+    let started = Instant::now();
+    while flood.sent.load(Ordering::SeqCst) < 2 {
+        assert!(started.elapsed() < Duration::from_secs(10), "it never read");
+        thread::sleep(Duration::from_millis(5));
+    }
     thread::sleep(Duration::from_millis(300));
     let read = flood.sent.load(Ordering::SeqCst);
     flood.stop.store(true, Ordering::SeqCst);
