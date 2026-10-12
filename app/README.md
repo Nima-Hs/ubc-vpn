@@ -36,12 +36,23 @@ pnpm format          # the same, fixing what it can
 pnpm typecheck
 pnpm test            # unit tests (Vitest)
 pnpm test:e2e        # builds both builds and drives the real app (Playwright)
+pnpm test:system     # the real app against the real client and a dev-mode service
 pnpm build           # production build, into out/
 pnpm check:build     # the production build contains no demo code
 pnpm check:licenses  # everything shipped has an allowed licence
 ```
 
 The end-to-end test saves a screenshot of every state to `test-results/screens`, or to `SCREENSHOT_DIR` if that is set. On Linux without a display, run it under `xvfb-run`.
+
+`pnpm test:system` is the one test with no stand-in in it ([`tests/system/real.spec.ts`](tests/system/real.spec.ts)). It starts `ubc-vpn-service --dev`, starts the production build of the app with `UBC_VPN_DEV=1`, and drives the window: the service is found and claimed, routes are checked and saved, a login is answered, the connection comes up and goes down, a login is cancelled, a wrong password is refused. Build the two programs first and name them:
+
+```sh
+cargo build --locked -p ubc-vpn-service --features dev-mode
+cargo build --locked -p ubc-vpn-cli --features dev-mode
+UBC_VPN_SYSTEM_SERVICE=../target/debug/ubc-vpn-service UBC_VPN_SYSTEM_CLI=../target/debug/ubc-vpn pnpm test:system
+```
+
+Without the two variables it is skipped and says so. Everything it starts gets a home of its own in one temporary folder, which it removes; it never touches an installed UBC VPN. On Windows it stops at once if a dev-mode service of yours is already running, because the dev channel there is named after the user. Its screenshots go to `test-results/system-screens`, or to `SCREENSHOT_DIR`.
 
 ## How it is built
 
