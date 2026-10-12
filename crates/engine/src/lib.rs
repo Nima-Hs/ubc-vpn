@@ -71,11 +71,22 @@
 //!   - On Windows remove them, and point the temporary folder at one only
 //!     the system can write. The libraries read the C runtime's copy of the
 //!     environment, which `std::env` does not change, so remove and set
-//!     through the C runtime (`_putenv_s`), and test it by watching what
-//!     the loaded library does, not by reading the variable back.
+//!     through the C runtime (`_putenv_s`), and test it by reading each one
+//!     back through the C runtime and by watching what the loaded library
+//!     does. Reading it back through `std::env` proves nothing.
+//!   - The Windows temporary folder is a plain ASCII path on a local drive.
+//!     The library asks for it through an interface that mangles other
+//!     characters. Newer Windows may ignore the setting for the SYSTEM
+//!     account and use a folder of its own, so the tunnel work must check
+//!     where the library's files really land when run as SYSTEM.
 //!   - On macOS and Linux remove nothing, because changing the environment
 //!     is only sound while no other thread exists: refuse to start while
-//!     one of them is set.
+//!     one of them is set, naming it. That applies to the command-line
+//!     client as well as the service, so a user with such a variable set is
+//!     told to unset it. The list for the client leaves out variables that
+//!     common developer set-ups export and that the engine's use of the
+//!     libraries cannot be steered by.
+//!   - Change the environment at most once in a process.
 //!   - The privileged service also refuses to start while a variable that
 //!     steers the system loader is set (`LD_*`, and `DYLD_*` other than
 //!     the two `DYLD_FALLBACK_*` ones). Nothing may ever remove a `DYLD_*`
