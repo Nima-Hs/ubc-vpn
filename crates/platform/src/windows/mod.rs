@@ -29,6 +29,7 @@
 
 mod pipe;
 mod security;
+pub(crate) mod terminal;
 #[cfg(test)]
 mod tests;
 
