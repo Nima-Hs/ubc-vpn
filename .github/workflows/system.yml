@@ -1,0 +1,92 @@
+name: System
+
+# The service and the command-line client as real programs, talking over the
+# real channel of each OS, in dev mode: an ordinary user, no admin rights,
+# pretend routing and a pretend gateway. Every other test runs one of them
+# against a stand-in for the other. This workflow fails if the test was
+# skipped.
+
+on:
+  pull_request:
+    paths:
+      - crates/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/system.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/system.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: system-${{ github.ref }}
+  cancel-in-progress: true
+
+# Named outright, because only then does a failing test at the head of a
+# pipe fail the step, on Windows too.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  together:
+    name: together (${{ matrix.os }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        profile: [debug, release]
+    env:
+      PROFILE: ${{ matrix.profile == 'release' && '--release' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      # Each program is built by itself (-p), as a release is, so that
+      # neither is given features only the other asked for.
+      - name: Build the service and the client in dev mode
+        run: |
+          cargo build --locked -p ubc-vpn-service --features dev-mode $PROFILE
+          cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test system --no-run
+      - name: Run them together
+        run: |
+          # The workspace's path as this OS writes it, for the test to start.
+          service="$GITHUB_WORKSPACE/target/${{ matrix.profile }}/ubc-vpn-service"
+          [ "$RUNNER_OS" = Windows ] && service="$service.exe"
+          test -x "$service"
+          UBC_VPN_SYSTEM_SERVICE="$service" \
+            cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test system \
+            -- --nocapture 2>&1 | tee system.log
+      # A test that is skipped passes, so prove from the log that it ran.
+      - name: The test ran and was not skipped
+        run: |
+          if grep "SKIPPED:" system.log; then
+            echo "The system test was skipped."
+            exit 1
+          fi
+          grep -qx "RAN: system" system.log
+      # Also when the test failed: it must clean up after itself then too.
+      - name: Nothing of it is left behind
+        if: always()
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            running=$(tasklist //FI "IMAGENAME eq ubc-vpn-service.exe" | grep -c ubc-vpn-service || true)
+            folders=$( (ls -d "$LOCALAPPDATA/Temp"/ubcvpn-sys-* 2>/dev/null || true) | wc -l)
+          else
+            running=$( (pgrep -x ubc-vpn-service || true) | wc -l)
+            folders=$( (ls -d /tmp/ubcvpn-sys-* 2>/dev/null || true) | wc -l)
+          fi
+          echo "services still running: $running; folders left: $folders"
+          [ "$running" -eq 0 ] && [ "$folders" -eq 0 ]
