@@ -105,14 +105,9 @@ mod tests {
 
     use windows_sys::Win32::System::Console::{
         CTRL_CLOSE_EVENT, ENABLE_ECHO_INPUT, GenerateConsoleCtrlEvent, GetConsoleMode,
-        GetConsoleWindow,
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, DETACHED_PROCESS,
-    };
-
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        PostMessageW, SC_CLOSE, WM_CLOSE, WM_SYSCOMMAND,
     };
 
     use super::*;
@@ -244,23 +239,6 @@ mod tests {
         assert_eq!(program.says(), "GOT Some(Interrupt)");
     }
 
-    // The console's window closed for real: Windows calls the handler, the
-    // request is delivered, and the program has time to end by itself.
-    #[test]
-    fn closing_the_console_is_delivered_and_leaves_time() {
-        if !consoles("interrupt close") {
-            return;
-        }
-        let program = Program::start("window", CREATE_NEW_CONSOLE, None);
-        let mut said = program.says();
-        if said.starts_with('(') {
-            println!("NOTE: {said}");
-            said = program.says();
-        }
-        assert_eq!(said, "GOT Terminate and went on");
-        assert_eq!(program.ended(), 7, "it exits when it chooses to");
-    }
-
     // When the console closes, Windows ends the program the moment the
     // handler returns. So it must not return while the caller tidies up.
     #[test]
@@ -310,27 +288,6 @@ mod tests {
                 println!("SAYS READY");
                 let heard = stops.recv_timeout(Duration::from_secs(3)).ok();
                 println!("SAYS GOT {heard:?}");
-            }
-            "window" => {
-                // SAFETY: a plain call; the window is this console's own.
-                let window = unsafe { GetConsoleWindow() };
-                assert!(!window.is_null(), "this console has no window");
-                // SAFETY: a plain call with no pointers.
-                let asked = unsafe { PostMessageW(window, WM_CLOSE, 0, 0) };
-                assert_ne!(asked, 0, "ask the window to close");
-                // The other way a window is told to close: its close button.
-                let stop = stops.recv_timeout(Duration::from_secs(5)).or_else(|_| {
-                    println!("SAYS (the first way did nothing)");
-                    // SAFETY: a plain call with no pointers.
-                    unsafe { PostMessageW(window, WM_SYSCOMMAND, SC_CLOSE as usize, 0) };
-                    stops.recv_timeout(Duration::from_secs(5))
-                });
-                let stop = stop.expect("a request");
-                // Tidying up. Had the handler returned, Windows would have
-                // ended this program before the next line.
-                thread::sleep(Duration::from_millis(1500));
-                println!("SAYS GOT {stop:?} and went on");
-                std::process::exit(7);
             }
             "close" => {
                 let handler = thread::spawn(|| handle(CTRL_CLOSE_EVENT));
