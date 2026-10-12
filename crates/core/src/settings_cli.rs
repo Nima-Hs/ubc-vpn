@@ -24,6 +24,11 @@
 //! - **Input.** One line of at most
 //!   [`MAX_LINE_BYTES`](crate::protocol::MAX_LINE_BYTES). A missing, longer
 //!   or undecodable line is [`SettingsFailureCode::BadInput`].
+//! - **Routes too long to report.** Routes whose reply, or the view `get`
+//!   would then print, would not fit in one line are
+//!   [`SettingsFailureCode::BadInput`], and nothing is saved. `set-routes`
+//!   may refuse for this reason where `check-routes` accepted, because only
+//!   it knows the rest of the file.
 //! - **No `settings.json`.** `get` answers with the default settings.
 //!   `set-routes` creates the file, and its folder if needed.
 //! - **A `settings.json` that cannot be read or understood.** `get` and

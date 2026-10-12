@@ -149,8 +149,8 @@ fn each_failure_has_its_own_exit_code_and_message() {
     for line in [
         "3  the service is not running",
         "6  another program",
-        "becomes the owner of the service",
-        "The bridge\nclaims nothing itself",
+        "status becomes the owner of the service",
+        "The bridge claims\nnothing itself",
         "bridge            Carry messages",
     ] {
         assert!(help.contains(line), "{help}");
