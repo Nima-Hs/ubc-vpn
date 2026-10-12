@@ -104,15 +104,18 @@ test("the window renders, locked down", async () => {
     expect(exposed.api).toEqual([
         "answerPrompt",
         "cancelLogin",
+        "checkRoutes",
         "closeWindow",
         "connect",
         "demo",
         "disconnect",
+        "getSettings",
         "getSnapshot",
         "minimizeWindow",
         "onSnapshot",
         "platform",
         "retry",
+        "saveRoutes",
     ]);
 });
 
@@ -138,6 +141,28 @@ test("a login answer is checked before the main process takes it", async () => {
         noText: "refused",
         noId: "refused",
         tooLong: "refused",
+    });
+    // Routes are checked the same way before anything is started for them.
+    const routes = await page.evaluate(async () => {
+        const save = window.ubcVpn.saveRoutes as (...args: unknown[]) => Promise<unknown>;
+        const check = window.ubcVpn.checkRoutes as (...args: unknown[]) => Promise<unknown>;
+        const outcome = (call: Promise<unknown>) =>
+            call.then(
+                () => "taken",
+                () => "refused",
+            );
+        return {
+            proper: await outcome(check({ subnets: ["203.0.113.0/24"], dns_domains: [] })),
+            extraField: await outcome(save({ subnets: [], dns_domains: [], path: "/etc/passwd" })),
+            notLists: await outcome(save({ subnets: "203.0.113.0/24", dns_domains: [] })),
+            notText: await outcome(check({ subnets: [42], dns_domains: [] })),
+        };
+    });
+    expect(routes).toEqual({
+        proper: "taken",
+        extraField: "refused",
+        notLists: "refused",
+        notText: "refused",
     });
     // The state the interface is sent has a place for a login, and it is idle.
     expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toMatchObject({
@@ -260,6 +285,9 @@ test("another window cannot use the interface's functions", async () => {
                     retry: () => api.retry(),
                     answerPrompt: () => api.answerPrompt(1, "an answer"),
                     cancelLogin: () => api.cancelLogin(),
+                    getSettings: () => api.getSettings(),
+                    checkRoutes: () => api.checkRoutes({ subnets: [], dns_domains: [] }),
+                    saveRoutes: () => api.saveRoutes({ subnets: [], dns_domains: [] }),
                     minimizeWindow: () => api.minimizeWindow(),
                     closeWindow: () => api.closeWindow(),
                     listScenarios: () => api.demo.listScenarios(),
@@ -282,6 +310,9 @@ test("another window cannot use the interface's functions", async () => {
         retry: "refused",
         answerPrompt: "refused",
         cancelLogin: "refused",
+        getSettings: "refused",
+        checkRoutes: "refused",
+        saveRoutes: "refused",
         minimizeWindow: "refused",
         closeWindow: "refused",
         listScenarios: "refused",

@@ -10,7 +10,7 @@ import type { LoginState, Snapshot } from "@shared/api";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { connectCommand } from "../src/main/channel/cli";
-import { ConnectRunner, plainText } from "../src/main/channel/connect";
+import { ConnectRunner, FALLBACK_LABEL, plainText } from "../src/main/channel/connect";
 import { MAX_LINE_BYTES } from "../src/main/channel/framing";
 import { isCliMessage } from "../src/main/channel/validate";
 import { Controller } from "../src/main/controller";
@@ -355,6 +355,15 @@ describe("text from the gateway and the client", () => {
         expect(plainText(`${"\n".repeat(500)}abcdef`, 3)).toBe("abc");
     });
 
+    it("gives a question a name when the gateway's label comes to nothing", async () => {
+        // Nothing but characters the app removes.
+        const { states } = await atPrompt([
+            { prompt: { id: 1, kind: "password", label: `\n\t ${RLO}${BEL} ` } },
+        ]);
+        expect(states.at(-1)).toMatchObject({ phase: "prompt", prompt: { label: "Answer" } });
+        expect(FALLBACK_LABEL).toBe("Answer");
+    });
+
     it("is cleaned in a question's label and message", async () => {
         const { states } = await atPrompt([
             {
@@ -450,8 +459,10 @@ describe("how often a login can start", () => {
             minStartGapMs: 600,
         });
         spawned.mockClear();
+        // Taken before the start: the gap is counted from when the client
+        // is started, which is inside this call.
+        const beforeFirstStart = Date.now();
         runner.start();
-        const firstStart = Date.now();
         await until(() => phase() === "prompt", "the first prompt");
         runner.cancel();
 
@@ -463,7 +474,7 @@ describe("how often a login can start", () => {
         expect(runner.start()).toBe(false);
 
         await until(() => spawned.mock.calls.length === 2, "the second start");
-        expect(Date.now() - firstStart).toBeGreaterThanOrEqual(590);
+        expect(Date.now() - beforeFirstStart).toBeGreaterThanOrEqual(595);
         await until(() => phase() === "prompt", "the second prompt");
     });
 

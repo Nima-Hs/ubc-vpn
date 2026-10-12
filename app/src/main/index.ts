@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
 import { app, type BrowserWindow, Menu, protocol, session } from "electron";
-import { bridgeCommand, connectCommand } from "./channel/cli";
+import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
 import { ConnectRunner } from "./channel/connect";
+import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
@@ -91,6 +92,10 @@ async function start(): Promise<void> {
         });
     }
     const controller = new Controller(link, login);
+    // The user's settings are read and written by the command-line client.
+    const settings: SettingsService = new SettingsRunner({
+        command: settingsCommand(app, process),
+    });
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.
@@ -100,7 +105,7 @@ async function start(): Promise<void> {
     }
 
     const window = createWindow(entryUrl, trayImage("on", 64), developmentBuild);
-    registerIpc(window, controller, devServerUrl);
+    registerIpc(window, controller, settings, devServerUrl);
     registerDemo?.(window);
 
     let quitting = false;
@@ -149,6 +154,7 @@ async function start(): Promise<void> {
     app.on("window-all-closed", () => app.quit());
     app.on("will-quit", () => {
         controller.dispose();
+        settings.stop();
         tray?.destroy();
     });
 
