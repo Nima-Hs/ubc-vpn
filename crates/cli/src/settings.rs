@@ -51,18 +51,31 @@ impl Command {
 }
 
 /// Runs one command: writes exactly one line on `out` and returns the exit
-/// status, 0 unless that line is a failure.
+/// status, 0 unless that line is a failure. When the failure is that the
+/// settings folder is not safe to use, `err` is told why.
 pub fn run(
     command: Command,
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> u8 {
     // A system this program cannot place its files on has no settings to
     // read and nowhere to save them.
     let paths = platform().ok().map(|platform| platform.paths);
     let answered = answer(command, paths.as_ref(), input);
     let failed = answered.is_err();
+    let about_files = [
+        Err(SettingsFailureCode::Unreadable),
+        Err(SettingsFailureCode::Unwritable),
+    ];
+    let dir = paths.as_ref().map(|paths| paths.settings_dir.as_path());
+    if let Some(why) = dir
+        .filter(|_| about_files.contains(&answered))
+        .and_then(folder_problem)
+    {
+        let _ = writeln!(err, "ubc-vpn: {why}");
+    }
     let line = answered.or_else(|error| encode(&SettingsFailure { error }));
     let written = out.write_all(line.unwrap_or_default().as_bytes());
     let unsaid = written.and_then(|()| out.flush()).is_err();
@@ -168,9 +181,50 @@ fn typed(input: &mut dyn BufRead) -> Result<RouteInput, SettingsFailureCode> {
     decode(&text).map_err(|_| bad)
 }
 
+/// Why the settings folder is not used, when it is not. On Unix that is a
+/// folder its group, or anyone, may write to: whoever can write there can
+/// replace the settings, and with them the routes the next connect asks
+/// for. A link is judged by the folder it leads to, which is the one used. On Windows a folder takes its access list from the profile it is in,
+/// and nothing is checked.
+pub(crate) fn folder_problem(dir: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let open = |found: fs::Metadata| found.permissions().mode() & 0o022 != 0;
+        if fs::metadata(dir).is_ok_and(open) {
+            // Quoted for a shell as it stands, whatever the path holds.
+            let folder = crate::clean(&dir.to_string_lossy()).replace('\'', r"'\''");
+            return Some(format!(
+                "The settings folder can be changed by other users of this computer, so it \
+                 is not used. To stop them, run: chmod go-w '{folder}'"
+            ));
+        }
+    }
+    let _ = dir;
+    None
+}
+
+/// Makes the settings folder if it is not there. On Unix a folder made here
+/// is the user's alone, mode 0700, whatever the umask; one that is already
+/// there is left as it is, and must pass [`folder_problem`].
+fn create_folder(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    match folder_problem(dir) {
+        Some(_) => Err(io::ErrorKind::PermissionDenied.into()),
+        None => Ok(()),
+    }
+}
+
 /// The text of `settings.json`, or `None` when there is no such file. One
 /// that is there and cannot be read is an error, not "no settings".
 pub(crate) fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> {
+    if folder_problem(dir).is_some() {
+        return Err(SettingsFailureCode::Unreadable);
+    }
     match fs::read_to_string(dir.join(SETTINGS)) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -218,7 +272,7 @@ pub(crate) fn partial_name() -> String {
 /// beside the old one, synced, and renamed over it. If anything fails the
 /// old file is untouched.
 fn save(dir: &Path, text: &str) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
+    create_folder(dir)?;
     sweep(dir, STALE);
     let partial = write_partial(dir, text, &mut partial_name)?;
     place(&partial, dir)
