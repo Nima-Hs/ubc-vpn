@@ -8,7 +8,7 @@ use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ubc_vpn_core::protocol::{Event, HelloReply, PROTOCOL_VERSION, ResponseBody};
+use ubc_vpn_core::protocol::{Event, Hello, HelloReply, PROTOCOL_VERSION, ResponseBody};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::Transport;
 use ubc_vpn_platform::fake::{Op, paths};
@@ -368,4 +368,61 @@ fn a_forwarded_request_must_be_answered_in_time() {
     assert_eq!(lines[1..], [BridgeLine::ServiceUnavailable]);
     assert!(everything.contains("did not answer a request in time"));
     assert!(stuck.join().unwrap().is_some(), "the request was sent on");
+}
+
+// The bridge runs for as long as the app. Every event is passed on as it
+// arrives and none is kept, so no number of events between or during
+// requests can make a later request fail.
+#[test]
+fn any_number_of_events_is_passed_on_and_none_is_kept() {
+    const REQUESTS: usize = 5;
+    const EVENTS_EACH: usize = 40;
+    assert!(REQUESTS * EVENTS_EACH > 2 * Limits::default().kept_events);
+
+    let rig = Rig::new();
+    let listener = rig.fake.listen(&paths(&rig.root).channel_name).unwrap();
+    let service = thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let send = |line: String| conn.write_line(line.trim_end()).unwrap();
+        // The bridge speaks for the app, and says so.
+        let hello: Hello = decode(&conn.read_line().unwrap().unwrap()).unwrap();
+        assert_eq!(hello.client, ClientKind::App);
+        assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+        send(
+            encode(&HelloReply {
+                protocol_version: PROTOCOL_VERSION,
+                service_version: "0.1.0".to_string(),
+                owner_claimed: true,
+            })
+            .unwrap(),
+        );
+        // Before each answer, more events than a client may keep.
+        while let Ok(Some(line)) = conn.read_line() {
+            let asked: Request = decode(&line).unwrap();
+            let event = ServerMessage::Event(Event::StateChanged(ConnState::Connecting));
+            (0..EVENTS_EACH).for_each(|_| send(encode(&event).unwrap()));
+            let outcome = Outcome::Ok(ResponseBody::Status(ConnState::Connecting));
+            let id = asked.id;
+            send(encode(&ServerMessage::Response(Response { id, outcome })).unwrap());
+        }
+    });
+    let mut bridge = start(&rig);
+    for n in 1..=REQUESTS {
+        bridge.say(&format!(r#"{{"id":{n},"body":{{"method":"status"}}}}"#));
+        let lines = bridge.lines(1 + n * (EVENTS_EACH + 1));
+        let answer = Ok(ResponseBody::Status(ConnState::Connecting));
+        assert!(
+            is_response(lines.last().unwrap(), n as u32, answer),
+            "request {n}"
+        );
+    }
+    bridge.app = None;
+    let (status, lines, _) = bridge.end();
+    service.join().unwrap();
+    assert_eq!(status, 0);
+    assert_eq!(
+        lines.len(),
+        1 + REQUESTS * (EVENTS_EACH + 1),
+        "every line, once"
+    );
 }

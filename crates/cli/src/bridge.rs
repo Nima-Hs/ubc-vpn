@@ -6,6 +6,11 @@
 //! reaches the service. Two rules matter most: a `connect` request is never
 //! forwarded, because the app must not hold a session cookie; and standard
 //! output carries nothing but [`BridgeLine`]s.
+//!
+//! The bridge keeps nothing. It uses the client's handshake but not its
+//! queue of kept events: every message from the service is written out the
+//! moment it arrives, whether or not a request is waiting for an answer, so
+//! nothing accumulates however long the app runs.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, Read, Write};
