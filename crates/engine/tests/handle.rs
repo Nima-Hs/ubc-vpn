@@ -303,16 +303,35 @@ fn a_cancel_on_the_command_pipe_stops_the_login() {
         Box::new(|_| true),
         Box::new(answer),
     );
-    let pipe = handle
-        .command_pipe()
-        .expect("the library makes a command pipe");
+    let pipe = handle.command_pipe();
+    // Security rule: one pipe per handle, however often it is asked for. A
+    // second would replace the first inside the library, and a cancel sent
+    // to the first would be lost.
+    assert_eq!(handle.command_pipe(), pipe);
     // SAFETY: `handle` is alive, so the pipe is open. `x` is `OC_CMD_CANCEL`.
     assert!(unsafe { pipe.send(b'x') });
     assert_ne!(handle.obtain_cookie(), 0);
     assert!(handle.cookie().is_none());
-    // Security rule: one pipe per handle. A second would replace the first
-    // inside the library, and a cancel sent to the first would be lost.
-    assert!(handle.command_pipe().is_none());
+}
+
+// Security rule: freeing a handle closes its own command pipe and nothing
+// else. The library closes file descriptor 0 when it frees a handle that
+// never made a pipe, which is why every handle makes one: after that, 0 is
+// whatever this process opens next, and the next free would close that too.
+#[cfg(unix)]
+#[test]
+fn freeing_a_handle_leaves_standard_input_open() {
+    unsafe extern "C" {
+        fn fcntl(fd: std::ffi::c_int, command: std::ffi::c_int, ...) -> std::ffi::c_int;
+    }
+    // SAFETY: `F_GETFD`, which is 1, only reads the flags of descriptor 0,
+    // and fails if it is closed.
+    let open = || unsafe { fcntl(0, 1) } != -1;
+    let (library, _guard) = library();
+    assert!(open(), "this test needs standard input to be open");
+    let (handle, _) = handle(library, 8443, &yes(), Box::new(|_| true), Box::new(answer));
+    drop(handle);
+    assert!(open(), "freeing the handle closed standard input");
 }
 
 // The callbacks are freed when the handle is, and not before: the library

@@ -416,8 +416,8 @@ pub struct Handle {
     raw: *mut VpnInfo,
     /// What the library holds as `privdata`. Freed after the handle.
     context: *mut Context,
-    /// Whether the command pipe has been made.
-    piped: Cell<bool>,
+    /// The write end of the command pipe, made with the handle.
+    pipe: CommandPipe,
 }
 
 impl Handle {
@@ -443,11 +443,31 @@ impl Handle {
             library,
             raw,
             context,
-            piped: Cell::new(false),
+            pipe: CommandPipe(0),
         };
         if raw.is_null() {
             return None;
         }
+        // Every handle gets its command pipe here, and only here. The library
+        // would make a second pipe over the first without closing it, and a
+        // cancel written to the first would be lost. And it must have one:
+        // freeing a handle that never made a pipe closes file descriptor 0,
+        // whatever that is by then, because the library leaves the field
+        // for the pipe at zero and then closes it.
+        // SAFETY: `raw` is a live handle used on its own thread.
+        let pipe = unsafe { (library.setup_cmd_pipe)(raw) };
+        #[cfg(windows)]
+        let failed = pipe == usize::MAX;
+        #[cfg(not(windows))]
+        let failed = pipe < 0;
+        if failed {
+            // Without a pipe the handle cannot be freed safely, for the
+            // reason above. It is left as it is, never used and never freed.
+            std::mem::forget(handle);
+            return None;
+        }
+        let mut handle = handle;
+        handle.pipe = CommandPipe(pipe);
         handle.context().handle.set(Some((library, raw)));
         // SAFETY: `raw` is a live handle on its own thread, and `resolve`
         // has the signature the library declares.
@@ -496,24 +516,10 @@ impl Handle {
         unsafe { copied((self.library.get_cookie)(self.raw)) }.map(Secret::new)
     }
 
-    /// Makes the command pipe and returns its write end, or `None` if the
-    /// library could not make one. The handle closes both ends when it is
-    /// dropped.
-    ///
-    /// Once per handle; a second call is `None`. The library would make a
-    /// new pipe over the first without closing it, and a cancel written to
-    /// the first would then be lost.
-    pub fn command_pipe(&self) -> Option<CommandPipe> {
-        if self.piped.replace(true) {
-            return None;
-        }
-        // SAFETY: `raw` is a live handle used on its own thread.
-        let pipe = unsafe { (self.library.setup_cmd_pipe)(self.raw) };
-        #[cfg(windows)]
-        let failed = pipe == usize::MAX;
-        #[cfg(not(windows))]
-        let failed = pipe < 0;
-        (!failed).then_some(CommandPipe(pipe))
+    /// The write end of the handle's command pipe. There is one per handle,
+    /// made with it, and the handle closes both ends when it is dropped.
+    pub fn command_pipe(&self) -> CommandPipe {
+        self.pipe
     }
 }
 
@@ -533,7 +539,7 @@ impl Drop for Handle {
 
 /// The write end of a handle's command pipe. It may go to another thread,
 /// which is how a login that is waiting is told to stop.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandPipe(CmdPipe);
 
 impl CommandPipe {
