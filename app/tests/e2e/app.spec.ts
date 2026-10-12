@@ -30,6 +30,10 @@ const launchEnv = {
     XDG_CURRENT_DESKTOP: "e2e",
 };
 
+// On Linux the test driver turns Chromium's sandbox off unless told not to.
+// The app ships with it on, so it is tested with it on.
+const launchOptions = { chromiumSandbox: true };
+
 let app: ElectronApplication;
 let page: Page;
 const problems: string[] = [];
@@ -37,6 +41,7 @@ const problems: string[] = [];
 test.beforeAll(async () => {
     mkdirSync(screenshotDir, { recursive: true });
     app = await electron.launch({
+        ...launchOptions,
         args: launchArgs(),
         env: launchEnv,
     });
@@ -270,9 +275,15 @@ test("keyboard focus on the scrolling details is visible", async () => {
     await scenario("connected-crowded");
     const details = page.getByRole("group", { name: "Connection details" });
     await expect(details).toBeVisible();
-    // Reach it the way a keyboard user does.
-    await page.getByRole("button", { name: /^Close/ }).focus();
-    await page.keyboard.press("Tab");
+    // Reach it the way a keyboard user does: Tab through the title bar,
+    // whose controls differ by OS, until focus lands on it.
+    await page.locator("body").click({ position: { x: 1, y: 1 } });
+    for (let presses = 0; presses < 8; presses++) {
+        await page.keyboard.press("Tab");
+        if (await details.evaluate((region) => region === document.activeElement)) {
+            break;
+        }
+    }
     await expect(details).toBeFocused();
     const ring = await details.evaluate((region) => {
         const style = getComputedStyle(region);
@@ -417,6 +428,7 @@ test("it cannot reach the network, open a window or leave its page", async () =>
 test("a built app ignores a dev server address in its environment", async () => {
     await app.close();
     const other = await electron.launch({
+        ...launchOptions,
         args: launchArgs(),
         env: { ...launchEnv, ELECTRON_RENDERER_URL: "https://example.com/" },
     });
