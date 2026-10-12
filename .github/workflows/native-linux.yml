@@ -69,6 +69,10 @@ jobs:
       - name: Check that no distribution libopenconnect is installed
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
+      # Shows the build carries our patch. The probe cannot: it always makes
+      # a command pipe.
+      - name: Check that freeing a handle leaves descriptor 0 open
+        run: bash native/probe/free-without-pipe.sh stage
 
       # The probe goes in stage/bin and finds the library in stage/lib through
       # its rpath, the same layout the installed app uses.

@@ -90,6 +90,10 @@ jobs:
               echo "$lib: macOS $(otool -l "$lib" | awk '$1 == "minos" { print $2; exit }')"
             fi
           done
+      # Shows the build carries our patch. The probe cannot: it always makes
+      # a command pipe.
+      - name: Check that freeing a handle leaves descriptor 0 open
+        run: bash native/probe/free-without-pipe.sh "$APP"
       - name: Build the probe against it
         working-directory: native/probe
         env:
