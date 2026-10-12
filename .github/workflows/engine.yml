@@ -120,14 +120,41 @@ jobs:
           cargo clippy --locked -p ubc-vpn-engine --features libopenconnect --all-targets -- -D warnings
           cargo clippy --locked -p ubc-vpn-engine --features libopenconnect,fake --all-targets -- -D warnings
 
+      # The login tests talk to a stand-in gateway written in Python
+      # (crates/engine/tests/gateway). The tests are given the path of this
+      # Python; it is not put on PATH.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: "3.13.16"
+          update-environment: false
+
+      # Made for this run and gone with the runner: never committed, never
+      # uploaded. The gateway's request logs go to the same folder.
+      - name: Make a throwaway key for the stand-in gateway
+        working-directory: ${{ runner.temp }}
+        env:
+          # Stops Git Bash on Windows from reading the subject as a path.
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          mkdir gateway
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn.example.test" \
+            -keyout gateway/key.pem -out gateway/cert.pem
+
       # The tests start themselves again with planted copies in the working
       # directory and the loader's search path. On macOS and Linux they build
       # a stand-in library with the runner's C compiler.
       - name: Load and call the library
         env:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          UBC_VPN_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+          UBC_VPN_TEST_GATEWAY_DIR: ${{ runner.temp }}/gateway
+          # Turns a skipped gateway test into a failure.
+          UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: |
           cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests -- --nocapture | tee test.log
+          # Each of the gateway's eight scenarios ran.
+          [ "$(grep -c '^RAN: gateway ' test.log)" = 8 ]
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
           # that need no binding run in it too.
@@ -140,4 +167,7 @@ jobs:
       - name: The same tests in a release build
         env:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          UBC_VPN_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+          UBC_VPN_TEST_GATEWAY_DIR: ${{ runner.temp }}/gateway
+          UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests --release
