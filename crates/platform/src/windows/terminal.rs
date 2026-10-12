@@ -265,25 +265,28 @@ mod tests {
         events
     }
 
+    /// Puts all of `keys` in the console's queue in one call, so that they
+    /// are all there before the first of them is read.
     fn type_keys(input: &Handle, keys: &str) {
-        for unit in keys.encode_utf16() {
-            let key = KEY_EVENT_RECORD {
-                bKeyDown: 1,
-                wRepeatCount: 1,
-                wVirtualKeyCode: 0,
-                wVirtualScanCode: 0,
-                uChar: KEY_EVENT_RECORD_0 { UnicodeChar: unit },
-                dwControlKeyState: 0,
-            };
-            let record = INPUT_RECORD {
-                EventType: KEY_EVENT as u16,
-                Event: INPUT_RECORD_0 { KeyEvent: key },
-            };
-            let mut written = 0;
-            // SAFETY: one live record is passed with the count one.
-            let done = unsafe { WriteConsoleInputW(input.0, &record, 1, &mut written) };
-            assert_ne!(done, 0, "type a key");
-        }
+        let key = |unit| KEY_EVENT_RECORD {
+            bKeyDown: 1,
+            wRepeatCount: 1,
+            wVirtualKeyCode: 0,
+            wVirtualScanCode: 0,
+            uChar: KEY_EVENT_RECORD_0 { UnicodeChar: unit },
+            dwControlKeyState: 0,
+        };
+        let record = |unit| INPUT_RECORD {
+            EventType: KEY_EVENT as u16,
+            Event: INPUT_RECORD_0 {
+                KeyEvent: key(unit),
+            },
+        };
+        let records: Vec<INPUT_RECORD> = keys.encode_utf16().map(record).collect();
+        let (count, mut written) = (records.len() as u32, 0);
+        // SAFETY: the pointer and count describe `records`, which is live.
+        let done = unsafe { WriteConsoleInputW(input.0, records.as_ptr(), count, &mut written) };
+        assert!(done != 0 && written == count, "type the keys");
     }
 
     // Not a test of its own: the two tests above run it in a new process.
