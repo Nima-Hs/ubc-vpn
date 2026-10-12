@@ -126,6 +126,17 @@ describe("the link to the service", () => {
         );
     });
 
+    it("shows 'not the owner' when the service refuses a disconnect for that reason", async () => {
+        // The claim goes unanswered here so that only the disconnect is refused.
+        const { bridge, link } = linkTo({ requestsRefusedAsNotOwner: true, ignore: ["claim"] });
+        await until(() => bridge.received().includes("claim"), "the claim being sent");
+        await expect(link.disconnect()).resolves.toEqual({
+            ok: false,
+            error: { kind: "refused", code: "not_owner", message: "only the owner may do this" },
+        });
+        expect(link.getState()).toEqual({ link: "not_owner" });
+    });
+
     it("reports a refusal in the service's words when there is no service to ask", async () => {
         const { link } = linkTo({ first: "service_unavailable" });
         await until(() => link.getState().link === "unavailable", "unavailable");

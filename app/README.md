@@ -54,7 +54,7 @@ The end-to-end test saves a screenshot of every state to `test-results/screens`,
 
 The interface runs sandboxed with no Node access, loads only the app's own files under a strict Content-Security-Policy, and cannot navigate, open windows, or make a network request. The bridge client never logs a line it sends or receives.
 
-The app never opens the service's pipe or socket itself. It starts the command-line client as `ubc-vpn bridge` and talks to it over standard input and output; the client is what checks that the other end really is the service. The contract is [`crates/core/src/bridge.rs`](../crates/core/src/bridge.rs), and `tests/mock-bridge.mjs` follows it. The app never sends `connect` through the bridge, so it never holds a session cookie.
+The app never opens the service's pipe or socket itself. It starts the command-line client as `ubc-vpn bridge` and talks to it over standard input and output; the client is what checks that the other end really is the service. The contract is [`crates/core/src/bridge.rs`](../crates/core/src/bridge.rs), and `tests/mock-bridge.mjs` follows it. The app never sends `connect` through the bridge, so it never holds a session cookie. The bridge is started with no shell, its own short list of environment variables (`BRIDGE_ENV`), and its standard error discarded; it is ended when the app lets go of it.
 
 Where the client sits in an installed app is in [`src/main/channel/cli.ts`](src/main/channel/cli.ts) and nowhere else. That place is provisional until the installers exist.
 

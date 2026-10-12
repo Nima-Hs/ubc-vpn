@@ -15,7 +15,8 @@
 // The config is `{ runs: [...], counter, log }`. Each start takes the next
 // entry of `runs` (the last one repeats), so a test can script "unavailable,
 // then ready". `counter` is a file holding how many times it has started and
-// `log` a file listing what it received, one entry per line.
+// `log` a file listing what it received, one entry per line. `pids`, if
+// given, is a file that gets the process id of every start.
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
@@ -31,6 +32,19 @@ writeFileSync(config.counter, String(started + 1));
 const run = config.runs[Math.min(started, config.runs.length - 1)];
 
 const log = (entry) => appendFileSync(config.log, `${entry}\n`);
+
+// What a test may want to know about how this process was started.
+if (config.pids !== undefined) {
+    appendFileSync(config.pids, `${process.pid}\n`);
+}
+if (run.reportStart) {
+    log(`cwd:${process.cwd()}`);
+    log(`env:${Object.keys(process.env).sort().join(",")}`);
+}
+// The real bridge logs to standard error. The app must never show it.
+if (run.stderr !== undefined) {
+    process.stderr.write(`${run.stderr}\n`);
+}
 const write = (line) => process.stdout.write(`${JSON.stringify(line)}\n`);
 const raw = (text, then) => process.stdout.write(text, then);
 /** Writes a last line and exits, once it has been flushed. */
@@ -66,10 +80,31 @@ function isRequest(value) {
         case "disconnect":
             return Object.keys(body).length === 1;
         case "connect":
-            return typeof body.params === "object" && body.params !== null;
+            // Decoded as strictly as any other request: a connect that is not
+            // well formed is a bad line, before the rule about connect applies.
+            return Object.keys(body).length === 2 && isConnectParams(body.params);
         default:
             return false;
     }
+}
+
+function isStrings(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isConnectParams(params) {
+    return (
+        typeof params === "object" &&
+        params !== null &&
+        Object.keys(params).sort().join() === "cookie,gateway_addr,routes" &&
+        typeof params.cookie === "string" &&
+        /^\d{1,3}(\.\d{1,3}){3}$/.test(params.gateway_addr) &&
+        typeof params.routes === "object" &&
+        params.routes !== null &&
+        Object.keys(params.routes).sort().join() === "dns_domains,subnets" &&
+        isStrings(params.routes.subnets) &&
+        isStrings(params.routes.dns_domains)
+    );
 }
 
 function answer(request) {
@@ -146,8 +181,17 @@ function readRequests() {
             answer(request);
         }
     });
-    // The app has gone: leave quietly.
-    process.stdin.on("end", () => process.exit(0));
+    // The app has gone: leave quietly. `staysAfterInputCloses` is a bridge
+    // that has stopped responding, to show that the app does not rely on it.
+    process.stdin.on("end", () => {
+        log("input closed");
+        if (run.staysAfterInputCloses) {
+            // Something to wait on, or the process would end by itself.
+            setInterval(() => {}, 1000);
+        } else {
+            process.exit(0);
+        }
+    });
 }
 
 function becomeReady() {

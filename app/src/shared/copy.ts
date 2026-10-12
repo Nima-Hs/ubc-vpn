@@ -225,8 +225,8 @@ export function describe(state: LinkState): StateCopy {
         case "untrusted_service":
             return {
                 tone: "problem",
-                title: "Do not continue",
-                body: "Something on this computer is answering in place of UBC VPN’s background service. The app has sent it nothing. Do not use the VPN. Install UBC VPN again, then restart your computer.",
+                title: "Service not verified",
+                body: "The app could not confirm that UBC VPN’s background service is the one answering, so it sent it nothing. Do not use the VPN on this computer. Install UBC VPN again, then restart your computer.",
                 action: null,
                 working: false,
             };

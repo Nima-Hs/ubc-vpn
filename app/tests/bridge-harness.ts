@@ -27,6 +27,9 @@ export interface MockRun {
     requestsRefusedAsNotOwner?: boolean;
     answerWithWrongId?: boolean;
     watchEarlyInput?: boolean;
+    reportStart?: boolean;
+    stderr?: string;
+    staysAfterInputCloses?: boolean;
     later?: { afterMs: number; state?: unknown; raw?: string; end?: string; exit?: number }[];
 }
 
@@ -36,8 +39,10 @@ export interface MockBridge {
     args: string[];
     /** How many times the bridge has been started. */
     starts(): number;
-    /** What the bridge received, in order: request methods, "bad_line", "early". */
+    /** What the bridge logged, in order: request methods, "bad_line", "early", and so on. */
     received(): string[];
+    /** The process ids of every bridge started, in order. */
+    pids(): number[];
 }
 
 /** Scripts the mock bridge: each start takes the next run, and the last repeats. */
@@ -46,11 +51,19 @@ export function mockBridge(...runs: MockRun[]): MockBridge {
     const config = join(dir, "config.json");
     const counter = join(dir, "starts");
     const log = join(dir, "log");
-    writeFileSync(config, JSON.stringify({ runs: runs.length > 0 ? runs : [{}], counter, log }));
+    const pids = join(dir, "pids");
+    writeFileSync(
+        config,
+        JSON.stringify({ runs: runs.length > 0 ? runs : [{}], counter, log, pids }),
+    );
     return {
         command: process.execPath,
         args: [join(__dirname, "mock-bridge.mjs"), "bridge", config],
         starts: () => (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0),
+        pids: () =>
+            existsSync(pids)
+                ? readFileSync(pids, "utf8").split("\n").filter(Boolean).map(Number)
+                : [],
         received: () =>
             existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [],
     };
@@ -67,6 +80,16 @@ export async function until(
             throw new Error(`timed out waiting for ${what}`);
         }
         await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+}
+
+/** Whether a process is still running. */
+export function alive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
     }
 }
 

@@ -19,20 +19,24 @@ export const CLI_OVERRIDE = "UBC_VPN_CLI";
  * override, because otherwise anything able to set the app's environment
  * could have it run, and trust, a different client.
  */
-export function bridgeCommand(app: {
-    isPackaged: boolean;
-    resourcesPath: string;
-    platform: NodeJS.Platform;
-    env: Record<string, string | undefined>;
-}): { command: string; args: readonly string[] } {
-    const override = app.isPackaged ? undefined : app.env[CLI_OVERRIDE];
+export function bridgeCommand(
+    // Electron's own `app` and Node's own `process`, passed whole, so the
+    // caller has nothing to fill in and so nothing to get wrong.
+    app: { readonly isPackaged: boolean },
+    process: {
+        readonly resourcesPath: string;
+        readonly platform: NodeJS.Platform;
+        readonly env: Record<string, string | undefined>;
+    },
+): { command: string; args: readonly string[] } {
+    const override = app.isPackaged ? undefined : process.env[CLI_OVERRIDE];
     const command =
         override !== undefined && override !== ""
             ? resolve(override)
             : join(
-                  app.resourcesPath,
+                  process.resourcesPath,
                   ...BUNDLED_CLI.slice(0, -1),
-                  `${BUNDLED_CLI.at(-1)}${app.platform === "win32" ? ".exe" : ""}`,
+                  `${BUNDLED_CLI.at(-1)}${process.platform === "win32" ? ".exe" : ""}`,
               );
     if (!isAbsolute(command)) {
         throw new Error("the command-line client's path must be absolute");

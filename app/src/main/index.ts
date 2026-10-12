@@ -51,12 +51,7 @@ async function start(): Promise<void> {
         };
     } else {
         link = createServiceLink({
-            ...bridgeCommand({
-                isPackaged: app.isPackaged,
-                resourcesPath: process.resourcesPath,
-                platform: process.platform,
-                env: process.env,
-            }),
+            ...bridgeCommand(app, process),
             appVersion: app.getVersion(),
             // The text is fixed and holds nothing that was sent or received.
             // biome-ignore lint/suspicious/noConsole: the app's only log line, for a bug in the app itself.

@@ -172,27 +172,30 @@ test("only the interface's own files are served, with their headers", async () =
     // folder: only the list of allowed kinds stands between it and a reader.
     const stray = resolve("out-demo/renderer/stray-notes.txt");
     writeFileSync(stray, "not part of the interface");
-    const fetched = await app.evaluate(async ({ session }) => {
-        const get = async (url: string) => {
-            try {
-                const response = await session.defaultSession.fetch(url);
-                return {
-                    status: response.status,
-                    csp: response.headers.get("content-security-policy"),
-                    sniff: response.headers.get("x-content-type-options"),
-                };
-            } catch {
-                return { status: 0, csp: null, sniff: null };
-            }
-        };
-        return {
-            index: await get("app://ui/index.html"),
-            climbing: await get("app://ui/..%2f..%2fpackage.json"),
-            otherMain: await get("app://ui/..%2fmain%2findex.js"),
-            otherHost: await get("app://elsewhere/index.html"),
-            otherType: await get("app://ui/stray-notes.txt"),
-        };
-    });
+    const fetched = await app
+        .evaluate(async ({ session }) => {
+            const get = async (url: string) => {
+                try {
+                    const response = await session.defaultSession.fetch(url);
+                    return {
+                        status: response.status,
+                        csp: response.headers.get("content-security-policy"),
+                        sniff: response.headers.get("x-content-type-options"),
+                    };
+                } catch {
+                    return { status: 0, csp: null, sniff: null };
+                }
+            };
+            return {
+                index: await get("app://ui/index.html"),
+                climbing: await get("app://ui/..%2f..%2fpackage.json"),
+                otherMain: await get("app://ui/..%2fmain%2findex.js"),
+                otherHost: await get("app://elsewhere/index.html"),
+                otherType: await get("app://ui/stray-notes.txt"),
+            };
+        })
+        // Whatever happens, the stray file does not outlive the test.
+        .finally(() => rmSync(stray, { force: true }));
     expect(fetched.index.status).toBe(200);
     expect(fetched.index.csp).toContain("default-src 'none'");
     expect(fetched.index.csp).toContain("connect-src 'none'");
@@ -203,7 +206,6 @@ test("only the interface's own files are served, with their headers", async () =
     expect(fetched.climbing.status).toBe(404);
     // Refused before it is even looked up: no such host is ever requested.
     expect(fetched.otherHost.status).toBe(0);
-    rmSync(stray);
     expect(fetched.otherType.status).toBe(404);
 });
 

@@ -12,6 +12,7 @@
 // bridge's standard error.
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { dirname } from "node:path";
 import type { UnavailableReason } from "@shared/api";
 import type { BridgeLine } from "@shared/protocol/BridgeLine";
 import type { Event } from "@shared/protocol/Event";
@@ -70,6 +71,51 @@ export interface BridgeOptions {
     maxRetryDelayMs?: number;
     /** How long to wait for the bridge's first line, or for a response. */
     replyTimeoutMs?: number;
+    /** How long a bridge whose input was closed has to leave before it is killed. */
+    exitGraceMs?: number;
+    /** The app's own environment, from which the bridge's short one is taken. */
+    env?: Record<string, string | undefined>;
+}
+
+/**
+ * The only variables the bridge is started with. The app's environment is
+ * not passed on: nothing set for the app, by the user or by anything else,
+ * reaches the client unless it is named here. (On Windows, Node adds back
+ * a fixed handful the OS needs to start any process, such as `PATH` and
+ * `USERNAME`; the client is started by absolute path and does not use them.)
+ */
+export const BRIDGE_ENV = [
+    // Windows: where the system's own libraries are. A program cannot start without it.
+    "SystemRoot",
+    // Windows: where the service's policy file is.
+    "ProgramData",
+    // Windows: the user's settings folder.
+    "APPDATA",
+    // Windows: the user's profile, which the settings folder falls back to.
+    "USERPROFILE",
+    // Windows: temporary files.
+    "TEMP",
+    "TMP",
+    // macOS and Linux: the user's home, where settings live.
+    "HOME",
+    // Linux: where settings live when the user has moved them.
+    "XDG_CONFIG_HOME",
+    // Linux: the per-user runtime folder, where a development service listens.
+    "XDG_RUNTIME_DIR",
+    // macOS and Linux: temporary files, and macOS's per-user runtime folder.
+    "TMPDIR",
+] as const;
+
+/** The bridge's environment: the entries of {@link BRIDGE_ENV} that are set, and nothing else. */
+export function bridgeEnv(env: Record<string, string | undefined>): Record<string, string> {
+    const kept: Record<string, string> = {};
+    for (const name of BRIDGE_ENV) {
+        const value = env[name];
+        if (value !== undefined) {
+            kept[name] = value;
+        }
+    }
+    return kept;
 }
 
 /** The pause before each new attempt: it doubles, and never passes `maxMs`. */
@@ -119,6 +165,8 @@ export class BridgeClient {
             initialRetryDelayMs: 250,
             maxRetryDelayMs: 5_000,
             replyTimeoutMs: 10_000,
+            exitGraceMs: 2_000,
+            env: process.env,
             ...options,
         };
         this.backoff = new Backoff(this.options.initialRetryDelayMs, this.options.maxRetryDelayMs);
@@ -134,10 +182,11 @@ export class BridgeClient {
         this.launch();
     }
 
+    /** Stops for good. The bridge is ended at once: nothing may outlive the app. */
     stop(): void {
         this.stopped = true;
         this.clearRetry();
-        this.drop();
+        this.drop(0);
     }
 
     /** Skips the wait before the next attempt. Does nothing while a bridge is running. */
@@ -188,13 +237,27 @@ export class BridgeClient {
     }
 
     private launch(): void {
-        // No shell, a fixed program and fixed arguments. Standard error is
-        // discarded unread: it is the bridge's own log, not the app's.
-        const child = spawn(this.options.command, [...this.options.args], {
-            shell: false,
-            windowsHide: true,
-            stdio: ["pipe", "pipe", "ignore"],
-        }) as unknown as ChildProcessWithoutNullStreams;
+        let child: ChildProcessWithoutNullStreams;
+        try {
+            // No shell, a fixed program and fixed arguments, a short
+            // environment of its own, and the program's own folder to work
+            // in. Standard error is discarded unread: it is the bridge's own
+            // log, not the app's.
+            child = spawn(this.options.command, [...this.options.args], {
+                shell: false,
+                windowsHide: true,
+                stdio: ["pipe", "pipe", "ignore"],
+                env: bridgeEnv(this.options.env),
+                cwd: dirname(this.options.command),
+            }) as unknown as ChildProcessWithoutNullStreams;
+        } catch {
+            // Starting a program can fail outright, for example when the file
+            // is there but is not a program. That is the service being out of
+            // reach, like any other; it must never take the app down.
+            this.options.onStatus({ status: "unavailable", reason: "not_running" });
+            this.retryAfter(this.backoff.take());
+            return;
+        }
         this.child = child;
         const decoder = new LineDecoder();
         let greeted = false;
@@ -330,28 +393,41 @@ export class BridgeClient {
         if (this.child !== child) {
             return;
         }
-        this.drop();
+        this.drop(this.options.exitGraceMs);
         if (this.stopped) {
             return;
         }
         this.options.onStatus(status);
         if (retryMs !== null) {
-            this.clearRetry();
-            this.retryTimer = setTimeout(() => {
-                this.retryTimer = null;
-                this.launch();
-            }, retryMs);
+            this.retryAfter(retryMs);
         }
     }
 
-    private drop(): void {
+    private retryAfter(delayMs: number): void {
+        this.clearRetry();
+        this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            this.launch();
+        }, delayMs);
+    }
+
+    /**
+     * Lets go of the current bridge, and makes sure it ends. Closing its
+     * input is how a bridge is told the app has gone, and it then leaves by
+     * itself. One that has not left after `graceMs` is killed.
+     */
+    private drop(graceMs: number): void {
         const child = this.child;
         this.child = null;
         this.ready = false;
         if (child !== null) {
-            // Closing its input is how the bridge is told the app has gone.
             child.stdin.end();
-            child.kill();
+            if (graceMs <= 0) {
+                child.kill();
+            } else if (child.exitCode === null && child.signalCode === null) {
+                const timer = setTimeout(() => child.kill(), graceMs);
+                child.once("close", () => clearTimeout(timer));
+            }
         }
         for (const pending of this.pending.values()) {
             clearTimeout(pending.timer);

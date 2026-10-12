@@ -1,17 +1,23 @@
 // The app's bridge client, run against a mock bridge that follows the
 // contract in `crates/core/src/bridge.rs`.
 
-import { spawn } from "node:child_process";
+import { type SpawnOptions, spawn } from "node:child_process";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { Event } from "@shared/protocol/Event";
 import type { RequestBody } from "@shared/protocol/RequestBody";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     Backoff,
+    BRIDGE_ENV,
     BridgeClient,
     BridgeError,
     type BridgeFault,
+    type BridgeOptions,
     type BridgeRequestBody,
     type BridgeStatus,
+    bridgeEnv,
 } from "../src/main/channel/bridge";
 import { bridgeCommand } from "../src/main/channel/cli";
 import {
@@ -20,10 +26,24 @@ import {
     LineTooLongError,
     MAX_LINE_BYTES,
 } from "../src/main/channel/framing";
-import { type MockBridge, type MockRun, mockBridge, pause, TUNNEL, until } from "./bridge-harness";
+import {
+    alive,
+    type MockBridge,
+    type MockRun,
+    mockBridge,
+    pause,
+    TUNNEL,
+    until,
+} from "./bridge-harness";
 
 /** Obviously fake, and searched for wherever a secret must not turn up. */
 const COOKIE = "not-a-real-cookie-0123456789";
+
+// The real `spawn`, watched: the tests below read how the bridge was started.
+vi.mock("node:child_process", async (original) => {
+    const actual = await original<typeof import("node:child_process")>();
+    return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 const cleanups: (() => unknown)[] = [];
 
@@ -44,11 +64,12 @@ interface Harness {
 
 function start(
     runs: MockRun[],
-    options: {
-        replyTimeoutMs?: number;
-        maxRetryDelayMs?: number;
-        initialRetryDelayMs?: number;
-    } = {},
+    options: Partial<
+        Pick<
+            BridgeOptions,
+            "replyTimeoutMs" | "maxRetryDelayMs" | "initialRetryDelayMs" | "exitGraceMs" | "env"
+        >
+    > = {},
 ): Harness {
     const bridge = mockBridge(...runs);
     const statuses: BridgeStatus[] = [];
@@ -118,12 +139,10 @@ describe("starting the bridge", () => {
     it("treats a client that cannot be started as a service that is not running", async () => {
         const statuses: BridgeStatus[] = [];
         const client = new BridgeClient({
-            command: bridgeCommand({
-                isPackaged: true,
-                resourcesPath: "/nowhere/that/exists",
-                platform: process.platform,
-                env: {},
-            }).command,
+            command: bridgeCommand(
+                { isPackaged: true },
+                { resourcesPath: "/nowhere/that/exists", platform: process.platform, env: {} },
+            ).command,
             args: ["bridge"],
             onStatus: (status) => statuses.push(status),
             onEvent: () => {},
@@ -146,6 +165,18 @@ describe("starting the bridge", () => {
         expect(statuses.at(-1)).toEqual({ status: "update_needed", serviceVersion: "0.2.0" });
         await pause(200);
         expect(bridge.starts()).toBe(1);
+    });
+
+    it("keeps the version it shows to the length of a real one", async () => {
+        const { last, statuses } = start(
+            [{ first: "update_needed", serviceVersion: `0.2.0-${"x".repeat(500)}` }],
+            { maxRetryDelayMs: 60_000 },
+        );
+        await until(() => last() === "update_needed", "update_needed");
+        expect(statuses.at(-1)).toEqual({
+            status: "update_needed",
+            serviceVersion: `0.2.0-${"x".repeat(26)}`,
+        });
     });
 
     it("reports something that is not the service, and does not hammer", async () => {
@@ -452,20 +483,24 @@ describe("secrets", () => {
         vi.spyOn(process.stderr, "write").mockImplementation(record);
 
         // A valid line, then one that is not, each carrying the marker.
-        const { faults, last, statuses } = start(
+        const { client, faults, last, statuses } = start(
             [
                 {
                     later: [
                         {
-                            afterMs: 20,
+                            afterMs: 200,
                             state: { state: "failed", code: "internal", message: COOKIE },
                         },
-                        { afterMs: 60, raw: `{"type":"server","cookie":"${COOKIE}"}\n` },
+                        { afterMs: 400, raw: `{"type":"server","cookie":"${COOKIE}"}\n` },
                     ],
                 },
             ],
             { initialRetryDelayMs: 60_000 },
         );
+        // Requests too: nothing sent is written anywhere either.
+        await until(() => last() === "ready", "ready");
+        await client.request({ method: "status" });
+        await client.request({ method: "claim" });
         await until(() => last() === "unavailable", "unavailable");
 
         expect(JSON.stringify(statuses)).not.toContain(COOKIE);
@@ -475,45 +510,222 @@ describe("secrets", () => {
 });
 
 describe("where the command-line client is", () => {
-    const installed = {
-        isPackaged: true,
-        resourcesPath: "/opt/UBC VPN/resources",
-        platform: "linux" as const,
-    };
+    const resources = "/opt/UBC VPN/resources";
+    const native = (path: string) =>
+        path.replaceAll("/", process.platform === "win32" ? "\\" : "/");
+    const command = (
+        isPackaged: boolean,
+        env: Record<string, string | undefined> = {},
+        platform: NodeJS.Platform = "linux",
+        resourcesPath = resources,
+    ) => bridgeCommand({ isPackaged }, { resourcesPath, platform, env });
 
     it("is the bundled client, by absolute path, started as 'bridge'", () => {
-        expect(bridgeCommand({ ...installed, env: {} })).toEqual({
-            command: "/opt/UBC VPN/resources/bin/ubc-vpn".replaceAll(
-                "/",
-                process.platform === "win32" ? "\\" : "/",
-            ),
+        expect(command(true)).toEqual({
+            command: native(`${resources}/bin/ubc-vpn`),
             args: ["bridge"],
         });
-        const windows = bridgeCommand({ ...installed, platform: "win32", env: {} });
-        expect(windows.command.endsWith("ubc-vpn.exe")).toBe(true);
+        expect(command(true, {}, "win32").command.endsWith("ubc-vpn.exe")).toBe(true);
     });
 
     it("cannot be redirected through the environment in an installed app", () => {
-        const command = bridgeCommand({ ...installed, env: { UBC_VPN_CLI: "/tmp/evil" } }).command;
-        expect(command).not.toContain("evil");
-        expect(command).toBe(bridgeCommand({ ...installed, env: {} }).command);
+        const redirected = command(true, { UBC_VPN_CLI: "/tmp/evil" }).command;
+        expect(redirected).not.toContain("evil");
+        expect(redirected).toBe(command(true).command);
     });
 
     it("can be pointed at a locally built client in development, as an absolute path", () => {
-        const dev = { ...installed, isPackaged: false };
-        expect(
-            bridgeCommand({ ...dev, env: { UBC_VPN_CLI: "target/debug/ubc-vpn" } }).command,
-        ).toMatch(/^(\/|[A-Za-z]:\\).*target[\\/]debug[\\/]ubc-vpn$/);
-        // Unset or empty, it falls back to the bundled place.
-        expect(bridgeCommand({ ...dev, env: { UBC_VPN_CLI: "" } })).toEqual(
-            bridgeCommand({ ...dev, env: {} }),
+        expect(command(false, { UBC_VPN_CLI: "target/debug/ubc-vpn" }).command).toMatch(
+            /^(\/|[A-Za-z]:\\).*target[\\/]debug[\\/]ubc-vpn$/,
         );
+        // Unset or empty, it falls back to the bundled place.
+        expect(command(false, { UBC_VPN_CLI: "" })).toEqual(command(false));
+        expect(command(false)).toEqual(command(true));
     });
 
     it("refuses a place that is not an absolute path, so PATH is never searched", () => {
-        expect(() =>
-            bridgeCommand({ ...installed, resourcesPath: "resources", env: {} }),
-        ).toThrow();
+        expect(() => command(true, {}, "linux", "resources")).toThrow();
+    });
+});
+
+describe("how the bridge is started", () => {
+    it("gets a short environment of its own, not the app's", async () => {
+        const { bridge, last } = start([{ reportStart: true }], {
+            env: {
+                ...process.env,
+                UBC_VPN_TEST_MARKER: "must not reach the bridge",
+                UBC_VPN_CLI: "/tmp/evil",
+                NODE_OPTIONS: "--no-warnings",
+                HOME: "/home/someone",
+            },
+        });
+        await until(() => last() === "ready", "ready");
+        const names = (bridge.received().find((entry) => entry.startsWith("env:")) ?? "")
+            .slice(4)
+            .split(",")
+            .map((name) => name.toUpperCase());
+
+        expect(names).toContain("HOME");
+        for (const leaked of ["UBC_VPN_TEST_MARKER", "UBC_VPN_CLI", "NODE_OPTIONS"]) {
+            expect(names, leaked).not.toContain(leaked);
+        }
+        // Nothing reaches it that is not on the list, with one exception the
+        // app cannot avoid: Windows will not start a process without a few
+        // variables of its own, so Node copies those in when they are left out.
+        const fromTheSystem =
+            process.platform === "win32"
+                ? [
+                      "HOMEDRIVE",
+                      "HOMEPATH",
+                      "LOGONSERVER",
+                      "PATH",
+                      "SYSTEMDRIVE",
+                      "USERDOMAIN",
+                      "USERNAME",
+                      "WINDIR",
+                  ]
+                : ["__CF_USER_TEXT_ENCODING"];
+        const allowed = [...BRIDGE_ENV.map((name) => name.toUpperCase()), ...fromTheSystem];
+        expect(names.filter((name) => !allowed.includes(name))).toEqual([]);
+        if (process.platform !== "win32") {
+            expect(names).not.toContain("PATH");
+        }
+    });
+
+    it("keeps only the listed variables, and only those that are set", () => {
+        expect(bridgeEnv({ HOME: "/home/someone", SECRET_TOKEN: "x", TMPDIR: undefined })).toEqual({
+            HOME: "/home/someone",
+        });
+        expect(bridgeEnv({})).toEqual({});
+    });
+
+    it("works in the client's own folder, wherever the app was started from", async () => {
+        const { bridge, last } = start([{ reportStart: true }]);
+        await until(() => last() === "ready", "ready");
+        const cwd = bridge
+            .received()
+            .find((entry) => entry.startsWith("cwd:"))
+            ?.slice(4);
+        expect(realpathSync(cwd ?? "")).toBe(realpathSync(dirname(bridge.command)));
+        expect(realpathSync(cwd ?? "")).not.toBe(realpathSync(process.cwd()));
+    });
+
+    it("never shows or reads what the bridge writes to standard error", async () => {
+        const spawned = vi.mocked(spawn);
+        spawned.mockClear();
+        const { last } = start([{ stderr: "bridge-stderr-marker" }]);
+        await until(() => last() === "ready", "ready");
+
+        const options = spawned.mock.calls.at(-1)?.[2] as SpawnOptions;
+        // Discarded: not inherited, where it would land in the app's own
+        // output, and not piped, where the app would hold it.
+        expect(options.stdio).toEqual(["pipe", "pipe", "ignore"]);
+        expect(spawned.mock.results.at(-1)?.value.stderr).toBeNull();
+    });
+
+    it("is started without a shell", async () => {
+        const spawned = vi.mocked(spawn);
+        spawned.mockClear();
+        const { bridge, last } = start([{}]);
+        await until(() => last() === "ready", "ready");
+        const [command, args, options] = spawned.mock.calls.at(-1) as [
+            string,
+            string[],
+            SpawnOptions,
+        ];
+        expect(command).toBe(bridge.command);
+        expect(args).toEqual(bridge.args);
+        expect(options.shell).toBe(false);
+        expect(options.windowsHide).toBe(true);
+    });
+
+    it("survives a client file that is there but is not a program", async () => {
+        // On Windows starting this throws outright; elsewhere it fails a
+        // moment later. Either way the app carries on and tries again.
+        const dir = mkdtempSync(join(tmpdir(), "ubc-vpn-not-a-program-"));
+        const notAProgram = join(dir, process.platform === "win32" ? "ubc-vpn.exe" : "ubc-vpn");
+        writeFileSync(notAProgram, "this is a text file, not a program\n");
+
+        const statuses: BridgeStatus[] = [];
+        const client = new BridgeClient({
+            command: notAProgram,
+            args: ["bridge"],
+            onStatus: (status) => statuses.push(status),
+            onEvent: () => {},
+            initialRetryDelayMs: 20,
+            maxRetryDelayMs: 40,
+        });
+        cleanups.push(() => client.stop());
+        expect(() => client.start()).not.toThrow();
+
+        // Reported, and tried again from the retry timer without bringing
+        // anything down.
+        const failures = () => statuses.filter((status) => status.status === "unavailable").length;
+        await until(() => failures() >= 3, "three failed starts");
+        expect(statuses.at(-1)).toEqual({ status: "unavailable", reason: "not_running" });
+        await expect(client.request({ method: "status" })).rejects.toMatchObject({
+            reason: "not_connected",
+        });
+    });
+});
+
+describe("the bridge process does not outlive its use", () => {
+    it("is told the app has gone by its input closing, and leaves by itself", async () => {
+        const { bridge, last } = start([{ later: [{ afterMs: 30, raw: "not json\n" }] }], {
+            initialRetryDelayMs: 60_000,
+            exitGraceMs: 60_000,
+        });
+        await until(() => last() === "unavailable", "the bridge being dropped");
+        // Not killed (the grace period is a minute): it left because its input closed.
+        await until(() => bridge.received().includes("input closed"), "its input closing");
+        const [pid = 0] = bridge.pids();
+        await until(() => !alive(pid), "the bridge leaving");
+    });
+
+    it("is killed if it does not leave when its input closes", async () => {
+        const { bridge, last } = start(
+            [{ staysAfterInputCloses: true, later: [{ afterMs: 30, raw: "not json\n" }] }],
+            { initialRetryDelayMs: 60_000, exitGraceMs: 150 },
+        );
+        await until(() => last() === "unavailable", "the bridge being dropped");
+        const [pid = 0] = bridge.pids();
+        expect(alive(pid)).toBe(true);
+        await until(() => !alive(pid), "the bridge being killed");
+    });
+
+    it("is ended at once when the app stops, even one that would not leave", async () => {
+        const { bridge, client, last } = start([{ staysAfterInputCloses: true }], {
+            exitGraceMs: 60_000,
+        });
+        await until(() => last() === "ready", "ready");
+        const [pid = 0] = bridge.pids();
+        expect(alive(pid)).toBe(true);
+        client.stop();
+        await until(() => !alive(pid), "the bridge ending", 3000);
+    });
+});
+
+describe("no bridge is started without its pause", () => {
+    it("waits before replacing a bridge that failed", async () => {
+        const { bridge, last } = start([{ first: "none" }], {
+            initialRetryDelayMs: 500,
+            maxRetryDelayMs: 500,
+        });
+        await until(() => last() === "unavailable", "unavailable");
+        await pause(200);
+        expect(bridge.starts()).toBe(1);
+        await until(() => bridge.starts() === 2, "the second start");
+    });
+
+    it("waits the longest pause before checking again on something that is not the service", async () => {
+        const { bridge, last } = start([{ first: "untrusted_service" }], {
+            initialRetryDelayMs: 10,
+            maxRetryDelayMs: 500,
+        });
+        await until(() => last() === "untrusted_service", "untrusted_service");
+        await pause(200);
+        expect(bridge.starts()).toBe(1);
+        await until(() => bridge.starts() === 2, "the second start");
     });
 });
 
@@ -543,7 +755,17 @@ describe("the mock bridge follows the contract", () => {
     }
 
     it("answers connect itself with bad_request and carries on", async () => {
-        const request = { id: 7, body: { method: "connect", params: { cookie: COOKIE } } };
+        const request = {
+            id: 7,
+            body: {
+                method: "connect",
+                params: {
+                    cookie: COOKIE,
+                    gateway_addr: "192.0.2.1",
+                    routes: { subnets: ["203.0.113.0/24"], dns_domains: [] },
+                },
+            },
+        };
         const { lines, code } = await run(
             mockBridge({ firstEvent: false }),
             `${JSON.stringify(request)}\n`,
@@ -558,6 +780,17 @@ describe("the mock bridge follows the contract", () => {
         expect(JSON.stringify(lines)).not.toContain(COOKIE);
         // Standard input closed: it leaves with status 0 and no further line.
         expect(code).toBe(0);
+    });
+
+    it("answers a connect that is not well formed with bad_line, like any bad request", async () => {
+        const request = { id: 7, body: { method: "connect", params: { cookie: COOKIE } } };
+        const { lines, code } = await run(
+            mockBridge({ firstEvent: false }),
+            `${JSON.stringify(request)}\n`,
+        );
+        expect(lines).toEqual([expect.objectContaining({ type: "ready" }), { type: "bad_line" }]);
+        expect(JSON.stringify(lines)).not.toContain(COOKIE);
+        expect(code).toBe(1);
     });
 
     it("answers a line that is not a request with bad_line, and exits", async () => {
