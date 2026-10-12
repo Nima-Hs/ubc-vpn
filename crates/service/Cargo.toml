@@ -7,10 +7,20 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Dev mode: the `--dev` flag, which runs the service unprivileged with fake
+# routing and fake DNS. Never enabled in a release build;
+# without it the flag does not exist.
+dev-mode = ["ubc-vpn-platform/dev-mode"]
+
 [dependencies]
+serde_json = "1.0.154"
 ubc-vpn-core.workspace = true
 ubc-vpn-engine.workspace = true
 ubc-vpn-platform.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+ubc-vpn-platform = { workspace = true, features = ["fake"] }
