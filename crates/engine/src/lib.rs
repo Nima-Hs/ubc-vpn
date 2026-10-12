@@ -97,6 +97,9 @@
 //! - On Windows the library asks for `wintun.dll` by name in the program's
 //!   own folder, so that file sits beside the service program, and after
 //!   loading nothing else can be loaded by name from that folder.
+//! - Call `openconnect_init_ssl` once, after loading and before the first
+//!   handle is made. On Windows it starts the network library as well as
+//!   TLS.
 //! - Never set a vpnc-script, a CSD wrapper or a proxy. The tunnel device is
 //!   created with a null script; routes and DNS belong to the service.
 //! - Keep to IPv4, which takes two steps. `openconnect_disable_ipv6` only
@@ -105,12 +108,24 @@
 //!   also install `openconnect_override_getaddrinfo` with a callback that
 //!   asks for `AF_INET` only, or fail when the peer turns out to be IPv6.
 //!   Without this a login cannot fill [`Session::gateway_addr`].
+//! - The library frees what a `getaddrinfo` callback returns with the
+//!   system's `freeaddrinfo`. So the callback must return a list the
+//!   system's own `getaddrinfo` made, for example by calling it on the
+//!   address in numeric form. Never return a list built in Rust.
 //! - Never enable a software-token mode, an external-browser or
 //!   single-sign-on login, or a client certificate.
 //! - Let one thread own the library handle and make every library call on
 //!   it. Other threads touch only the write end of the command pipe from
 //!   `openconnect_setup_cmd_pipe`. On Windows that end is a socket, written
-//!   with `send`.
+//!   with `send`. The library closes that end when the handle is freed, so
+//!   never close it, and never write to it after the handle is dropped.
+//! - Give every handle a real `privdata` pointer. Given a null one, the
+//!   library passes the handle itself to the callbacks in its place.
+//! - Strings the library returns, such as the cookie and the certificate's
+//!   hash, belong to the handle. Copy each at once and keep no pointer: the
+//!   hash is freed at every new connection.
+//! - Keep at most one tunnel handle alive at a time. On Windows the library
+//!   keeps one handle in a global for the tunnel driver's log.
 //!
 //! **Certificates**
 //!
@@ -206,7 +221,12 @@
 //!   soon as it is held. The library logs the session cookie at debug level,
 //!   so its debug output is dropped in release builds (see
 //!   [`DEBUG_LINES`]), and the library must never be asked to dump request
-//!   or response bodies.
+//!   or response bodies. Unless told otherwise the library logs at every
+//!   level, the most detailed included.
+//! - A line longer than the buffer it is formatted into arrives cut short.
+//!   [`LogSink::hide`] replaces exact text, so a secret cut at the end of
+//!   such a line would not match and its first part would get through. Drop
+//!   any line that was cut, and any line that failed to format, whole.
 
 #![cfg_attr(not(feature = "libopenconnect"), forbid(unsafe_code))]
 
