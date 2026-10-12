@@ -12,8 +12,8 @@ publish.workspace = true
 # It is off by default, so ordinary builds and tests need no native library.
 # With it, build.rs requires UBC_VPN_NATIVE_DIR to name our own pinned build
 # of the library, which the tests in tests/ load. serde_json reads that
-# build's manifest. Nothing in the crate itself uses the binding yet.
-libopenconnect = ["dep:serde_json"]
+# build's manifest, and cc compiles shim.c. No engine uses the binding yet.
+libopenconnect = ["dep:cc", "dep:serde_json"]
 # The scripted engine in `fake`, for other crates' tests (as a
 # dev-dependency feature) and for the service's dev-mode feature. A release
 # build of the service must never enable it. This crate's own tests always
@@ -36,6 +36,7 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [build-dependencies]
+cc = { version = "=1.8.0", optional = true }
 serde_json = { version = "1.0.154", optional = true }
 
 [dev-dependencies]

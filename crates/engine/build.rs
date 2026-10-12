@@ -3,9 +3,10 @@
 //! Without the feature this does nothing. With it, `UBC_VPN_NATIVE_DIR` must
 //! name an unpacked output of this repository's own build of the library
 //! (`native/`, the `libopenconnect-*` workflow artifacts), and the build
-//! stops unless that output is the pinned one. Nothing is linked: the engine
-//! loads the library at run time (`src/ffi.rs`). The folder is handed to
-//! this crate's own tests and to nothing else.
+//! stops unless that output is the pinned one. The library itself is not
+//! linked: the engine loads it at run time (`src/ffi.rs`). Only `shim.c` is
+//! compiled in. The folder is handed to this crate's own tests and to
+//! nothing else.
 //!
 //! Every rule is in [`check`], which `tests/native_manifest.rs` tests.
 
@@ -140,5 +141,12 @@ fn main() {
         }
         // The folder this crate's own tests load the library from.
         println!("cargo:rustc-env=UBC_VPN_NATIVE_LIBS={}", libs.display());
+        // The engine's one C file. Left out when a test compiles this file
+        // to reach `check`: a test has no build-dependencies.
+        #[cfg(not(test))]
+        {
+            println!("cargo:rerun-if-changed=shim.c");
+            cc::Build::new().file("shim.c").compile("ubc_vpn_shim");
+        }
     }
 }
