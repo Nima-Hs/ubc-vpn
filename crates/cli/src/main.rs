@@ -31,14 +31,37 @@ Commands:
   status [--json]   Show whether the VPN is connected
   bridge            Carry messages between the app and the service
   help              Show this text
-  version           Show the version";
+  version           Show the version
+
+The first user to run status or connect becomes the owner of the service, and
+from then on only that user can control UBC VPN on this computer. The bridge
+claims nothing itself; it leaves that to the app.
+
+With --json, status prints the connection state as one line of JSON.
+
+Exit status:
+  0  done
+  1  failed for another reason
+  2  wrong usage
+  3  the service is not running
+  4  version mismatch: update UBC VPN
+  5  you are not the owner
+  6  another program is answering in place of the service";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let installed = || Platform::native(Mode::Installed);
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-    // The one command that reads standard input, so it is started here.
+    // An argument that is not Unicode is no command this program has.
+    let args: Option<Vec<String>> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string().ok())
+        .collect();
+    let Some(args) = args else {
+        return ExitCode::from(say(&mut err, HELP, USAGE));
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    // The one command that reads standard input, so it is started here,
+    // and only for exactly this spelling.
     if args == ["bridge"] {
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
@@ -98,9 +121,19 @@ fn status(
 }
 
 /// Text that came from the service, made safe to print: without control
-/// characters, which could do anything to a terminal.
+/// characters, which could do anything to a terminal, and without the
+/// invisible characters that reorder or hide text, which could make a line
+/// read differently from what it says. Other Unicode is kept.
 fn clean(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
+    // Not the zero-width joiner and non-joiner (U+200C, U+200D): they are
+    // ordinary in Persian, Arabic and Indic text and in emoji, and neither
+    // reorder nor hide anything.
+    let invisible = |c: char| {
+        matches!(c, '\u{061c}' | '\u{200b}' | '\u{200e}' | '\u{200f}')
+            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+    };
+    let shown = |c: &char| !c.is_control() && !invisible(*c);
+    text.chars().filter(shown).collect()
 }
 
 /// The state in words.
@@ -154,6 +187,6 @@ fn explain(error: &ClientError) -> (u8, String) {
                 .to_string(),
         ),
         ClientError::Refused(error) => (FAILED, clean(&error.message)),
-        ClientError::Lost(why) => (FAILED, format!("The service did not answer: {why}.")),
+        ClientError::Lost(why) => (FAILED, format!("Lost contact with the service: {why}.")),
     }
 }

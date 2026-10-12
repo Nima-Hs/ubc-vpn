@@ -132,6 +132,29 @@ fn each_failure_has_its_own_exit_code_and_message() {
     let unsupported = || Err(Error::Unsupported);
     let (mut out, mut err) = (Vec::new(), Vec::new());
     assert_eq!(run(&["status"], &unsupported, &mut out, &mut err), FAILED);
+
+    // A request the service refuses is a failure too, with its reason: here
+    // the first claim, which the service cannot store.
+    let rig = Rig::new();
+    let _service = rig.service();
+    let state = rig.fake.platform(&rig.root).paths.state_dir;
+    std::fs::create_dir_all(state.join("state.json.tmp")).unwrap();
+    let (code, out, err) = rig.run(&["status"]);
+    assert_eq!((code, out.as_str()), (FAILED, ""));
+    assert!(err.contains("The owner could not be saved"), "{err}");
+
+    // The help says what the statuses mean and that the first use claims.
+    let (code, help, _) = rig.run(&["help"]);
+    assert_eq!(code, 0);
+    for line in [
+        "3  the service is not running",
+        "6  another program",
+        "becomes the owner of the service",
+        "The bridge\nclaims nothing itself",
+        "bridge            Carry messages",
+    ] {
+        assert!(help.contains(line), "{help}");
+    }
     assert_eq!(rig.run(&["help"]).0, 0);
 }
 
@@ -303,8 +326,11 @@ fn every_state_is_printed_exactly() {
     };
     let failed = ConnState::Failed {
         code: ErrorCode::VerificationFailed,
-        // Whatever an OS error may hold, the terminal gets no control codes.
-        message: "10.19.0.0/16 is \u{1b}[2Jnot routed\r\n".to_string(),
+        // Whatever an OS error may hold, the terminal gets no control codes
+        // and nothing that reorders the line. Ordinary Unicode is kept.
+        message:
+            "10.19.0.0/16 is \u{1b}[2Jnot routed \u{202e}(réseau 網, می\u{200c}خواهم)\u{200b}\r\n"
+                .to_string(),
     };
     let states = [
         (
@@ -329,8 +355,8 @@ fn every_state_is_printed_exactly() {
         ),
         (
             failed,
-            "Failed: 10.19.0.0/16 is [2Jnot routed\n",
-            r#"{"state":"failed","code":"verification_failed","message":"10.19.0.0/16 is \u001b[2Jnot routed\r\n"}"#,
+            "Failed: 10.19.0.0/16 is [2Jnot routed (réseau 網, می\u{200c}خواهم)\n",
+            "{\"state\":\"failed\",\"code\":\"verification_failed\",\"message\":\"10.19.0.0/16 is \\u001b[2Jnot routed \u{202e}(réseau 網, می\u{200c}خواهم)\u{200b}\\r\\n\"}",
         ),
         (
             ConnState::Connected { tunnel },
@@ -365,7 +391,10 @@ fn an_answer_that_is_not_a_status_is_an_error() {
 fn a_reply_this_version_cannot_read_still_means_please_update() {
     let rig = Rig::new();
     let service = scripted(&rig, |conn| {
-        conn.read_line().unwrap();
+        // The command-line client says which program it is.
+        let hello: ubc_vpn_core::protocol::Hello =
+            decode(&conn.read_line().unwrap().unwrap()).unwrap();
+        assert_eq!(hello.client, ClientKind::Cli);
         let later = r#"{"protocol_version":99,"service":{"version":"9.9.9"}}"#;
         conn.write_line(later).unwrap();
     });
