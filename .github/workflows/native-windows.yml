@@ -103,7 +103,7 @@ jobs:
           ours=$(cd ../windows/out/bin && pwd)
           openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 2 -subj "//CN=localhost"
           python fake_server.py cert.pem key.pem 4444 &
-          sleep 3
+          ../windows/tests/wait-for-server.sh 4444 $!
           # Control: without the build output there is no libopenconnect to load,
           # so the probe cannot start and never prints a version.
           status=0
@@ -128,7 +128,7 @@ jobs:
           unzip -q wintun.zip
           cp wintun/bin/amd64/wintun.dll target/release/
           python fake_server.py cert.pem key.pem 4445 &
-          sleep 3
+          ../windows/tests/wait-for-server.sh 4445 $!
           PATH="$ours:$windows" ./target/release/oc-probe.exe connect https://127.0.0.1:4445 testuser testpass | tee connect.txt
           grep -qE '^version  = v9\.21(-|$)' connect.txt
           grep -qx 'RESULT: PASS' connect.txt

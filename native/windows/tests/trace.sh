@@ -41,8 +41,9 @@ powershell -NoProfile -Command "
 
 cd "$probe"
 python fake_server.py cert.pem key.pem 4458 >/dev/null 2>&1 &
+"$here/tests/wait-for-server.sh" 4458 $!
 python fake_server.py cert.pem key.pem 4459 >/dev/null 2>&1 &
-sleep 3
+"$here/tests/wait-for-server.sh" 4459 $!
 
 "$procmon" //AcceptEula //Quiet //Minimized //BackingFile "$(cygpath -w "$tools/trace.pml")" &
 tracer=$!
