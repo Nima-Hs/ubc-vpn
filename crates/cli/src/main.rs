@@ -155,7 +155,8 @@ fn main() -> ExitCode {
             return ExitCode::from(say(&mut err, HELP, USAGE));
         };
         let mut input = std::io::stdin().lock();
-        return ExitCode::from(settings::run(command, &chosen, &mut input, &mut out));
+        let status = settings::run(command, &chosen, &mut input, &mut out, &mut err);
+        return ExitCode::from(status);
     }
     if args == ["connect", "--json"] {
         let engines = |policy: &Policy| login_engine(dev, policy);

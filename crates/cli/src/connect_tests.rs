@@ -87,7 +87,7 @@ impl Scene {
         std::fs::create_dir_all(rig.root.join("policy")).unwrap();
         std::fs::write(rig.root.join("policy/policy.json"), policy).unwrap();
         if let Some(text) = settings {
-            std::fs::create_dir_all(rig.root.join("settings")).unwrap();
+            crate::tests::settings_folder(&rig.root.join("settings"));
             std::fs::write(rig.root.join("settings/settings.json"), text).unwrap();
         }
         let mut script = Script::new(pin());
@@ -641,4 +641,23 @@ fn a_username_that_cannot_be_saved_does_not_fail_the_connect() {
         );
         assert_eq!(saved(&scene), before);
     }
+}
+
+// Security rule: a connect takes its routes from the settings, so it does
+// not read them from a folder others can write to. It asks nothing, sends
+// nothing, and says what to do about it.
+#[cfg(unix)]
+#[test]
+fn a_connect_does_not_read_settings_others_can_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scene = Scene::usual();
+    let dir = scene.rig.root.join("settings");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    let (code, out, err) = scene.connect(&mut typist);
+    assert_eq!((code, out.as_str()), (FAILED, ""));
+    assert!(err.contains("can be changed by other users"), "{err}");
+    assert!(err.contains("chmod go-w"), "{err}");
+    assert!(typist.asked.is_empty() && !scene.gateway_was_asked());
 }

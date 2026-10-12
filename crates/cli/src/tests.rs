@@ -63,6 +63,17 @@ impl Rig {
     }
 }
 
+/// Makes a settings folder as this program would: on Unix for the user
+/// alone, whatever the umask of whoever runs the tests.
+pub(crate) fn settings_folder(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
 impl Drop for Rig {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);

@@ -19,6 +19,8 @@ const GOOD: &str =
 /// One user's machine: a policy folder and a settings folder, both empty.
 struct Machine {
     root: PathBuf,
+    /// What the last command wrote on standard error.
+    said: std::cell::RefCell<String>,
 }
 
 impl Machine {
@@ -27,7 +29,8 @@ impl Machine {
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = std::env::temp_dir().join(format!("ubc-vpn-settings-test-{unique:?}"));
         std::fs::create_dir_all(&root).unwrap();
-        Self { root }
+        let said = Default::default();
+        Self { root, said }
     }
 
     fn settings_file(&self) -> PathBuf {
@@ -35,7 +38,7 @@ impl Machine {
     }
 
     fn write_settings(&self, text: &str) {
-        std::fs::create_dir_all(self.root.join("settings")).unwrap();
+        crate::tests::settings_folder(&self.root.join("settings"));
         std::fs::write(self.settings_file(), text).unwrap();
     }
 
@@ -56,7 +59,15 @@ impl Machine {
     fn run(&self, command: Command, input: &str) -> (u8, String) {
         let platform = || Ok(Fake::new().platform(&self.root));
         let mut out = Vec::new();
-        let status = run(command, &platform, &mut input.as_bytes(), &mut out);
+        let mut err = Vec::new();
+        let status = run(
+            command,
+            &platform,
+            &mut input.as_bytes(),
+            &mut out,
+            &mut err,
+        );
+        *self.said.borrow_mut() = String::from_utf8(err).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.ends_with('\n') && out.lines().count() == 1, "{out:?}");
         (status, out)
@@ -550,7 +561,13 @@ fn without_a_platform_only_checking_works() {
     let nowhere = || Err(Error::Unsupported);
     let status = |command: Command| {
         let mut out = Vec::new();
-        let status = run(command, &nowhere, &mut GOOD.as_bytes(), &mut out);
+        let status = run(
+            command,
+            &nowhere,
+            &mut GOOD.as_bytes(),
+            &mut out,
+            &mut Vec::new(),
+        );
         (status, String::from_utf8(out).unwrap())
     };
     assert_eq!(
@@ -641,7 +658,13 @@ fn no_more_than_the_limit_is_read_from_standard_input() {
     let platform = || Ok(Fake::new().platform(&machine.root));
     let mut input = std::io::BufReader::new(Endless(0));
     let mut out = Vec::new();
-    let status = run(Command::CheckRoutes, &platform, &mut input, &mut out);
+    let status = run(
+        Command::CheckRoutes,
+        &platform,
+        &mut input,
+        &mut out,
+        &mut Vec::new(),
+    );
     assert_eq!(status, 1);
     assert_eq!(out, b"{\"error\":\"bad_input\"}\n");
     let taken = input.get_ref().0;
@@ -823,4 +846,64 @@ fn a_username_that_would_not_fit_beside_the_routes_is_not_saved() {
     assert_eq!(machine.run(Command::Get, "").0, 0);
     // Forgetting never makes a file longer, so it always goes through.
     assert_eq!(remember_username(&dir, None, None), Ok(()));
+}
+
+// Security rule: the settings folder is the user's alone. One this program
+// makes is made that way, whatever the umask.
+#[cfg(unix)]
+#[test]
+fn the_settings_folder_is_made_for_the_user_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    let dir = machine.root.join("settings");
+    assert!(!dir.exists());
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+// Security rule: a settings folder that others can write to is not used,
+// to read or to save, and the user is told why. Whoever can write there can
+// replace the settings, and with them the routes of the next connect.
+#[cfg(unix)]
+#[test]
+fn a_settings_folder_others_can_write_to_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    let before = r#"{"username":"jdoe"}"#;
+    machine.write_settings(before);
+    let dir = machine.root.join("settings");
+    let mode = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+    for open in [0o720, 0o702, 0o777] {
+        mode(open).unwrap();
+        for command in [Command::Get, Command::SetRoutes] {
+            let why = machine.fails(command, GOOD);
+            assert_eq!(why, SettingsFailureCode::Unreadable, "{open:o}");
+            let said = machine.said.borrow().clone();
+            assert!(said.contains("can be changed by other users"), "{said}");
+            assert!(
+                said.contains("chmod go-w") && said.ends_with('\n'),
+                "{said}"
+            );
+        }
+        // Checking routes reads no file, and has nothing to say about it.
+        assert_eq!(machine.run(Command::CheckRoutes, GOOD).0, 0);
+        assert_eq!(*machine.said.borrow(), "");
+    }
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, before);
+
+    // Others may read it; that is not the rule.
+    mode(0o755).unwrap();
+    assert_eq!(machine.view().settings.username.as_deref(), Some("jdoe"));
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    assert_eq!(*machine.said.borrow(), "");
 }

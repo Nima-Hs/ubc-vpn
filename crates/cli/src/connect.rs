@@ -323,13 +323,13 @@ fn remember(platform: &Platform, policy: &Policy, username: Option<&str>, err: &
 
 /// The user's settings, or the defaults when none are saved.
 fn saved(platform: &Platform) -> Result<Settings, Stop> {
+    let dir = &platform.paths.settings_dir;
     let unreadable = |_| {
-        failed(
-            LoginErrorCode::Internal,
-            "The settings file cannot be read.",
-        )
+        let unsafe_folder = settings::folder_problem(dir);
+        let why = unsafe_folder.unwrap_or_else(|| "The settings file cannot be read.".to_string());
+        failed(LoginErrorCode::Internal, &why)
     };
-    let text = settings::stored(&platform.paths.settings_dir).map_err(unreadable)?;
+    let text = settings::stored(dir).map_err(unreadable)?;
     match text {
         Some(text) => settings::understood(&text).map_err(unreadable),
         None => Ok(Settings::default()),
