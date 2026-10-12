@@ -11,6 +11,10 @@
 //!   is [`RoutesReply::Ok`] it has replaced the `routes` field of
 //!   `settings.json` and nothing else in the file (see [`replace_routes`]).
 //!
+//! The username is not set through these commands. `ubc-vpn connect` saves
+//! the one the user typed once a login with it has succeeded, and removes a
+//! saved one that the gateway refused (see [`replace_username`]).
+//!
 //! Saved routes are used by the next connection. A connection that is already
 //! up keeps the routes it started with.
 //!
@@ -251,14 +255,54 @@ pub fn replace_routes(
     current: Option<&str>,
     routes: &RouteSet,
 ) -> Result<String, SettingsFailureCode> {
+    let routes = serde_json::to_value(routes).map_err(|_| SettingsFailureCode::Unreadable)?;
+    replace_field(current, "routes", Some(routes))
+}
+
+/// The longest username that is saved, in bytes.
+pub const MAX_USERNAME_BYTES: usize = 256;
+
+/// The new text of `settings.json` with its username replaced, or removed
+/// when `username` is `None`.
+///
+/// `current` is the file's text, or `None` when there is no file yet. Only
+/// the `username` field changes; every other field is kept exactly, as
+/// [`replace_routes`] keeps them.
+///
+/// Fails with [`SettingsFailureCode::Unreadable`] when `current` is not
+/// settings this version can load, and with
+/// [`SettingsFailureCode::BadInput`] for a username that is empty, longer
+/// than [`MAX_USERNAME_BYTES`] or holds a control character: nothing a
+/// person would type as a name, and not worth keeping.
+pub fn replace_username(
+    current: Option<&str>,
+    username: Option<&str>,
+) -> Result<String, SettingsFailureCode> {
+    let odd = |name: &str| {
+        name.is_empty() || name.len() > MAX_USERNAME_BYTES || name.chars().any(char::is_control)
+    };
+    if username.is_some_and(odd) {
+        return Err(SettingsFailureCode::BadInput);
+    }
+    replace_field(current, "username", username.map(serde_json::Value::from))
+}
+
+/// The text of a settings file with one field set to `value`, or removed.
+fn replace_field(
+    current: Option<&str>,
+    field: &str,
+    value: Option<serde_json::Value>,
+) -> Result<String, SettingsFailureCode> {
     let unreadable = |_| SettingsFailureCode::Unreadable;
     let text = current.unwrap_or("{}");
     // Loading it as settings first refuses anything `get` would refuse.
     serde_json::from_str::<Settings>(text).map_err(unreadable)?;
     let mut file: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(text).map_err(unreadable)?;
-    let routes = serde_json::to_value(routes).map_err(unreadable)?;
-    file.insert("routes".to_string(), routes);
+    match value {
+        Some(value) => file.insert(field.to_string(), value),
+        None => file.remove(field),
+    };
     let mut text = serde_json::to_string_pretty(&file).map_err(unreadable)?;
     text.push('\n');
     Ok(text)
@@ -569,6 +613,60 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    // Saving or forgetting the username changes that one field and nothing
+    // else, whatever else another version stored.
+    #[test]
+    fn saving_the_username_changes_nothing_else_in_the_file() {
+        let before = r#"{"username":"jdoe","routes":{"subnets":["10.19.0.0/16"],"old":1},
+            "save_password":true,"theme":"dark","future":{"a":[1,2]}}"#;
+        let mut expected: serde_json::Value = serde_json::from_str(before).unwrap();
+        let value = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+
+        let renamed = replace_username(Some(before), Some("asmith")).unwrap();
+        expected["username"] = serde_json::json!("asmith");
+        assert_eq!(value(&renamed), expected);
+        assert!(renamed.ends_with('\n'));
+
+        let forgotten = replace_username(Some(before), None).unwrap();
+        expected.as_object_mut().unwrap().remove("username");
+        assert_eq!(value(&forgotten), expected);
+        let loaded: Settings = serde_json::from_str(&forgotten).unwrap();
+        assert_eq!(loaded.username, None);
+
+        // With no file there is one afterwards, or still nothing to forget.
+        let made = replace_username(None, Some("jdoe")).unwrap();
+        assert_eq!(value(&made), serde_json::json!({"username": "jdoe"}));
+        assert_eq!(replace_username(None, None).unwrap(), "{}\n");
+    }
+
+    #[test]
+    fn a_file_that_does_not_load_keeps_its_username() {
+        let unreadable = Err(SettingsFailureCode::Unreadable);
+        for bad in ["", "not json", "[]", r#"{"save_password":"yes"}"#] {
+            assert_eq!(
+                replace_username(Some(bad), Some("jdoe")),
+                unreadable,
+                "{bad:?}"
+            );
+            assert_eq!(replace_username(Some(bad), None), unreadable, "{bad:?}");
+        }
+    }
+
+    // A name nobody would type is not kept, so that it cannot make the file
+    // too long to show or put control characters in it.
+    #[test]
+    fn only_a_plausible_username_is_saved() {
+        let longest = "u".repeat(MAX_USERNAME_BYTES);
+        assert!(replace_username(None, Some(&longest)).is_ok());
+        let too_long = format!("{longest}u");
+        for odd in ["", &too_long, "j\ndoe", "jdoe\u{1b}[2J", "j\u{0}doe"] {
+            let refused = replace_username(Some("{}"), Some(odd));
+            assert_eq!(refused, Err(SettingsFailureCode::BadInput), "{odd:?}");
+        }
+        assert!(replace_username(None, Some("jdoe@example.test")).is_ok());
+        assert!(replace_username(None, Some("Zoë Müller")).is_ok());
     }
 
     // The input comes from the app. An unknown field means the app and the

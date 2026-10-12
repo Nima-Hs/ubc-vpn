@@ -16,7 +16,7 @@ use ubc_vpn_engine::{Cancel, Gateway, LogSink, LoginEngine, LoginError, Prompts,
 use crate::client::ClientError;
 use crate::connect::{BUSY, CANCELLED, LOGIN_REFUSED, start, stop};
 use crate::connect_json::connect;
-use crate::connect_tests::{CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, pin};
+use crate::connect_tests::{CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, pin, saved};
 use crate::{FAILED, NOT_OWNER, NOT_RUNNING};
 
 /// What the command writes, line by line, as the app reads it.
@@ -519,4 +519,19 @@ fn a_reader_that_panics_cancels_the_login() {
     let code = connect(&platform, &engines, input, brief(), &mut out, &mut err);
     let line = format!("{}\n", error_line("cancelled", CANCELLED_LINE));
     assert_eq!((code, String::from_utf8(out).unwrap()), (CANCELLED, line));
+}
+
+// The app's flow remembers the username as the terminal's does: after
+// "done", and not after an error.
+#[test]
+fn the_username_the_app_sent_is_remembered_after_done() {
+    let scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let before = saved(&scene);
+    let wrong: &[&str] = &["alice", "wrong-password-0000", CODE];
+    let (code, _, _) = drive(&scene, answering(wrong));
+    assert_eq!((code, saved(&scene)), (LOGIN_REFUSED, before));
+
+    let (code, lines, _) = drive(&scene, answering(&["alice", PASSWORD, CODE]));
+    assert_eq!((code, lines.len()), (0, 4), "{lines:?}");
+    assert_eq!(saved(&scene)["username"], "alice");
 }

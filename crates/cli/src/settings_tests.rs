@@ -11,7 +11,7 @@ use ubc_vpn_core::settings_cli::{
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
 
-use crate::settings::{Command, partial_name, place, run, sweep, write_partial};
+use crate::settings::{Command, partial_name, place, remember_username, run, sweep, write_partial};
 
 const GOOD: &str =
     r#"{"subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test"]}"#;
@@ -799,4 +799,28 @@ fn routes_that_are_too_long_can_be_replaced_by_shorter_ones() {
         std::fs::read_to_string(machine.settings_file()).unwrap(),
         long
     );
+}
+
+// Security rule: nothing a connect saves can leave `get` unable to answer.
+// Beside routes that only just fit, a username that would not is not saved.
+#[test]
+fn a_username_that_would_not_fit_beside_the_routes_is_not_saved() {
+    let machine = Machine::new();
+    let dir = machine.root.join("settings");
+    // The longest routes `get` can still show.
+    let sizes = (0..40).map(|step| MAX_LINE_BYTES - step * 16);
+    let fitting = sizes.map(routes_filling).find(|routes| {
+        machine.write_settings(&format!(r#"{{"routes":{routes}}}"#));
+        machine.run(Command::Get, "").0 == 0
+    });
+    assert!(fitting.is_some(), "some size can be shown");
+    let before = std::fs::read_to_string(machine.settings_file()).unwrap();
+    let long = "u".repeat(200);
+    let refused = remember_username(&dir, None, Some(&long));
+    assert_eq!(refused, Err(SettingsFailureCode::BadInput));
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, before);
+    assert_eq!(machine.run(Command::Get, "").0, 0);
+    // Forgetting never makes a file longer, so it always goes through.
+    assert_eq!(remember_username(&dir, None, None), Ok(()));
 }
