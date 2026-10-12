@@ -80,12 +80,21 @@ pub fn exit_status(stop: Stop) -> i32 {
     os::exit_status(stop)
 }
 
+/// For tests only: a variable a test sets for a child process on Windows, so
+/// that [`watch`] in the child turns Ctrl-C back on. Windows turns it off
+/// for a program started in a process group of its own, which is how a test
+/// has to start one to send it Ctrl-C and nobody else. Without the `fake`
+/// feature the variable does nothing.
+#[cfg(feature = "fake")]
+pub const ACCEPT_CTRL_C: &str = "UBC_VPN_FAKE_ACCEPT_CTRL_C";
+
 /// For tests only: sends a real Ctrl-C to the child process with this ID.
 ///
 /// On Linux and macOS it is `SIGINT`. On Windows it is `CTRL_C_EVENT`, which
-/// reaches the child only if it was started in a process group of its own
-/// (`CREATE_NEW_PROCESS_GROUP`) on the caller's console and has turned
-/// Ctrl-C back on, which Windows turns off in a new group.
+/// reaches the child only if the test started it in a process group of its
+/// own (`CREATE_NEW_PROCESS_GROUP`), on the test's own console, with
+/// [`ACCEPT_CTRL_C`] set, and the child calls [`watch`]. Under CI a test has
+/// a console; a program with none cannot send the event.
 #[cfg(feature = "fake")]
 pub fn send_interrupt(child: u32) -> Result<()> {
     os::send_interrupt(child)

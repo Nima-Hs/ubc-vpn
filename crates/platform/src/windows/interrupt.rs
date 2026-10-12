@@ -35,6 +35,15 @@ pub(crate) fn watch() -> Result<Receiver<Stop>> {
     }
     let (requests, receiver) = mpsc::channel();
     *lock(&REQUESTS) = Some(requests);
+    // For tests only: the `fake` feature is never in a shipped build. A
+    // program started in a process group of its own has Ctrl-C turned off,
+    // and that is left as it is. A test that starts one in order to send it
+    // Ctrl-C sets this variable to have it turned back on.
+    #[cfg(feature = "fake")]
+    if std::env::var_os(crate::interrupt::ACCEPT_CTRL_C).is_some() {
+        // SAFETY: a plain call: no handler, and "do not ignore Ctrl-C".
+        unsafe { SetConsoleCtrlHandler(None, 0) };
+    }
     // SAFETY: `on_event` is a function of the type a handler must have and
     // lives as long as the program.
     if unsafe { SetConsoleCtrlHandler(Some(on_event), 1) } == 0 {
@@ -113,7 +122,7 @@ mod tests {
     }
 
     impl Program {
-        fn start(kind: &str, flags: u32) -> Self {
+        fn start(kind: &str, flags: u32, set: Option<&str>) -> Self {
             let mut child = Command::new(std::env::current_exe().expect("this program"));
             let (_, tests) = module_path!().split_once("::").expect("a module path");
             let name = format!("{tests}::child");
@@ -122,6 +131,9 @@ mod tests {
                 .env(CHILD, kind)
                 .stdout(Stdio::piped())
                 .creation_flags(flags);
+            if let Some(variable) = set {
+                child.env(variable, "1");
+            }
             let mut child = child.spawn().expect("start the child");
             let printed = BufReader::new(child.stdout.take().expect("its output"));
             let (found, lines) = mpsc::channel();
@@ -180,7 +192,7 @@ mod tests {
         if !consoles("interrupt") {
             return;
         }
-        let program = Program::start("console", CREATE_NEW_CONSOLE);
+        let program = Program::start("console", CREATE_NEW_CONSOLE, None);
         assert_eq!(program.says(), "GOT Interrupt restored=true");
         assert_eq!(program.says(), "GOT Interrupt");
         assert_eq!(program.says(), "GOT Terminate");
@@ -194,7 +206,7 @@ mod tests {
         if !consoles("interrupt unheard") {
             return;
         }
-        let program = Program::start("dropped", CREATE_NEW_CONSOLE);
+        let program = Program::start("dropped", CREATE_NEW_CONSOLE, None);
         assert_eq!(program.ended(), exit_status(Stop::Interrupt));
         assert_eq!(exit_status(Stop::Terminate) as u32, 0xC000_013A);
     }
@@ -207,27 +219,35 @@ mod tests {
         if !consoles("interrupt sent") {
             return;
         }
-        let program = Program::start(
-            "group",
-            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
-        );
+        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+        use crate::interrupt::{ACCEPT_CTRL_C, send_interrupt};
+
+        // A program in a group of its own has Ctrl-C turned off by Windows,
+        // and watching leaves it so: it hears nothing.
+        let program = Program::start("group", CREATE_NEW_PROCESS_GROUP, None);
         assert_eq!(program.says(), "READY");
-        crate::interrupt::send_interrupt(program.child.id()).expect("send");
-        assert_eq!(program.says(), "GOT Interrupt");
+        send_interrupt(program.child.id()).expect("send");
+        assert_eq!(program.says(), "GOT None");
+        // With the variable a test sets, it hears it.
+        let program = Program::start("group", CREATE_NEW_PROCESS_GROUP, Some(ACCEPT_CTRL_C));
+        assert_eq!(program.says(), "READY");
+        send_interrupt(program.child.id()).expect("send");
+        assert_eq!(program.says(), "GOT Some(Interrupt)");
     }
 
     // When the console closes, Windows ends the program the moment the
     // handler returns. So it must not return while the caller tidies up.
     #[test]
     fn the_handler_holds_on_when_the_console_closes() {
-        let program = Program::start("close", CREATE_NO_WINDOW);
+        let program = Program::start("close", CREATE_NO_WINDOW, None);
         assert_eq!(program.says(), "GOT Terminate held=true");
     }
 
     // A program with no console at all, as one started by a service is.
     #[test]
     fn without_a_console_watching_says_what_it_can_do() {
-        let program = Program::start("none", DETACHED_PROCESS);
+        let program = Program::start("none", DETACHED_PROCESS, None);
         assert_eq!(program.says(), "WATCH None");
     }
 
@@ -241,9 +261,12 @@ mod tests {
             println!("SAYS WATCH {:?}", watch().err());
             return;
         }
-        // A new process group starts with Ctrl-C turned off.
-        // SAFETY: a plain call; no handler and "do not ignore".
-        unsafe { SetConsoleCtrlHandler(None, 0) };
+        if kind != "group" {
+            // Whatever this process was started with, Ctrl-C counts in the
+            // console that is its own.
+            // SAFETY: a plain call: no handler, and "do not ignore Ctrl-C".
+            unsafe { SetConsoleCtrlHandler(None, 0) };
+        }
         let stops = watch().expect("watch");
         assert_eq!(watch().err(), Some(Error::AlreadyExists), "watched twice");
         let event = |event| {
@@ -260,10 +283,8 @@ mod tests {
             }
             "group" => {
                 println!("SAYS READY");
-                println!(
-                    "SAYS GOT {:?}",
-                    stops.recv_timeout(WAIT).expect("a request")
-                );
+                let heard = stops.recv_timeout(Duration::from_secs(3)).ok();
+                println!("SAYS GOT {heard:?}");
             }
             "close" => {
                 let handler = thread::spawn(|| handle(CTRL_CLOSE_EVENT));
