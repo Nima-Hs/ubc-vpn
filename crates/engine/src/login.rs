@@ -5,8 +5,7 @@
 //! here: every call into the library goes through the `ffi` module.
 //!
 //! A cancel is looked at before the login starts and before a session is
-//! returned. Stopping a login that is waiting on the gateway comes with the
-//! paths that interrupt one.
+//! returned, and in between it stops a login that is waiting on the gateway.
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_int};
@@ -290,7 +289,15 @@ impl LoginEngine for OpenConnect {
         if handle.parse_url(&url) != 0 {
             return Err(LoginError::Failed);
         }
+        // A cancel from another thread wakes the library through its command
+        // pipe. The hook is armed for this one call and disarmed before the
+        // handle is freed; a cancel that comes later reaches nothing.
+        let stopper = handle.stopper();
+        let armed = cancel.on_cancel(move || {
+            stopper.cancel();
+        });
         let result = handle.obtain_cookie();
+        drop(armed);
         finish(handle, result, &notes, cancel, logs)
     }
 }

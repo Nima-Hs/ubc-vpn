@@ -52,7 +52,7 @@ mod handle;
 #[allow(unused_imports)]
 pub use handle::{
     Callbacks, CommandPipe, Context, Field, FieldKind, Fill, Form, FormAnswer, Handle, Judge,
-    LineState, Lines, Resolve,
+    LineState, Lines, Resolve, Stopper,
 };
 
 /// The version string of the one release this binding is written for.

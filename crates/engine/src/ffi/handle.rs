@@ -14,10 +14,13 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::net::SocketAddrV4;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ubc_vpn_core::redact::Secret;
 
-use super::{AddrInfo, AuthForm, CmdPipe, FormOpt, Library, OC_FORM_OPT_IGNORE, VpnInfo};
+use super::{
+    AddrInfo, AuthForm, CmdPipe, FormOpt, Library, OC_CMD_CANCEL, OC_FORM_OPT_IGNORE, VpnInfo,
+};
 
 #[link(name = "ubc_vpn_shim", kind = "static")]
 unsafe extern "C" {
@@ -431,6 +434,31 @@ pub struct Handle<'a> {
     context: *mut Context<'a>,
     /// The write end of the command pipe, made with the handle.
     pipe: CommandPipe,
+    /// Holds the pipe for other threads while the handle is alive.
+    stopper: Stopper,
+}
+
+/// Tells a handle to stop what it is waiting for, from any thread, with no
+/// `unsafe`: it holds the handle's command pipe only while the handle lives.
+/// The handle takes the pipe back, under the same lock a write holds, before
+/// it frees itself. So a stop that comes late writes nothing, and can never
+/// reach a pipe that is closed or a number that is something else by then.
+#[derive(Clone, Default)]
+pub struct Stopper(Arc<Mutex<Option<CommandPipe>>>);
+
+impl Stopper {
+    /// Writes `OC_CMD_CANCEL`. `None` if the handle is gone, and then
+    /// nothing was written; otherwise whether the write worked.
+    pub fn cancel(&self) -> Option<bool> {
+        let pipe = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: a pipe is here only while its handle is alive: `drop`
+        // takes it out, under this lock, before it frees the handle.
+        (*pipe).map(|pipe| unsafe { pipe.send(OC_CMD_CANCEL) })
+    }
+
+    fn hold(&self, pipe: Option<CommandPipe>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = pipe;
+    }
 }
 
 impl<'a> Handle<'a> {
@@ -457,6 +485,7 @@ impl<'a> Handle<'a> {
             raw,
             context,
             pipe: CommandPipe(0),
+            stopper: Stopper::default(),
         };
         if raw.is_null() {
             return None;
@@ -481,6 +510,7 @@ impl<'a> Handle<'a> {
         }
         let mut handle = handle;
         handle.pipe = CommandPipe(pipe);
+        handle.stopper.hold(Some(handle.pipe));
         handle.context().handle.set(Some((library, raw)));
         // SAFETY: `raw` is a live handle on its own thread, and `resolve`
         // has the signature the library declares.
@@ -534,10 +564,19 @@ impl<'a> Handle<'a> {
     pub fn command_pipe(&self) -> CommandPipe {
         self.pipe
     }
+
+    /// What another thread uses to stop this handle. It works until the
+    /// handle is dropped and does nothing afterwards.
+    pub fn stopper(&self) -> Stopper {
+        self.stopper.clone()
+    }
 }
 
 impl Drop for Handle<'_> {
     fn drop(&mut self) {
+        // First, so that no other thread writes to the pipe while or after
+        // the library closes it. This waits for a write that is under way.
+        self.stopper.hold(None);
         if !self.raw.is_null() {
             // SAFETY: `raw` came from `openconnect_vpninfo_new` and is freed
             // once. The library may call back while freeing, so the context

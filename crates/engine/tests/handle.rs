@@ -335,6 +335,33 @@ fn a_cancel_on_the_command_pipe_stops_the_login() {
     assert!(handle.cookie().is_none());
 }
 
+// Security rule: nothing is written to a command pipe once its handle is
+// dropped. The stopper another thread holds writes while the handle lives,
+// and afterwards says the handle is gone and writes nothing: the pipe is
+// closed by then, and its number may already belong to something else.
+#[test]
+fn a_stopper_stops_a_live_handle_and_writes_nothing_to_a_dropped_one() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    let (handle, _) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(answer),
+    );
+    let stopper = handle.stopper();
+    let elsewhere = stopper.clone();
+    let written = std::thread::spawn(move || elsewhere.cancel()).join();
+    assert_eq!(written.unwrap(), Some(true));
+    assert_ne!(handle.obtain_cookie(), 0);
+    assert!(handle.cookie().is_none());
+    drop(handle);
+    assert_eq!(stopper.cancel(), None);
+}
+
 // Security rule: freeing a handle closes its own command pipe and nothing
 // else. The library closes file descriptor 0 when it frees a handle that
 // never made a pipe, which is why every handle makes one: after that, 0 is

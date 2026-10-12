@@ -12,6 +12,7 @@ mod gateway;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use gateway::Gateway as StandIn;
 use ubc_vpn_core::login::PromptKind;
@@ -432,6 +433,113 @@ fn a_login_asks_for_at_most_three_codes() {
     drop(prompts);
     assert_eq!(codes, 3);
     assert_eq!(sent(&stand_in, CODE), 3);
+}
+
+// Security rule: the engine sets no host-scan wrapper, so a gateway's offer
+// of a program to download and run ends the login. Nothing is fetched from
+// where the offer points, nothing is run, and the user is asked nothing.
+#[test]
+fn an_offer_of_a_host_scan_program_ends_the_login() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("csd") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert_eq!(attempt.result, Err(LoginError::Failed));
+    assert!(attempt.prompts.is_empty(), "{:?}", kinds(&attempt));
+    assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
+    assert_eq!(
+        stand_in.requests().len(),
+        1,
+        "only the request for the form"
+    );
+}
+
+// A login that is waiting on the gateway stops when another thread cancels
+// it, and reports that it was cancelled. Here the gateway takes the answers
+// and then says nothing for an hour.
+#[test]
+fn a_login_waiting_on_the_gateway_stops_when_cancelled() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("hang") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let gateway = gateway(&stand_in, &pin);
+    let cancel = Cancel::new();
+    let (from_outside, done) = (cancel.clone(), std::sync::mpsc::channel());
+    // On a thread of its own, so that a login that never stops fails this
+    // test and does not hold it.
+    std::thread::spawn(move || {
+        let mut ask = |prompt: &Prompt| {
+            if prompt.kind == PromptKind::Password {
+                // The cancel comes once the answers are with the gateway.
+                let cancel = cancel.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    cancel.cancel();
+                });
+            }
+            Some(Secret::new(PASSWORD))
+        };
+        let mut prompts = Prompts::new(&mut ask);
+        let result = engine.login(&gateway, &mut prompts, &cancel, &LogSink::none());
+        let _ = done.0.send(result);
+    });
+    let result = done.1.recv_timeout(Duration::from_secs(60));
+    assert_eq!(result, Ok(Err(LoginError::Cancelled)));
+    assert_eq!(
+        sent(&stand_in, PASSWORD),
+        1,
+        "the login was not yet waiting"
+    );
+    // The login is over and its handle freed. A cancel now reaches nothing.
+    from_outside.cancel();
+}
+
+/// Set for the child process of the key-log test.
+const CHILD: &str = "UBC_VPN_TEST_LOGIN_CHILD";
+
+/// Not a test of its own: the body of that child. It prepares the
+/// environment as every program does, logs in once and says how that went.
+#[test]
+fn child() {
+    if std::env::var_os(CHILD).is_none() {
+        return;
+    }
+    let (engine, library, _guard) = engine();
+    let stand_in = StandIn::start("accept").expect("the parent had the tools");
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    println!("CHILD LOGIN: {}", attempt.result.is_ok());
+}
+
+// Security rule: on Windows the start-up step removes `SSLKEYLOGFILE` where
+// the libraries read it, so a TLS key log is never written, whatever the
+// program was started with. Watched here on a real login: with the variable
+// left in place, GnuTLS writes the session's keys to the file it names.
+#[cfg(windows)]
+#[test]
+fn a_key_log_named_in_the_environment_is_never_written() {
+    // Only to skip, or fail, as every other test here does without the tools.
+    if StandIn::start("accept").is_none() {
+        return;
+    }
+    let file = std::env::temp_dir().join(format!("ubc-vpn-test-keys-{}", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["child", "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .env("SSLKEYLOGFILE", &file)
+        .output()
+        .expect("the child starts");
+    let written = file.exists();
+    let _ = std::fs::remove_file(&file);
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(said.contains("CHILD LOGIN: true"), "{said}");
+    assert!(!written, "a TLS key log was written");
+    println!("RAN: engine writes no key log");
 }
 
 // A cancel that is already set stops the login before anything is contacted.
