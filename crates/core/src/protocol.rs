@@ -9,6 +9,59 @@
 //! [`Request`]s and the service sends [`ServerMessage`]s: one response per
 //! request, plus events whenever the connection state changes.
 //!
+//! # The service's log
+//!
+//! The owner can read what the service has logged, and ask to be sent new
+//! lines as they come. A [`LogLine`] is one line of text that is safe to
+//! show: the service has already removed every secret it held and every
+//! character that could mislead, and the type refuses anything else.
+//!
+//! - Lines are numbered by `seq`, from 1, within one run of the service.
+//!   A service that restarts starts again at 1 with a new `run`, so a place
+//!   in the log is a [`LogCursor`]: a run and a number. Numbers are given
+//!   out without gaps, but a page may skip the numbers of lines that are
+//!   no longer held.
+//! - `logs` answers with a [`LogPage`]: the lines whose `seq` is greater
+//!   than the cursor's, oldest first, as many as fit. No cursor means
+//!   after 0, and so does a cursor from another run: the page then starts
+//!   from the oldest line held, and the client sees the run changed by
+//!   comparing `run`. `next` is the `seq` of the last line in the page, or
+//!   the cursor that was used when the page is empty. Ask again from
+//!   `next` until a page is empty.
+//! - `dropped` means exactly this: at least one line of this run with a
+//!   `seq` greater than the cursor that was used existed and is no longer
+//!   held, whichever kind of line it was. So the first read of a run that
+//!   has already lost lines says `dropped`, and a cursor from another run
+//!   does not by itself.
+//! - Every number here stays below 2^53, so it is exact as a JavaScript
+//!   `number`, which is how the generated TypeScript carries it. A count
+//!   of milliseconds or of lines does not reach that in any real run.
+//! - `watch_logs` turns [`Event::Log`] on or off for one connection, and
+//!   is answered with `accepted` ([`ResponseBody::Accepted`]). To miss
+//!   nothing, turn it on first, then fetch with `logs`, and drop whatever
+//!   arrives twice, by `seq`.
+//! - A log event is not a promise. When a client is slow to take its
+//!   events the service drops log events for it, never state changes, and
+//!   never closes the connection for it. The gap shows in `seq`, and
+//!   `logs` fills it.
+//! - `add_log` lets the command-line client hand over what its login
+//!   wrote. The service cleans it as it cleans its own lines and keeps it
+//!   as [`LogSource::Login`]. Such lines are kept apart from the service's
+//!   own, [`KEPT_ADDED_LOG_LINES`] of them, so no client can push a line
+//!   of the service's out; and one connection may add
+//!   [`MAX_ADDED_LOG_LINES`]. A line that is kept is answered with
+//!   `accepted` ([`ResponseBody::Accepted`]). A text that is not a
+//!   [`LogText`], because it is too long or is not one plain line, and
+//!   any line from a connection that has added all it may, is answered
+//!   with the error `bad_request` ([`ErrorCode::BadRequest`]); nothing of
+//!   it is kept and the connection stays open.
+//! - `diagnostics` answers with a [`Diagnostics`]: what a person helping
+//!   the user would ask first, with no path and no user name in it. It is
+//!   small whatever the state: it counts what the tunnel carries and does
+//!   not list it.
+//!
+//! All of these are for the owner only.
+//!
 //! This module is the reference for the wire format. The TypeScript types the
 //! app uses are generated from it.
 //!
@@ -18,6 +71,12 @@
 //! cannot read a message that uses anything new. Any change to these types,
 //! including adding a variant or a field, must bump [`PROTOCOL_VERSION`]. That
 //! is cheap, because the app and the service are installed together.
+//!
+//! The app passes over an event of a kind it does not know, and still
+//! refuses a response of a kind it does not know. That is a second line of
+//! defence for the app, not a way to add an event without a new version:
+//! the rule above holds for events as for everything else, and the Rust
+//! peers here refuse an unknown event.
 //!
 //! So that a mismatch gives a clear "please update" and not a dropped
 //! connection, the service reads only the version from the first line with
@@ -33,11 +92,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::redact::Secret;
 use crate::routes::{Ipv4Net, RouteSet};
+use crate::settings_cli::misleads;
 use crate::state::ConnState;
 
 /// Bumped whenever the wire format changes in a way an older peer could not
 /// understand. A client and a service with different versions refuse to talk.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The longest line either side accepts, newline included. The service drops a
 /// connection that sends more.
@@ -119,6 +179,48 @@ pub enum RequestBody {
     Connect(ConnectParams),
     /// Close the tunnel and remove its routes and DNS.
     Disconnect,
+    /// Read the service's log from a place in it.
+    Logs(LogsParams),
+    /// Turn [`Event::Log`] on or off for this connection.
+    WatchLogs(WatchLogsParams),
+    /// Describe the service and its state, for someone helping the user.
+    Diagnostics,
+    /// Add a line to the service's log. Only the command-line client's own
+    /// login sends this; the bridge refuses it from the app.
+    AddLog(AddLogParams),
+}
+
+/// Where to read the log from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct LogsParams {
+    /// The last line already read, or `None` to read from the oldest line
+    /// the service still has.
+    pub after: Option<LogCursor>,
+}
+
+/// Whether this connection wants [`Event::Log`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct WatchLogsParams {
+    /// `true` to be sent new lines as they come, `false` to stop.
+    pub on: bool,
+}
+
+/// A line for the service to keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct AddLogParams {
+    /// How serious the line is.
+    pub level: LogLevel,
+    /// The line. It must be a [`LogText`]: the service answers one that is
+    /// too long, or is not one plain line, with `bad_request`, and keeps
+    /// nothing of it. It is a plain string here so that such a request can
+    /// be answered and not merely fail to be read.
+    pub text: String,
 }
 
 /// What the service needs to open a tunnel.
@@ -207,6 +309,11 @@ pub enum ResponseBody {
     Status(ConnState),
     /// The request was accepted. Progress follows as [`Event`]s.
     Accepted,
+    /// Lines of the service's log.
+    Logs(LogPage),
+    /// The service and its state. Boxed only because it is much the
+    /// largest answer; on the wire it is the value itself.
+    Diagnostics(Box<Diagnostics>),
 }
 
 /// Something the service reports without being asked.
@@ -216,6 +323,289 @@ pub enum ResponseBody {
 pub enum Event {
     /// The connection state changed.
     StateChanged(ConnState),
+    /// The service logged a line. Sent only to a connection that asked with
+    /// `watch_logs`, and dropped when that connection is slow.
+    Log(LogLine),
+}
+
+/// The longest text of one log line, in bytes.
+pub const MAX_LOG_TEXT_BYTES: usize = 512;
+
+/// About how much of a line a [`LogPage`] may fill, once encoded. It leaves
+/// room for the rest of the response, so that a page can never pass
+/// [`MAX_LINE_BYTES`].
+pub const LOG_PAGE_BYTES: usize = 48 * 1024;
+
+/// How many lines one connection may add with `add_log`.
+pub const MAX_ADDED_LOG_LINES: usize = 20;
+
+/// How many added lines the service keeps. They are kept apart from the
+/// service's own lines, which they can therefore never push out.
+pub const KEPT_ADDED_LOG_LINES: usize = 100;
+
+/// How serious a log line is. There is no level for protocol detail: such
+/// lines are never kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum LogLevel {
+    /// Something failed.
+    Error,
+    /// Something is wrong but was dealt with.
+    Warn,
+    /// What happened, in the ordinary course.
+    Info,
+}
+
+/// Who wrote a log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum LogSource {
+    /// The service itself.
+    Service,
+    /// The VPN engine inside the service.
+    Engine,
+    /// The command-line client's login, handed over with `add_log`.
+    Login,
+}
+
+/// The text of one log line: not empty, one line, at most
+/// [`MAX_LOG_TEXT_BYTES`], and with no character that could mislead whoever
+/// reads it (see [`misleads`]).
+///
+/// It cannot be made, and cannot be decoded, any other way. That it holds no
+/// secret is not something a type can check: the service sees to that
+/// before it makes one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export, type = "string"))]
+pub struct LogText(String);
+
+/// Why a text is not a [`LogText`]. It does not repeat the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotLogText;
+
+impl fmt::Display for NotLogText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not one plain line of a length that can be kept")
+    }
+}
+
+impl std::error::Error for NotLogText {}
+
+impl LogText {
+    /// Stands where a line was that could not be kept.
+    pub const LEFT_OUT: &'static str = "(a line that could not be kept was left out)";
+
+    /// `text` as a log line's text, if it is one.
+    pub fn new(text: &str) -> Result<Self, NotLogText> {
+        let plain = !text.is_empty() && !text.chars().any(misleads);
+        match plain && text.len() <= MAX_LOG_TEXT_BYTES {
+            true => Ok(Self(text.to_string())),
+            false => Err(NotLogText),
+        }
+    }
+
+    /// `text` with every misleading character removed, if what is left is a
+    /// log line's text. Nothing is cut to fit: a line that is still too
+    /// long is not one, since half a line can read as something else.
+    pub fn cleaned(text: &str) -> Result<Self, NotLogText> {
+        let kept: String = text.chars().filter(|c| !misleads(*c)).collect();
+        Self::new(&kept)
+    }
+
+    /// The marker that stands where a line could not be kept.
+    pub fn left_out() -> Self {
+        Self(Self::LEFT_OUT.to_string())
+    }
+
+    /// The text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for LogText {
+    type Error = NotLogText;
+
+    fn try_from(text: String) -> Result<Self, NotLogText> {
+        Self::new(&text)
+    }
+}
+
+impl From<LogText> for String {
+    fn from(text: LogText) -> Self {
+        text.0
+    }
+}
+
+/// One line of the service's log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct LogLine {
+    /// Its number within this run of the service, from 1. Numbers are given
+    /// out without gaps; a page may skip those of lines no longer held.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub seq: u64,
+    /// When the service took the line, by its own clock: milliseconds since
+    /// the start of 1970 (UTC). Clocks get set, so order is by `seq`.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub at_unix_ms: u64,
+    /// How serious it is.
+    pub level: LogLevel,
+    /// Who wrote it.
+    pub source: LogSource,
+    /// What it says.
+    pub text: LogText,
+}
+
+/// A place in the service's log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct LogCursor {
+    /// Which run of the service the number belongs to.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub run: u64,
+    /// The number of a line in that run.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub seq: u64,
+}
+
+/// Some lines of the service's log, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct LogPage {
+    /// This run of the service.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub run: u64,
+    /// The lines, oldest first. Empty when there are none after the cursor.
+    pub lines: Vec<LogLine>,
+    /// Where to read on from: with `run`, the cursor for the next request.
+    /// The `seq` of the last line here, or the cursor that was used when
+    /// there is none: 0 if none was given or it was from another run.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub next: u64,
+    /// Whether a line of this run with a `seq` greater than the cursor
+    /// that was used existed and is no longer held. A cursor from another
+    /// run does not make this true by itself; `run` shows that.
+    pub dropped: bool,
+}
+
+impl LogPage {
+    /// A page of the lines after `after` in this `run`: as many of `lines`,
+    /// which must be in order, as fit in [`LOG_PAGE_BYTES`] once encoded.
+    /// `after` is the cursor that was used: 0 when the client gave none or
+    /// gave one from another run. `dropped` is for the service to say; see
+    /// [`LogPage::dropped`].
+    pub fn after(
+        run: u64,
+        after: u64,
+        dropped: bool,
+        lines: impl IntoIterator<Item = LogLine>,
+    ) -> Self {
+        let mut room = LOG_PAGE_BYTES;
+        let fits = |line: &LogLine| {
+            // What the line really takes on the wire, and the comma after it.
+            let size = serde_json::to_string(line).map_or(usize::MAX, |text| text.len() + 1);
+            let fit = size <= room;
+            room = room.saturating_sub(size);
+            fit
+        };
+        let lines: Vec<LogLine> = lines.into_iter().take_while(fits).collect();
+        let next = lines.last().map_or(after, |last| last.seq);
+        Self {
+            run,
+            lines,
+            next,
+            dropped,
+        }
+    }
+}
+
+/// Where the connection stands, without what a [`ConnState`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum StateKind {
+    /// See [`ConnState::Disconnected`].
+    Disconnected,
+    /// See [`ConnState::Connecting`].
+    Connecting,
+    /// See [`ConnState::Connected`].
+    Connected,
+    /// See [`ConnState::Disconnecting`].
+    Disconnecting,
+    /// See [`ConnState::LoginNeeded`].
+    LoginNeeded,
+    /// See [`ConnState::Failed`].
+    Failed,
+}
+
+impl From<&ConnState> for StateKind {
+    fn from(state: &ConnState) -> Self {
+        match state {
+            ConnState::Disconnected => Self::Disconnected,
+            ConnState::Connecting => Self::Connecting,
+            ConnState::Connected { .. } => Self::Connected,
+            ConnState::Disconnecting => Self::Disconnecting,
+            ConnState::LoginNeeded => Self::LoginNeeded,
+            ConnState::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
+/// A failure of a connection, as [`Diagnostics`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct LastError {
+    /// What went wrong, for a program to act on.
+    pub code: ErrorCode,
+    /// What went wrong, for a person to read: cleaned by the service as a
+    /// log line is, and checked like one when it is read.
+    pub message: LogText,
+}
+
+/// The service and its state, for someone helping the user. It names no
+/// path and no user.
+///
+/// Nothing in it grows with what is connected: the tunnel's subnets and
+/// domains are counted, not listed, and every text has a limit. So it
+/// always fits in one line, whatever the state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct Diagnostics {
+    /// The service's product version.
+    pub service_version: String,
+    /// The service's [`PROTOCOL_VERSION`].
+    pub protocol_version: u32,
+    /// The kind of operating system: `windows`, `macos` or `linux`.
+    pub os: String,
+    /// The kind of processor the service was built for, such as `x86_64`.
+    pub arch: String,
+    /// The operating system's version, when the service can tell. One
+    /// plain line, like a log line's text.
+    pub os_version: Option<LogText>,
+    /// How long the service has been running, in seconds.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub uptime_s: u64,
+    /// Where the connection stands. `status` gives the whole state.
+    pub state: StateKind,
+    /// How many subnets are routed through the tunnel; 0 with no tunnel.
+    pub subnets: u32,
+    /// How many DNS domains are resolved through it; 0 with no tunnel.
+    pub dns_domains: u32,
+    /// The last failure of a connection, if there has been one in this run.
+    pub last_error: Option<LastError>,
+    /// Whether the service's policy file could be read and is valid.
+    pub policy_readable: bool,
+    /// How many certificate pins the policy holds.
+    pub pins: u32,
+    /// The gateway the policy names, when the policy could be read.
+    pub gateway: Option<String>,
+    /// Whether an owner has claimed the service.
+    pub owner_claimed: bool,
 }
 
 /// Why a request failed.
@@ -378,7 +768,7 @@ mod tests {
     fn request_wire_format_is_stable() {
         // If the snapshot below has to change, so does this number: an older
         // peer could no longer read the message.
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
         let line = encode(&connect()).unwrap();
         assert_eq!(
             line,
@@ -585,5 +975,357 @@ mod tests {
         };
         assert!(reply(PROTOCOL_VERSION).is_compatible());
         assert!(!reply(PROTOCOL_VERSION + 1).is_compatible());
+    }
+
+    fn line(seq: u64, text: &str) -> LogLine {
+        LogLine {
+            seq,
+            at_unix_ms: 1_800_000_000_000 + seq,
+            level: LogLevel::Info,
+            source: LogSource::Engine,
+            text: LogText::new(text).unwrap(),
+        }
+    }
+
+    // The app is written against these lines. Changing one is changing the
+    // protocol.
+    #[test]
+    fn the_log_messages_have_a_stable_wire_format() {
+        let request = |body| encode(&Request { id: 1, body }).unwrap();
+        let after = Some(LogCursor { run: 7, seq: 41 });
+        let add = AddLogParams {
+            level: LogLevel::Error,
+            text: "Login failed.".to_string(),
+        };
+        let requests = [
+            (
+                RequestBody::Logs(LogsParams { after }),
+                r#"{"id":1,"body":{"method":"logs","params":{"after":{"run":7,"seq":41}}}}"#,
+            ),
+            (
+                RequestBody::Logs(LogsParams { after: None }),
+                r#"{"id":1,"body":{"method":"logs","params":{"after":null}}}"#,
+            ),
+            (
+                RequestBody::WatchLogs(WatchLogsParams { on: true }),
+                r#"{"id":1,"body":{"method":"watch_logs","params":{"on":true}}}"#,
+            ),
+            (
+                RequestBody::Diagnostics,
+                r#"{"id":1,"body":{"method":"diagnostics"}}"#,
+            ),
+            (
+                RequestBody::AddLog(add),
+                r#"{"id":1,"body":{"method":"add_log","params":{"level":"error","text":"Login failed."}}}"#,
+            ),
+        ];
+        for (body, wire) in requests {
+            assert_eq!(request(body.clone()), format!("{wire}\n"));
+            assert_eq!(decode::<Request>(wire).unwrap().body, body);
+        }
+        // `after` may be left out, which reads from the oldest line.
+        let bare: Request = decode(r#"{"id":1,"body":{"method":"logs","params":{}}}"#).unwrap();
+        assert_eq!(bare.body, RequestBody::Logs(LogsParams { after: None }));
+
+        let logged = r#"{"seq":42,"at_unix_ms":1800000000042,"level":"info","source":"engine","text":"CSTP connected"}"#;
+        let event = ServerMessage::Event(Event::Log(line(42, "CSTP connected")));
+        let wire = format!(r#"{{"type":"event","data":{{"kind":"log","value":{logged}}}}}"#);
+        assert_eq!(encode(&event).unwrap(), format!("{wire}\n"));
+        assert_eq!(decode::<ServerMessage>(&wire).unwrap(), event);
+
+        let page = LogPage::after(7, 41, true, [line(42, "CSTP connected")]);
+        let wire = format!(
+            r#"{{"kind":"logs","value":{{"run":7,"lines":[{logged}],"next":42,"dropped":true}}}}"#
+        );
+        assert_eq!(
+            encode(&ResponseBody::Logs(page.clone())).unwrap(),
+            format!("{wire}\n")
+        );
+        assert_eq!(
+            decode::<ResponseBody>(&wire).unwrap(),
+            ResponseBody::Logs(page)
+        );
+        for (level, source) in [("error", "service"), ("warn", "login")] {
+            let other = logged.replace("info", level).replace("engine", source);
+            assert!(decode::<LogLine>(&other).is_ok(), "{other}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_have_a_stable_wire_format() {
+        let diagnostics = Diagnostics {
+            service_version: "0.1.0".to_string(),
+            protocol_version: 3,
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            os_version: None,
+            uptime_s: 90,
+            state: StateKind::Connected,
+            subnets: 2,
+            dns_domains: 1,
+            last_error: Some(LastError {
+                code: ErrorCode::GatewayUnreachable,
+                message: LogText::new("The gateway could not be reached.").unwrap(),
+            }),
+            policy_readable: true,
+            pins: 2,
+            gateway: Some("vpn.example.test".to_string()),
+            owner_claimed: true,
+        };
+        let wire = concat!(
+            r#"{"kind":"diagnostics","value":{"service_version":"0.1.0","protocol_version":3,"#,
+            r#""os":"linux","arch":"x86_64","os_version":null,"uptime_s":90,"#,
+            r#""state":"connected","subnets":2,"dns_domains":1,"#,
+            r#""last_error":{"code":"gateway_unreachable","message":"The gateway could not be reached."},"#,
+            r#""policy_readable":true,"pins":2,"gateway":"vpn.example.test","owner_claimed":true}}"#,
+        );
+        let body = ResponseBody::Diagnostics(Box::new(diagnostics.clone()));
+        assert_eq!(encode(&body).unwrap(), format!("{wire}\n"));
+        assert_eq!(decode::<ResponseBody>(wire).unwrap(), body);
+
+        // Security rule: the message of the last failure is checked like a
+        // log line when it is read, as is the system's version.
+        for odd in ["two\\nlines", "escape\\u001b[2J", ""] {
+            let message = wire.replace("The gateway could not be reached.", odd);
+            assert!(decode::<ResponseBody>(&message).is_err(), "{odd}");
+            let version = wire.replace(r#""os_version":null"#, &format!(r#""os_version":"{odd}""#));
+            assert!(decode::<ResponseBody>(&version).is_err(), "{odd}");
+        }
+
+        // The largest there can be: the worst text wherever there is text
+        // with a limit, the largest numbers, and the longest name a gateway
+        // can have. The largest state a connect can carry (256 subnets and
+        // as many domains as fit in a request) adds nothing to it, because
+        // those are counted, not listed.
+        let worst = LogText::new(&"\"".repeat(MAX_LOG_TEXT_BYTES)).unwrap();
+        let largest = Diagnostics {
+            os_version: Some(worst.clone()),
+            uptime_s: u64::MAX,
+            state: StateKind::Disconnecting,
+            subnets: u32::MAX,
+            dns_domains: u32::MAX,
+            last_error: Some(LastError {
+                code: ErrorCode::VerificationFailed,
+                message: worst,
+            }),
+            pins: u32::MAX,
+            gateway: Some("x".repeat(253)),
+            ..diagnostics
+        };
+        let line = encode(&ResponseBody::Diagnostics(Box::new(largest))).unwrap();
+        assert!(line.len() < 4096, "{}", line.len());
+    }
+
+    // What `diagnostics` says of each state.
+    #[test]
+    fn every_state_has_its_kind() {
+        let tunnel = crate::state::TunnelInfo {
+            interface: "fake0".to_string(),
+            address: "10.255.0.2".to_string(),
+            subnets: Vec::new(),
+            dns_domains: Vec::new(),
+        };
+        let (code, message) = (ErrorCode::Internal, String::new());
+        let kinds = [
+            (ConnState::Disconnected, "disconnected"),
+            (ConnState::Connecting, "connecting"),
+            (ConnState::Connected { tunnel }, "connected"),
+            (ConnState::Disconnecting, "disconnecting"),
+            (ConnState::LoginNeeded, "login_needed"),
+            (ConnState::Failed { code, message }, "failed"),
+        ];
+        for (state, kind) in kinds {
+            let said = serde_json::to_string(&StateKind::from(&state)).unwrap();
+            assert_eq!(said, format!("{kind:?}"));
+            // The same word as the state itself uses.
+            let whole = serde_json::to_string(&state).unwrap();
+            assert!(whole.contains(&format!(r#""state":{said}"#)), "{whole}");
+        }
+    }
+
+    // Security rule: a log line is one plain line of bounded length, however
+    // it comes to be: made here, or read off the wire from a peer.
+    #[test]
+    fn a_log_text_is_one_plain_line_or_it_is_nothing() {
+        // The number is part of the contract: the app sizes its rows by it.
+        assert_eq!(MAX_LOG_TEXT_BYTES, 512);
+        let longest = "x".repeat(MAX_LOG_TEXT_BYTES);
+        assert_eq!(LogText::new(&longest).unwrap().as_str(), longest);
+        // Counted in bytes, not characters.
+        let wide = "é".repeat(MAX_LOG_TEXT_BYTES / 2);
+        assert!(LogText::new(&wide).is_ok());
+        let not_lines = [
+            String::new(),
+            format!("{longest}x"),
+            format!("{wide}é"),
+            "two\nlines".to_string(),
+            "carriage\rreturn".to_string(),
+            "escape\u{1b}[2J".to_string(),
+            "tab\there".to_string(),
+            "reordered\u{202e}txet".to_string(),
+            "hid\u{200b}den".to_string(),
+            // Not control characters, but each breaks a line.
+            "two\u{2028}lines".to_string(),
+            "two\u{2029}paragraphs".to_string(),
+            "tagged\u{e0041}".to_string(),
+        ];
+        for text in &not_lines {
+            assert_eq!(LogText::new(text), Err(NotLogText), "{text:?}");
+            // The same text off the wire is refused in a line. A request to
+            // add it can be read, so that the service can answer it.
+            let quoted = serde_json::to_string(text).unwrap();
+            let shape = Err(InvalidKind::Shape);
+            let kind = |found: Result<(), FrameError>| match found {
+                Err(FrameError::Invalid { kind, .. }) => Err(kind),
+                other => Ok(other),
+            };
+            assert_eq!(
+                kind(decode::<LogText>(&quoted).map(drop)),
+                shape,
+                "{text:?}"
+            );
+            let logged = format!(
+                r#"{{"seq":1,"at_unix_ms":1,"level":"info","source":"engine","text":{quoted}}}"#
+            );
+            assert_eq!(
+                kind(decode::<LogLine>(&logged).map(drop)),
+                shape,
+                "{text:?}"
+            );
+            let add = format!(
+                r#"{{"id":1,"body":{{"method":"add_log","params":{{"level":"info","text":{quoted}}}}}}}"#
+            );
+            let Ok(Request { body, .. }) = decode::<Request>(&add) else {
+                panic!("{text:?} must be readable, to be answered");
+            };
+            let RequestBody::AddLog(params) = body else {
+                panic!("not an add_log: {body:?}");
+            };
+            assert_eq!(LogText::new(&params.text), Err(NotLogText));
+        }
+        // The error does not repeat the text.
+        assert!(!NotLogText.to_string().contains("escape"));
+
+        // Cleaning removes what misleads and keeps the rest, and still does
+        // not cut: a line too long to keep is not kept in part.
+        let cleaned = LogText::cleaned("es\u{1b}[2Jcape\u{202e} and a\ttab").unwrap();
+        assert_eq!(cleaned.as_str(), "es[2Jcape and atab");
+        assert_eq!(
+            LogText::cleaned(&format!("{longest}\u{1b}"))
+                .unwrap()
+                .as_str(),
+            longest
+        );
+        assert_eq!(LogText::cleaned(&format!("{longest}x")), Err(NotLogText));
+        assert_eq!(LogText::cleaned("\u{1b}\n"), Err(NotLogText));
+        // The marker for a line that was left out is itself a line.
+        assert_eq!(LogText::new(LogText::LEFT_OUT), Ok(LogText::left_out()));
+    }
+
+    // A page of the log is one response and so one line. However long the
+    // lines are, and however many there are, the page stops in time.
+    #[test]
+    fn a_page_of_the_log_always_fits_in_a_line() {
+        // The worst a line can be on the wire: every byte doubles.
+        let worst = "\"".repeat(MAX_LOG_TEXT_BYTES);
+        let all: Vec<LogLine> = (1..=600).map(|seq| line(seq, &worst)).collect();
+        let (mut after, mut read, mut pages) = (0, Vec::new(), 0);
+        loop {
+            let rest = all.iter().filter(|line| line.seq > after).cloned();
+            let page = LogPage::after(7, after, false, rest);
+            let response = ServerMessage::Response(Response {
+                id: u32::MAX,
+                outcome: Outcome::Ok(ResponseBody::Logs(page.clone())),
+            });
+            let wire = encode(&response).expect("a page fits in a line");
+            assert!(wire.len() <= LOG_PAGE_BYTES + 256, "{}", wire.len());
+            if page.lines.is_empty() {
+                // An empty page leaves the cursor where it was.
+                assert_eq!(page.next, after);
+                break;
+            }
+            // Nothing is skipped and nothing comes twice.
+            assert_eq!(page.lines[0].seq, after + 1);
+            assert_eq!(page.next, page.lines.last().unwrap().seq);
+            after = page.next;
+            read.extend(page.lines);
+            pages += 1;
+        }
+        assert_eq!(read, all);
+        // Full pages: about 48 KiB of lines that take about 1.1 KiB each.
+        assert!((13..=16).contains(&pages), "{pages} pages");
+        // Short lines go many to a page, by the same rule.
+        let short = (1..=600).map(|seq| line(seq, "ok"));
+        let page = LogPage::after(7, 0, false, short);
+        assert!(page.lines.len() > 400, "{}", page.lines.len());
+        assert!(encode(&ResponseBody::Logs(page)).unwrap().len() <= LOG_PAGE_BYTES + 256);
+    }
+
+    // The app reads these as JavaScript numbers. The contract says they stay
+    // below 2^53; a `bigint` here would break the app's arithmetic on them.
+    #[test]
+    fn the_log_numbers_are_plain_numbers_for_the_app() {
+        use ts_rs::TS;
+        let how = ts_rs::Config::default();
+        let fields = [
+            (LogLine::decl(&how), "seq"),
+            (LogLine::decl(&how), "at_unix_ms"),
+            (LogCursor::decl(&how), "run"),
+            (LogCursor::decl(&how), "seq"),
+            (LogPage::decl(&how), "run"),
+            (LogPage::decl(&how), "next"),
+            (Diagnostics::decl(&how), "uptime_s"),
+        ];
+        for (declared, field) in fields {
+            let wanted = format!("{field}: number,");
+            let found = declared.lines().any(|line| line.starts_with(&wanted));
+            assert!(found, "{field} in {declared}");
+        }
+        // The largest value promised is carried without loss.
+        let most = (1u64 << 53) - 1;
+        let text = encode(&LogCursor {
+            run: most,
+            seq: most,
+        })
+        .unwrap();
+        assert_eq!(
+            text.trim_end(),
+            r#"{"run":9007199254740991,"seq":9007199254740991}"#
+        );
+    }
+
+    // The new requests refuse what they do not know, like the old ones.
+    #[test]
+    fn the_log_requests_refuse_unknown_fields() {
+        for odd in [
+            r#"{"id":1,"body":{"method":"logs","params":{"after":null,"all":true}}}"#,
+            r#"{"id":1,"body":{"method":"logs","params":{"after":{"run":1,"seq":2,"x":3}}}}"#,
+            r#"{"id":1,"body":{"method":"logs","params":{"after":{"seq":2}}}}"#,
+            r#"{"id":1,"body":{"method":"watch_logs","params":{"on":true,"level":"debug"}}}"#,
+            r#"{"id":1,"body":{"method":"watch_logs","params":{}}}"#,
+            r#"{"id":1,"body":{"method":"add_log","params":{"level":"debug","text":"x"}}}"#,
+            r#"{"id":1,"body":{"method":"add_log","params":{"level":"info","text":"x","source":"service"}}}"#,
+            r#"{"id":1,"body":{"method":"add_log","params":{"level":"info"}}}"#,
+            r#"{"id":1,"body":{"method":"diagnostics","params":{}}}"#,
+        ] {
+            assert!(decode::<Request>(odd).is_err(), "{odd}");
+        }
+        // A level for protocol detail does not exist, so no line can have it.
+        assert!(decode::<LogLevel>(r#""debug""#).is_err());
+    }
+
+    // A peer that speaks version 2 knows none of this. It is told to update
+    // in the handshake, before either side sends what the other cannot read.
+    #[test]
+    fn a_version_2_peer_is_told_to_update() {
+        let older = r#"{"protocol_version":2,"client":"app","client_version":"0.1.0"}"#;
+        assert_eq!(peek_protocol_version(older), Ok(2));
+        assert_ne!(peek_protocol_version(older), Ok(PROTOCOL_VERSION));
+        let reply = HelloReply {
+            protocol_version: 2,
+            service_version: "0.1.0".to_string(),
+            owner_claimed: true,
+        };
+        assert!(!reply.is_compatible());
     }
 }

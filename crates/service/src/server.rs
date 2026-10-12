@@ -317,6 +317,16 @@ impl Shared {
             RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
             RequestBody::Connect(params) => accepted(self.session.connect(params)),
             RequestBody::Disconnect => accepted(self.session.disconnect()),
+            // The contract for these is in the protocol; the service's side
+            // of it comes next. Until then the owner is told so, and anyone
+            // else is refused above like for any other request.
+            RequestBody::Logs(_)
+            | RequestBody::WatchLogs(_)
+            | RequestBody::Diagnostics
+            | RequestBody::AddLog(_) => {
+                let message = "This service does not keep a log that can be read yet.";
+                Err(error(ErrorCode::BadRequest, message))
+            }
         };
         let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
         (answer, !stranger)

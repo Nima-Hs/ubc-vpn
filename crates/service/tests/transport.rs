@@ -195,7 +195,7 @@ fn until(what: &str, happened: impl Fn() -> bool) {
     }
 }
 
-const HELLO: &str = r#"{"protocol_version":2,"client":"app","client_version":"0.1.0"}"#;
+const HELLO: &str = r#"{"protocol_version":3,"client":"app","client_version":"0.1.0"}"#;
 const CLAIM: &str = r#"{"id":1,"body":{"method":"claim"}}"#;
 const STATUS: &str = r#"{"id":2,"body":{"method":"status"}}"#;
 

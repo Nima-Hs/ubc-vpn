@@ -6,7 +6,9 @@ mod harness;
 use std::time::Duration;
 
 use harness::*;
-use ubc_vpn_core::protocol::{HelloReply, PROTOCOL_VERSION, decode};
+use ubc_vpn_core::protocol::{
+    AddLogParams, HelloReply, LogLevel, LogsParams, PROTOCOL_VERSION, WatchLogsParams, decode,
+};
 use ubc_vpn_platform::fake::Applied;
 use ubc_vpn_platform::{Dns, Routes, SplitDns};
 use ubc_vpn_service::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS};
@@ -69,6 +71,13 @@ fn a_non_owner_is_refused_and_disconnected() {
         RequestBody::Status,
         RequestBody::Disconnect,
         good(),
+        RequestBody::Logs(LogsParams { after: None }),
+        RequestBody::WatchLogs(WatchLogsParams { on: true }),
+        RequestBody::Diagnostics,
+        RequestBody::AddLog(AddLogParams {
+            level: LogLevel::Info,
+            text: "made up".to_string(),
+        }),
     ];
     for (n, body) in requests.into_iter().enumerate() {
         let mut stranger = rig.peer(&format!("stranger-{n}"));
@@ -78,6 +87,11 @@ fn a_non_owner_is_refused_and_disconnected() {
         assert_eq!(stranger.lines.len(), 1, "told nothing but the refusal");
     }
     assert_eq!(alice.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
+    assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
+    // The service does not keep a log that can be read yet. The owner is
+    // told so and keeps the connection.
+    let unready = alice.ask(RequestBody::Diagnostics);
+    assert_eq!(unready, Err(ErrorCode::BadRequest));
     assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
     let stored = std::fs::read_to_string(rig.root.join("state/state.json")).unwrap();
     assert_eq!(stored, r#"{"owner":"alice"}"#);

@@ -109,14 +109,17 @@ pub enum BridgeLine {
 ///
 /// A `connect` carries the session cookie, and the app must never hold one,
 /// so the bridge answers it with a `bad_request` error and sends nothing to
-/// the service.
+/// the service. An `add_log` is refused the same way: lines are added by
+/// the command-line client's own login and by nobody else, so the app
+/// cannot write into the log it shows the user.
 ///
 /// Every request is listed, with no catch-all, so a request added later does
 /// not compile until someone decides whether the app may send it.
 pub fn bridge_allows(request: &RequestBody) -> bool {
     match request {
         RequestBody::Claim | RequestBody::Status | RequestBody::Disconnect => true,
-        RequestBody::Connect(_) => false,
+        RequestBody::Logs(_) | RequestBody::WatchLogs(_) | RequestBody::Diagnostics => true,
+        RequestBody::Connect(_) | RequestBody::AddLog(_) => false,
     }
 }
 
@@ -125,7 +128,9 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::protocol::{ConnectParams, Event, decode, encode};
+    use crate::protocol::{
+        AddLogParams, ConnectParams, Event, LogLevel, LogsParams, WatchLogsParams, decode, encode,
+    };
     use crate::redact::Secret;
     use crate::routes::RouteSet;
     use crate::state::ConnState;
@@ -179,10 +184,19 @@ mod tests {
             routes: RouteSet::default(),
         });
         assert!(!bridge_allows(&connect));
+        // Nor may the app write into the log it shows the user.
+        let add_log = RequestBody::AddLog(AddLogParams {
+            level: LogLevel::Info,
+            text: "made up".to_string(),
+        });
+        assert!(!bridge_allows(&add_log));
         for allowed in [
             RequestBody::Claim,
             RequestBody::Status,
             RequestBody::Disconnect,
+            RequestBody::Logs(LogsParams { after: None }),
+            RequestBody::WatchLogs(WatchLogsParams { on: true }),
+            RequestBody::Diagnostics,
         ] {
             assert!(bridge_allows(&allowed), "{allowed:?} should be forwarded");
         }

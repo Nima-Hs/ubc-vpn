@@ -469,7 +469,11 @@ fn follow(client: &mut Client, during: &ConnState) -> Result<ConnState, Stop> {
     let deadline = Instant::now() + client.limits().outcome;
     let mut started = false;
     loop {
-        let Event::StateChanged(state) = client.next_event(Some(deadline)).map_err(stop)?;
+        // A log line is not a state. None is sent unless asked for, and
+        // this asks for none.
+        let Event::StateChanged(state) = client.next_event(Some(deadline)).map_err(stop)? else {
+            continue;
+        };
         match (state == *during, started) {
             (true, _) => started = true,
             (false, true) => return Ok(state),
