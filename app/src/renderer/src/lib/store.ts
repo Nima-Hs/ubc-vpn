@@ -7,6 +7,7 @@ export const api: VpnApi = window.ubcVpn;
 export const useSnapshot = create<Snapshot>(() => ({
     state: { link: "starting" },
     notice: null,
+    closeHides: false,
 }));
 
 /** Starts following the main process. Call once, before the first render. */

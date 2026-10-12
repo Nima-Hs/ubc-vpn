@@ -150,7 +150,8 @@ export function createDemoLink(stepMs = 1400): DemoLink {
             after(SCENARIOS.disconnected as LinkState);
         },
         setScenario: (name) => {
-            const state = SCENARIOS[name];
+            // `hasOwn`, so a name such as "__proto__" is not mistaken for a scenario.
+            const state = Object.hasOwn(SCENARIOS, name) ? SCENARIOS[name] : undefined;
             if (state !== undefined) {
                 cancel();
                 store.set(state);

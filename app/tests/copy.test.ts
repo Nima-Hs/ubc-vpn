@@ -144,17 +144,39 @@ describe("the words for each state", () => {
             { kind: "service_unavailable" },
             { kind: "refused", code: "busy", message: "m" },
         ];
-        const texts = errors.map(describeActionError);
+        const texts = errors.map((error) => describeActionError(error).text);
         expect(texts[0]).toContain("cannot log in to UBC yet");
         expect(new Set(texts).size).toBe(3);
+    });
+
+    it("passes on what the service said when it refuses an action", () => {
+        // "The message below says which one" is only true if the message is shown.
+        const refused = describeActionError({
+            kind: "refused",
+            code: "route_refused",
+            message: " 198.51.100.0/4 is wider than /8 ",
+        });
+        expect(refused.text).toContain("The message below says which one");
+        expect(refused.detail).toBe("198.51.100.0/4 is wider than /8");
+        expect(
+            describeActionError({ kind: "refused", code: "busy", message: " " }).detail,
+        ).toBeUndefined();
+    });
+
+    it("does not call a service that answered 'not running'", () => {
+        const silent = copyFor({ link: "unavailable", reason: "not_running" });
+        const garbled = copyFor({ link: "unavailable", reason: "protocol_error" });
+        expect(silent.title).toBe("Service not running");
+        expect(garbled.title).not.toBe(silent.title);
+        expect(garbled.body).toContain("answered");
     });
 });
 
 describe("the writing rules", () => {
     const everything = [
         ...STATES.map(copyFor).flatMap((copy) => [copy.title, copy.body, copy.action?.label ?? ""]),
-        describeActionError({ kind: "login_unavailable" }),
-        describeActionError({ kind: "service_unavailable" }),
+        describeActionError({ kind: "login_unavailable" }).text,
+        describeActionError({ kind: "service_unavailable" }).text,
     ].filter((text) => text !== "");
 
     it("uses no exclamation marks and no filler", () => {

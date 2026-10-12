@@ -29,8 +29,8 @@ function Entries({ items }: { items: readonly string[] }) {
 
 function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
     return (
-        <Panel className="flex max-h-full flex-col overflow-hidden">
-            <List className="scroll-region">
+        <Panel scrollLabel="Connection details">
+            <List>
                 <ListRow label="Your VPN address" data>
                     {tunnel.address}
                 </ListRow>
@@ -52,7 +52,7 @@ export function ConnectionView() {
     const { action } = copy;
     const tunnel =
         state.link === "ready" && state.conn.state === "connected" ? state.conn.tunnel : null;
-    const noticeText = notice === null ? null : describeActionError(notice);
+    const noticeCopy = notice === null ? null : describeActionError(notice);
 
     return (
         <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
@@ -69,7 +69,7 @@ export function ConnectionView() {
 
             {/* Read out, politely, whenever the state or the notice changes. */}
             <p role="status" className="sr-only">
-                {copy.title}. {copy.body} {noticeText}
+                {copy.title}. {copy.body} {noticeCopy?.text}
             </p>
 
             {/* Keeps a minimum height, so when the text is zoomed past what the
@@ -77,10 +77,7 @@ export function ConnectionView() {
             <div className="flex min-h-24 flex-1 flex-col">
                 {tunnel !== null && <TunnelDetails tunnel={tunnel} />}
                 {copy.detail !== undefined && (
-                    <Panel
-                        tone="problem"
-                        className="scroll-region flex max-h-full flex-col gap-1 px-4 py-3"
-                    >
+                    <Panel tone="problem" scrollLabel="What the VPN service reported">
                         <Text size="label" tone="secondary">
                             The VPN service reported
                         </Text>
@@ -89,9 +86,14 @@ export function ConnectionView() {
                 )}
             </div>
 
-            {noticeText !== null && (
-                <Panel tone="attention" className="shrink-0 px-4 py-3">
-                    <Text>{noticeText}</Text>
+            {noticeCopy !== null && (
+                <Panel tone="attention" className="shrink-0">
+                    <Text>{noticeCopy.text}</Text>
+                    {noticeCopy.detail !== undefined && (
+                        <Text size="label" tone="secondary" selectable>
+                            {noticeCopy.detail}
+                        </Text>
+                    )}
                 </Panel>
             )}
 

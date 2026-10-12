@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { WINDOW_BACKGROUND } from "@shared/api";
 import { BrowserWindow, screen } from "electron";
+import { webPreferences } from "./security";
 
 /** A compact, fixed-size window: the app lives in the tray. */
 const WIDTH = 380;
@@ -22,16 +23,7 @@ export function createWindow(entryUrl: string, icon: Electron.NativeImage): Brow
         // The interface draws its own title bar so it looks the same on every
         // OS. macOS keeps its own window buttons, placed inside that bar.
         ...(mac ? { titleBarStyle: "hiddenInset" as const } : { frame: false }),
-        webPreferences: {
-            preload: join(__dirname, "../preload/index.js"),
-            contextIsolation: true,
-            sandbox: true,
-            nodeIntegration: false,
-            webSecurity: true,
-            webviewTag: false,
-            spellcheck: false,
-            devTools: import.meta.env.DEV,
-        },
+        webPreferences: webPreferences(join(__dirname, "../preload/index.js"), import.meta.env.DEV),
     });
     enableKeyboardZoom(window);
     window.once("ready-to-show", () => window.show());

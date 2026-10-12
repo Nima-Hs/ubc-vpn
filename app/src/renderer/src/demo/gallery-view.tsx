@@ -51,7 +51,7 @@ export default function GalleryView({ show }: { show(id: string): void }) {
 
             <Section title="Buttons">
                 {variants.map((variant) => (
-                    <div key={variant} className="flex items-center gap-2">
+                    <div key={variant} className="flex flex-wrap items-center gap-2">
                         <Button variant={variant}>
                             {variant === "destructive" ? "Delete route" : "Connect"}
                         </Button>
@@ -117,10 +117,10 @@ export default function GalleryView({ show }: { show(id: string): void }) {
                         </ListRow>
                     </List>
                 </Panel>
-                <Panel tone="attention" className="px-4 py-3">
+                <Panel tone="attention">
                     <Text>A message the user should not miss.</Text>
                 </Panel>
-                <Panel tone="problem" className="px-4 py-3">
+                <Panel tone="problem">
                     <Text>A problem, with what to do about it.</Text>
                 </Panel>
             </Section>

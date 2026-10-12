@@ -192,16 +192,23 @@ export function describe(state: LinkState): StateCopy {
                 working: true,
             };
         case "unavailable":
-            return {
-                tone: "problem",
-                title: "Service not running",
-                body:
-                    state.reason === "not_running"
-                        ? "UBC VPN’s background service is not answering, so the app cannot connect. Restart your computer. If that does not help, install UBC VPN again."
-                        : `Something answered in place of UBC VPN’s background service, and the app could not understand it. ${UPDATE_BOTH}`,
-                action: { kind: "retry", label: "Check again" },
-                working: false,
-            };
+            // Two different problems: nothing answered, or something did
+            // and the app could not make sense of it.
+            return state.reason === "not_running"
+                ? {
+                      tone: "problem",
+                      title: "Service not running",
+                      body: "UBC VPN’s background service is not answering, so the app cannot connect. Restart your computer. If that does not help, install UBC VPN again.",
+                      action: { kind: "retry", label: "Check again" },
+                      working: false,
+                  }
+                : {
+                      tone: "problem",
+                      title: "Service not understood",
+                      body: `UBC VPN’s background service answered, but not in a way this app understands. ${UPDATE_BOTH}`,
+                      action: { kind: "retry", label: "Check again" },
+                      working: false,
+                  };
         case "update_needed": {
             const versions =
                 state.serviceVersion === ""
@@ -228,14 +235,24 @@ export function describe(state: LinkState): StateCopy {
     }
 }
 
+export interface NoticeCopy {
+    text: string;
+    /** The service's own account of a refusal, shown beneath the text. */
+    detail?: string;
+}
+
 /** The words for an action that did not start. */
-export function describeActionError(error: ActionError): string {
+export function describeActionError(error: ActionError): NoticeCopy {
     switch (error.kind) {
         case "login_unavailable":
-            return "This version cannot log in to UBC yet, so it cannot connect. Login arrives in a later version.";
+            return {
+                text: "This version of UBC VPN cannot log in to UBC yet, so it cannot connect.",
+            };
         case "service_unavailable":
-            return "The VPN service did not answer. Wait a few seconds, then try again.";
-        case "refused":
-            return FAILURES[error.code].body;
+            return { text: "The VPN service did not answer. Wait a few seconds, then try again." };
+        case "refused": {
+            const detail = error.message.trim();
+            return { text: FAILURES[error.code].body, ...(detail !== "" && { detail }) };
+        }
     }
 }

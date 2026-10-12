@@ -1,3 +1,4 @@
+import { CircleAlert } from "lucide-react";
 import { type ComponentProps, useId } from "react";
 import { cn } from "@/lib/cn";
 
@@ -40,10 +41,14 @@ export function TextField({ label, hint, error, className, ...props }: TextField
                 <p
                     id={noteId}
                     className={cn(
-                        "text-caption",
+                        "flex items-start gap-1.5 text-caption",
                         error === undefined ? "text-text-tertiary" : "text-danger",
                     )}
                 >
+                    {/* An error is marked as well as coloured. */}
+                    {error !== undefined && (
+                        <CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />
+                    )}
                     {note}
                 </p>
             )}

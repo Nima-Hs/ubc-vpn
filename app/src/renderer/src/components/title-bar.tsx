@@ -1,7 +1,7 @@
 import { Minus, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { api } from "@/lib/store";
+import { api, useSnapshot } from "@/lib/store";
 import { IconButton } from "./ui/icon-button";
 
 /** The app's mark: one line in, two lines out. */
@@ -27,6 +27,7 @@ function Mark() {
  */
 export function TitleBar({ children }: { children?: ReactNode }) {
     const mac = api.platform === "darwin";
+    const closeHides = useSnapshot((snapshot) => snapshot.closeHides);
     return (
         <header
             className={cn(
@@ -46,10 +47,10 @@ export function TitleBar({ children }: { children?: ReactNode }) {
                             <Minus />
                         </IconButton>
                         <IconButton
-                            label="Close to tray"
+                            label={closeHides ? "Close to tray" : "Close"}
                             tone="danger"
                             tooltipSide="left"
-                            onClick={() => void api.hideWindow()}
+                            onClick={() => void api.closeWindow()}
                         >
                             <X />
                         </IconButton>

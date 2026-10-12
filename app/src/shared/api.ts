@@ -44,6 +44,11 @@ export interface Snapshot {
      * in the window or from the tray. Cleared when the state next changes.
      */
     notice: ActionError | null;
+    /**
+     * Whether closing the window hides it and leaves the app in the tray.
+     * Where there is no tray to come back from, closing quits instead.
+     */
+    closeHides: boolean;
 }
 
 /** The whole of what the interface can ask the main process to do. */
@@ -59,8 +64,8 @@ export interface VpnApi {
     /** Tries to reach the service now instead of waiting for the next attempt. */
     retry(): Promise<void>;
     minimizeWindow(): Promise<void>;
-    /** Hides the window; the app keeps running in the tray. */
-    hideWindow(): Promise<void>;
+    /** Closes the window: to the tray where there is one, otherwise quitting. */
+    closeWindow(): Promise<void>;
     /** Present only in demo builds. */
     readonly demo?: DemoApi;
 }
@@ -86,7 +91,7 @@ export const IPC = {
     disconnect: "vpn:disconnect",
     retry: "vpn:retry",
     minimizeWindow: "window:minimize",
-    hideWindow: "window:hide",
+    closeWindow: "window:close",
 } as const;
 
 /** Demo builds only. Kept out of `IPC` so production builds do not carry them. */

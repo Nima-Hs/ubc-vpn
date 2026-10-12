@@ -7,6 +7,21 @@ import { isTrustedOrigin } from "./security";
  * Registers a handler that runs only for the interface's own page in the
  * app's own window. Anything else gets an error and nothing happens.
  */
+/**
+ * Whether an IPC message came from the interface: from the top frame of the
+ * app's own window, showing the app's own page. A frame inside that page, or
+ * any other window, is refused whatever it is showing.
+ */
+export function isFromInterface(
+    sender: { origin: string } | null,
+    interfaceFrame: unknown,
+    devServerUrl: string | undefined,
+): boolean {
+    return (
+        sender !== null && sender === interfaceFrame && isTrustedOrigin(sender.origin, devServerUrl)
+    );
+}
+
 export function handleFromInterface(
     window: BrowserWindow,
     devServerUrl: string | undefined,
@@ -14,12 +29,7 @@ export function handleFromInterface(
     handler: (...args: unknown[]) => unknown,
 ): void {
     ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-        const frame = event.senderFrame;
-        if (
-            frame === null ||
-            frame !== window.webContents.mainFrame ||
-            !isTrustedOrigin(frame.origin, devServerUrl)
-        ) {
+        if (!isFromInterface(event.senderFrame, window.webContents.mainFrame, devServerUrl)) {
             throw new Error("refused");
         }
         return handler(...args);
@@ -40,7 +50,7 @@ export function registerIpc(
     handle(IPC.disconnect, () => controller.disconnect());
     handle(IPC.retry, () => controller.retry());
     handle(IPC.minimizeWindow, () => window.minimize());
-    handle(IPC.hideWindow, () => window.close());
+    handle(IPC.closeWindow, () => window.close());
 
     controller.subscribe((snapshot) => {
         if (!window.isDestroyed()) {

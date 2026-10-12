@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WINDOW_BACKGROUND } from "@shared/api";
 import { describe, expect, it } from "vitest";
-import { duration, easeOut } from "../src/renderer/src/lib/motion";
+import { COLOUR_PALETTE } from "../src/main/tray-icon";
+import { duration, easeOut, tooltipDelay, tooltipSpace } from "../src/renderer/src/lib/motion";
 
 const css = readFileSync(join(__dirname, "../src/renderer/src/styles/tokens.css"), "utf8");
 
@@ -127,6 +128,16 @@ const NON_TEXT_PAIRS: [string, string][] = [
     ["--c-text-tertiary", "--c-control"],
 ];
 
+/**
+ * Edges that only tidy a shape whose text already identifies it: a secondary
+ * button, a panel. WCAG sets no minimum for these; they must still be seen.
+ */
+const EDGE_PAIRS: [string, string][] = [
+    ["--c-border-strong", "--c-bg"],
+    ["--c-border-strong", "--c-surface"],
+    ["--c-border-strong", "--c-control"],
+];
+
 describe("colour contrast", () => {
     it.each(TEXT_PAIRS)("%s on %s reaches 4.5:1", (foreground, background) => {
         expect(contrast(foreground, background)).toBeGreaterThanOrEqual(4.5);
@@ -134,6 +145,12 @@ describe("colour contrast", () => {
 
     it.each(NON_TEXT_PAIRS)("%s against %s reaches 3:1", (foreground, background) => {
         expect(contrast(foreground, background)).toBeGreaterThanOrEqual(3);
+    });
+});
+
+describe("edges", () => {
+    it.each(EDGE_PAIRS)("%s against %s can be seen", (edge, background) => {
+        expect(contrast(edge, background)).toBeGreaterThanOrEqual(1.5);
     });
 });
 
@@ -176,6 +193,24 @@ describe("the colours themselves", () => {
 describe("values repeated outside the token file", () => {
     it("paints the empty window in the background colour", () => {
         expect(WINDOW_BACKGROUND).toBe(hex("--c-bg"));
+    });
+
+    it("draws the tray icon in the interface's own colours", () => {
+        const rgb = (name: string) => {
+            const value = hex(name);
+            return [1, 3, 5].map((at) => Number.parseInt(value.slice(at, at + 2), 16));
+        };
+        expect(COLOUR_PALETTE.ink).toEqual(rgb("--c-text"));
+        expect(COLOUR_PALETTE.on).toEqual(rgb("--c-positive"));
+        expect(COLOUR_PALETTE.attention).toEqual(rgb("--c-attention"));
+        expect(COLOUR_PALETTE.rim).toEqual(rgb("--c-bg"));
+    });
+
+    it("gives tooltips the delays and gaps the tokens name", () => {
+        expect(tooltipDelay.open).toBe(Number.parseFloat(resolve("--delay-tooltip")));
+        expect(tooltipDelay.skip).toBe(Number.parseFloat(resolve("--delay-tooltip-skip")));
+        expect(tooltipSpace.gap).toBe(Number.parseFloat(resolve("--tooltip-gap")));
+        expect(tooltipSpace.inset).toBe(Number.parseFloat(resolve("--tooltip-inset")));
     });
 
     it("gives script-driven motion the same timings as CSS", () => {

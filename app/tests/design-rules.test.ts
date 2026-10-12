@@ -5,7 +5,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { colourPalette, TEMPLATE_PALETTE, type TrayKind, trayIconPng } from "../src/main/tray-icon";
+import {
+    COLOUR_PALETTE,
+    closeHidesWindow,
+    drawTrayIcon,
+    TEMPLATE_PALETTE,
+    type TrayKind,
+    trayIconPng,
+} from "../src/main/tray-icon";
 
 const renderer = join(__dirname, "../src/renderer/src");
 
@@ -98,8 +105,43 @@ describe("the tray icon", () => {
         expect(middle("off")).toBe(0);
     });
 
-    it("uses colour as well where the OS allows it", () => {
-        expect(colourPalette(true).on).not.toEqual(colourPalette(true).ink);
-        expect(colourPalette(true).ink).not.toEqual(colourPalette(false).ink);
+    it("carries its own contrast, since it cannot know the taskbar's colour", () => {
+        // Light shapes for a dark bar, rimmed in dark for a light one.
+        const pixels = drawTrayIcon("off", COLOUR_PALETTE, 32);
+        const opaque: number[] = [];
+        for (let at = 0; at < pixels.length; at += 4) {
+            if ((pixels[at + 3] ?? 0) > 180) {
+                opaque.push(pixels[at] ?? 0);
+            }
+        }
+        expect(Math.max(...opaque)).toBeGreaterThan(200);
+        expect(Math.min(...opaque)).toBeLessThan(60);
+        // macOS tints the icon itself, so there it has one colour and no rim.
+        expect(TEMPLATE_PALETTE.rim).toBeNull();
+    });
+
+    it("uses colour as well as shape where the OS allows it", () => {
+        expect(COLOUR_PALETTE.on).not.toEqual(COLOUR_PALETTE.ink);
+        expect(COLOUR_PALETTE.attention).not.toEqual(COLOUR_PALETTE.ink);
+    });
+});
+
+describe("closing the window", () => {
+    it("hides it to the tray where there is a way back", () => {
+        expect(closeHidesWindow("win32", {}, true)).toBe(true);
+        expect(closeHidesWindow("linux", { XDG_CURRENT_DESKTOP: "KDE" }, true)).toBe(true);
+        expect(closeHidesWindow("linux", { XDG_CURRENT_DESKTOP: "ubuntu:GNOME" }, true)).toBe(true);
+        // The Dock is always there.
+        expect(closeHidesWindow("darwin", {}, false)).toBe(true);
+    });
+
+    it("quits where a hidden window could not be brought back", () => {
+        expect(closeHidesWindow("win32", {}, false)).toBe(false);
+        expect(closeHidesWindow("linux", {}, false)).toBe(false);
+        // GNOME shows no tray without an extension, and gives no error either.
+        expect(closeHidesWindow("linux", { XDG_CURRENT_DESKTOP: "GNOME" }, true)).toBe(false);
+        expect(
+            closeHidesWindow("linux", { XDG_CURRENT_DESKTOP: "GNOME-Classic:GNOME" }, true),
+        ).toBe(false);
     });
 });

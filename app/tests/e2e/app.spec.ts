@@ -1,7 +1,7 @@
 // Launches the real app in demo mode and looks at it. Screenshots of every
 // state go to `SCREENSHOT_DIR`, or `test-results/screens` when it is not set.
 
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -14,6 +14,22 @@ import {
 
 const screenshotDir = resolve(process.env.SCREENSHOT_DIR ?? "test-results/screens");
 
+const launchArgs = () => [
+    resolve("out-demo/main/index.js"),
+    // A window hidden behind others has its animations paused, and a
+    // test machine's windows usually are. Keep them running.
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    // Its own profile, so it never collides with a running copy.
+    `--user-data-dir=${mkdtempSync(join(tmpdir(), "ubc-vpn-e2e-"))}`,
+];
+const launchEnv = {
+    ...process.env,
+    UBC_VPN_DEMO_STEP_MS: "600",
+    // Whatever desktop the test machine runs, behave as on one with a tray.
+    XDG_CURRENT_DESKTOP: "e2e",
+};
+
 let app: ElectronApplication;
 let page: Page;
 const problems: string[] = [];
@@ -21,16 +37,8 @@ const problems: string[] = [];
 test.beforeAll(async () => {
     mkdirSync(screenshotDir, { recursive: true });
     app = await electron.launch({
-        args: [
-            resolve("out-demo/main/index.js"),
-            // A window hidden behind others has its animations paused, and a
-            // test machine's windows usually are. Keep them running.
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            // Its own profile, so it never collides with a running copy.
-            `--user-data-dir=${mkdtempSync(join(tmpdir(), "ubc-vpn-e2e-"))}`,
-        ],
-        env: { ...process.env, UBC_VPN_DEMO_STEP_MS: "600" },
+        args: launchArgs(),
+        env: launchEnv,
     });
     page = await app.firstWindow();
     // The real mouse pointer hovers whatever is under it. Put the window
@@ -58,7 +66,8 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-    await app.close();
+    // The last test closes the app itself; closing twice is harmless.
+    await app.close().catch(() => {});
 });
 
 async function shoot(name: string): Promise<void> {
@@ -88,16 +97,125 @@ test("the window renders, locked down", async () => {
     expect(exposed.require).toBe("undefined");
     expect(exposed.process).toBe("undefined");
     expect(exposed.api).toEqual([
+        "closeWindow",
         "connect",
         "demo",
         "disconnect",
         "getSnapshot",
-        "hideWindow",
         "minimizeWindow",
         "onSnapshot",
         "platform",
         "retry",
     ]);
+});
+
+test("the interface's process is confined", async () => {
+    const seen = await app.evaluate(({ app: electronApp, BrowserWindow, Menu }) => {
+        const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+        // Electron keeps the preferences a window was made with; the method
+        // is real but missing from its type definitions.
+        const preferences = (
+            contents as unknown as
+                | { getLastWebPreferences(): Record<string, unknown> | null }
+                | undefined
+        )?.getLastWebPreferences();
+        const items = Menu.getApplicationMenu()?.items ?? [];
+        return {
+            sandbox: preferences?.sandbox,
+            contextIsolation: preferences?.contextIsolation,
+            nodeIntegration: preferences?.nodeIntegration,
+            webSecurity: preferences?.webSecurity,
+            webviewTag: preferences?.webviewTag,
+            noSandboxSwitch: electronApp.commandLine.hasSwitch("no-sandbox"),
+            pid: contents?.getOSProcessId(),
+            // Every role the menu offers, at any depth.
+            menuRoles: items.flatMap((item) => [
+                item.role,
+                ...(item.submenu?.items.map((entry) => entry.role) ?? []),
+            ]),
+        };
+    });
+    expect(seen).toMatchObject({
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        webviewTag: false,
+        noSandboxSwitch: false,
+    });
+    // No menu entry reloads the page or opens developer tools.
+    for (const role of ["reload", "forcereload", "toggledevtools", "viewmenu"]) {
+        expect(seen.menuRoles.map((entry) => String(entry).toLowerCase())).not.toContain(role);
+    }
+    // On Linux the kernel says whether the process is really sandboxed:
+    // Chromium's sandbox puts a seccomp filter (mode 2) on it.
+    if (process.platform === "linux") {
+        expect(readFileSync(`/proc/${seen.pid}/status`, "utf8")).toMatch(/^Seccomp:\s*2$/m);
+    }
+});
+
+test("no permission is granted", async () => {
+    const answers = await page.evaluate(async () => ({
+        check: (await navigator.permissions.query({ name: "notifications" })).state,
+        request: await Notification.requestPermission(),
+    }));
+    expect(answers).toEqual({ check: "denied", request: "denied" });
+});
+
+test("only the interface's own files are served, with their headers", async () => {
+    const fetched = await app.evaluate(async ({ session }) => {
+        const get = async (url: string) => {
+            try {
+                const response = await session.defaultSession.fetch(url);
+                return {
+                    status: response.status,
+                    csp: response.headers.get("content-security-policy"),
+                    sniff: response.headers.get("x-content-type-options"),
+                };
+            } catch {
+                return { status: 0, csp: null, sniff: null };
+            }
+        };
+        return {
+            index: await get("app://ui/index.html"),
+            climbing: await get("app://ui/..%2f..%2fpackage.json"),
+            otherMain: await get("app://ui/..%2fmain%2findex.js"),
+            otherHost: await get("app://elsewhere/index.html"),
+            otherType: await get("app://ui/index.html.map"),
+        };
+    });
+    expect(fetched.index.status).toBe(200);
+    expect(fetched.index.csp).toContain("default-src 'none'");
+    expect(fetched.index.csp).toContain("connect-src 'none'");
+    expect(fetched.index.csp).toContain("script-src 'self';");
+    expect(fetched.index.sniff).toBe("nosniff");
+    // The main process's own code sits beside the interface's folder.
+    expect(fetched.otherMain.status).toBe(404);
+    expect(fetched.climbing.status).toBe(404);
+    // Refused before it is even looked up: no such host is ever requested.
+    expect(fetched.otherHost.status).toBe(0);
+    expect(fetched.otherType.status).toBe(404);
+});
+
+test("another window cannot use the interface's functions", async () => {
+    const answer = await app.evaluate(async ({ BrowserWindow }, preload) => {
+        // The same page and the same preload, in a window the app did not make.
+        const other = new BrowserWindow({
+            show: false,
+            webPreferences: { preload, sandbox: true },
+        });
+        try {
+            await other.loadURL("app://ui/index.html");
+            return await other.webContents.executeJavaScript(
+                "window.ubcVpn.getSnapshot().then(() => 'answered', () => 'refused')",
+            );
+        } finally {
+            other.destroy();
+        }
+    }, resolve("out-demo/preload/index.js"));
+    expect(answer).toBe("refused");
+    // The interface's own window is still served.
+    expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toHaveProperty("state");
 });
 
 test("connect and disconnect, by keyboard", async () => {
@@ -148,6 +266,34 @@ test("every state, photographed", async () => {
     }
 });
 
+test("keyboard focus on the scrolling details is visible", async () => {
+    await scenario("connected-crowded");
+    const details = page.getByRole("group", { name: "Connection details" });
+    await expect(details).toBeVisible();
+    // Reach it the way a keyboard user does.
+    await page.getByRole("button", { name: /^Close/ }).focus();
+    await page.keyboard.press("Tab");
+    await expect(details).toBeFocused();
+    const ring = await details.evaluate((region) => {
+        const style = getComputedStyle(region);
+        return {
+            keyboard: region.matches(":focus-visible"),
+            style: style.outlineStyle,
+            width: Number.parseFloat(style.outlineWidth),
+            offset: Number.parseFloat(style.outlineOffset),
+        };
+    });
+    // Drawn inside the region, where the panel's rounded edge cannot clip it.
+    expect(ring.keyboard).toBe(true);
+    expect(ring.style).toBe("solid");
+    expect(ring.width).toBeGreaterThanOrEqual(2);
+    expect(ring.offset).toBe(-ring.width);
+    await shoot("keyboard-focus-details");
+    await page.keyboard.press("ArrowDown");
+    await expect.poll(() => details.evaluate((region) => region.scrollTop)).toBeGreaterThan(0);
+    await scenario("disconnected");
+});
+
 test("the component gallery", async () => {
     await page.getByRole("button", { name: "Components" }).click();
     await expect(page.getByRole("heading", { name: "Buttons" })).toBeVisible();
@@ -156,8 +302,12 @@ test("the component gallery", async () => {
         await page.getByRole("heading", { name: section }).scrollIntoViewIfNeeded();
         await shoot(`components-${index + 2}`);
     }
-    await page.getByRole("button", { name: "Open settings" }).hover();
+    const settings = page.getByRole("button", { name: "Open settings" });
+    await settings.hover();
     await expect(page.getByRole("tooltip")).toHaveText("Open settings");
+    // The tooltip repeats the button's name, so it must not also be its
+    // description: a screen reader would read the same words twice.
+    await expect(settings).not.toHaveAttribute("aria-describedby");
     await shoot("components-tooltip");
     await page.getByRole("button", { name: "Delete route" }).last().hover();
     await shoot("components-hover");
@@ -204,7 +354,7 @@ test("a connection in progress does not trap the user", async () => {
     await scenario("connecting");
     await expect(action()).toHaveAttribute("aria-busy", "true");
     // The window can still be put away, and the app can still be quit.
-    await page.evaluate(() => window.ubcVpn.hideWindow());
+    await page.evaluate(() => window.ubcVpn.closeWindow());
     await expect
         .poll(() =>
             app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible()),
@@ -215,7 +365,7 @@ test("a connection in progress does not trap the user", async () => {
 });
 
 test("closing the window keeps the app in the tray", async () => {
-    await page.evaluate(() => window.ubcVpn.hideWindow());
+    await page.evaluate(() => window.ubcVpn.closeWindow());
     await expect
         .poll(() =>
             app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible()),
@@ -239,12 +389,43 @@ test("it cannot reach the network, open a window or leave its page", async () =>
     expect(fetched).toBe("blocked");
     const opened = await page.evaluate(() => window.open("https://example.com/") !== null);
     expect(opened).toBe(false);
-    await page.evaluate(() => {
-        window.location.href = "https://example.com/";
+    // Ask the page to leave, and wait for the app's answer to that very
+    // request: the navigation is offered to the app, which must refuse it.
+    const navigation = await app.evaluate(({ BrowserWindow }) => {
+        const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+        return new Promise<{ url: string; refused: boolean; stayedAt: string | undefined }>(
+            (done) => {
+                // Added after the app's own listener, so it sees the decision.
+                contents?.once("will-navigate", (event) => {
+                    done({
+                        url: event.url,
+                        refused: event.defaultPrevented,
+                        stayedAt: contents.getURL(),
+                    });
+                });
+                void contents?.executeJavaScript("window.location.href = 'https://example.com/'");
+            },
+        );
     });
-    await page.waitForTimeout(500);
-    const urls = await app.evaluate(({ BrowserWindow }) =>
-        BrowserWindow.getAllWindows().map((window) => window.webContents.getURL()),
-    );
-    expect(urls).toEqual(["app://ui/index.html"]);
+    expect(navigation).toEqual({
+        url: "https://example.com/",
+        refused: true,
+        stayedAt: "app://ui/index.html",
+    });
+});
+
+test("a built app ignores a dev server address in its environment", async () => {
+    await app.close();
+    const other = await electron.launch({
+        args: launchArgs(),
+        env: { ...launchEnv, ELECTRON_RENDERER_URL: "https://example.com/" },
+    });
+    try {
+        const window = await other.firstWindow();
+        await window.waitForLoadState("domcontentloaded");
+        expect(window.url()).toBe("app://ui/index.html");
+        await expect(window.getByRole("heading", { level: 1 })).toHaveText("Not connected");
+    } finally {
+        await other.close();
+    }
 });

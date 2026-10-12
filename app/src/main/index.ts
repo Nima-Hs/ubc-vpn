@@ -1,15 +1,16 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
-import { app, type BrowserWindow, Menu } from "electron";
+import { app, type BrowserWindow, Menu, protocol, session } from "electron";
 import { serviceChannelPath } from "./channel/endpoint";
 import { Controller } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
-import { registerAppScheme, secureSession } from "./security";
+import { applicationMenu, devServerUrlFor, registerAppScheme, secureSession } from "./security";
 import { createTray, trayImage } from "./tray";
+import { closeHidesWindow } from "./tray-icon";
 import { createWindow, showWindow } from "./window";
 
-registerAppScheme();
+registerAppScheme(protocol);
 
 // One copy of the app at a time: a second launch brings the first one's
 // window forward and exits.
@@ -21,8 +22,12 @@ if (app.requestSingleInstanceLock()) {
 
 async function start(): Promise<void> {
     // Set only by `electron-vite dev`, and read only in development builds.
-    const devServerUrl = import.meta.env.DEV ? process.env.ELECTRON_RENDERER_URL : undefined;
-    const entryUrl = secureSession(join(__dirname, "../renderer"), devServerUrl);
+    const devServerUrl = devServerUrlFor(import.meta.env.DEV, process.env);
+    const entryUrl = secureSession(
+        { app, protocol, session: session.defaultSession },
+        join(__dirname, "../renderer"),
+        devServerUrl,
+    );
 
     let link: ServiceLink;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
@@ -48,16 +53,9 @@ async function start(): Promise<void> {
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.
-    if (!import.meta.env.DEV) {
-        Menu.setApplicationMenu(
-            process.platform === "darwin"
-                ? Menu.buildFromTemplate([
-                      { role: "appMenu" },
-                      { role: "editMenu" },
-                      { role: "windowMenu" },
-                  ])
-                : null,
-        );
+    const menu = applicationMenu(process.platform, import.meta.env.DEV);
+    if (menu !== undefined) {
+        Menu.setApplicationMenu(menu === null ? null : Menu.buildFromTemplate(menu));
     }
 
     const window = createWindow(entryUrl, trayImage("on", 64));
@@ -74,7 +72,6 @@ async function start(): Promise<void> {
     const tray = createTray(
         {
             showWindow: show,
-            toggleWindow: () => (window.isVisible() && window.isFocused() ? window.hide() : show()),
             // An action that does not start explains itself in the window.
             connect: () => void controller.connect().then(showIfNotice),
             disconnect: () => void controller.disconnect().then(showIfNotice),
@@ -90,12 +87,12 @@ async function start(): Promise<void> {
     }
     controller.subscribe((snapshot) => tray?.update(snapshot.state));
 
-    // Closing the window leaves the app running in the tray. Where the
-    // desktop gave us no tray icon there would be no way back to a hidden
-    // window, so there closing the window quits. macOS always has the Dock.
-    const staysOpen = tray !== null || process.platform === "darwin";
+    // Closing the window leaves the app running in the tray, but only where
+    // there is a way back to a hidden window. Elsewhere closing quits.
+    const closeHides = closeHidesWindow(process.platform, process.env, tray !== null);
+    controller.setCloseHides(closeHides);
     window.on("close", (event) => {
-        if (!quitting && staysOpen) {
+        if (!quitting && closeHides) {
             event.preventDefault();
             window.hide();
         }

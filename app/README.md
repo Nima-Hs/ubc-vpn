@@ -58,6 +58,16 @@ The pipe or socket name the app connects to is in [`src/main/channel/endpoint.ts
 
 Ctrl or Cmd with plus, minus and zero enlarge, shrink and reset the interface. The window grows with it.
 
+Each of these protections has a test in `tests/security.test.ts` that fails when it is removed, and the end-to-end test checks them again in the running app. When you add a protection, add its test, then remove the protection and watch the test fail.
+
+### The tray
+
+Closing the window hides it and leaves the app in the tray, but only where there is a way back to a hidden window. macOS always has the Dock, and Windows always has a tray. GNOME has no tray unless an extension adds one, and Electron cannot tell, so on GNOME without Ubuntu's extension closing the window quits the app. Starting the app a second time always brings the window back.
+
+The tray icon is light with a dark rim, so it shows on a dark taskbar and a light one; macOS tints it itself. A click on it shows the window.
+
+Not yet checked on a real desktop, and to be checked before the first release: the tray on macOS and on Linux (GNOME with and without the extension, KDE), the rimmed icon on a light Windows taskbar, and the click on Windows.
+
 Every word the app shows about the connection is in [`src/shared/copy.ts`](src/shared/copy.ts). The window and the tray both read from it.
 
 ## The design system

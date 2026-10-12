@@ -158,6 +158,18 @@ describe("the controller", () => {
 });
 
 describe("the demo service", () => {
+    it("ignores a scenario name it does not have, even one every object answers to", () => {
+        const demo = createDemoLink(10);
+        cleanups.push(() => demo.dispose());
+        const before = demo.getState();
+        for (const name of ["__proto__", "constructor", "toString", "no-such-state"]) {
+            demo.setScenario(name);
+            expect(demo.getState(), name).toEqual(before);
+        }
+        demo.setScenario("connecting");
+        expect(demo.getState()).toEqual({ link: "ready", conn: { state: "connecting" } });
+    });
+
     it("walks from disconnected through connecting to connected, and back", async () => {
         const demo = createDemoLink(10);
         cleanups.push(() => demo.dispose());

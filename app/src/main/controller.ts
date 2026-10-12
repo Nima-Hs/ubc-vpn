@@ -10,9 +10,10 @@ export class Controller {
     private snapshot: Snapshot;
     private readonly listeners = new Set<(snapshot: Snapshot) => void>();
     private readonly unsubscribe: () => void;
+    private closeHides = false;
 
     constructor(private readonly link: ServiceLink) {
-        this.snapshot = { state: link.getState(), notice: null };
+        this.snapshot = { state: link.getState(), notice: null, closeHides: false };
         // A change of state makes any earlier notice out of date.
         this.unsubscribe = link.subscribe((state) => this.publish({ state, notice: null }));
     }
@@ -34,6 +35,12 @@ export class Controller {
         return this.run(() => this.link.disconnect());
     }
 
+    /** Says whether closing the window hides it or quits the app. */
+    setCloseHides(closeHides: boolean): void {
+        this.closeHides = closeHides;
+        this.publish(this.snapshot);
+    }
+
     retry(): void {
         this.link.retry();
     }
@@ -50,7 +57,8 @@ export class Controller {
         }
     }
 
-    private publish(snapshot: Snapshot): void {
+    private publish(next: Pick<Snapshot, "state" | "notice">): void {
+        const snapshot = { state: next.state, notice: next.notice, closeHides: this.closeHides };
         this.snapshot = snapshot;
         for (const listener of this.listeners) {
             listener(snapshot);

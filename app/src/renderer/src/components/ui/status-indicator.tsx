@@ -44,7 +44,7 @@ export function StatusIndicator({
                 aria-hidden
                 className={cn(
                     "relative grid shrink-0 place-items-center",
-                    size === "lg" ? "size-7" : "size-4",
+                    size === "lg" ? "size-mark-lg" : "size-mark-sm",
                 )}
             >
                 <span
@@ -56,7 +56,7 @@ export function StatusIndicator({
                 <span
                     className={cn(
                         "relative rounded-full transition-colors duration-(--dur-base)",
-                        size === "lg" ? "size-3" : "size-2",
+                        size === "lg" ? "size-mark-dot-lg" : "size-mark-dot-sm",
                         dot[tone],
                     )}
                 />

@@ -36,8 +36,8 @@ export function ViewSwitcher({
                     onClick={() => onChange(view.id)}
                     className={cn(
                         pressable,
-                        "h-7 rounded-sm px-2.5 text-label text-text-secondary hover:text-text",
-                        "aria-[current]:bg-control aria-[current]:text-text aria-[current]:shadow-control",
+                        "h-control-xs rounded-sm px-2.5 text-label text-text-secondary hover:text-text",
+                        "aria-[current]:bg-control-hover aria-[current]:text-text aria-[current]:shadow-control",
                     )}
                 >
                     {view.label}

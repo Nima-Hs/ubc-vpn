@@ -16,6 +16,7 @@
     "build": "electron-vite build",
     "build:demo": "electron-vite build --mode demo --outDir out-demo",
     "check:build": "node scripts/check-production-build.mjs",
+    "check:build:control": "node scripts/check-production-build.mjs --control",
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.e2e.json",

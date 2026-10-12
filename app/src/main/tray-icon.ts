@@ -26,58 +26,105 @@ export function trayKind(state: LinkState): TrayKind {
     }
 }
 
+/**
+ * Whether closing the window should hide it and leave the app in the tray.
+ * That is only safe where there is a way back to a hidden window.
+ *
+ * macOS always has the Dock. Windows always has a tray. On Linux, GNOME has
+ * none unless an extension adds one (Ubuntu ships that extension; Debian and
+ * Fedora do not), and Electron cannot tell: it creates the icon without
+ * error either way. So GNOME without Ubuntu's extension is assumed to have
+ * no tray, and there closing the window quits the app.
+ */
+export function closeHidesWindow(
+    platform: NodeJS.Platform,
+    env: Record<string, string | undefined>,
+    trayCreated: boolean,
+): boolean {
+    if (platform === "darwin") {
+        return true;
+    }
+    if (!trayCreated) {
+        return false;
+    }
+    if (platform === "linux") {
+        const desktop = (env.XDG_CURRENT_DESKTOP ?? "").toLowerCase();
+        return !desktop.includes("gnome") || desktop.includes("ubuntu");
+    }
+    return true;
+}
+
 type Rgb = readonly [number, number, number];
 
 export interface TrayPalette {
-    /** The outline, chosen to stand out against the OS's tray. */
+    /** The outline of the mark. */
     ink: Rgb;
     on: Rgb;
     attention: Rgb;
+    /**
+     * A thin dark rim around every shape, or `null` for none. The icon cannot
+     * know the colour of the taskbar it sits on (the OS can theme that apart
+     * from apps), so it carries its own contrast: light shapes that show on a
+     * dark bar, rimmed so they also show on a light one.
+     */
+    rim: Rgb | null;
 }
 
-/** One colour throughout, for macOS, which tints template images itself. */
+/** One colour and no rim, for macOS, which tints template images itself. */
 export const TEMPLATE_PALETTE: TrayPalette = {
     ink: [0, 0, 0],
     on: [0, 0, 0],
     attention: [0, 0, 0],
+    rim: null,
 };
 
-export function colourPalette(darkTray: boolean): TrayPalette {
-    return {
-        ink: darkTray ? [236, 239, 245] : [32, 36, 46],
-        on: darkTray ? [77, 214, 160] : [0, 135, 90],
-        attention: darkTray ? [245, 183, 77] : [176, 106, 0],
-    };
-}
+/**
+ * For Windows and Linux. These are the design tokens `--c-text`,
+ * `--c-positive`, `--c-attention` and `--c-bg`; a test fails if they drift.
+ */
+export const COLOUR_PALETTE: TrayPalette = {
+    ink: [238, 240, 244],
+    on: [89, 225, 162],
+    attention: [245, 194, 95],
+    rim: [11, 14, 20],
+};
 
 /** Samples per pixel along each axis, for smooth edges. */
 const SAMPLES = 4;
+/** How far the rim reaches beyond a shape, and how solid it is. */
+const RIM_WIDTH = 0.07;
+const RIM_ALPHA = 0.8;
 
 /**
- * Colour and coverage at one point, in units where the icon is 1 wide.
- * Off is a ring, on is a filled disc, busy is a ring around a dot, and
- * attention is a ring with a solid badge at the lower right.
+ * Which colour covers a point, in units where the icon is 1 wide, with every
+ * shape grown by `grow`. Off is a ring, on is a filled disc, busy is a ring
+ * around a dot, and attention is a ring with a solid badge at the lower right.
  */
-function sample(kind: TrayKind, palette: TrayPalette, x: number, y: number): Rgb | null {
+function shapeAt(
+    kind: TrayKind,
+    x: number,
+    y: number,
+    grow: number,
+): "ink" | "on" | "attention" | null {
     const fromCentre = Math.hypot(x - 0.5, y - 0.5);
     if (kind === "on") {
-        return fromCentre <= 0.44 ? palette.on : null;
+        return fromCentre <= 0.4 + grow ? "on" : null;
     }
     if (kind === "attention") {
-        const fromBadge = Math.hypot(x - 0.76, y - 0.76);
-        if (fromBadge <= 0.2) {
-            return palette.attention;
+        const fromBadge = Math.hypot(x - 0.74, y - 0.74);
+        if (fromBadge <= 0.19 + grow) {
+            return "attention";
         }
         // A clear gap keeps the badge apart from the ring in one colour.
         if (fromBadge <= 0.29) {
             return null;
         }
     }
-    if (fromCentre <= 0.44 && fromCentre >= 0.31) {
-        return palette.ink;
+    if (fromCentre <= 0.4 + grow && fromCentre >= 0.28 - grow) {
+        return "ink";
     }
-    if (kind === "busy" && fromCentre <= 0.14) {
-        return palette.ink;
+    if (kind === "busy" && fromCentre <= 0.13 + grow) {
+        return "ink";
     }
     return null;
 }
@@ -87,27 +134,40 @@ export function drawTrayIcon(kind: TrayKind, palette: TrayPalette, size: number)
     const pixels = Buffer.alloc(size * size * 4);
     for (let py = 0; py < size; py++) {
         for (let px = 0; px < size; px++) {
-            let covered = 0;
-            let colour: Rgb = palette.ink;
+            let red = 0;
+            let green = 0;
+            let blue = 0;
+            let alpha = 0;
             for (let sy = 0; sy < SAMPLES; sy++) {
                 for (let sx = 0; sx < SAMPLES; sx++) {
-                    const hit = sample(
-                        kind,
-                        palette,
-                        (px + (sx + 0.5) / SAMPLES) / size,
-                        (py + (sy + 0.5) / SAMPLES) / size,
-                    );
-                    if (hit !== null) {
-                        covered++;
-                        colour = hit;
+                    const x = (px + (sx + 0.5) / SAMPLES) / size;
+                    const y = (py + (sy + 0.5) / SAMPLES) / size;
+                    const shape = shapeAt(kind, x, y, 0);
+                    let colour: Rgb;
+                    let weight: number;
+                    if (shape !== null) {
+                        colour = palette[shape];
+                        weight = 1;
+                    } else if (palette.rim !== null && shapeAt(kind, x, y, RIM_WIDTH) !== null) {
+                        colour = palette.rim;
+                        weight = RIM_ALPHA;
+                    } else {
+                        continue;
                     }
+                    red += colour[0] * weight;
+                    green += colour[1] * weight;
+                    blue += colour[2] * weight;
+                    alpha += weight;
                 }
             }
+            if (alpha === 0) {
+                continue;
+            }
             const at = (py * size + px) * 4;
-            pixels[at] = colour[0];
-            pixels[at + 1] = colour[1];
-            pixels[at + 2] = colour[2];
-            pixels[at + 3] = Math.round((covered / (SAMPLES * SAMPLES)) * 255);
+            pixels[at] = Math.round(red / alpha);
+            pixels[at + 1] = Math.round(green / alpha);
+            pixels[at + 2] = Math.round(blue / alpha);
+            pixels[at + 3] = Math.round((alpha / (SAMPLES * SAMPLES)) * 255);
         }
     }
     return pixels;

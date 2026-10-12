@@ -66,7 +66,12 @@
     --text-display--letter-spacing: var(--type-display-tracking);
 
     --spacing: var(--space-unit);
+    --spacing-control-xs: var(--size-control-xs);
     --spacing-control-sm: var(--size-control-sm);
+    --spacing-mark-sm: var(--size-mark-sm);
+    --spacing-mark-dot-sm: var(--size-mark-dot-sm);
+    --spacing-mark-lg: var(--size-mark-lg);
+    --spacing-mark-dot-lg: var(--size-mark-dot-lg);
     --spacing-control-md: var(--size-control-md);
     --spacing-control-lg: var(--size-control-lg);
 
@@ -113,7 +118,7 @@
     }
     @keyframes breathe {
         from {
-            opacity: 0.35;
+            opacity: var(--opacity-pulse-low);
         }
     }
 }
@@ -140,8 +145,8 @@
 
     /* One focus ring for every control, shown for keyboard use only. */
     :focus-visible {
-        outline: 2px solid var(--c-focus);
-        outline-offset: 2px;
+        outline: var(--focus-width) solid var(--c-focus);
+        outline-offset: var(--focus-offset);
     }
 
     ::selection {
@@ -161,8 +166,15 @@
 
 /* A region that scrolls inside the window without moving anything behind it. */
 @utility scroll-region {
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: thin;
     scrollbar-color: var(--c-border-strong) transparent;
+
+    /* Drawn inside the region: an outline outside it would be clipped by the
+       rounded surface it sits in, and keyboard focus would be invisible. */
+    &:focus-visible {
+        outline-offset: calc(-1 * var(--focus-width));
+    }
 }

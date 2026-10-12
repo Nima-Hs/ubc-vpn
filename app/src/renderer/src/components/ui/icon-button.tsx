@@ -23,7 +23,11 @@ export function IconButton({
     ...props
 }: IconButtonProps) {
     return (
-        <Tooltip label={label} {...(tooltipSide !== undefined && { side: tooltipSide })}>
+        <Tooltip
+            label={label}
+            repeatsName
+            {...(tooltipSide !== undefined && { side: tooltipSide })}
+        >
             <button
                 type={type}
                 aria-label={label}

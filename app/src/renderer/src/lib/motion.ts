@@ -8,4 +8,10 @@ export const duration = {
     slow: 0.42,
 } as const;
 
+/** Milliseconds, as the tooltip expects. */
+export const tooltipDelay = { open: 500, skip: 300 } as const;
+
+/** Pixels, as the tooltip expects. */
+export const tooltipSpace = { gap: 6, inset: 8 } as const;
+
 export const easeOut = [0.23, 1, 0.32, 1] as const;

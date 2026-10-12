@@ -21,7 +21,7 @@ const api: VpnApi = {
     disconnect: () => ipcRenderer.invoke(IPC.disconnect),
     retry: () => ipcRenderer.invoke(IPC.retry),
     minimizeWindow: () => ipcRenderer.invoke(IPC.minimizeWindow),
-    hideWindow: () => ipcRenderer.invoke(IPC.hideWindow),
+    closeWindow: () => ipcRenderer.invoke(IPC.closeWindow),
     ...(__DEMO__ && {
         demo: {
             listScenarios: () => ipcRenderer.invoke(DEMO_IPC.listScenarios),
