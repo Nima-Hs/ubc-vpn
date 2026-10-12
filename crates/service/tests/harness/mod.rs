@@ -225,6 +225,8 @@ impl Peer {
         loop {
             match self.read().expect("a response before the close") {
                 ServerMessage::Event(Event::StateChanged(state)) => self.events.push_back(state),
+                // Not a state. It is in `lines` for a test that wants it.
+                ServerMessage::Event(Event::Log(_)) => {}
                 ServerMessage::Response(response) => {
                     assert_eq!(response.id, self.id);
                     return match response.outcome {
