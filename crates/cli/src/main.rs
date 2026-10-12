@@ -1,5 +1,5 @@
 //! The command-line client. It logs in and talks to the service. Only
-//! `status` exists so far.
+//! `status` and `bridge` exist so far.
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -11,6 +11,7 @@ use ubc_vpn_platform::{Mode, Platform};
 
 use client::{Client, ClientError};
 
+mod bridge;
 mod client;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,7 @@ Usage: ubc-vpn <command>
 
 Commands:
   status [--json]   Show whether the VPN is connected
+  bridge            Carry messages between the app and the service
   help              Show this text
   version           Show the version";
 
@@ -36,6 +38,13 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let installed = || Platform::native(Mode::Installed);
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+    // The one command that reads standard input, so it is started here.
+    if args == ["bridge"] {
+        let input = std::io::BufReader::new(std::io::stdin());
+        let limits = client::Limits::default();
+        let status = bridge::run(&installed, input, limits, &mut out, &mut err);
+        return ExitCode::from(status);
+    }
     ExitCode::from(run(&args, &installed, &mut out, &mut err))
 }
 

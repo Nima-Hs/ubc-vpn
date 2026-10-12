@@ -19,13 +19,13 @@ use super::*;
 use crate::client::Limits;
 
 /// A fake machine with the files of one service in a folder of its own.
-struct Rig {
-    fake: Fake,
-    root: PathBuf,
+pub(crate) struct Rig {
+    pub(crate) fake: Fake,
+    pub(crate) root: PathBuf,
 }
 
 impl Rig {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = std::env::temp_dir().join(format!("ubc-vpn-cli-test-{unique:?}"));
@@ -33,7 +33,7 @@ impl Rig {
         Self { fake, root }
     }
 
-    fn service(&self) -> Service {
+    pub(crate) fn service(&self) -> Service {
         let key = format!("pin-sha256:{}=", "A".repeat(43));
         let engine = FakeEngine::new(Script::new(key.try_into().unwrap()));
         let platform = self.fake.platform(&self.root);
@@ -50,7 +50,7 @@ impl Rig {
     }
 
     /// Makes another user the owner.
-    fn claim_as_someone_else(&self) {
+    pub(crate) fn claim_as_someone_else(&self) {
         let other = "someone-else".parse().unwrap();
         let name = paths(&self.root).channel_name;
         let conn = self.fake.connect_as(&name, &other).unwrap();

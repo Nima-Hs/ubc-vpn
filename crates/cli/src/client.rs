@@ -30,7 +30,10 @@ pub struct Limits {
     pub write: Duration,
     /// How many events may arrive while an answer is awaited and be kept
     /// for later. State changes are few; more than this is not a service
-    /// that is working.
+    /// that is working. Kept events leave only through
+    /// [`Client::next_event`], so a program that keeps one client for a
+    /// long time must take them between requests, or the cap will end a
+    /// later request.
     pub kept_events: usize,
 }
 
