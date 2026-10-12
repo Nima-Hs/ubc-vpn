@@ -35,15 +35,8 @@ use ubc_vpn_core::redact::Secret;
 use ubc_vpn_engine::{Cancel, Prompt};
 use ubc_vpn_platform::Platform;
 
-use crate::clean;
 use crate::client::Limits;
-use crate::connect::{Ask, Engines, start};
-
-/// The most of a question's label and of its message that is passed on, in
-/// UTF-16 code units, which is how the app counts them. The gateway words
-/// both, and a question must always fit in one line.
-const MAX_LABEL: usize = 200;
-const MAX_MESSAGE: usize = 1000;
+use crate::connect::{Ask, Engines, MAX_LABEL, MAX_MESSAGE, start, worded};
 
 /// How many answers may wait to be used. A prompt gets one answer, so more
 /// than a few waiting means the app is not following the conversation.
@@ -143,7 +136,6 @@ impl Ask for App<'_> {
         // The wording is the gateway's. JSON carries any character safely;
         // the app is spared the ones no label has a use for, and a length
         // that would not fit in a line.
-        let worded = |text: &str, most| cut(&clean(text), most);
         let question = CliMessage::Prompt {
             id: self.asked,
             kind: prompt.kind,
@@ -164,21 +156,20 @@ impl Ask for App<'_> {
     }
 }
 
-/// The start of `text`: as many whole characters as fit in `most` UTF-16
-/// code units.
-fn cut(text: &str, most: usize) -> String {
-    let mut room = most;
-    let fits = |c: &char| {
-        let fit = c.len_utf16() <= room;
-        room = room.saturating_sub(c.len_utf16());
-        fit
-    };
-    text.chars().take_while(fits).collect()
+/// Cancels when dropped: however the reader of standard input ends, a panic
+/// included, a login is not left waiting for a cancel nobody can send.
+struct CancelAtTheEnd<'a>(&'a Cancel);
+
+impl Drop for CancelAtTheEnd<'_> {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 /// Reads the app's lines until it cancels, goes away, or stops making sense.
 /// Each of those cancels the login, wherever it is.
 fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>, cancel: &Cancel) {
+    let _cancel = CancelAtTheEnd(cancel);
     // One buffer for every line, never grown, so that no copy of an answer
     // is left behind in memory this function has let go of.
     let mut line = Vec::with_capacity(MAX_LINE_BYTES + 1);
@@ -213,5 +204,4 @@ fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>, cancel: &Cancel) 
             break;
         }
     }
-    cancel.cancel();
 }

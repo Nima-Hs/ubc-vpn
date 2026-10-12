@@ -49,8 +49,38 @@ pub trait Ask {
     /// this before it does anything else.
     fn unusable(&self) -> Option<String>;
 
-    /// One answer, or `None` when the user gave up.
+    /// One answer, or `None` to stop the login: the user gave up, or
+    /// [`Ask::failure`] says what went wrong.
     fn ask(&mut self, prompt: &Prompt) -> Option<Secret>;
+
+    /// Why the last `None` was not the user giving up, if it was not.
+    fn failure(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The most of a question's label and of its message that is shown, in
+/// UTF-16 code units, which is how the app counts them. The gateway words
+/// both, and a question must always fit in one line.
+pub(crate) const MAX_LABEL: usize = 200;
+pub(crate) const MAX_MESSAGE: usize = 1000;
+
+/// A piece of the gateway's wording made fit to show: without control
+/// characters, and no longer than `most`.
+pub(crate) fn worded(text: &str, most: usize) -> String {
+    cut(&clean(text), most)
+}
+
+/// The start of `text`: as many whole characters as fit in `most` UTF-16
+/// code units.
+fn cut(text: &str, most: usize) -> String {
+    let mut room = most;
+    let fits = |c: &char| {
+        let fit = c.len_utf16() <= room;
+        room = room.saturating_sub(c.len_utf16());
+        fit
+    };
+    text.chars().take_while(fits).collect()
 }
 
 /// The engine that logs in to the gateway `policy` names, if this build has
@@ -214,7 +244,9 @@ pub(crate) fn start(
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
         return Err(failed(LoginErrorCode::RouteRefused, &message));
     }
-    // A user who has given up already is not made the owner of anything.
+    // A user already known to have given up is not made the owner of
+    // anything. This catches only a cancel that has been seen by now: one
+    // still on its way, from another thread, is caught before the request.
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
@@ -308,7 +340,13 @@ fn login(
         };
         let _ = writeln!(err, "ubc-vpn: {}", clean(&line));
     }
+    // A login that stopped at a question was given up by the user, unless
+    // the one asking says otherwise.
+    let stopped = ask.failure();
     result.map_err(|error| {
+        if let Some(why) = &stopped {
+            return failed(LoginErrorCode::Internal, why);
+        }
         let (exit, code) = match error {
             LoginError::WrongPassword => (LOGIN_REFUSED, LoginErrorCode::WrongPassword),
             LoginError::Cancelled => return cancelled(),

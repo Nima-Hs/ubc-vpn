@@ -108,7 +108,7 @@ impl Scene {
     }
 
     /// Runs `connect` with `typist` at the terminal.
-    pub(crate) fn connect(&self, typist: &mut Typist) -> (u8, String, String) {
+    pub(crate) fn connect(&self, typist: &mut dyn Ask) -> (u8, String, String) {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
         let engines = |_: &Policy| Some(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
