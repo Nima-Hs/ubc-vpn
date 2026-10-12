@@ -104,7 +104,7 @@ One rule: **a screen never styles anything by hand.** Colours, sizes, radii, sha
 - **Tokens** are in [`src/renderer/src/styles/tokens.css`](src/renderer/src/styles/tokens.css). Primitives (`--ink-900`) name a value and are used only in that file. Roles (`--c-surface`) name a job and are what components use.
 - **Tailwind** is wired to the tokens in [`styles/app.css`](src/renderer/src/styles/app.css). Its default palette, type scale, radii and shadows are switched off, so `bg-blue-500` and `rounded-2xl` do not exist; `bg-surface` and `rounded-lg` do.
 - **Components** are in [`src/renderer/src/components/ui`](src/renderer/src/components/ui): `Button`, `IconButton`, `StatusIndicator`, `Panel`, `List` and `ListRow`, `TextField`, `Tooltip`, and `Heading`, `Subheading` and `Text`.
-- **Screens** are in `src/renderer/src/views`. A screen arranges components with layout classes (`flex`, `gap-4`, `px-5`) and nothing else. To add a screen, add it to the list in `App.tsx`; the switcher in the title bar appears when there is more than one.
+- **Screens** are in `src/renderer/src/views`. A screen arranges components with layout classes (`flex`, `gap-4`, `px-5`) and nothing else. To add a screen, add it to the list in `App.tsx`; the switcher, a row under the title bar that names every screen, appears when there is more than one and has room for four.
 
 If a screen needs something the components cannot do, change the component or add a token. Do not reach past them.
 
