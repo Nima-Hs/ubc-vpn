@@ -99,6 +99,21 @@ fn each_failure_has_its_own_exit_code_and_message() {
         assert!(err.contains("not the owner"), "{err}");
     }
 
+    // Something else holds the channel. This is not "not running": the
+    // user has to be told, and nothing may be sent.
+    let rig = Rig::new();
+    let _service = rig.service();
+    let impostor = Some(Error::NotTheService);
+    rig.fake.set_failure(Op::Connect, impostor);
+    let (code, out, err) = rig.run(&["status"]);
+    assert_eq!((code, out.as_str()), (NOT_THE_SERVICE, ""));
+    assert!(err.contains("Another program is answering"), "{err}");
+    rig.fake.set_failure(Op::Connect, None);
+    assert!(
+        !rig.fake.platform(&rig.root).paths.state_dir.exists(),
+        "no claim was sent"
+    );
+
     for usage in [
         &[][..],
         &["bogus"],

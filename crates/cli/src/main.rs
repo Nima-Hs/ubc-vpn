@@ -21,6 +21,7 @@ const USAGE: u8 = 2;
 const NOT_RUNNING: u8 = 3;
 const MISMATCH: u8 = 4;
 const NOT_OWNER: u8 = 5;
+const NOT_THE_SERVICE: u8 = 6;
 
 const HELP: &str = "\
 Usage: ubc-vpn <command>
@@ -123,6 +124,12 @@ fn explain(error: &ClientError) -> (u8, String) {
             NOT_OWNER,
             "You are not the owner. Only the first user of UBC VPN on this computer can \
              control it."
+                .to_string(),
+        ),
+        ClientError::NotTheService => (
+            NOT_THE_SERVICE,
+            "Another program is answering in place of the UBC VPN service. Nothing was sent \
+             to it. Restart the service, or reinstall UBC VPN."
                 .to_string(),
         ),
         ClientError::Refused(error) => (FAILED, error.message.clone()),

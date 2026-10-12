@@ -22,6 +22,9 @@ pub enum ClientError {
     NotRunning,
     /// The service belongs to another user.
     NotOwner,
+    /// Something is listening where the service should be, and it is not
+    /// the service. Nothing was sent to it.
+    NotTheService,
     /// The service speaks another protocol version. Holds its product version.
     Mismatch(String),
     /// The service refused or failed the request.
@@ -35,6 +38,7 @@ impl From<Error> for ClientError {
         match error {
             Error::NotFound => Self::NotRunning,
             Error::PermissionDenied => Self::NotOwner,
+            Error::NotTheService => Self::NotTheService,
             other => Self::Lost(other.to_string()),
         }
     }
