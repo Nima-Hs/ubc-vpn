@@ -22,6 +22,8 @@ export type LinkState =
     | { link: "unavailable"; reason: UnavailableReason }
     /** The app and the service speak different protocol versions. */
     | { link: "update_needed"; appVersion: string; serviceVersion: string }
+    /** Something is answering in the service's place, and it is not the service. */
+    | { link: "untrusted_service" }
     /** Another user of this computer owns the service. */
     | { link: "not_owner" }
     | { link: "ready"; conn: ConnState };

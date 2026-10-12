@@ -3,17 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
 import { createServiceLink, type ServiceLink } from "../src/main/link";
-import { MockService, TUNNEL, uniqueChannelPath } from "./mock-service";
-
-async function until(condition: () => boolean, what: string, timeoutMs = 4000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (!condition()) {
-        if (Date.now() > deadline) {
-            throw new Error(`timed out waiting for ${what}`);
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-}
+import { type MockBridge, type MockRun, mockBridge, pause, TUNNEL, until } from "./bridge-harness";
 
 const cleanups: (() => unknown)[] = [];
 
@@ -23,67 +13,73 @@ afterEach(async () => {
     }
 });
 
-function linkTo(path: string): { link: ServiceLink; seen: LinkState[] } {
+function linkTo(...runs: MockRun[]): { bridge: MockBridge; link: ServiceLink; seen: LinkState[] } {
+    const bridge = mockBridge(...runs);
     const link = createServiceLink({
-        path,
+        command: bridge.command,
+        args: bridge.args,
         appVersion: "0.1.0",
         initialRetryDelayMs: 20,
         maxRetryDelayMs: 80,
-        replyTimeoutMs: 1000,
+        replyTimeoutMs: 300,
     });
     cleanups.push(() => link.dispose());
     const seen: LinkState[] = [link.getState()];
     link.subscribe((state) => seen.push(state));
-    return { link, seen };
+    return { bridge, link, seen };
 }
-
-async function startService(configure?: (service: MockService) => void): Promise<MockService> {
-    const service = new MockService();
-    configure?.(service);
-    await service.start();
-    cleanups.push(() => service.stop());
-    return service;
-}
-
-const methods = (service: MockService) =>
-    service.received
-        .slice(1)
-        .map((request) => (request as { body: { method: string } }).body.method);
 
 describe("the link to the service", () => {
-    it("claims the service, then shows the state it reports", async () => {
-        const service = await startService((s) => {
-            s.state = { state: "connected", tunnel: TUNNEL };
+    it("claims the service once the bridge is ready, then shows the state it reports", async () => {
+        const connected = { state: "connected", tunnel: TUNNEL };
+        const { bridge, link, seen } = linkTo({
+            state: connected,
+            later: [{ afterMs: 150, state: { state: "login_needed" } }],
         });
-        const { link, seen } = linkTo(service.path);
         await until(() => link.getState().link === "ready", "ready");
 
         expect(seen[0]).toEqual({ link: "starting" });
-        expect(link.getState()).toEqual({
-            link: "ready",
-            conn: { state: "connected", tunnel: TUNNEL },
-        });
-        expect(methods(service)[0]).toBe("claim");
+        expect(link.getState()).toEqual({ link: "ready", conn: connected });
+        // The bridge claims nothing itself; the app's first request is the claim.
+        expect(bridge.received()[0]).toBe("claim");
 
-        service.setState({ state: "login_needed" });
-        await until(() => seen.at(-1)?.link === "ready" && seen.length > 2, "the change");
+        await until(() => JSON.stringify(link.getState()).includes("login_needed"), "the change");
         expect(link.getState()).toEqual({ link: "ready", conn: { state: "login_needed" } });
     });
 
-    it("says so when another user owns the service", async () => {
-        const service = await startService((s) => {
-            s.ownedByAnother = true;
-        });
-        const { link } = linkTo(service.path);
+    it("claims even when the bridge says an owner already exists", async () => {
+        const { bridge, link } = linkTo({ ownerClaimed: true });
+        await until(() => link.getState().link === "ready", "ready");
+        expect(bridge.received()).toContain("claim");
+    });
+
+    it("asks for the state when the first event does not come", async () => {
+        const { bridge, link } = linkTo({ firstEvent: false, state: { state: "connecting" } });
+        await until(() => link.getState().link === "ready", "ready");
+        expect(link.getState()).toEqual({ link: "ready", conn: { state: "connecting" } });
+        expect(bridge.received()).toEqual(["claim", "status"]);
+    });
+
+    it("says so when the bridge reports another user's service", async () => {
+        const { link } = linkTo({ first: "not_owner" });
         await until(() => link.getState().link === "not_owner", "not_owner");
     });
 
+    it("says the same when it is the service that refuses the claim", async () => {
+        // The channel was not reserved for the owner, so the bridge got through
+        // and the service itself answers "not the owner".
+        const { link } = linkTo({ requestsRefusedAsNotOwner: true });
+        await until(() => link.getState().link === "not_owner", "not_owner");
+        expect(link.getState()).toEqual({ link: "not_owner" });
+    });
+
+    it("says so when something other than the service is listening", async () => {
+        const { link } = linkTo({ first: "untrusted_service" });
+        await until(() => link.getState().link === "untrusted_service", "untrusted_service");
+    });
+
     it("says an update is needed when the versions differ", async () => {
-        const service = await startService((s) => {
-            s.protocolVersion = 3;
-            s.serviceVersion = "0.2.0";
-        });
-        const { link } = linkTo(service.path);
+        const { link } = linkTo({ first: "update_needed", serviceVersion: "0.2.0" });
         await until(() => link.getState().link === "update_needed", "update_needed");
         expect(link.getState()).toEqual({
             link: "update_needed",
@@ -93,34 +89,34 @@ describe("the link to the service", () => {
     });
 
     it("says the service is unavailable, and recovers when it appears", async () => {
-        const path = uniqueChannelPath();
-        const { link } = linkTo(path);
-        await until(() => link.getState().link === "unavailable", "unavailable");
-        expect(link.getState()).toEqual({ link: "unavailable", reason: "not_running" });
+        const { link, seen } = linkTo({ first: "service_unavailable" }, { first: "none" }, {});
+        await until(() => link.getState().link === "ready", "ready");
+        expect(seen).toContainEqual({ link: "unavailable", reason: "not_running" });
+    });
 
-        const service = new MockService(path);
-        await service.start();
-        cleanups.push(() => service.stop());
+    it("does not wait for ever on a claim that is never answered", async () => {
+        const { link, seen } = linkTo({ ignore: ["claim"] }, {});
+        await until(() => seen.some((state) => state.link === "unavailable"), "unavailable");
+        expect(seen).toContainEqual({ link: "unavailable", reason: "protocol_error" });
+        // The next bridge answers, and the app carries on.
         await until(() => link.getState().link === "ready", "ready");
     });
 
     it("cannot connect yet, and sends nothing when asked to", async () => {
-        const service = await startService();
-        const { link } = linkTo(service.path);
+        const { bridge, link } = linkTo({});
         await until(() => link.getState().link === "ready", "ready");
 
         await expect(link.connect()).resolves.toEqual({
             ok: false,
             error: { kind: "login_unavailable" },
         });
-        expect(methods(service)).not.toContain("connect");
+        await pause(50);
+        expect(bridge.received()).not.toContain("connect");
+        expect(bridge.received()).toEqual(["claim"]);
     });
 
-    it("disconnects, and reports a refusal in the service's words", async () => {
-        const service = await startService((s) => {
-            s.state = { state: "connected", tunnel: TUNNEL };
-        });
-        const { link } = linkTo(service.path);
+    it("disconnects, and follows the service through to disconnected", async () => {
+        const { link } = linkTo({ state: { state: "connected", tunnel: TUNNEL } });
         await until(() => link.getState().link === "ready", "ready");
 
         await expect(link.disconnect()).resolves.toEqual({ ok: true });
@@ -128,11 +124,14 @@ describe("the link to the service", () => {
             () => JSON.stringify(link.getState()).includes('"disconnected"'),
             "disconnected",
         );
+    });
 
-        service.ownedByAnother = true;
+    it("reports a refusal in the service's words when there is no service to ask", async () => {
+        const { link } = linkTo({ first: "service_unavailable" });
+        await until(() => link.getState().link === "unavailable", "unavailable");
         await expect(link.disconnect()).resolves.toEqual({
             ok: false,
-            error: { kind: "refused", code: "not_owner", message: "only the owner may do this" },
+            error: { kind: "service_unavailable" },
         });
     });
 });

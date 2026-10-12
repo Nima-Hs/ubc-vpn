@@ -222,6 +222,14 @@ export function describe(state: LinkState): StateCopy {
                 working: false,
             };
         }
+        case "untrusted_service":
+            return {
+                tone: "problem",
+                title: "Do not continue",
+                body: "Something on this computer is answering in place of UBC VPN’s background service. The app has sent it nothing. Do not use the VPN. Install UBC VPN again, then restart your computer.",
+                action: null,
+                working: false,
+            };
         case "not_owner":
             return {
                 tone: "problem",

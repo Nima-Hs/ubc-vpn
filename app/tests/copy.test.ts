@@ -46,6 +46,8 @@ const STATES: LinkState[] = [
             conn: { state: "failed", code, message: "the service's own words" },
         }),
     ),
+    // Last, so the positions above stay as the tests below expect.
+    { link: "untrusted_service" },
 ];
 
 const failed = (code: ErrorCode, message = "m"): StateCopy =>
@@ -136,6 +138,18 @@ describe("the words for each state", () => {
         expect(update.action).toBeNull();
         // An unknown service version is not printed as an empty one.
         expect(copyFor(STATES[4] as LinkState).body).not.toContain("version .");
+    });
+
+    it("tells the user to stop when something else answers for the service", () => {
+        const copy = copyFor({ link: "untrusted_service" });
+        expect(copy.tone).toBe("problem");
+        expect(copy.title).toBe("Do not continue");
+        expect(copy.body).toContain("Do not use the VPN");
+        expect(copy.body).toContain("Install UBC VPN again");
+        // Nothing to press: trying again is not the answer.
+        expect(copy.action).toBeNull();
+        // Plain words only.
+        expect(copy.body).not.toMatch(/pipe|socket|process|certificate|untrusted|listener/i);
     });
 
     it("explains an action that did not start", () => {
