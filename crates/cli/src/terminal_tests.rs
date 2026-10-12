@@ -71,6 +71,9 @@ fn outside_a_terminal_nothing_is_asked() {
         "{err}"
     );
     assert!(asked.borrow().is_empty() && !scene.gateway_was_asked());
+    // The service was left alone: nobody owns it, so another user can
+    // still claim it.
+    scene.rig.claim_as_someone_else();
 }
 
 // Giving up at a question is a cancel. Any other failed read stops the
@@ -78,7 +81,9 @@ fn outside_a_terminal_nothing_is_asked() {
 #[test]
 fn a_read_that_fails_stops_the_login_once() {
     let unreadable = Error::Failed("made up".to_string());
+    let not_text = read_shown("", &mut Cursor::new(b"\xff\xfe\n"), &mut Vec::new());
     let cases = [
+        (not_text.unwrap_err(), FAILED, "That username is not text"),
         (Error::Closed, CANCELLED, "Login was cancelled."),
         (Error::NotATerminal, FAILED, "Run it in a terminal"),
         (Error::LineTooLong, FAILED, "That answer is too long"),
@@ -113,6 +118,33 @@ fn a_question_is_written_without_control_characters() {
         (false, "Co[2Jde: ".to_string()),
     ];
     assert_eq!(*asked.borrow(), questions);
+
+    // And never longer than the app would show, cut between characters.
+    let (mut at, asked) = terminal(true, &[Ok(CODE)]);
+    let wide = "\u{1f512}";
+    prompt.label = format!("{}{wide}", "l".repeat(199));
+    prompt.message = Some("m".repeat(70_000));
+    assert!(at.ask(&prompt).is_some());
+    let question = format!("{}\n{}: ", "m".repeat(1000), "l".repeat(199));
+    assert_eq!(*asked.borrow(), [(false, question)]);
+}
+
+// Security rule: a question of a kind this program does not know may have
+// a secret for its answer, so that answer is not shown either.
+#[test]
+fn any_other_question_is_answered_unseen() {
+    let (mut at, asked) = terminal(true, &[Ok("made-up-answer")]);
+    let prompt = Prompt {
+        kind: PromptKind::Text,
+        label: "Security question".to_string(),
+        message: None,
+    };
+    assert!(at.ask(&prompt).is_some());
+    let hidden = true;
+    assert_eq!(
+        *asked.borrow(),
+        [(hidden, "Security question: ".to_string())]
+    );
 }
 
 #[test]

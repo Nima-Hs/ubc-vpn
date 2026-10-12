@@ -59,6 +59,30 @@ pub trait Ask {
     }
 }
 
+/// The most of a question's label and of its message that is shown, in
+/// UTF-16 code units, which is how the app counts them. The gateway words
+/// both, and a question must always fit in one line.
+pub(crate) const MAX_LABEL: usize = 200;
+pub(crate) const MAX_MESSAGE: usize = 1000;
+
+/// A piece of the gateway's wording made fit to show: without control
+/// characters, and no longer than `most`.
+pub(crate) fn worded(text: &str, most: usize) -> String {
+    cut(&clean(text), most)
+}
+
+/// The start of `text`: as many whole characters as fit in `most` UTF-16
+/// code units.
+fn cut(text: &str, most: usize) -> String {
+    let mut room = most;
+    let fits = |c: &char| {
+        let fit = c.len_utf16() <= room;
+        room = room.saturating_sub(c.len_utf16());
+        fit
+    };
+    text.chars().take_while(fits).collect()
+}
+
 /// The engine that logs in to the gateway `policy` names, if this build has
 /// one.
 pub type Engines<'a> = &'a dyn Fn(&Policy) -> Option<Box<dyn LoginEngine>>;

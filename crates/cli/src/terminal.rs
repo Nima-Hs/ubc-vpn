@@ -14,12 +14,12 @@ use ubc_vpn_engine::Prompt;
 use ubc_vpn_platform::terminal::{MAX_HIDDEN_LINE_BYTES, read_hidden_line};
 use ubc_vpn_platform::{Error, Result};
 
-use crate::clean;
-use crate::connect::Ask;
+use crate::connect::{Ask, MAX_LABEL, MAX_MESSAGE, worded};
 
 const NOT_A_TERMINAL: &str = "connect asks for the password in a terminal, and this is not one. \
                               Run it in a terminal, or use the app.";
 const TOO_LONG: &str = "That answer is too long, so the login was stopped.";
+const NOT_TEXT: &str = "That username is not text, so the login was stopped.";
 const UNREADABLE: &str = "The terminal could not be read, so the login was stopped.";
 
 /// Writes the question and reads one line.
@@ -37,8 +37,15 @@ pub struct Terminal {
 impl Terminal {
     /// The terminal this program runs in.
     pub fn real() -> Self {
+        // The platform can write a question to the terminal only as part
+        // of a hidden read. The username's question goes to standard error,
+        // and only when that is the terminal: a question the user cannot see
+        // is not asked.
         let shown = |question: &str| {
             let (mut input, mut echo) = (std::io::stdin().lock(), std::io::stderr());
+            if !echo.is_terminal() {
+                return Err(Error::NotATerminal);
+            }
             read_shown(question, &mut input, &mut echo)
         };
         let interactive = std::io::stdin().is_terminal();
@@ -63,11 +70,11 @@ impl Ask for Terminal {
     }
 
     fn ask(&mut self, prompt: &Prompt) -> Option<Secret> {
-        // The wording is the gateway's, so it is cleaned like any text that
-        // is not this program's own.
-        let label = clean(&prompt.label);
+        // The wording is the gateway's, so it is cleaned and cut like any
+        // text that is not this program's own.
+        let label = worded(&prompt.label, MAX_LABEL);
         let question = match &prompt.message {
-            Some(message) => format!("{}\n{label}: ", clean(message)),
+            Some(message) => format!("{}\n{label}: ", worded(message, MAX_MESSAGE)),
             None => format!("{label}: "),
         };
         // Only a username is shown as it is typed.
@@ -83,6 +90,7 @@ impl Ask for Terminal {
                 self.stopped = Some(match other {
                     Error::NotATerminal => NOT_A_TERMINAL,
                     Error::LineTooLong => TOO_LONG,
+                    Error::Failed(why) if why == NOT_TEXT => NOT_TEXT,
                     _ => UNREADABLE,
                 });
                 None
@@ -116,6 +124,6 @@ pub fn read_shown(question: &str, input: &mut dyn BufRead, echo: &mut dyn Write)
     if line.len() > MAX_HIDDEN_LINE_BYTES {
         return Err(Error::LineTooLong);
     }
-    let text = String::from_utf8(line).map_err(|_| Error::Failed("not text".to_string()))?;
+    let text = String::from_utf8(line).map_err(|_| Error::Failed(NOT_TEXT.to_string()))?;
     Ok(Secret::new(text))
 }
