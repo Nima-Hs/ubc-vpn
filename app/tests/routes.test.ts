@@ -94,6 +94,32 @@ describe("the words on the Routes screen", () => {
 });
 
 describe("the demo settings", () => {
+    it("keeps a read waiting in the 'reading' state, and answers it when the state changes", async () => {
+        const demo = createDemoSettings(1);
+        demo.setScenario("routes-loading");
+        let answered: unknown;
+        const reads = [demo.getSettings(), demo.getSettings()];
+        void reads[0]?.then((result) => {
+            answered = result;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(answered).toBeUndefined();
+        // Still waiting while it stays in that state.
+        demo.setScenario("routes-loading");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(answered).toBeUndefined();
+        // No read is left that nothing can ever answer.
+        demo.setScenario("routes-unreadable");
+        await expect(Promise.all(reads)).resolves.toEqual([
+            { ok: false, error: "unreadable" },
+            { ok: false, error: "unreadable" },
+        ]);
+        demo.setScenario("routes-loading");
+        const later = demo.getSettings();
+        demo.setScenario("routes");
+        await expect(later).resolves.toMatchObject({ ok: true });
+    });
+
     it("reports each problem against its own entry, or against the whole input", async () => {
         const demo = createDemoSettings(1);
         const reply = await demo.checkRoutes({

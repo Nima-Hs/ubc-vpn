@@ -163,16 +163,24 @@ export function createDemoSettings(stepMs = 300): DemoSettings {
     const later = <T>(value: T) =>
         new Promise<T>((resolve) => setTimeout(() => resolve(value), stepMs));
 
+    // Reads that are being kept waiting, to show the "reading" state. Each
+    // is answered when the scenario changes. A read that nothing could ever
+    // answer is, to Electron, a reply that was never sent, and it says so
+    // on the page at some later moment of its own choosing.
+    const waiting: ((result: SettingsResult<SettingsView>) => void)[] = [];
+    const answer = (): SettingsResult<SettingsView> =>
+        scenario.get === undefined || scenario.get === "loading"
+            ? { ok: true, value: current }
+            : { ok: false, error: scenario.get };
+
     return {
         getSettings: () => {
             if (scenario.get === "loading") {
-                return new Promise<SettingsResult<SettingsView>>(() => {});
+                return new Promise<SettingsResult<SettingsView>>((resolve) => {
+                    waiting.push(resolve);
+                });
             }
-            return later(
-                scenario.get === undefined
-                    ? { ok: true, value: current }
-                    : { ok: false, error: scenario.get },
-            );
+            return later(answer());
         },
         checkRoutes: (input) => later({ ok: true, value: check(input, current.allowed_routes) }),
         saveRoutes: (input) => {
@@ -190,6 +198,11 @@ export function createDemoSettings(stepMs = 300): DemoSettings {
             if (Object.hasOwn(SCENARIOS, name)) {
                 scenario = SCENARIOS[name] as Scenario;
                 current = scenario.view ?? current;
+                if (scenario.get !== "loading") {
+                    for (const resolve of waiting.splice(0)) {
+                        resolve(answer());
+                    }
+                }
             }
         },
     };
