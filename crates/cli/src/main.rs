@@ -49,6 +49,7 @@ Commands:
   settings get --json            Print the settings and the route limits
   settings check-routes --json   Check the routes given on standard input
   settings set-routes --json     Check them and, if they pass, save them
+  settings reset [--force] --json  Start afresh when the settings cannot be read
   help              Show this text
   version           Show the version
 

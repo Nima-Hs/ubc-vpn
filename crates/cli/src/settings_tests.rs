@@ -6,12 +6,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode};
 use ubc_vpn_core::settings_cli::{
-    RouteProblemCode, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView,
+    ResetReply, RouteProblemCode, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView,
 };
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
 
-use crate::settings::{Command, partial_name, place, remember_username, run, sweep, write_partial};
+use crate::settings::{
+    Command, nowhere_to_keep, partial_name, place, remember_username, reset_with, run, sweep,
+    write_partial,
+};
 
 const GOOD: &str =
     r#"{"subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test"]}"#;
@@ -113,11 +116,18 @@ fn only_the_three_spellings_are_commands() {
     assert_eq!(check, Some(Command::CheckRoutes));
     let set = Command::parse(&["set-routes", "--json"]);
     assert_eq!(set, Some(Command::SetRoutes));
+    let reset = |force| Some(Command::Reset { force });
+    assert_eq!(Command::parse(&["reset", "--json"]), reset(false));
+    assert_eq!(Command::parse(&["reset", "--force", "--json"]), reset(true));
     for wrong in [
         &[][..],
         &["get"],
         &["get", "--json", "x"],
         &["set", "--json"],
+        &["reset"],
+        &["reset", "--force"],
+        &["reset", "--json", "--force"],
+        &["reset", "-f", "--json"],
     ] {
         assert_eq!(Command::parse(wrong), None, "{wrong:?}");
     }
@@ -579,6 +589,11 @@ fn without_a_platform_only_checking_works() {
         (1, "{\"error\":\"unwritable\"}\n".to_string())
     );
     assert_eq!(status(Command::CheckRoutes).0, 0);
+    let reset = Command::Reset { force: true };
+    assert_eq!(
+        status(reset),
+        (1, "{\"error\":\"unwritable\"}\n".to_string())
+    );
     drop(machine);
 }
 
@@ -950,4 +965,275 @@ fn the_fix_is_quoted_for_a_shell() {
     let fix = format!("To stop them, run: chmod go-w '{quoted}'");
     assert!(said.is_some_and(|said| said.ends_with(&fix)));
     assert!(fix.contains(r"it'\''s $HOME"), "{fix}");
+}
+
+const RESET: Command = Command::Reset { force: false };
+const RESET_ALL: Command = Command::Reset { force: true };
+
+impl Machine {
+    fn reset(&self, command: Command) -> ResetReply {
+        let (status, line) = self.run(command, "");
+        assert_eq!(status, 0, "{line}");
+        decode(&line).unwrap()
+    }
+
+    fn kept(&self, n: usize) -> PathBuf {
+        let name = format!("settings/settings.json.damaged-{n}");
+        self.root.join(name)
+    }
+}
+
+fn was_reset(n: usize) -> ResetReply {
+    let kept = format!("settings.json.damaged-{n}");
+    ResetReply::Reset { kept }
+}
+
+// A settings file that cannot be read is the user's dead end without this:
+// `reset` puts it aside, whole, and the settings are the defaults again.
+#[test]
+fn a_damaged_file_is_put_aside_and_the_settings_start_afresh() {
+    let too_long = format!(r#"{{"routes":{}}}"#, routes_filling(MAX_LINE_BYTES));
+    let damaged: [&[u8]; 5] = [
+        b"not json",
+        b"[]",
+        br#"{"save_password":"yes"}"#,
+        b"\xff\xfe not text",
+        too_long.as_bytes(),
+    ];
+    for bytes in damaged {
+        let machine = Machine::new();
+        machine.write_settings("");
+        std::fs::write(machine.settings_file(), bytes).unwrap();
+        assert_eq!(
+            machine.fails(Command::Get, ""),
+            SettingsFailureCode::Unreadable
+        );
+
+        assert_eq!(machine.reset(RESET), was_reset(1));
+        assert_eq!(std::fs::read(machine.kept(1)).unwrap(), bytes);
+        assert_eq!(machine.view().settings, Default::default());
+        let fresh = std::fs::read_to_string(machine.settings_file()).unwrap();
+        assert_eq!(fresh, "{}\n");
+        // And they can be used again.
+        assert!(matches!(
+            machine.routes(Command::SetRoutes, GOOD),
+            RoutesReply::Ok { .. }
+        ));
+    }
+}
+
+// Security rule: `reset` cannot be used to wipe good settings by accident,
+// or by a part of the app that should not be able to. A file that can be
+// read is left exactly as it is, unless the command says otherwise; and
+// even then the old file is kept.
+#[test]
+fn settings_that_can_be_read_are_not_reset_unless_told_to() {
+    let machine = Machine::new();
+    let good = r#"{"username":"jdoe","theme":"dark"}"#;
+    machine.write_settings(good);
+    assert_eq!(machine.reset(RESET), ResetReply::NotNeeded);
+    assert_eq!(
+        std::fs::read_to_string(machine.settings_file()).unwrap(),
+        good
+    );
+    assert!(!machine.kept(1).exists());
+
+    assert_eq!(machine.reset(RESET_ALL), was_reset(1));
+    assert_eq!(std::fs::read_to_string(machine.kept(1)).unwrap(), good);
+    assert_eq!(machine.view().settings.username, None);
+
+    // With no file there is nothing to reset and nothing is made.
+    let machine = Machine::new();
+    for command in [RESET, RESET_ALL] {
+        assert_eq!(machine.reset(command), ResetReply::NotNeeded);
+    }
+    assert!(!machine.root.join("settings").exists());
+}
+
+// Security rule: a reset never destroys settings, however often it is
+// asked. Old files go to the lowest free name and are never replaced: with
+// every name taken a reset changes nothing, fails, and says what to do.
+// So the good settings a forced reset put aside are still there, byte for
+// byte, after any number of further resets.
+#[test]
+fn no_number_of_resets_replaces_a_kept_file() {
+    let machine = Machine::new();
+    let good = r#"{"username":"jdoe","theme":"dark"}"#;
+    machine.write_settings(good);
+    let kept = |n: usize| std::fs::read_to_string(machine.kept(n)).unwrap();
+    assert_eq!(machine.reset(RESET_ALL), was_reset(1));
+    assert_eq!(machine.reset(RESET_ALL), was_reset(2));
+    machine.write_settings("damaged, the third time");
+    // With a name still free, a reset that failed would have another cause,
+    // and the sentence about the kept files would be the wrong one.
+    assert_eq!(nowhere_to_keep(&machine.root.join("settings")), None);
+    assert_eq!(machine.reset(RESET), was_reset(3));
+    assert_eq!(*machine.said.borrow(), "");
+    assert!(nowhere_to_keep(&machine.root.join("settings")).is_some());
+
+    // Every name is taken. Forced or not, damaged or not: nothing changes.
+    for (command, now) in [(RESET_ALL, "{}\n"), (RESET, "damaged, the fourth time")] {
+        std::fs::write(machine.settings_file(), now).unwrap();
+        for _ in 0..3 {
+            assert_eq!(machine.fails(command, ""), SettingsFailureCode::Unwritable);
+            let said = machine.said.borrow().clone();
+            assert!(said.starts_with("ubc-vpn: Nothing was reset."), "{said}");
+            assert!(said.contains("settings.json.damaged-1 to settings.json.damaged-3"));
+            assert!(said.ends_with("then reset again.\n"), "{said}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(machine.settings_file()).unwrap(),
+            now
+        );
+        let all = [kept(1), kept(2), kept(3)];
+        assert_eq!(all, [good, "{}\n", "damaged, the third time"]);
+        assert!(!machine.kept(4).exists(), "three are kept, and no more");
+    }
+
+    // A name the user freed is used again, and the others are left alone.
+    std::fs::remove_file(machine.kept(2)).unwrap();
+    assert_eq!(machine.reset(RESET), was_reset(2));
+    assert_eq!(*machine.said.borrow(), "");
+    assert_eq!(
+        (kept(1), kept(2)),
+        (good.to_string(), "damaged, the fourth time".to_string())
+    );
+
+    // A folder at a name takes it like any file. And the sweep of old
+    // partial files, which the save below runs, removes none of these.
+    std::fs::remove_file(machine.kept(2)).unwrap();
+    std::fs::create_dir(machine.kept(2)).unwrap();
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+    for n in [1, 3] {
+        let file = std::fs::File::options().write(true).open(machine.kept(n));
+        file.unwrap().set_modified(long_ago).unwrap();
+    }
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    assert_eq!(
+        machine.fails(RESET_ALL, ""),
+        SettingsFailureCode::Unwritable
+    );
+    assert_eq!(
+        (kept(1), kept(3)),
+        (good.to_string(), "damaged, the third time".to_string())
+    );
+    assert!(machine.kept(2).is_dir());
+}
+
+// A reset that could not move the old file, or could not write the new
+// one, is a failure and is never reported as a reset.
+#[test]
+fn a_reset_that_fails_part_way_is_a_failure() {
+    let machine = Machine::new();
+    machine.write_settings("not json");
+    let dir = machine.root.join("settings");
+    let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    let unwritable = Err(SettingsFailureCode::Unwritable);
+
+    // The move fails: nothing has changed, and no new file is written.
+    let stuck = |_: &std::path::Path| Err(denied());
+    let never = |_: &std::path::Path| panic!("nothing is written after a failed move");
+    assert_eq!(reset_with(&dir, None, false, &stuck, &never), unwritable);
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, "not json");
+    assert!(!machine.kept(1).exists());
+
+    // The move works and the write fails: the old file is aside, whole.
+    let aside = |dir: &std::path::Path| {
+        std::fs::rename(
+            dir.join("settings.json"),
+            dir.join("settings.json.damaged-1"),
+        )?;
+        Ok("settings.json.damaged-1".to_string())
+    };
+    let full = |_: &std::path::Path| Err(denied());
+    assert_eq!(reset_with(&dir, None, false, &aside, &full), unwritable);
+    assert_eq!(
+        std::fs::read_to_string(machine.kept(1)).unwrap(),
+        "not json"
+    );
+    // With no settings file the settings read as the defaults.
+    assert_eq!(machine.view().settings, Default::default());
+}
+
+// The file that is put aside is the same file, with the access it had.
+#[cfg(unix)]
+#[test]
+fn a_kept_file_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    machine.write_settings("not json");
+    let mode = std::fs::Permissions::from_mode(0o640);
+    std::fs::set_permissions(machine.settings_file(), mode).unwrap();
+    assert_eq!(machine.reset(RESET), was_reset(1));
+    let kept = std::fs::metadata(machine.kept(1))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(kept & 0o777, 0o640);
+    let fresh = std::fs::metadata(machine.settings_file()).unwrap();
+    assert_eq!(fresh.permissions().mode() & 0o777, 0o600);
+}
+
+// Security rule: a link where the settings file should be is moved aside
+// as a link. What it points at is neither read as damaged nor written.
+#[test]
+fn a_link_in_place_of_the_settings_is_moved_and_not_followed() {
+    let machine = Machine::new();
+    machine.write_settings("");
+    std::fs::remove_file(machine.settings_file()).unwrap();
+    let target = machine.root.join("someone-elses-file");
+    std::fs::write(&target, "precious, and not settings").unwrap();
+    if let Err(error) = link_to_file(&target, &machine.settings_file()) {
+        let skipped = format!("SKIPPED a_link_in_place_of_the_settings_is_moved: {error}\n");
+        std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes()).unwrap();
+        return;
+    }
+    assert_eq!(machine.reset(RESET), was_reset(1));
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "precious, and not settings"
+    );
+    assert!(
+        std::fs::symlink_metadata(machine.kept(1))
+            .unwrap()
+            .is_symlink()
+    );
+    let fresh = std::fs::symlink_metadata(machine.settings_file()).unwrap();
+    assert!(fresh.is_file());
+
+    // A link that leads nowhere is still something in the settings' place.
+    std::fs::remove_file(machine.settings_file()).unwrap();
+    let nowhere = machine.root.join("not-there");
+    link_to_file(&nowhere, &machine.settings_file()).unwrap();
+    assert_eq!(machine.reset(RESET), was_reset(2));
+    let moved = std::fs::symlink_metadata(machine.kept(2)).unwrap();
+    assert!(moved.is_symlink() && !nowhere.exists());
+    let fresh = std::fs::symlink_metadata(machine.settings_file()).unwrap();
+    assert!(fresh.is_file());
+}
+
+// Security rule: the folder rule holds for `reset` too. In a folder others
+// can write to nothing is moved and nothing is written, and the user is
+// told why.
+#[cfg(unix)]
+#[test]
+fn reset_does_nothing_in_a_folder_others_can_write_to() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    machine.write_settings("not json");
+    let dir = machine.root.join("settings");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+    for command in [RESET, RESET_ALL] {
+        assert_eq!(machine.fails(command, ""), SettingsFailureCode::Unreadable);
+        assert!(machine.said.borrow().contains("chmod go-w"));
+    }
+    let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert_eq!(untouched, "not json");
+    assert!(!machine.kept(1).exists());
 }
