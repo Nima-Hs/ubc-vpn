@@ -158,10 +158,13 @@ mod tests {
 
         screen.type_text("s3cret fake\r").expect("type");
         let shown = screen.expect("own terminal", WAIT).expect("what it says");
-        // Security rule: the child holds its three streams and nothing else
-        // of the test's. With the test's end of its own terminal in hand, it
-        // would keep that terminal alive, and it could never hang up.
-        let said = "SAYS 11 bytes, open [0, 1, 2], streams [true, true, true], own terminal true";
+        // Security rule: the child holds its terminal as its three streams
+        // and nowhere else. With the test's end of that terminal in hand as
+        // well, it would keep the terminal alive, and it could never hang
+        // up. (Other things a test run was itself handed, which a child
+        // gets too, are no part of this; a runner hands on several.)
+        let said =
+            "SAYS 11 bytes, other terminals [], streams [true, true, true], own terminal true";
         assert!(shown.contains(said), "{shown:?}");
         assert!(!shown.contains("s3cret"), "the secret was shown: {shown:?}");
 
@@ -200,13 +203,16 @@ mod tests {
             io::stdout().is_terminal(),
             io::stderr().is_terminal(),
         ];
+        // Every open descriptor past the three streams that is a terminal.
         // SAFETY: the call only asks about a number; it has no conditions.
-        let open = |fd: &i32| unsafe { libc::fcntl(*fd, libc::F_GETFD) } != -1;
-        let open: Vec<i32> = (0..256).filter(open).collect();
+        let terminal = |fd: &i32| unsafe { libc::isatty(*fd) } == 1;
+        let others: Vec<i32> = (3..1024).filter(terminal).collect();
         let own = File::open("/dev/tty").is_ok();
         let typed = read_hidden_line("Password: ").expect("a hidden line");
         let bytes = typed.expose().len();
-        println!("SAYS {bytes} bytes, open {open:?}, streams {streams:?}, own terminal {own}");
+        println!(
+            "SAYS {bytes} bytes, other terminals {others:?}, streams {streams:?}, own terminal {own}"
+        );
         let mut line = String::new();
         io::stdin().read_line(&mut line).expect("a line");
         println!("SAYS line {}", line.trim());
