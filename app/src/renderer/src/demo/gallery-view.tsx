@@ -96,7 +96,7 @@ export default function GalleryView({ show }: { show(id: string): void }) {
                 <TextField
                     label="Subnet"
                     placeholder="203.0.113.0/24"
-                    hint="An IPv4 subnet, no wider than /8."
+                    hint="An IPv4 subnet, no larger than /8."
                 />
                 <TextField
                     label="Subnet"
@@ -131,7 +131,7 @@ export default function GalleryView({ show }: { show(id: string): void }) {
                     Label: subnets through the VPN
                 </Text>
                 <Text size="caption" tone="tertiary">
-                    Caption: an IPv4 subnet, no wider than /8.
+                    Caption: an IPv4 subnet, no larger than /8.
                 </Text>
                 <Text data size="label">
                     Data: 203.0.113.0/24 0123456789

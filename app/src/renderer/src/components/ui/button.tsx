@@ -6,6 +6,8 @@ import { cn } from "@/lib/cn";
 /** Shared by every pressable control, so they all feel the same under the hand. */
 export const pressable = cn(
     "no-drag inline-flex shrink-0 select-none items-center justify-center whitespace-nowrap font-medium",
+    // An icon in a control is sized by the control.
+    "[&_svg]:size-4 [&_svg]:shrink-0",
     // Every control has an edge, even where it is the colour of the control.
     "border border-transparent",
     "transition-[background-color,color,box-shadow,scale] duration-(--dur-fast) ease-out",

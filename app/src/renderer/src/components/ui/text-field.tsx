@@ -9,16 +9,34 @@ type TextFieldProps = Omit<ComponentProps<"input">, "id" | "aria-invalid" | "ari
     hint?: string;
     /** Says how to fix what was entered. Replaces the hint while present. */
     error?: string;
+    /** Keeps the label for screen readers only, for a field in a list that names it. */
+    hideLabel?: boolean;
+    /** Sets the value in the fixed-width face, for addresses. */
+    data?: boolean;
 };
 
 /** A labelled single-line input with room for a hint or an error. */
-export function TextField({ label, hint, error, className, ...props }: TextFieldProps) {
+export function TextField({
+    label,
+    hint,
+    error,
+    hideLabel = false,
+    data = false,
+    className,
+    ...props
+}: TextFieldProps) {
     const id = useId();
     const noteId = `${id}-note`;
     const note = error ?? hint;
     return (
         <div className={cn("flex flex-col gap-1.5", className)}>
-            <label htmlFor={id} className="wrap-anywhere text-label text-text-secondary">
+            <label
+                htmlFor={id}
+                className={cn(
+                    "wrap-anywhere text-label text-text-secondary",
+                    hideLabel && "sr-only",
+                )}
+            >
                 {label}
             </label>
             <input
@@ -34,6 +52,7 @@ export function TextField({ label, hint, error, className, ...props }: TextField
                     "placeholder:text-text-tertiary hover:bg-surface",
                     "disabled:cursor-default disabled:border-border disabled:bg-surface disabled:text-text-tertiary",
                     error === undefined ? "border-field-border" : "border-danger",
+                    data && "font-data",
                 )}
                 {...props}
             />

@@ -25,7 +25,14 @@ function Mark() {
  * OS. It drags the window. macOS places its window buttons at the left, so
  * there the bar leaves room for them and shows none of its own.
  */
-export function TitleBar({ children }: { children?: ReactNode }) {
+export function TitleBar({
+    children,
+    crowded = false,
+}: {
+    children?: ReactNode;
+    /** With many screens to switch between, the name gives way to the mark alone. */
+    crowded?: boolean;
+}) {
     const mac = api.platform === "darwin";
     const closeHides = useSnapshot((snapshot) => snapshot.closeHides);
     return (
@@ -36,7 +43,12 @@ export function TitleBar({ children }: { children?: ReactNode }) {
             )}
         >
             <Mark />
-            <span className="shrink-0 whitespace-nowrap font-strong text-label text-text">
+            <span
+                className={cn(
+                    "shrink-0 whitespace-nowrap font-strong text-label text-text",
+                    crowded && "sr-only",
+                )}
+            >
                 UBC VPN
             </span>
             <div className="ms-auto flex items-center gap-1">

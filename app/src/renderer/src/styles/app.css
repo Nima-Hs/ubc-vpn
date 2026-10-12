@@ -164,6 +164,12 @@
     -webkit-app-region: no-drag;
 }
 
+/* A row in a long list: not laid out or painted until it is near the screen. */
+@utility row-lazy {
+    content-visibility: auto;
+    contain-intrinsic-size: auto var(--size-control-md);
+}
+
 /* A region that scrolls inside the window without moving anything behind it. */
 @utility scroll-region {
     overflow-x: hidden;

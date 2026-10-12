@@ -20,14 +20,9 @@ const CODES: RouteProblemCode[] = [
     "not_allowed",
     "bad_domain",
 ];
-const ERRORS: SettingsError[] = [
-    "bad_input",
-    "unreadable",
-    "unwritable",
-    "unavailable",
-    "busy",
-    "superseded",
-];
+const ERRORS: SettingsError[] = ["bad_input", "unreadable", "unwritable", "unavailable", "busy"];
+
+const VIEW_LIMITS = { ...LIMITS, policy_readable: true, allowed_routes: null };
 
 describe("the words on the Routes screen", () => {
     it("gives every problem its own wording, with how to put it right", () => {
@@ -51,7 +46,7 @@ describe("the words on the Routes screen", () => {
     it("says the limits up front, and how the policy bears on them", () => {
         const base = { ...LIMITS, policy_readable: true, allowed_routes: null };
         expect(describeRouteLimits(base)).toEqual({
-            limits: "A subnet can be /8 or narrower. You can list up to 256 subnets and 256 domains.",
+            limits: "A subnet can be no larger than /8: the number after the slash must be 8 or more. You can list up to 256 subnets and 256 domains.",
         });
         expect(
             describeRouteLimits({ ...base, allowed_routes: ["203.0.113.0/24"] }).allowed,
@@ -78,6 +73,22 @@ describe("the words on the Routes screen", () => {
             }
         }
         expect(describeSettingsError("unwritable", "save")).toContain("the old ones are unchanged");
+        // A reinstall never touches the user's settings file, so it is not offered.
+        expect(describeSettingsError("unreadable", "read")).not.toMatch(/install/i);
+    });
+
+    it("says the size rule one way, and nothing for a check a newer one replaced", () => {
+        const said = [
+            describeRouteLimits(VIEW_LIMITS).limits,
+            describeRouteProblem("too_wide", LIMITS),
+        ];
+        for (const text of said) {
+            expect(text).toContain("after the slash");
+            expect(text).not.toMatch(/narrow|wide|prefix/i);
+        }
+        for (const doing of ["read", "check", "save"] as const) {
+            expect(describeSettingsError("superseded", doing)).toBe("");
+        }
         expect(ROUTES.whileConnected).toBe("Changes apply the next time you connect.");
     });
 });

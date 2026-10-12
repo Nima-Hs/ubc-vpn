@@ -1,20 +1,23 @@
 import { MotionConfig } from "motion/react";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense } from "react";
 import { TitleBar } from "@/components/title-bar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type View, ViewSwitcher } from "@/components/view-switcher";
+import { show, useNavigation } from "@/lib/navigation";
 import { ConnectionView } from "@/views/connection-view";
+import { RoutesView } from "@/views/routes-view";
 
-// The app's screens. Routes, settings and the log will be added here; the
-// switcher in the title bar appears once there is more than one.
+// The app's screens, in the order the switcher in the title bar shows them.
+// Settings and the log will be added here.
 const views: View[] = [
     { id: "connection", label: "Connection", Component: ConnectionView },
-    // Demo builds only: a second screen showing every component.
+    { id: "routes", label: "Routes", Component: RoutesView },
+    // Demo builds only: a screen showing every component.
     ...(__DEMO__
         ? [
               {
                   id: "components",
-                  label: "Components",
+                  label: "Parts",
                   Component: lazy(() => import("@/demo/gallery-view")),
               },
           ]
@@ -22,7 +25,7 @@ const views: View[] = [
 ];
 
 export function App() {
-    const [current, setCurrent] = useState("connection");
+    const current = useNavigation((navigation) => navigation.current);
     const Current = (views.find((view) => view.id === current) ?? views[0])?.Component;
 
     return (
@@ -30,10 +33,10 @@ export function App() {
         <MotionConfig reducedMotion="user">
             <TooltipProvider>
                 <div className="flex h-full flex-col">
-                    <TitleBar>
-                        <ViewSwitcher views={views} current={current} onChange={setCurrent} />
+                    <TitleBar crowded={views.length > 2}>
+                        <ViewSwitcher views={views} current={current} onChange={show} />
                     </TitleBar>
-                    <Suspense>{Current !== undefined && <Current show={setCurrent} />}</Suspense>
+                    <Suspense>{Current !== undefined && <Current show={show} />}</Suspense>
                 </div>
             </TooltipProvider>
         </MotionConfig>
