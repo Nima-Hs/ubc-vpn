@@ -215,6 +215,7 @@ dependencies = [
 name = "ubc-vpn-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "ubc-vpn-core",
  "ubc-vpn-engine",
  "ubc-vpn-platform",

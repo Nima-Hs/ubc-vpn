@@ -13,6 +13,9 @@ use client::{Client, ClientError};
 
 mod bridge;
 mod client;
+mod settings;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod tests;
 
@@ -30,14 +33,20 @@ Usage: ubc-vpn <command>
 Commands:
   status [--json]   Show whether the VPN is connected
   bridge            Carry messages between the app and the service
+  settings get --json            Print the settings and the route limits
+  settings check-routes --json   Check the routes given on standard input
+  settings set-routes --json     Check them and, if they pass, save them
   help              Show this text
   version           Show the version
 
-The first user to run status or connect becomes the owner of the service, and
-from then on only that user can control UBC VPN on this computer. The bridge
-claims nothing itself; it leaves that to the app.
+The first user to run status becomes the owner of the service, and from then
+on only that user can control UBC VPN on this computer. The bridge claims
+nothing itself; it leaves that to the app. The settings commands do not talk
+to the service at all.
 
-With --json, status prints the connection state as one line of JSON.
+With --json, status prints the connection state as one line of JSON. Each
+settings command prints one line of JSON, and exits with status 1 only when
+that line is an error.
 
 Exit status:
   0  done
@@ -60,13 +69,21 @@ fn main() -> ExitCode {
         return ExitCode::from(say(&mut err, HELP, USAGE));
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    // The one command that reads standard input, so it is started here,
-    // and only for exactly this spelling.
+    // The commands that read standard input are started here. The bridge
+    // only for exactly this spelling.
     if args == ["bridge"] {
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
         let status = bridge::run(&installed, input, limits, &mut out, &mut err);
         return ExitCode::from(status);
+    }
+    // The settings commands read standard input too.
+    if let ["settings", rest @ ..] = args.as_slice() {
+        let Some(command) = settings::Command::parse(rest) else {
+            return ExitCode::from(say(&mut err, HELP, USAGE));
+        };
+        let mut input = std::io::stdin().lock();
+        return ExitCode::from(settings::run(command, &installed, &mut input, &mut out));
     }
     ExitCode::from(run(&args, &installed, &mut out, &mut err))
 }
