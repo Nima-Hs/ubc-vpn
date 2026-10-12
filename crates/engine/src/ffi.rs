@@ -248,11 +248,26 @@ unsafe extern "C" {
     fn ubc_vpn_progress(privdata: *mut c_void, level: c_int, fmt: *const c_char, ...);
 }
 
+/// Whether a log line is all of what the library logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineState {
+    /// The whole line.
+    Whole,
+    /// The line did not fit the shim's buffer and was cut. A secret in it
+    /// may be cut too, and a cut secret matches no registered one: treat
+    /// the line as holding part of one.
+    Cut,
+    /// The line could not be formatted. What arrives may be its beginning,
+    /// or nothing.
+    Failed,
+}
+
 /// Receives each line the library logs, with its `PRG_*` level. A line may
 /// hold a secret: an engine passes it to `LogSink::log` and nowhere else.
-pub type Lines = Box<dyn Fn(c_int, &CStr) + Send + Sync>;
+pub type Lines = Box<dyn Fn(c_int, &CStr, LineState) + Send + Sync>;
 
-/// Called by `shim.c` with one formatted log line.
+/// Called by `shim.c` with one formatted log line. `state` is one of the
+/// `UBC_VPN_LINE_*` values there.
 ///
 /// # Safety
 ///
@@ -263,15 +278,22 @@ unsafe extern "C" fn ubc_vpn_progress_line(
     privdata: *mut c_void,
     level: c_int,
     line: *const c_char,
+    state: c_int,
 ) {
     if privdata.is_null() || line.is_null() {
         return;
     }
+    // A value the shim does not send is read as the cautious one.
+    let state = match state {
+        0 => LineState::Whole,
+        2 => LineState::Failed,
+        _ => LineState::Cut,
+    };
     // SAFETY: by the contract above `privdata` points to the `Lines` a live
     // `Handle` owns, and `line` is a NUL-terminated string for this call.
     let (lines, line) = unsafe { (&*privdata.cast::<Lines>(), CStr::from_ptr(line)) };
     // A panic must not unwind into C.
-    let _ = catch_unwind(AssertUnwindSafe(|| lines(level, line)));
+    let _ = catch_unwind(AssertUnwindSafe(|| lines(level, line, state)));
 }
 
 /// One `openconnect_info`, freed on drop. It is not `Send`: the thread that

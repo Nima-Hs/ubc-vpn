@@ -134,3 +134,10 @@ jobs:
           cargo test --locked -p ubc-vpn-engine --features libopenconnect
           # A test that is skipped passes, so prove from the log that it ran.
           grep -E '^RAN: Ok\("v9\.21(-unknown)?"\)' test.log
+
+      # The optimised build is the one that ships, and the one in which a
+      # compiler may drop the C shim's wipe of its buffer.
+      - name: The same tests in a release build
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+        run: cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests --release

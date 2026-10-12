@@ -171,21 +171,25 @@ fn child() {
     #[cfg(not(windows))]
     let report = "";
     println!("LOAD: {result:?}{report}");
-    // What a handle logs when it is given two server addresses it refuses.
+    // What a handle logs when it is given server addresses it refuses. The
+    // last one makes the library log about 9,000 bytes in one line.
     if let Ok(library) = loaded {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let lines = Arc::clone(&seen);
         let handle = Handle::new(
             library,
-            Box::new(move |level, line| {
-                let line = line.to_string_lossy().into_owned();
-                lines.lock().unwrap().push((level, line));
+            Box::new(move |level, line, state| {
+                let (length, line) = (line.to_bytes().len(), line.to_string_lossy());
+                let start: String = line.chars().take(48).collect();
+                lines.lock().unwrap().push((level, state, length, start));
             }),
         )
         .expect("the library makes a handle");
+        let long = std::ffi::CString::new(format!("ftp://{}", "h".repeat(9000))).unwrap();
         let results = [
             handle.parse_url(c"ftp://vpn.example.test"),
             handle.parse_url(c"http://vpn.example.test"),
+            handle.parse_url(&long),
         ];
         drop(handle);
         println!("LOGGED: {results:?} {:?}", seen.lock().unwrap());
@@ -221,19 +225,26 @@ fn the_declared_functions_are_the_reviewed_ones() {
 }
 
 // The library's log lines are printf-style. They reach Rust through the C
-// shim, formatted and whole, at the library's own level.
+// shim, formatted, at the library's own level, and marked whole or cut.
+//
+// Security rule: a line longer than the shim's buffer is cut to fit it, and
+// said to be cut. The real library's 9,000-byte line arrives as 4,095 bytes.
 #[test]
 fn a_handle_logs_through_the_shim() {
     let libs = Path::new(LIBS);
     let logged = printed("LOGGED: ", libs, libs, &[]);
     assert!(
-        !logged.starts_with("[0, 0]"),
-        "both addresses must be refused: {logged}"
+        !logged.starts_with("[0, 0, 0]"),
+        "none may be accepted: {logged}"
     );
-    let first = r#"(0, "Failed to parse server URL 'ftp://vpn.example.test'\n")"#;
-    let second = r#"(0, "Only https:// permitted for server URL\n")"#;
+    let lines = [
+        // Each is the line's length and its first 48 characters.
+        r#"(0, Whole, 52, "Failed to parse server URL 'ftp://vpn.example.te")"#,
+        r#"(0, Whole, 39, "Only https:// permitted for server URL\n")"#,
+        r#"(0, Cut, 4095, "Failed to parse server URL 'ftp://hhhhhhhhhhhhhh")"#,
+    ];
     assert!(
-        logged.ends_with(&format!("[{first}, {second}]")),
+        logged.ends_with(&format!("[{}]", lines.join(", "))),
         "{logged}"
     );
 }
