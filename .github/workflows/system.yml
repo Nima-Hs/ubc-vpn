@@ -59,7 +59,7 @@ jobs:
       - name: Build the service and the client in dev mode
         run: |
           cargo build --locked -p ubc-vpn-service --features dev-mode $PROFILE
-          cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test system --no-run
+          cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test system --test interrupts --no-run
       - name: Run them together
         run: |
           # The workspace's path as this OS writes it, for the test to start.
@@ -77,6 +77,20 @@ jobs:
             exit 1
           fi
           grep -qx "RAN: system" system.log
+      # Real interrupts to a real connect in a terminal of its own. A test
+      # can give a child a terminal on Linux and macOS only.
+      - name: Interrupt a connect at each point
+        if: runner.os != 'Windows'
+        run: |
+          service="$GITHUB_WORKSPACE/target/${{ matrix.profile }}/ubc-vpn-service"
+          UBC_VPN_SYSTEM_SERVICE="$service" \
+            cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test interrupts \
+            -- --nocapture 2>&1 | tee interrupts.log
+          if grep "SKIPPED:" interrupts.log; then
+            echo "The interrupt test was skipped."
+            exit 1
+          fi
+          grep -qx "RAN: interrupts" interrupts.log
       # Also when the test failed: it must clean up after itself then too.
       - name: Nothing of it is left behind
         if: always()
@@ -86,6 +100,9 @@ jobs:
             folders=$( (ls -d "$LOCALAPPDATA/Temp"/ubcvpn-sys-* 2>/dev/null || true) | wc -l)
           else
             running=$( (pgrep -x ubc-vpn-service || true) | wc -l)
+            # A connect, or the shell an interrupt test ran it under.
+            shells=$( (pgrep -f 'ubc-vpn --dev connect' || true) | wc -l)
+            running=$((running + shells))
             folders=$( (ls -d /tmp/ubcvpn-sys-* 2>/dev/null || true) | wc -l)
           fi
           echo "services still running: $running; folders left: $folders"
