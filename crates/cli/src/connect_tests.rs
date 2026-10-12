@@ -512,9 +512,13 @@ fn returning(settings: &str) -> Scene {
     scene
 }
 
+/// The settings file, byte for byte.
+fn settings_text(scene: &Scene) -> String {
+    std::fs::read_to_string(scene.rig.root.join("settings/settings.json")).unwrap()
+}
+
 pub(crate) fn saved(scene: &Scene) -> serde_json::Value {
-    let text = std::fs::read_to_string(scene.rig.root.join("settings/settings.json")).unwrap();
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&settings_text(scene)).unwrap()
 }
 
 // A username the user typed is kept once a connect made with it has been
@@ -548,10 +552,14 @@ fn no_username_is_kept_from_a_connect_that_did_not_start() {
     ];
     for typed in attempts {
         let scene = returning(&format!("{{{ROUTES}}}"));
-        let before = saved(&scene);
+        // The file as it was written, which is not how this program would
+        // write it: a save of any kind would show.
+        let before = settings_text(&scene);
         let mut typist = Typist::typing(typed);
         assert_ne!(scene.connect(&mut typist).0, 0);
-        assert_eq!(saved(&scene), before, "{typed:?}");
+        assert_eq!(settings_text(&scene), before, "{typed:?}");
+        let beside = std::fs::read_dir(scene.rig.root.join("settings")).unwrap();
+        assert_eq!(beside.count(), 1, "nothing was written beside it");
     }
     // The login is good, and the service refuses the connect: the policy it
     // read when it started does not allow routes the policy file now does.
@@ -634,6 +642,13 @@ fn a_username_that_cannot_be_saved_does_not_fail_the_connect() {
     let (code, _, err) = scene.connect(&mut typist);
     mode(0o700).unwrap();
     assert_eq!(code, 0, "{err}");
+    if root {
+        // Root writes where it likes, so the save went through and there is
+        // nothing to see. Said past the capture, so a log shows it.
+        let skipped = "SKIPPED a_username_that_cannot_be_saved_does_not_fail_the_connect: \
+                       run as root, so only the exit status was checked\n";
+        std::io::Write::write_all(&mut std::io::stderr(), skipped.as_bytes()).unwrap();
+    }
     if !root {
         assert_eq!(
             err,
@@ -660,4 +675,21 @@ fn a_connect_does_not_read_settings_others_can_change() {
     assert!(err.contains("can be changed by other users"), "{err}");
     assert!(err.contains("To stop them, run: chmod go-w '"), "{err}");
     assert!(typist.asked.is_empty() && !scene.gateway_was_asked());
+}
+
+// Security rule: a name that could be shown as another name is not kept.
+// The connect is none the worse for it, and the name is asked for again.
+#[test]
+fn a_username_that_could_mislead_is_used_but_not_kept() {
+    for odd in ["alice\u{202e}ecila", "al\u{200b}ice", "   "] {
+        let mut scene = returning(&format!("{{{ROUTES}}}"));
+        let before = settings_text(&scene);
+        let mut script = Script::new(pin());
+        script.form[0].1 = Secret::new(odd);
+        scene.gateway = FakeEngine::new(script);
+        let mut typist = Typist::typing(&[Some(odd), Some(PASSWORD)]);
+        let (code, _, err) = scene.connect(&mut typist);
+        assert_eq!((code, err.as_str()), (0, ""), "{odd:?}");
+        assert_eq!(settings_text(&scene), before, "{odd:?}");
+    }
 }
