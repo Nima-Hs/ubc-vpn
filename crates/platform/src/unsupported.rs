@@ -15,6 +15,7 @@ use crate::{
 
 pub(crate) struct Native;
 
+#[cfg_attr(windows, allow(dead_code))]
 /// The shape a real OS module fills in: it builds every part for `mode`, so
 /// the transport and anything kept on disk know which mode they serve.
 pub(crate) fn native(mode: Mode) -> Result<Platform> {
@@ -27,6 +28,7 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
     })
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn paths(_mode: Mode) -> Result<Paths> {
     Err(Error::Unsupported)
 }

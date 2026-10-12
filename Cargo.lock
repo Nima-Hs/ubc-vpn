@@ -178,6 +178,7 @@ name = "ubc-vpn-platform"
 version = "0.1.0"
 dependencies = [
  "ubc-vpn-core",
+ "windows-sys",
 ]
 
 [[package]]
