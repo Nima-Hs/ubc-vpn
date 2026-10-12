@@ -6,15 +6,27 @@
 //! service has accepted the request, or one `error`. What the connection
 //! does after that reaches the app as state events through its bridge.
 //!
+//! Whatever happens, a panic included, the command ends with exactly one of
+//! those two last lines.
+//!
 //! Standard input is read on a thread of its own for as long as the command
 //! runs, so that a `cancel` stops a login that is waiting on the gateway,
 //! not only one that is waiting for an answer. Standard input closing means
 //! the app has gone, and is a cancel too.
 //!
+//! A cancel is acted on up to the moment the connect request is sent. One
+//! that arrives after that is too late: the command ends with `done`, and
+//! the app undoes the connect by sending `disconnect` through its bridge.
+//!
 //! An answer is a [`Secret`] from the moment its line is decoded. A line that
-//! cannot be understood is never repeated back.
+//! cannot be understood is never repeated back. The bytes of each line are
+//! overwritten once it has been decoded. That is as far as this program can
+//! reach: the copy in the reader's own buffer, the one in the operating
+//! system's pipe and the [`Secret`] itself are not wiped, and without unsafe
+//! code the compiler is asked, not forced, to keep the overwrite.
 
 use std::io::{BufRead, Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use ubc_vpn_core::login::{AppMessage, CliMessage, LoginErrorCode};
@@ -26,6 +38,12 @@ use ubc_vpn_platform::Platform;
 use crate::clean;
 use crate::client::Limits;
 use crate::connect::{Ask, Engines, start};
+
+/// The most of a question's label and of its message that is passed on, in
+/// UTF-16 code units, which is how the app counts them. The gateway words
+/// both, and a question must always fit in one line.
+const MAX_LABEL: usize = 200;
+const MAX_MESSAGE: usize = 1000;
 
 /// How many answers may wait to be used. A prompt gets one answer, so more
 /// than a few waiting means the app is not following the conversation.
@@ -65,7 +83,13 @@ pub fn connect(
         asked: 0,
         confused: false,
     };
-    let ended = start(platform, engines, &mut app, &cancel, limits, err);
+    // A panic on the way, in an engine for one, still ends in a last line.
+    let run = || start(platform, engines, &mut app, &cancel, limits, err);
+    let Ok(ended) = catch_unwind(AssertUnwindSafe(run)) else {
+        let (code, message) = (LoginErrorCode::Internal, PANICKED.to_string());
+        let _ = write_line(out, &CliMessage::Error { code, message });
+        return crate::FAILED;
+    };
     // A line that made no sense may have arrived while nothing was being
     // asked; it cancelled the login all the same.
     let unread = |arrival| matches!(arrival, Arrival::NotUnderstood);
@@ -86,6 +110,7 @@ pub fn connect(
     exit
 }
 
+const PANICKED: &str = "Something went wrong inside UBC VPN while logging in.";
 const NOT_UNDERSTOOD: &str = "The app sent something that is not an answer to the question asked.";
 
 fn write_line(out: &mut dyn Write, message: &CliMessage) -> std::io::Result<()> {
@@ -116,12 +141,14 @@ impl Ask for App<'_> {
         }
         self.asked += 1;
         // The wording is the gateway's. JSON carries any character safely;
-        // the app is spared the ones no label has a use for.
+        // the app is spared the ones no label has a use for, and a length
+        // that would not fit in a line.
+        let worded = |text: &str, most| cut(&clean(text), most);
         let question = CliMessage::Prompt {
             id: self.asked,
             kind: prompt.kind,
-            label: clean(&prompt.label),
-            message: prompt.message.as_deref().map(clean),
+            label: worded(&prompt.label, MAX_LABEL),
+            message: prompt.message.as_deref().map(|m| worded(m, MAX_MESSAGE)),
         };
         // An app that cannot be written to has gone.
         write_line(self.out, &question).ok()?;
@@ -137,22 +164,43 @@ impl Ask for App<'_> {
     }
 }
 
+/// The start of `text`: as many whole characters as fit in `most` UTF-16
+/// code units.
+fn cut(text: &str, most: usize) -> String {
+    let mut room = most;
+    let fits = |c: &char| {
+        let fit = c.len_utf16() <= room;
+        room = room.saturating_sub(c.len_utf16());
+        fit
+    };
+    text.chars().take_while(fits).collect()
+}
+
 /// Reads the app's lines until it cancels, goes away, or stops making sense.
 /// Each of those cancels the login, wherever it is.
 fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>, cancel: &Cancel) {
+    // One buffer for every line, never grown, so that no copy of an answer
+    // is left behind in memory this function has let go of.
+    let mut line = Vec::with_capacity(MAX_LINE_BYTES + 1);
     loop {
-        let mut line = Vec::new();
         // No more of a line is held than could be a message. `decode`
         // refuses one that is too long, as it does one cut short here.
         let limit = MAX_LINE_BYTES as u64 + 1;
         let read = input.by_ref().take(limit).read_until(b'\n', &mut line);
         let message = match read {
             // The end of the input, or an error reading it: the app has gone.
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                line.fill(0);
+                break;
+            }
             Ok(_) => std::str::from_utf8(&line)
                 .ok()
                 .and_then(|text| decode(text).ok()),
         };
+        // The line may have held an answer. See the module's note on what
+        // this does and does not reach.
+        line.fill(0);
+        std::hint::black_box(&mut line).clear();
         let arrival = match message {
             Some(AppMessage::Answer { id, value }) => Arrival::Answer { id, value },
             Some(AppMessage::Cancel) => break,

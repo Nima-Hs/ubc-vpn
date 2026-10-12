@@ -97,6 +97,16 @@ pub(crate) fn stop(error: ClientError) -> Stop {
     }
 }
 
+fn cancelled() -> Stop {
+    Stop {
+        exit: CANCELLED,
+        ..failed(
+            LoginErrorCode::Cancelled,
+            &LoginError::Cancelled.to_string(),
+        )
+    }
+}
+
 fn busy() -> Stop {
     let message = "The VPN is connected, or is connecting or disconnecting. \
                    Run `ubc-vpn disconnect` first.";
@@ -204,6 +214,10 @@ pub(crate) fn start(
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
         return Err(failed(LoginErrorCode::RouteRefused, &message));
     }
+    // A user who has given up already is not made the owner of anything.
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
     let mut client = owner(&platform, limits)?;
     let now = client.request(RequestBody::Status).map_err(stop)?;
     let idle = [
@@ -231,6 +245,12 @@ pub(crate) fn start(
         gateway_addr,
         routes: saved.routes,
     };
+    // The last moment a cancel can still stop the connect. A login that was
+    // cancelled too late to stop still yields a session; it is thrown away
+    // here, because the user gave up.
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
     client.request(RequestBody::Connect(params)).map_err(stop)?;
     Ok(client)
 }
@@ -275,12 +295,6 @@ fn login(
     };
     let mut prompts = Prompts::new(&mut answer);
     let result = engine.login(gateway, &mut prompts, cancel, &logs);
-    // A login that was cancelled too late to stop still yields a session.
-    // It is thrown away: the user gave up, so nothing is connected.
-    let result = match result {
-        Ok(_) if cancel.is_cancelled() => Err(LoginError::Cancelled),
-        other => other,
-    };
     // The engine held the cookie before this code did, so a line it wrote on
     // the way may show it. The lines are printed only now, with it removed.
     // They can also carry text the gateway sent, some of it from before its
@@ -297,7 +311,7 @@ fn login(
     result.map_err(|error| {
         let (exit, code) = match error {
             LoginError::WrongPassword => (LOGIN_REFUSED, LoginErrorCode::WrongPassword),
-            LoginError::Cancelled => (CANCELLED, LoginErrorCode::Cancelled),
+            LoginError::Cancelled => return cancelled(),
             LoginError::PinMismatch => (FAILED, LoginErrorCode::PinMismatch),
             LoginError::GatewayUnreachable => (FAILED, LoginErrorCode::GatewayUnreachable),
             LoginError::Failed => (FAILED, LoginErrorCode::Internal),

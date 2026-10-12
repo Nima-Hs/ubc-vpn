@@ -2,6 +2,8 @@
 //! the other end of two pipes.
 
 use std::io::{BufRead, BufReader, Lines, PipeReader, PipeWriter, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ubc_vpn_core::login::{CliMessage, LoginErrorCode};
@@ -12,7 +14,7 @@ use ubc_vpn_engine::fake::{FakeEngine, Script};
 use ubc_vpn_engine::{Cancel, Gateway, LogSink, LoginEngine, LoginError, Prompts, Session};
 
 use crate::client::ClientError;
-use crate::connect::{BUSY, CANCELLED, LOGIN_REFUSED, stop};
+use crate::connect::{BUSY, CANCELLED, LOGIN_REFUSED, start, stop};
 use crate::connect_json::connect;
 use crate::connect_tests::{CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, pin};
 use crate::{FAILED, NOT_OWNER, NOT_RUNNING};
@@ -193,6 +195,8 @@ fn answers_to_no_question_are_not_piled_up() {
 /// then still ask a question.
 struct TooLate {
     asks: bool,
+    /// Set once the login is under way.
+    begun: Arc<AtomicBool>,
 }
 
 impl LoginEngine for TooLate {
@@ -203,6 +207,7 @@ impl LoginEngine for TooLate {
         cancel: &Cancel,
         _: &LogSink,
     ) -> Result<Session, LoginError> {
+        self.begun.store(true, Ordering::SeqCst);
         wait_until("the cancel", || cancel.is_cancelled());
         if self.asks {
             let script = Script::new(pin());
@@ -222,8 +227,16 @@ impl LoginEngine for TooLate {
 fn nothing_is_asked_or_used_after_a_cancel() {
     for asks in [false, true] {
         let scene = Scene::usual();
-        let engine = || Box::new(TooLate { asks }) as Box<dyn LoginEngine>;
-        let (code, lines, _) = drive_through(&scene, &engine, |lines, to_cli| {
+        let begun = Arc::new(AtomicBool::new(false));
+        let engine = || {
+            let begun = begun.clone();
+            Box::new(TooLate { asks, begun }) as Box<dyn LoginEngine>
+        };
+        let seen = begun.clone();
+        let (code, lines, _) = drive_through(&scene, &engine, move |lines, to_cli| {
+            // Not before the login is under way: a cancel before that is
+            // another test's.
+            wait_until("the login", || seen.load(Ordering::SeqCst));
             drop(to_cli);
             lines.map(Result::unwrap).collect::<Vec<_>>()
         });
@@ -384,15 +397,97 @@ fn an_app_that_makes_no_sense_ends_the_login() {
 }
 
 // Security rule: the gateway words the questions, and its wording reaches
-// the app without control characters.
+// the app without control characters and never too long for a line.
 #[test]
-fn a_question_reaches_the_app_without_control_characters() {
+fn a_question_reaches_the_app_clean_and_short_enough() {
+    // What the app is asked when the gateway's password question has this
+    // label and this message.
+    let asked = |label: &str, message: &str| {
+        let mut scene = Scene::usual();
+        let mut script = Script::new(pin());
+        script.form[1].0.label = label.to_string();
+        script.form[1].0.message = Some(message.to_string());
+        scene.gateway = FakeEngine::new(script);
+        let (code, lines, _) = drive(&scene, answering(&[PASSWORD]));
+        assert_eq!((code, lines.len()), (0, 2), "{lines:?}");
+        match decode(&lines[0]).unwrap() {
+            CliMessage::Prompt { label, message, .. } => (label, message.unwrap()),
+            other => panic!("{other:?}"),
+        }
+    };
+    let units = |text: &str| text.encode_utf16().count();
+
+    let (label, message) = asked("Pass\u{1b}[2J\u{202e}word", "Try\u{1b}[1A again\u{202e}.");
+    assert_eq!(
+        (label.as_str(), message.as_str()),
+        ("Pass[2Jword", "Try[1A again.")
+    );
+
+    // At the bound everything is passed on; past it, the start is.
+    let (label, message) = asked(&"l".repeat(200), &"m".repeat(1000));
+    assert_eq!((label, message), ("l".repeat(200), "m".repeat(1000)));
+    let (label, message) = asked(&"l".repeat(201), &"m".repeat(1001));
+    assert_eq!((label, message), ("l".repeat(200), "m".repeat(1000)));
+    // Far past it, where the question would not have fitted in a line.
+    let (label, message) = asked(&"l".repeat(70_000), &"m".repeat(70_000));
+    assert_eq!((units(&label), units(&message)), (200, 1000));
+    // The cut is between characters, and counted as the app counts.
+    let wide = "\u{1f512}";
+    let (label, message) = asked(&format!("{}{wide}", "l".repeat(199)), &wide.repeat(501));
+    assert_eq!((label, message), ("l".repeat(199), wide.repeat(500)));
+}
+
+/// A login that asks for the password and then panics.
+struct Panics;
+
+impl LoginEngine for Panics {
+    fn login(
+        &self,
+        _: &Gateway,
+        prompts: &mut Prompts<'_>,
+        _: &Cancel,
+        _: &LogSink,
+    ) -> Result<Session, LoginError> {
+        prompts.ask(&Script::new(pin()).form[1].0)?;
+        panic!("made up, to see how connect --json ends");
+    }
+}
+
+// The app is always told how it ended, even when something panics.
+#[test]
+fn a_panic_still_ends_with_an_error_line() {
+    let scene = Scene::usual();
+    let engine = || Box::new(Panics) as Box<dyn LoginEngine>;
+    let (code, lines, _) = drive_through(&scene, &engine, answering(&[PASSWORD]));
+    let said = "Something went wrong inside UBC VPN while logging in.";
+    assert_eq!(code, FAILED);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[1], error_line("internal", said));
+    assert!(scene.state().contains(r#""state":"disconnected""#));
+}
+
+// A user who gave up before the service was contacted claims nothing: the
+// service is not even looked for.
+#[test]
+fn a_cancel_before_the_service_is_contacted_claims_nothing() {
+    let look_for_service = |scene: &Scene| {
+        let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+        let engines = |_: &Policy| Some(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
+        let (cancel, mut typist) = (Cancel::new(), Typist::typing(&[Some(PASSWORD)]));
+        cancel.cancel();
+        let mut err = Vec::new();
+        let ended = start(&platform, &engines, &mut typist, &cancel, brief(), &mut err);
+        let stop = ended.err().expect("cancelled");
+        assert_eq!(
+            (stop.exit, stop.code),
+            (CANCELLED, LoginErrorCode::Cancelled)
+        );
+        assert!(!scene.gateway_was_asked());
+    };
     let mut scene = Scene::usual();
-    let mut script = Script::new(pin());
-    script.form[1].0.label = "Pass\u{1b}[2J\u{202e}word".to_string();
-    scene.gateway = FakeEngine::new(script);
-    let (code, lines, _) = drive(&scene, answering(&[PASSWORD]));
-    assert_eq!(code, 0);
-    let asked = r#"{"type":"prompt","id":1,"kind":"password","label":"Pass[2Jword"}"#;
-    assert_eq!(lines[0], asked);
+    look_for_service(&scene);
+    // Nobody owns the service yet, so another user can still claim it.
+    scene.rig.claim_as_someone_else();
+    scene.service = None;
+    look_for_service(&scene);
 }
