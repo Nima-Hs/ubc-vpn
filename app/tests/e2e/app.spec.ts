@@ -102,6 +102,8 @@ test("the window renders, locked down", async () => {
     expect(exposed.require).toBe("undefined");
     expect(exposed.process).toBe("undefined");
     expect(exposed.api).toEqual([
+        "answerPrompt",
+        "cancelLogin",
         "closeWindow",
         "connect",
         "demo",
@@ -112,6 +114,35 @@ test("the window renders, locked down", async () => {
         "platform",
         "retry",
     ]);
+});
+
+test("a login answer is checked before the main process takes it", async () => {
+    // The one function that takes arguments. Anything but a prompt id and
+    // text is refused, whatever the page sends.
+    const sent = await page.evaluate(async () => {
+        const answer = window.ubcVpn.answerPrompt as (...args: unknown[]) => Promise<void>;
+        const outcome = (...args: unknown[]) =>
+            answer(...args).then(
+                () => "taken",
+                () => "refused",
+            );
+        return {
+            proper: await outcome(1, "an answer"),
+            noText: await outcome(1, { toString: () => "an answer" }),
+            noId: await outcome("1", "an answer"),
+            tooLong: await outcome(1, "x".repeat(5000)),
+        };
+    });
+    expect(sent).toEqual({
+        proper: "taken",
+        noText: "refused",
+        noId: "refused",
+        tooLong: "refused",
+    });
+    // The state the interface is sent has a place for a login, and it is idle.
+    expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toMatchObject({
+        login: { phase: "idle" },
+    });
 });
 
 test("the interface's process is confined", async () => {
@@ -218,14 +249,44 @@ test("another window cannot use the interface's functions", async () => {
         });
         try {
             await other.loadURL("app://ui/index.html");
-            return await other.webContents.executeJavaScript(
-                "window.ubcVpn.getSnapshot().then(() => 'answered', () => 'refused')",
-            );
+            // Every function the interface has, each with arguments its own
+            // check would accept, so that only the sender can be the reason.
+            return await other.webContents.executeJavaScript(`(async () => {
+                const api = window.ubcVpn;
+                const calls = {
+                    getSnapshot: () => api.getSnapshot(),
+                    connect: () => api.connect(),
+                    disconnect: () => api.disconnect(),
+                    retry: () => api.retry(),
+                    answerPrompt: () => api.answerPrompt(1, "an answer"),
+                    cancelLogin: () => api.cancelLogin(),
+                    minimizeWindow: () => api.minimizeWindow(),
+                    closeWindow: () => api.closeWindow(),
+                    listScenarios: () => api.demo.listScenarios(),
+                    setScenario: () => api.demo.setScenario("connected"),
+                };
+                const out = {};
+                for (const [name, call] of Object.entries(calls)) {
+                    out[name] = await call().then(() => "answered", () => "refused");
+                }
+                return out;
+            })()`);
         } finally {
             other.destroy();
         }
     }, resolve("out-demo/preload/index.js"));
-    expect(answer).toBe("refused");
+    expect(answer).toEqual({
+        getSnapshot: "refused",
+        connect: "refused",
+        disconnect: "refused",
+        retry: "refused",
+        answerPrompt: "refused",
+        cancelLogin: "refused",
+        minimizeWindow: "refused",
+        closeWindow: "refused",
+        listScenarios: "refused",
+        setScenario: "refused",
+    });
     // The interface's own window is still served.
     expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toHaveProperty("state");
 });

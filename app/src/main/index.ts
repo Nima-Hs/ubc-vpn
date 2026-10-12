@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
 import { app, type BrowserWindow, Menu, protocol, session } from "electron";
-import { bridgeCommand } from "./channel/cli";
-import { Controller } from "./controller";
+import { bridgeCommand, connectCommand } from "./channel/cli";
+import { ConnectRunner } from "./channel/connect";
+import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
 import {
@@ -37,6 +38,9 @@ if (app.requestSingleInstanceLock()) {
     app.quit();
 }
 
+/** Whether the interface can show a login's questions yet. */
+const LOGIN_SCREENS_READY = false;
+
 async function start(): Promise<void> {
     // Set only by `electron-vite dev`, and read only in development builds.
     // Decided once, here. Everything that differs in development takes
@@ -50,6 +54,7 @@ async function start(): Promise<void> {
     );
 
     let link: ServiceLink;
+    let login: LoginFactory | undefined;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
@@ -67,6 +72,7 @@ async function start(): Promise<void> {
             });
         };
     } else {
+        login = (onState) => new ConnectRunner({ ...connectCommand(app, process), onState });
         link = createServiceLink({
             ...bridgeCommand(app, process),
             appVersion: app.getVersion(),
@@ -75,7 +81,11 @@ async function start(): Promise<void> {
             onFault: (fault) => console.error(`ubc-vpn: ${fault}`),
         });
     }
-    const controller = new Controller(link);
+    // The command-line client does the logging in. The screens that show its
+    // questions come in the next change; until they are there, Connect says
+    // that this build cannot log in, so nobody is left at a prompt they
+    // cannot see.
+    const controller = new Controller(link, LOGIN_SCREENS_READY ? login : undefined);
 
     // The default menu offers reload, zoom and developer tools. A built app
     // has no use for them; macOS keeps the entries every Mac app has.
@@ -117,6 +127,9 @@ async function start(): Promise<void> {
     // there is a way back to a hidden window. Elsewhere closing quits.
     const closeHides = closeHidesWindow(process.platform, process.env, tray !== null);
     controller.setCloseHides(closeHides);
+    // A login does not carry on behind a window the user has put away:
+    // nobody would be there to answer it.
+    window.on("hide", () => controller.cancelLogin());
     window.on("close", (event) => {
         if (!quitting && closeHides) {
             event.preventDefault();

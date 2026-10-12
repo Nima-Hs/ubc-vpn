@@ -101,3 +101,46 @@ export const TUNNEL = {
     subnets: ["203.0.113.0/24"],
     dns_domains: ["campus.example"],
 };
+
+/** One thing the mock `connect --json` does next. See `mock-cli.mjs`. */
+export type CliStep =
+    | { prompt: { id: number; kind: string; label: string; message?: string }; expect?: string }
+    | { done: true }
+    | { error: { code: string; message: string } }
+    | { raw: string }
+    | { exit: number }
+    | { hang: true };
+
+export interface MockCli {
+    command: string;
+    args: string[];
+    /** What the client logged: "answer:<id>:as expected", "cancel", "input closed", and so on. */
+    received(): string[];
+    pids(): number[];
+}
+
+/** Scripts the mock command-line client's side of a login. */
+export function mockCli(
+    steps: CliStep[],
+    options: {
+        ignoresCancel?: boolean;
+        stderr?: string;
+        reportStart?: boolean;
+        /** The steps for the second login, the third, and so on. */
+        laterLogins?: CliStep[][];
+    } = {},
+): MockCli {
+    const dir = mkdtempSync(join(tmpdir(), "ubc-vpn-cli-"));
+    const config = join(dir, "config.json");
+    const log = join(dir, "log");
+    const pids = join(dir, "pids");
+    writeFileSync(config, JSON.stringify({ steps, log, pids, ...options }));
+    const lines = (file: string) =>
+        existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+    return {
+        command: process.execPath,
+        args: [join(__dirname, "mock-cli.mjs"), "connect", "--json", config],
+        received: () => lines(log),
+        pids: () => lines(pids).map(Number),
+    };
+}

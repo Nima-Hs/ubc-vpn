@@ -19,6 +19,8 @@ const api: VpnApi = {
     },
     connect: () => ipcRenderer.invoke(IPC.connect),
     disconnect: () => ipcRenderer.invoke(IPC.disconnect),
+    answerPrompt: (id, value) => ipcRenderer.invoke(IPC.answerPrompt, id, value),
+    cancelLogin: () => ipcRenderer.invoke(IPC.cancelLogin),
     retry: () => ipcRenderer.invoke(IPC.retry),
     minimizeWindow: () => ipcRenderer.invoke(IPC.minimizeWindow),
     closeWindow: () => ipcRenderer.invoke(IPC.closeWindow),

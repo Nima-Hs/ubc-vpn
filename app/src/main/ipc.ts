@@ -36,7 +36,47 @@ export function handleFromInterface(
     });
 }
 
-/** The fixed set of things the interface can ask for. None takes an argument. */
+/** The longest answer a login prompt may be given, in characters. */
+export const MAX_ANSWER_LENGTH = 1024;
+
+/**
+ * Whether the arguments of an "answer the prompt" message are what they must
+ * be: a prompt id and the text the user typed. The interface is not trusted
+ * to send only that, so anything else is refused before it goes further.
+ */
+export function isPromptAnswer(args: readonly unknown[]): args is [number, string] {
+    const [id, value] = args;
+    return (
+        args.length === 2 &&
+        typeof id === "number" &&
+        Number.isInteger(id) &&
+        id >= 0 &&
+        id <= 0xffffffff &&
+        typeof value === "string" &&
+        value.length <= MAX_ANSWER_LENGTH
+    );
+}
+
+/**
+ * Takes an answer to a login prompt from the interface and hands it straight
+ * on. An answer may be a password, so nothing here keeps it, and a refusal
+ * says only "refused": Electron prints a handler's error to the main
+ * process's standard error, and nothing that was sent may end up there.
+ */
+export function takePromptAnswer(
+    controller: Pick<Controller, "answerPrompt">,
+    args: readonly unknown[],
+): void {
+    if (!isPromptAnswer(args)) {
+        throw new Error("refused");
+    }
+    controller.answerPrompt(args[0], args[1]);
+}
+
+/**
+ * The fixed set of things the interface can ask for. Only one takes
+ * arguments, and it checks them.
+ */
 export function registerIpc(
     window: BrowserWindow,
     controller: Controller,
@@ -49,6 +89,10 @@ export function registerIpc(
     handle(IPC.connect, () => controller.connect());
     handle(IPC.disconnect, () => controller.disconnect());
     handle(IPC.retry, () => controller.retry());
+    handle(IPC.cancelLogin, () => controller.cancelLogin());
+    handleFromInterface(window, devServerUrl, IPC.answerPrompt, (...args) =>
+        takePromptAnswer(controller, args),
+    );
     handle(IPC.minimizeWindow, () => window.minimize());
     handle(IPC.closeWindow, () => window.close());
 

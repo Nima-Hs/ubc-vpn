@@ -143,6 +143,26 @@ export class Backoff {
     }
 }
 
+/**
+ * Starts the command-line client, the same way whatever it is asked to do:
+ * no shell, a fixed program and fixed arguments, a short environment of its
+ * own, and the program's own folder to work in. Its standard error is
+ * discarded unread: that is the client's own log, not the app's.
+ */
+export function startClient(
+    command: string,
+    args: readonly string[],
+    env: Record<string, string | undefined>,
+): ChildProcessWithoutNullStreams {
+    return spawn(command, [...args], {
+        shell: false,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "ignore"],
+        env: bridgeEnv(env),
+        cwd: dirname(command),
+    }) as unknown as ChildProcessWithoutNullStreams;
+}
+
 interface Pending {
     resolve(outcome: Outcome): void;
     reject(error: BridgeError): void;
@@ -252,17 +272,7 @@ export class BridgeClient {
     private launch(): void {
         let child: ChildProcessWithoutNullStreams;
         try {
-            // No shell, a fixed program and fixed arguments, a short
-            // environment of its own, and the program's own folder to work
-            // in. Standard error is discarded unread: it is the bridge's own
-            // log, not the app's.
-            child = spawn(this.options.command, [...this.options.args], {
-                shell: false,
-                windowsHide: true,
-                stdio: ["pipe", "pipe", "ignore"],
-                env: bridgeEnv(this.options.env),
-                cwd: dirname(this.options.command),
-            }) as unknown as ChildProcessWithoutNullStreams;
+            child = startClient(this.options.command, this.options.args, this.options.env);
         } catch {
             // Starting a program can fail outright, for example when the file
             // is there but is not a program. That is the service being out of

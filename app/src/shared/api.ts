@@ -3,6 +3,8 @@
 
 import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
+import type { LoginErrorCode } from "./protocol/LoginErrorCode";
+import type { PromptKind } from "./protocol/PromptKind";
 
 /** Why the service cannot be used right now. */
 export type UnavailableReason =
@@ -28,6 +30,33 @@ export type LinkState =
     | { link: "not_owner" }
     | { link: "ready"; conn: ConnState };
 
+/** A question the command-line client is asking the user while logging in. */
+export interface LoginPrompt {
+    /**
+     * Sent back with the answer. Made by the app, and never the same for two
+     * prompts, even across logins.
+     */
+    id: number;
+    /** Which field to show. `password` and `code` are hidden as they are typed. */
+    kind: PromptKind;
+    /** The gateway's wording for the question. */
+    label: string;
+    /** Anything the gateway says alongside it, such as why the last try was refused. */
+    message?: string;
+}
+
+/**
+ * Where a login stands. It never holds an answer: what the user types goes
+ * to the command-line client and nowhere else.
+ */
+export type LoginState =
+    | { phase: "idle" }
+    /** The client is busy: starting, or acting on the last answer. */
+    | { phase: "working" }
+    | { phase: "prompt"; prompt: LoginPrompt }
+    /** `message` is the client's own account, and may be empty. */
+    | { phase: "failed"; code: LoginErrorCode; message: string };
+
 /** Why an action the user asked for did not start. */
 export type ActionError =
     /** Login is a later feature; without it there is no session to connect with. */
@@ -46,6 +75,8 @@ export interface Snapshot {
      * in the window or from the tray. Cleared when the state next changes.
      */
     notice: ActionError | null;
+    /** The login under way, if any. */
+    login: LoginState;
     /**
      * Whether closing the window hides it and leaves the app in the tray.
      * Where there is no tray to come back from, closing quits instead.
@@ -63,6 +94,13 @@ export interface VpnApi {
     /** The outcome arrives as a new snapshot, not as a return value. */
     connect(): Promise<void>;
     disconnect(): Promise<void>;
+    /**
+     * Answers the login prompt with this `id`. The value may be a password:
+     * it is passed straight on and kept nowhere. Clear the field after calling.
+     */
+    answerPrompt(id: number, value: string): Promise<void>;
+    /** Gives up a login, or dismisses one that failed. */
+    cancelLogin(): Promise<void>;
     /** Tries to reach the service now instead of waiting for the next attempt. */
     retry(): Promise<void>;
     minimizeWindow(): Promise<void>;
@@ -92,6 +130,8 @@ export const IPC = {
     connect: "vpn:connect",
     disconnect: "vpn:disconnect",
     retry: "vpn:retry",
+    answerPrompt: "login:answer",
+    cancelLogin: "login:cancel",
     minimizeWindow: "window:minimize",
     closeWindow: "window:close",
 } as const;
