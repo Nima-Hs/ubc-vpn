@@ -205,13 +205,15 @@ mod tests {
         mode
     }
 
-    /// Types `keys` into this process's own console once it stops echoing.
-    fn type_when_quiet(keys: &str) {
+    /// Types `keys` into this process's own console once it stops echoing,
+    /// and returns the mode the console was in by then.
+    fn type_when_quiet(keys: &str) -> u32 {
         let input = console("CONIN$").expect("the console");
         let started = Instant::now();
         while mode(&input) & ENABLE_ECHO_INPUT != 0 && started.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(10));
         }
+        let quiet = mode(&input);
         for unit in keys.encode_utf16() {
             let key = KEY_EVENT_RECORD {
                 bKeyDown: 1,
@@ -230,6 +232,7 @@ mod tests {
             let done = unsafe { WriteConsoleInputW(input.0, &record, 1, &mut written) };
             assert_ne!(done, 0, "type a key");
         }
+        quiet
     }
 
     // Not a test of its own: the two tests above run it in a new process.
@@ -249,9 +252,20 @@ mod tests {
         assert_ne!(before & ENABLE_ECHO_INPUT, 0, "a new console echoes");
         let typist = std::thread::spawn(|| type_when_quiet("s3cret fakx\u{8}e\r"));
         let read = read_hidden_line("Password: ").expect("read");
-        typist.join().expect("the typist");
+        let quiet = typist.join().expect("the typist");
         assert_eq!(read.expose(), "s3cret fake");
         assert_eq!(mode(&input), before, "the mode was not put back");
+        // While it read, the console neither edited the line nor stood
+        // ready to turn Ctrl-C into an event that ends the program.
+        let cooked = ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT;
+        assert_eq!(quiet & cooked, 0, "the console's mode while reading");
+
+        // Ctrl-C comes as a key: the call gives up and the mode is put back.
+        let typist = std::thread::spawn(|| type_when_quiet("half\u{3}"));
+        let read = read_hidden_line("").map(|_| ());
+        typist.join().expect("the typist");
+        assert_eq!(read, Err(Error::Closed));
+        assert_eq!(mode(&input), before, "the mode after Ctrl-C");
 
         // The first line of the screen: the prompt, and nothing typed.
         let output = console("CONOUT$").expect("the screen");
