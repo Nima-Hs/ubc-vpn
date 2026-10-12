@@ -6,7 +6,6 @@
 export type ResetReply = { "type": "reset", 
 /**
  * The name, inside the settings folder, of the file the old
- * settings were moved to. `None` when there was no settings file,
- * and so nothing to move.
+ * settings were moved to.
  */
-kept: string | null, } | { "type": "not_needed" };
+kept: string, } | { "type": "not_needed" };

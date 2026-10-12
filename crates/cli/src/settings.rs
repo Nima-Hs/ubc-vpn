@@ -27,8 +27,8 @@ const SETTINGS: &str = "settings.json";
 /// older one was left by a save that was cut short.
 const STALE: Duration = Duration::from_secs(3600);
 
-/// How many damaged settings files `reset` keeps aside. A further one takes
-/// the place of the oldest.
+/// How many old settings files `reset` keeps aside. It replaces none of
+/// them: with all the names taken, a reset fails and changes nothing.
 const KEPT_ASIDE: usize = 3;
 
 /// The commands. Each is spelled with `--json`, the only form so far.
@@ -86,6 +86,11 @@ pub fn run(
         .filter(|_| about_files.contains(&answered))
         .and_then(folder_problem)
     {
+        let _ = writeln!(err, "ubc-vpn: {why}");
+    }
+    let full = matches!(command, Command::Reset { .. })
+        && answered == Err(SettingsFailureCode::Unwritable);
+    if let Some(why) = dir.filter(|_| full).and_then(nowhere_to_keep) {
         let _ = writeln!(err, "ubc-vpn: {why}");
     }
     let line = answered.or_else(|error| encode(&SettingsFailure { error }));
@@ -178,27 +183,42 @@ pub(crate) fn remember_username(
 
 /// Starts the settings afresh when the file cannot be read, or whatever it
 /// holds with `force`. The old file is never destroyed: it is moved aside,
-/// as it is, under one of [`KEPT_ASIDE`] names that nothing here removes.
+/// as it is, under one of [`KEPT_ASIDE`] names that nothing here removes or
+/// replaces. With every name taken nothing is changed and the answer is
+/// [`SettingsFailureCode::Unwritable`].
 ///
-/// If the fresh file cannot then be written the answer is
-/// [`SettingsFailureCode::Unwritable`] with the old file already aside.
+/// If the fresh file cannot be written after the move the answer is also
+/// [`SettingsFailureCode::Unwritable`], with the old file already aside.
 /// There is then no settings file, which reads as the defaults all the same.
 fn reset(
     dir: &Path,
     policy: Option<&Policy>,
     force: bool,
 ) -> Result<ResetReply, SettingsFailureCode> {
+    let fresh = |dir: &Path| save(dir, "{}\n");
+    reset_with(dir, policy, force, &keep_aside, &fresh)
+}
+
+/// [`reset`], with the two things it does to the files given by the caller:
+/// `aside` moves the settings file away and returns its new name, and
+/// `fresh` writes the new one.
+pub(crate) fn reset_with(
+    dir: &Path,
+    policy: Option<&Policy>,
+    force: bool,
+    aside: &dyn Fn(&Path) -> io::Result<String>,
+    fresh: &dyn Fn(&Path) -> io::Result<()>,
+) -> Result<ResetReply, SettingsFailureCode> {
     // A folder others can write to is not touched, to reset it either.
     if folder_problem(dir).is_some() {
         return Err(SettingsFailureCode::Unreadable);
     }
     // Whatever is at the name counts, a link or a folder too. The link
-    // itself is asked about and later moved, and never followed.
+    // itself is asked about and later moved, and never followed. With
+    // nothing there, there is nothing to reset and nothing is made.
     match fs::symlink_metadata(dir.join(SETTINGS)) {
         Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(ResetReply::Reset { kept: None });
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ResetReply::NotNeeded),
         Err(_) => return Err(SettingsFailureCode::Unwritable),
     }
     // "Can be read" means what it means to `get`: it loads, and fits a line.
@@ -211,25 +231,45 @@ fn reset(
         return Ok(ResetReply::NotNeeded);
     }
     let unwritable = |_| SettingsFailureCode::Unwritable;
-    let kept = keep_aside(dir).map_err(unwritable)?;
-    save(dir, "{}\n").map_err(unwritable)?;
-    Ok(ResetReply::Reset { kept: Some(kept) })
+    let kept = aside(dir).map_err(unwritable)?;
+    fresh(dir).map_err(unwritable)?;
+    Ok(ResetReply::Reset { kept })
 }
 
-/// Moves `settings.json` to a name of its own beside it and returns that
-/// name: the first of `settings.json.damaged-1` and so on that is free, or
-/// the one last changed longest ago when all are taken.
+/// The names a reset keeps old settings files under, lowest first.
+fn kept_names() -> impl Iterator<Item = String> {
+    (1..=KEPT_ASIDE).map(|n| format!("{SETTINGS}.damaged-{n}"))
+}
+
+/// Moves `settings.json` to the lowest of those names that is free and
+/// returns the name. Anything at a name takes it, a folder or a link too,
+/// and nothing that is there is ever replaced: with no name free this fails
+/// and moves nothing.
 fn keep_aside(dir: &Path) -> io::Result<String> {
-    let names = (1..=KEPT_ASIDE).map(|n| format!("{SETTINGS}.damaged-{n}"));
-    // When it was last changed, or `None` for a name that is free, which
-    // sorts first.
-    let changed = |name: &String| {
-        let found = fs::symlink_metadata(dir.join(name)).ok()?;
-        Some(found.modified().unwrap_or(std::time::UNIX_EPOCH))
+    let free = |name: &String| {
+        let found = fs::symlink_metadata(dir.join(name));
+        found.is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
     };
-    let name = names.min_by_key(changed).unwrap_or_default();
+    let name = kept_names()
+        .find(free)
+        .ok_or(io::ErrorKind::AlreadyExists)?;
     fs::rename(dir.join(SETTINGS), dir.join(&name))?;
     Ok(name)
+}
+
+/// What to tell the user when a reset fails because every name it keeps old
+/// settings under is taken, if that is so.
+pub(crate) fn nowhere_to_keep(dir: &Path) -> Option<String> {
+    let taken = |name: String| fs::symlink_metadata(dir.join(name)).is_ok();
+    let (first, last) = (kept_names().next()?, kept_names().last()?);
+    let folder = crate::clean(&dir.to_string_lossy());
+    kept_names().all(taken).then(|| {
+        format!(
+            "Nothing was reset. Earlier settings files are kept as {first} to {last} in \
+             {folder}, and a reset never replaces one. Remove those you no longer need, \
+             then reset again."
+        )
+    })
 }
 
 /// The policy, if its file is there and valid. Nothing fails for want of

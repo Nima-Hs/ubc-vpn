@@ -14,7 +14,10 @@
 //! - `ubc-vpn settings reset --json` is the way out when `settings.json`
 //!   cannot be read: it moves the file aside and starts afresh, and writes
 //!   one [`ResetReply`] line. It does nothing to a file that can be read
-//!   unless it is spelled `settings reset --force --json`.
+//!   unless it is spelled `settings reset --force --json`. It never
+//!   replaces or removes a file it moved aside earlier: when it has nowhere
+//!   left to move one to, it changes nothing and fails with
+//!   [`SettingsFailureCode::Unwritable`].
 //!
 //! The username is not set through these commands. `ubc-vpn connect` saves
 //! the one the user typed once a login with it has succeeded, and removes a
@@ -132,12 +135,11 @@ pub enum ResetReply {
     /// The settings are now the defaults.
     Reset {
         /// The name, inside the settings folder, of the file the old
-        /// settings were moved to. `None` when there was no settings file,
-        /// and so nothing to move.
-        kept: Option<String>,
+        /// settings were moved to.
+        kept: String,
     },
-    /// Nothing was changed: the settings file can be read, and the command
-    /// was not told to reset it all the same.
+    /// Nothing was changed. Either there is no settings file, or it can be
+    /// read and the command was not told to reset it all the same.
     NotNeeded,
 }
 
@@ -527,18 +529,17 @@ mod tests {
 
     #[test]
     fn reset_replies_have_a_stable_wire_format() {
-        let kept = Some("settings.json.damaged-1".to_string());
+        let kept = "settings.json.damaged-1".to_string();
         let lines = [
             (
                 ResetReply::Reset { kept },
                 "{\"type\":\"reset\",\"kept\":\"settings.json.damaged-1\"}\n",
             ),
-            (
-                ResetReply::Reset { kept: None },
-                "{\"type\":\"reset\",\"kept\":null}\n",
-            ),
             (ResetReply::NotNeeded, "{\"type\":\"not_needed\"}\n"),
         ];
+        // A reply always says where the old file went.
+        assert!(decode::<ResetReply>("{\"type\":\"reset\",\"kept\":null}").is_err());
+        assert!(decode::<ResetReply>("{\"type\":\"reset\"}").is_err());
         for (reply, line) in lines {
             assert_eq!(encode(&reply).unwrap(), line);
             assert_eq!(decode::<ResetReply>(line).unwrap(), reply);
