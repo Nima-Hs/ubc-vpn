@@ -182,8 +182,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::System::Console::{
-        COORD, GetNumberOfConsoleInputEvents, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT,
-        KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, ReadConsoleOutputCharacterW, WriteConsoleInputW,
+        COORD, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+        PeekConsoleInputW, ReadConsoleOutputCharacterW, WriteConsoleInputW,
     };
     use windows_sys::Win32::System::Threading::{CREATE_NEW_CONSOLE, DETACHED_PROCESS};
 
@@ -256,19 +256,9 @@ mod tests {
         quiet
     }
 
-    /// How many key events wait in the console.
-    fn waiting(input: &Handle) -> u32 {
-        let mut events = 0;
-        // SAFETY: `events` is a live integer and the handle is open.
-        let done = unsafe { GetNumberOfConsoleInputEvents(input.0, &mut events) };
-        assert_ne!(done, 0, "count the keys");
-        events
-    }
-
-    /// Puts all of `keys` in the console's queue in one call, so that they
-    /// are all there before the first of them is read.
-    fn type_keys(input: &Handle, keys: &str) {
-        let key = |unit| KEY_EVENT_RECORD {
+    /// The event a key makes in the console's queue.
+    fn key(unit: u16) -> INPUT_RECORD {
+        let key = KEY_EVENT_RECORD {
             bKeyDown: 1,
             wRepeatCount: 1,
             wVirtualKeyCode: 0,
@@ -276,13 +266,32 @@ mod tests {
             uChar: KEY_EVENT_RECORD_0 { UnicodeChar: unit },
             dwControlKeyState: 0,
         };
-        let record = |unit| INPUT_RECORD {
+        INPUT_RECORD {
             EventType: KEY_EVENT as u16,
-            Event: INPUT_RECORD_0 {
-                KeyEvent: key(unit),
-            },
-        };
-        let records: Vec<INPUT_RECORD> = keys.encode_utf16().map(record).collect();
+            Event: INPUT_RECORD_0 { KeyEvent: key },
+        }
+    }
+
+    /// How many keys wait in the console. Only keys: the console also puts
+    /// events of its own in the same queue whenever it likes, such as its
+    /// window gaining the focus. Those are nothing a shell could read as
+    /// text, and counting them made this test fail now and then.
+    fn waiting(input: &Handle) -> usize {
+        let mut events = vec![key(0); 4096];
+        let mut seen = 0;
+        // SAFETY: the pointer and length describe `events`, which the call
+        // fills without removing anything from the queue; `seen` is live.
+        let done = unsafe { PeekConsoleInputW(input.0, events.as_mut_ptr(), 4096, &mut seen) };
+        assert_ne!(done, 0, "look at the queue");
+        let keys = events[..seen as usize].iter();
+        keys.filter(|event| event.EventType == KEY_EVENT as u16)
+            .count()
+    }
+
+    /// Puts all of `keys` in the console's queue in one call, so that they
+    /// are all there before the first of them is read.
+    fn type_keys(input: &Handle, keys: &str) {
+        let records: Vec<INPUT_RECORD> = keys.encode_utf16().map(key).collect();
         let (count, mut written) = (records.len() as u32, 0);
         // SAFETY: the pointer and count describe `records`, which is live.
         let done = unsafe { WriteConsoleInputW(input.0, records.as_ptr(), count, &mut written) };
