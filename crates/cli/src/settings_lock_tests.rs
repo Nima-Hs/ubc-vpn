@@ -212,10 +212,18 @@ fn a_lock_that_cannot_be_had_does_not_stop_the_change() {
     };
     assert_eq!(with(|| Ok(Tried::Held(Box::new(())))), Ok(false));
     assert_eq!(with(|| Ok(Tried::Busy)), HELD);
+    // There is nothing to wait for then, so it does not wait: with a wait
+    // far longer than a loaded machine could take over one try, the answer
+    // still comes long before it is up.
     let no_locks = || Err(std::io::ErrorKind::Unsupported.into());
+    let long = Duration::from_secs(60);
     let started = Instant::now();
-    assert_eq!(with(no_locks), Ok(true));
-    assert!(started.elapsed() < SHORT, "there was nothing to wait for");
+    let unlocked = change_with(&dir, long, no_locks).map(|changing| changing.unlocked());
+    assert_eq!(unlocked, Ok(true));
+    assert!(
+        started.elapsed() < long / 4,
+        "there was nothing to wait for"
+    );
 
     // A try that is busy at first and then succeeds is tried again.
     let tries = AtomicUsize::new(0);

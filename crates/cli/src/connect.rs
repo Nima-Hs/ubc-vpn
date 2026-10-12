@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex};
 use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{
-    ClientKind, ConnectParams, ErrorCode, Event, RequestBody, ResponseBody,
+    AddLogParams, ClientKind, ConnectParams, ErrorCode, Event, LogText, MAX_ADDED_LOG_LINES,
+    RequestBody, ResponseBody,
 };
 use ubc_vpn_core::redact::{REDACTED, Secret};
 use ubc_vpn_core::settings::Settings;
@@ -324,15 +325,25 @@ pub(crate) fn start(
         return Err(busy());
     }
 
-    let mut typed = None;
+    let (mut typed, mut said) = (None, Vec::new());
     let name = saved.username.as_deref();
-    let logged_in = login(&*engine, &gateway, name, &mut typed, ask, cancel, err);
+    let asked = Asked {
+        username: name,
+        typed: &mut typed,
+        said: &mut said,
+    };
+    let logged_in = login(&*engine, &gateway, asked, ask, cancel, err);
     let Session {
         cookie,
         gateway_addr,
     } = match logged_in {
         Ok(session) => session,
         Err(stop) => {
+            // Why a login failed is what the log is most wanted for. A
+            // user who gave up is leaving, and is not kept waiting for it.
+            if stop.code != LoginErrorCode::Cancelled {
+                hand_over(&mut client, &said);
+            }
             // The gateway does not say which answer it refused. A saved
             // username may be the one, and nothing else lets the user
             // change it, so it is forgotten and asked for next time.
@@ -359,7 +370,11 @@ pub(crate) fn start(
     if !sending() {
         return Err(cancelled());
     }
-    client.request(RequestBody::Connect(params)).map_err(stop)?;
+    let asked = client.request(RequestBody::Connect(params));
+    // After the request, so that the service holds the cookie by now and
+    // removes it from these lines as well, should one have kept it.
+    hand_over(&mut client, &said);
+    asked.map_err(stop)?;
     // Only now, with the login good and the connect accepted, is a username
     // the user typed worth keeping.
     if let Some(typed) = typed {
@@ -397,19 +412,51 @@ fn saved(platform: &Platform) -> Result<Settings, Stop> {
     }
 }
 
+/// Gives the service what the login wrote, for its log: the lines this
+/// program printed, as it printed them, the last of them if there are more
+/// than one connection may add. A line too long to keep is left out with
+/// the marker. This never fails a connect: it stops at the first line the
+/// service does not take, and whatever broke shows at the next request.
+pub(crate) fn hand_over(client: &mut Client, said: &[String]) {
+    let said: Vec<&String> = said.iter().filter(|line| !line.trim().is_empty()).collect();
+    let from = said.len().saturating_sub(MAX_ADDED_LOG_LINES);
+    for line in &said[from..] {
+        let text = LogText::cleaned(line).unwrap_or_else(|_| LogText::left_out());
+        // Only what failed is printed, so only that is handed over.
+        let (level, text) = (ubc_vpn_core::protocol::LogLevel::Error, text.into());
+        let add = RequestBody::AddLog(AddLogParams { level, text });
+        if client.request(add).is_err() {
+            return;
+        }
+    }
+}
+
+/// What a login starts with and what it leaves behind.
+struct Asked<'a> {
+    /// The saved username, which answers that question for the user.
+    username: Option<&'a str>,
+    /// A username the user was asked for.
+    typed: &'a mut Option<Secret>,
+    /// The lines the login wrote, as they were printed.
+    said: &'a mut Vec<String>,
+}
+
 /// Logs in, asking the user what the gateway asks. A saved username answers
 /// the question for it; everything else is asked, and nothing is asked twice
-/// (the engine's [`Prompts`] sees to that). A username the user was asked
-/// for is left in `typed`.
+/// (the engine's [`Prompts`] sees to that).
 fn login(
     engine: &dyn LoginEngine,
     gateway: &Gateway,
-    username: Option<&str>,
-    typed: &mut Option<Secret>,
+    asked: Asked,
     ask: &mut dyn Ask,
     cancel: &Cancel,
     err: &mut dyn Write,
 ) -> Result<Session, Stop> {
+    let Asked {
+        username,
+        typed,
+        said,
+    } = asked;
     let lines = Arc::new(Mutex::new(Vec::new()));
     let kept = lines.clone();
     let keep = move |_, line: &str| kept.lock().unwrap().push(line.to_string());
@@ -439,7 +486,9 @@ fn login(
             Some(cookie) if !cookie.is_empty() => line.replace(cookie, REDACTED),
             _ => line.clone(),
         };
-        let _ = writeln!(err, "ubc-vpn: {}", clean(&line));
+        let line = clean(&line);
+        let _ = writeln!(err, "ubc-vpn: {line}");
+        said.push(line);
     }
     // A login that stopped at a question was given up by the user, unless
     // the one asking says otherwise.

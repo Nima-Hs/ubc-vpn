@@ -3,24 +3,28 @@
 //! fake.
 //!
 //! One file per job: `args` (the command line), `policy` (the policy file),
-//! `owner` (the state file), `logs` (the log buffer), `hub` (who is connected
-//! and what they are told), `server` (the channel), `session` (the connection
-//! state machine), `connect`, `verify` and `teardown` (its three steps).
+//! `owner` (the state file), `logs` (the log), `hub` (who is connected and
+//! what they are told), `queue` (what waits to be written to one of them),
+//! `server` (the channel), `diagnostics` (what the service says about
+//! itself), `session` (the connection state machine), `connect`, `verify`
+//! and `teardown` (its three steps).
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub mod args;
 mod connect;
+mod diagnostics;
 mod hub;
 mod logs;
 mod owner;
 pub mod policy;
+mod queue;
 mod server;
 mod session;
 mod teardown;
 mod verify;
 
-pub use logs::Logs;
+pub use logs::{CAPACITY as LOG_CAPACITY, LINGER, Logs};
 pub use server::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS, Service, Timeouts};
 
 /// Locks a mutex, carrying on after another thread panicked while holding it.

@@ -11,9 +11,10 @@
 
 use std::net::Ipv4Addr;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{ConnectParams, ErrorCode, ErrorInfo, is_plausible_gateway_addr};
@@ -22,7 +23,9 @@ use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
 use ubc_vpn_platform::{Dns, PhysicalNetwork, Platform, Routes};
 
+use crate::diagnostics::failure;
 use crate::hub::Hub;
+use crate::logs::Held;
 use crate::{Logs, lock};
 
 /// Builds the error a request is refused with.
@@ -47,7 +50,8 @@ struct Gate {
 }
 
 enum Command {
-    Connect(ConnectParams, Cancel),
+    /// With the hold that keeps its cookie out of the log.
+    Connect(ConnectParams, Cancel, Held),
     Disconnect,
     /// The tunnel with this number ended by itself.
     Ended(u64, TunnelEvent),
@@ -75,6 +79,9 @@ pub(crate) struct Machine {
     pub(crate) gateway: Option<Gateway>,
     pub(crate) logs: Logs,
     pub(crate) applied: Applied,
+    /// Keeps the cookie of the connection in hand out of the log, from the
+    /// moment its request is admitted until everything is torn down.
+    pub(crate) hidden: Option<Held>,
     /// Counts tunnels, so an ending is matched to the tunnel it came from.
     tunnels: u64,
     hub: Arc<Hub>,
@@ -89,6 +96,7 @@ pub(crate) struct Session {
     gate: Arc<Mutex<Gate>>,
     commands: Sender<Command>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    logs: Logs,
 }
 
 impl Session {
@@ -115,8 +123,9 @@ impl Session {
             dns: platform.dns.clone(),
             engine,
             gateway,
-            logs,
+            logs: logs.clone(),
             applied: Applied::default(),
+            hidden: None,
             tunnels: 0,
             hub,
             gate: gate.clone(),
@@ -129,6 +138,7 @@ impl Session {
             gate,
             commands,
             worker: Mutex::new(Some(worker)),
+            logs,
         })
     }
 
@@ -159,7 +169,10 @@ impl Session {
             phase: Phase::Connecting,
             cancel: Cancel::new(),
         };
-        self.send(Command::Connect(params, gate.cancel.clone()))
+        // Held from here on, before the request is anywhere a line could
+        // be written about it.
+        let hidden = self.logs.hold(&params.cookie);
+        self.send(Command::Connect(params, gate.cancel.clone(), hidden))
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
@@ -202,7 +215,17 @@ fn failed(code: ErrorCode, message: &str) -> ConnState {
 
 impl Machine {
     fn run(mut self, inbox: &Receiver<Command>) {
-        for command in inbox {
+        loop {
+            // While a cookie waits to be wiped, the wait for a command ends
+            // when its time is up, so that it is wiped with nothing asked.
+            let command = match self.logs.wipe() {
+                None => inbox.recv().ok(),
+                Some(wait) => match inbox.recv_timeout(wait + Duration::from_millis(1)) {
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    command => command.ok(),
+                },
+            };
+            let Some(command) = command else { break };
             if matches!(command, Command::Shutdown) {
                 break;
             }
@@ -216,7 +239,7 @@ impl Machine {
         // one runs the steps that need no memory of what was applied.
         if panic::catch_unwind(AssertUnwindSafe(|| self.teardown())).is_err() {
             self.logs
-                .push("teardown panicked at shutdown; trying again");
+                .error("teardown panicked at shutdown; trying again");
             let _ = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
         }
     }
@@ -226,8 +249,9 @@ impl Machine {
     /// the failure and takes requests again. Without this the routes would
     /// stay applied and the state would say `connecting` for ever.
     fn recover(&mut self) {
-        self.logs
-            .push("the worker panicked; tearing everything down");
+        // A bug that panics on every request is logged once, not every time.
+        let line = "the worker panicked; tearing everything down";
+        self.logs.error_about("panic", line);
         let torn_down = panic::catch_unwind(AssertUnwindSafe(|| self.teardown()));
         let message = match torn_down {
             Ok(true) => "Something went wrong inside the service. The connection was closed.",
@@ -235,14 +259,22 @@ impl Machine {
         };
         // The gate first: a client that hears `failed` may ask again at once.
         lock(&self.gate).phase = Phase::Idle;
-        self.hub.publish(failed(ErrorCode::Internal, message));
+        self.publish(failed(ErrorCode::Internal, message));
+    }
+
+    /// Tells the owner's connections the new state. A failure is also kept
+    /// for the diagnostics, cleaned here and now, while the service still
+    /// holds what the failed connection's lines must not show.
+    fn publish(&self, state: ConnState) {
+        let failure = failure(&state, &self.logs);
+        self.hub.publish(state, failure);
     }
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Connect(params, cancel) => self.connect(params, &cancel),
+            Command::Connect(params, cancel, hidden) => self.connect(params, &cancel, hidden),
             Command::Disconnect => {
-                self.hub.publish(ConnState::Disconnecting);
+                self.publish(ConnState::Disconnecting);
                 self.finish(ConnState::Disconnected);
                 lock(&self.gate).phase = Phase::Idle;
             }
@@ -273,9 +305,12 @@ impl Machine {
         }
     }
 
-    fn connect(&mut self, params: ConnectParams, cancel: &Cancel) {
-        self.hub.publish(ConnState::Connecting);
-        let result = match self.teardown() {
+    fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
+        self.publish(ConnState::Connecting);
+        let clean = self.teardown();
+        // After the teardown, which lets go of the hold before this one.
+        self.hidden = Some(hidden);
+        let result = match clean {
             true => self.set_up(params, cancel),
             false => Err((ErrorCode::Internal, LEFT_BEHIND.to_string())),
         };
@@ -297,7 +332,7 @@ impl Machine {
                 self.teardown();
             }
             // Reached only after `set_up` verified everything.
-            Ok(tunnel) => self.hub.publish(ConnState::Connected { tunnel }),
+            Ok(tunnel) => self.publish(ConnState::Connected { tunnel }),
             Err((ErrorCode::LoginNeeded, _)) => self.finish(ConnState::LoginNeeded),
             Err((code, message)) => self.finish(ConnState::Failed { code, message }),
         }
@@ -312,7 +347,7 @@ impl Machine {
         } else {
             failed(ErrorCode::Internal, LEFT_BEHIND)
         };
-        self.hub.publish(state);
+        self.publish(state);
     }
 
     /// Passes the tunnel's one ending on to the worker.
@@ -329,3 +364,7 @@ impl Machine {
 }
 
 const LEFT_BEHIND: &str = "Some routes or DNS settings could not be removed.";
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

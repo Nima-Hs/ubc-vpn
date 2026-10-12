@@ -100,8 +100,10 @@ jobs:
             folders=$( (ls -d "$LOCALAPPDATA/Temp"/ubcvpn-sys-* 2>/dev/null || true) | wc -l)
           else
             running=$( (pgrep -x ubc-vpn-service || true) | wc -l)
-            # A connect, or the shell an interrupt test ran it under.
-            shells=$( (pgrep -f 'ubc-vpn --dev connect' || true) | wc -l)
+            # A connect, or the shell an interrupt test ran it under: the
+            # shell's script names the program as "$0", so only the
+            # arguments are in both command lines.
+            shells=$( (pgrep -f -- '--dev connect' || true) | wc -l)
             running=$((running + shells))
             folders=$( (ls -d /tmp/ubcvpn-sys-* 2>/dev/null || true) | wc -l)
           fi

@@ -738,3 +738,60 @@ fn messages_are_not_read_faster_than_the_app_takes_them() {
     assert!((2..100).contains(&read), "{read} messages were read");
     assert_eq!(status, 1, "the service went away");
 }
+
+// Security rule: no secret reaches the log the app shows. A made-up
+// password, one-time code and cookie go through a login whose library
+// writes each of them in a line that is printed, with no word to mark it
+// and without registering it. The lines are handed to the service, and the
+// app, watching and then reading the log through the bridge, finds the
+// lines and none of the three.
+#[test]
+fn no_secret_reaches_the_app_through_the_log() {
+    use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist, pin};
+    use ubc_vpn_core::login::PromptKind;
+    use ubc_vpn_core::redact::Secret;
+    use ubc_vpn_engine::fake::{FakeEngine, Script};
+
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    let mut code = script.form[1].clone();
+    (code.0.kind, code.1) = (PromptKind::Code, Secret::new(CODE));
+    script.form.push(code);
+    script.leaks = true;
+    scene.gateway = FakeEngine::new(script);
+
+    let bridge = start(&scene.rig);
+    bridge.say(r#"{"id":1,"body":{"method":"claim"}}"#);
+    bridge.say(r#"{"id":2,"body":{"method":"watch_logs","params":{"on":true}}}"#);
+    let accepted = |line| is_response(line, 2, Ok(ResponseBody::Accepted));
+    assert!(bridge.lines(4).iter().any(accepted));
+
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    let (status, _, err) = scene.connect(&mut typist);
+    assert_eq!(status, 0, "{err}");
+    bridge.say(r#"{"id":3,"body":{"method":"logs","params":{"after":null}}}"#);
+
+    // Three answers and the cookie, each in a line of its own: four lines
+    // as events, and the same four in the page.
+    let login_lines = |text: &str| text.matches(r#""source":"login""#).count();
+    let started = Instant::now();
+    let seen = loop {
+        let text = bridge.out.text();
+        if login_lines(&text) >= 8 && text.contains(r#""id":3"#) {
+            break text;
+        }
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_secs(10), "got only: {text}");
+        thread::sleep(Duration::from_millis(5));
+    };
+    let lines = |text: &str| seen.matches(&format!(r#""text":"{text}""#)).count();
+    assert_eq!(
+        (lines("> [redacted]"), lines("< [redacted]")),
+        (6, 2),
+        "{seen}"
+    );
+    let shown = seen.clone() + &bridge.err.text();
+    for secret in [PASSWORD, CODE, COOKIE] {
+        assert!(!shown.contains(secret), "{secret} reached the app");
+    }
+}

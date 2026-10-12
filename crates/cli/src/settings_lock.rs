@@ -38,7 +38,7 @@
 //! program runs one command and ends, so nothing waits behind it.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
@@ -93,7 +93,8 @@ pub(crate) enum Tried {
 pub(crate) fn change(dir: &Path) -> Result<Changing, SettingsFailureCode> {
     let changing = change_within(dir, WAIT)?;
     if changing.unlocked() {
-        eprintln!("ubc-vpn: {UNLOCKED}");
+        // A closed standard error must not end the program over a notice.
+        let _ = writeln!(io::stderr(), "ubc-vpn: {UNLOCKED}");
     }
     Ok(changing)
 }

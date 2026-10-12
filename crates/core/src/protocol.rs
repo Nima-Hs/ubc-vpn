@@ -41,12 +41,13 @@
 //!   nothing, turn it on first, then fetch with `logs`, and drop whatever
 //!   arrives twice, by `seq`.
 //! - A log event is not a promise. When a client is slow to take its
-//!   events the service drops log events for it, never state changes, and
-//!   never closes the connection for it. The gap shows in `seq`, and
-//!   `logs` fills it.
+//!   events the service drops log events for it, never state changes. No
+//!   number of log events waiting for a client closes its connection; a
+//!   write that fails after the write limit closes it, as for any message.
+//!   The gap shows in `seq`, and `logs` fills it.
 //! - `add_log` lets the command-line client hand over what its login
-//!   wrote. The service cleans it as it cleans its own lines and keeps it
-//!   as [`LogSource::Login`]. Such lines are kept apart from the service's
+//!   wrote. The service removes secrets from it as it does from its own
+//!   lines, and keeps it as [`LogSource::Login`]. Such lines are kept apart from the service's
 //!   own, [`KEPT_ADDED_LOG_LINES`] of them, so no client can push a line
 //!   of the service's out; and one connection may add
 //!   [`MAX_ADDED_LOG_LINES`]. A line that is kept is answered with

@@ -526,6 +526,57 @@ fn the_wait_for_the_outcome_has_an_end() {
     assert!(waited < std::time::Duration::from_secs(3), "{waited:?}");
 }
 
+// Security rule: the login's lines are handed over after the connect
+// request, never before it. By then the service holds the cookie, so its
+// own removal covers these lines as well as the client's does.
+#[test]
+fn the_logins_lines_follow_the_connect_request() {
+    use std::sync::{Arc, Mutex};
+    use ubc_vpn_core::protocol::{
+        Event, Outcome, Request, RequestBody, Response, ResponseBody, ServerMessage, decode,
+    };
+
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    script.leaks = true;
+    scene.gateway = FakeEngine::new(script);
+    scene.service = None;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let service = crate::tests::scripted(&scene.rig, move |conn| {
+        crate::tests::greet(conn);
+        while let Ok(Some(line)) = conn.read_line() {
+            let Request { id, body } = decode(&line).unwrap();
+            let (name, answer, then) = match body {
+                RequestBody::Status => {
+                    let idle = ResponseBody::Status(ConnState::Disconnected);
+                    ("status", idle, None)
+                }
+                // Accepted, and it ends at once, so the client is done soon.
+                RequestBody::Connect(_) => {
+                    let ends = [ConnState::Connecting, ConnState::LoginNeeded];
+                    ("connect", ResponseBody::Accepted, Some(ends))
+                }
+                RequestBody::AddLog(_) => ("add_log", ResponseBody::Accepted, None),
+                _ => ("another", ResponseBody::Accepted, None),
+            };
+            seen.lock().unwrap().push(name);
+            let outcome = Outcome::Ok(answer);
+            crate::tests::tell(conn, &ServerMessage::Response(Response { id, outcome }));
+            for state in then.into_iter().flatten() {
+                crate::tests::tell(conn, &ServerMessage::Event(Event::StateChanged(state)));
+            }
+        }
+    });
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    service.join().unwrap();
+    assert_eq!(code, LOGIN_REFUSED, "{err}");
+    // Two answers and the cookie, each in a line of its own.
+    let order = ["status", "connect", "add_log", "add_log", "add_log"];
+    assert_eq!(*asked.lock().unwrap(), order);
+}
+
 /// A scene whose service takes a new login after a log-off, with these
 /// settings saved.
 fn returning(settings: &str) -> Scene {
@@ -719,4 +770,63 @@ fn a_username_that_could_mislead_is_used_but_not_kept() {
         assert_eq!((code, err.as_str()), (0, ""), "{odd:?}");
         assert_eq!(settings_text(&scene), before, "{odd:?}");
     }
+}
+
+// Why a login failed is in the service's log afterwards, where the app can
+// show it: the same line as was printed.
+#[test]
+fn what_a_failed_login_wrote_is_handed_to_the_service() {
+    let scene = Scene::usual();
+    scene.gateway.set_reachable(false);
+    let (code, _, err) = scene.connect(&mut Typist::default());
+    assert_eq!(code, FAILED, "{err}");
+    assert!(
+        err.contains("ubc-vpn: Failed to connect to the gateway\n"),
+        "{err}"
+    );
+    let logs = scene.service.as_ref().unwrap().logs();
+    assert_eq!(logs, ["Failed to connect to the gateway"]);
+}
+
+// A user who gave up is leaving: the login's lines are printed, since they
+// were written, but the program does not stay to hand them over. The
+// careless gateway writes a line for the username before the password is
+// asked for, so there is a line that could have been handed over.
+#[test]
+fn a_login_the_user_gave_up_hands_nothing_over() {
+    let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
+    let mut script = Script::new(pin());
+    script.leaks = true;
+    scene.gateway = FakeEngine::new(script);
+    let mut typist = Typist::typing(&[Some("alice"), None]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!(code, CANCELLED, "{err}");
+    assert!(err.contains("ubc-vpn: > [redacted]\n"), "{err}");
+    let logs = scene.service.as_ref().unwrap().logs();
+    assert_eq!(logs, [""; 0], "a line was handed over");
+}
+
+// No more is handed over than one connection may add: the last lines, which
+// are the nearest to how it ended. A blank line is passed over, and a line
+// too long to keep is not cut: the marker goes in its place.
+#[test]
+fn only_the_last_lines_are_handed_over_and_none_is_cut() {
+    use ubc_vpn_core::protocol::{ClientKind, LogText, MAX_ADDED_LOG_LINES};
+
+    let scene = Scene::usual();
+    let platform = scene.rig.fake.platform(&scene.rig.root);
+    let (transport, name) = (&*platform.transport, &platform.paths.channel_name);
+    let mut client =
+        crate::client::Client::connect_within(transport, name, ClientKind::Cli, brief()).unwrap();
+    client.claim_if_unowned().unwrap();
+    let mut said: Vec<String> = (0..MAX_ADDED_LOG_LINES + 3)
+        .map(|n| format!("line {n}"))
+        .collect();
+    said.extend(["  ".to_string(), "x".repeat(600)]);
+    crate::connect::hand_over(&mut client, &said);
+    let logs = scene.service.as_ref().unwrap().logs();
+    assert_eq!(logs.len(), MAX_ADDED_LOG_LINES);
+    assert_eq!(logs[0], "line 4");
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 2], "line 22");
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 1], LogText::LEFT_OUT);
 }

@@ -40,9 +40,11 @@ impl Machine {
         let mut applied = std::mem::take(&mut self.applied);
         let mut tunnel = Closing(applied.tunnel.take());
         let logs = self.logs.clone();
-        let step = |what: &str, result: Result<()>| {
+        // A step that keeps failing the same way is logged once, so that no
+        // number of requests can fill the log with it.
+        let step = |what: &'static str, result: Result<()>| {
             if let Err(error) = &result {
-                logs.push(&format!("teardown: {what} failed: {error}"));
+                logs.error_about(what, &format!("teardown: {what} failed: {error}"));
             }
             result.is_ok()
         };
@@ -58,6 +60,12 @@ impl Machine {
             step("removing the gateway route", removed);
         }
         let routes_clear = step("removing all routes", self.routes.remove_all());
+        // The tunnel is closed and the cookie has no further use. It is
+        // left to the cleaning of the log for a short time more, because
+        // the client's lines about a connect that failed arrive just now.
+        if let Some(hidden) = self.hidden.take() {
+            hidden.linger();
+        }
         dns_clear && routes_clear
     }
 }

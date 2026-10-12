@@ -6,17 +6,18 @@
 //! the lock a state is only put in a connection's queue; a thread of the
 //! connection's own writes it. So a client that stops reading holds up its
 //! own events until the write limit closes it, and nobody else's. The queue
-//! is short: a client that falls that far behind is closed, not buffered for.
+//! is short: a client that falls that far behind with states is closed, not
+//! buffered for. Log lines are different: see [`crate::queue`].
 
-use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use ubc_vpn_core::protocol::{Event, ServerMessage, encode};
+use ubc_vpn_core::protocol::{LastError, LogLine, ServerMessage, encode};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::{Connection, UserId};
 
 use crate::lock;
+use crate::queue::{Queue, queue};
 
 /// The shared view of clients and connection state.
 pub(crate) struct Hub(Mutex<Inner>);
@@ -24,6 +25,8 @@ pub(crate) struct Hub(Mutex<Inner>);
 struct Inner {
     owner: Option<UserId>,
     state: ConnState,
+    /// The last failure of a connection in this run.
+    last_error: Option<LastError>,
     clients: Vec<Client>,
 }
 
@@ -32,13 +35,10 @@ struct Client {
     conn: Arc<Connection>,
     /// Where its events are queued, once it receives any. Only ever set
     /// for the owner.
-    events: Option<SyncSender<ConnState>>,
+    events: Option<Queue>,
+    /// Whether it asked to be sent log lines as they come.
+    watching: bool,
 }
-
-/// How many states may wait for one connection. States are few, a handful
-/// for a connect and a disconnect, so a client this far behind is not
-/// reading.
-pub(crate) const EVENT_QUEUE: usize = 16;
 
 /// Sends one message. A failed write has already closed the connection.
 pub(crate) fn send(conn: &Connection, message: &ServerMessage) -> bool {
@@ -50,22 +50,23 @@ pub(crate) fn send(conn: &Connection, message: &ServerMessage) -> bool {
 /// itself: it starts the connection's writer and queues the state for it.
 fn subscribe(client: &mut Client, state: &ConnState) {
     let _ = client.conn.set_read_timeout(None);
-    let (events, queued) = mpsc::sync_channel(EVENT_QUEUE);
+    let (events, queued) = queue();
     let conn = client.conn.clone();
-    // Ends when the hub forgets the connection or a state cannot be sent.
+    // Ends when the hub forgets the connection or an event cannot be sent.
     // The connection is then closed, whatever the reason: one that hears
     // nothing more must not stay open as if nothing had happened.
     let write = move || {
-        let event = |state| ServerMessage::Event(Event::StateChanged(state));
-        let _ = queued
-            .into_iter()
-            .try_for_each(|state| send(&conn, &event(state)).then_some(()));
+        while let Some(event) = queued.next() {
+            if !send(&conn, &ServerMessage::Event(event)) {
+                break;
+            }
+        }
         conn.close();
     };
     if thread::Builder::new().spawn(write).is_err() {
         return client.conn.close();
     }
-    let _ = events.try_send(state.clone());
+    events.state(state.clone());
     client.events = Some(events);
 }
 
@@ -74,6 +75,7 @@ impl Hub {
         Self(Mutex::new(Inner {
             owner,
             state: ConnState::Disconnected,
+            last_error: None,
             clients: Vec::new(),
         }))
     }
@@ -86,6 +88,11 @@ impl Hub {
         lock(&self.0).state.clone()
     }
 
+    /// The last failure of a connection in this run, if there was one.
+    pub(crate) fn last_error(&self) -> Option<LastError> {
+        lock(&self.0).last_error.clone()
+    }
+
     /// Registers a connection whose handshake is done. The owner's is told
     /// the current state at once; anyone else's is told nothing.
     pub(crate) fn add(&self, user: &UserId, conn: &Arc<Connection>) {
@@ -95,6 +102,7 @@ impl Hub {
             user,
             conn,
             events: None,
+            watching: false,
         };
         if inner.owner.as_ref() == Some(&client.user) {
             subscribe(&mut client, &inner.state);
@@ -135,20 +143,44 @@ impl Hub {
 
     /// Records the new state and queues it for every connection of the
     /// owner, in the order states are published. A connection whose queue
-    /// is full is closed.
-    pub(crate) fn publish(&self, state: ConnState) {
+    /// is full is closed. `failure` is what to remember of a state that is
+    /// a failure, already cleaned.
+    pub(crate) fn publish(&self, state: ConnState, failure: Option<LastError>) {
         let mut inner = lock(&self.0);
         for client in &mut inner.clients {
             let queued = client
                 .events
                 .as_ref()
-                .map(|events| events.try_send(state.clone()));
-            if matches!(queued, Some(Err(_))) {
+                .map(|events| events.state(state.clone()));
+            if queued == Some(false) {
                 client.events = None;
                 client.conn.close();
             }
         }
+        if failure.is_some() {
+            inner.last_error = failure;
+        }
         inner.state = state;
+    }
+
+    /// Turns log events on or off for one connection. Only a connection
+    /// that is sent events can have them, and only the owner's is.
+    pub(crate) fn watch(&self, conn: &Arc<Connection>, on: bool) {
+        let mut inner = lock(&self.0);
+        let this = |client: &&mut Client| Arc::ptr_eq(&client.conn, conn);
+        if let Some(client) = inner.clients.iter_mut().find(this) {
+            client.watching = on && client.events.is_some();
+        }
+    }
+
+    /// Queues a log line for every connection that asked for them. One with
+    /// no room for it does not get it; nothing is closed and nothing waits.
+    pub(crate) fn log(&self, line: &LogLine) {
+        for client in lock(&self.0).clients.iter().filter(|c| c.watching) {
+            if let Some(events) = &client.events {
+                events.log(line);
+            }
+        }
     }
 
     pub(crate) fn close_all(&self) {
@@ -166,6 +198,7 @@ mod tests {
     use ubc_vpn_platform::{RawConnection, Result};
 
     use super::*;
+    use crate::queue::{EVENT_QUEUE, LOG_QUEUE};
 
     /// The far end of a connection, which either takes every write or takes
     /// none, and shows whether the service closed it.
@@ -247,17 +280,51 @@ mod tests {
         far.until("a write", |far| far.holding_a_write);
         let started = Instant::now();
         for _ in 0..EVENT_QUEUE {
-            hub.publish(ConnState::Connecting);
+            hub.publish(ConnState::Connecting, None);
         }
         assert!(
             !far.state().closed,
             "a full queue is still within the limit"
         );
-        hub.publish(ConnState::Disconnected);
+        hub.publish(ConnState::Disconnected, None);
         assert!(far.state().closed, "one state too many closes it");
         assert_eq!(hub.state(), ConnState::Disconnected);
         let took = started.elapsed();
         assert!(took < Duration::from_secs(2), "publishing waited: {took:?}");
+    }
+
+    // Security rule: log lines never close a connection and never cost it a
+    // state, however many there are and however slow the client is. Those
+    // there is no room for are dropped, and logging never waits.
+    #[test]
+    fn log_lines_for_a_slow_client_are_dropped_and_nothing_else_happens() {
+        use ubc_vpn_core::protocol::{LogLevel, LogSource, LogText};
+        let far = Far::default();
+        far.state().reads_nothing = true;
+        let alice: UserId = "alice".parse().unwrap();
+        let hub = Hub::new(Some(alice.clone()));
+        let conn = Arc::new(Connection::new(Box::new(far.clone())));
+        hub.add(&alice, &conn);
+        hub.watch(&conn, true);
+        far.until("a write", |far| far.holding_a_write);
+        let started = Instant::now();
+        for seq in 1..=10 * LOG_QUEUE as u64 {
+            hub.log(&LogLine {
+                seq,
+                at_unix_ms: 0,
+                level: LogLevel::Info,
+                source: LogSource::Service,
+                text: LogText::left_out(),
+            });
+        }
+        assert!(!far.state().closed, "log lines closed the connection");
+        // Every state still has its place.
+        for _ in 0..EVENT_QUEUE {
+            hub.publish(ConnState::Connecting, None);
+        }
+        assert!(!far.state().closed, "log lines took the states' room");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(2), "logging waited: {took:?}");
     }
 
     // A state too long to send must not leave the client connected and
@@ -267,7 +334,7 @@ mod tests {
         let far = Far::default();
         let hub = owned(&far);
         let (code, message) = (ErrorCode::Internal, "x".repeat(70_000));
-        hub.publish(ConnState::Failed { code, message });
+        hub.publish(ConnState::Failed { code, message }, None);
         far.until("the connection is closed", |far| far.closed);
     }
 
