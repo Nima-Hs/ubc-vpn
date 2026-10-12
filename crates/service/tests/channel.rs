@@ -389,3 +389,34 @@ fn connect_and_disconnect_say_they_are_not_available_yet() {
     assert!(alice.lines[3].contains("Disconnecting is not available"));
     assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
 }
+
+/// Makes `link` a symbolic link to the file `target`, where the OS and the
+/// user's rights allow it.
+fn link_to_file(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_file(target, link);
+}
+
+// Security rule: the state file is never written through a link. A link at
+// the partial file's name is replaced, and what it pointed at is untouched.
+#[test]
+fn the_owner_is_never_written_through_a_link() {
+    let rig = rig();
+    let state = rig.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let target = rig.root.join("someone-elses-file");
+    std::fs::write(&target, "precious").unwrap();
+    if let Err(error) = link_to_file(&target, &state.join("state.json.tmp")) {
+        // Windows lets only an admin, or anyone in Developer Mode, make one.
+        eprintln!("SKIPPED the_owner_is_never_written_through_a_link: no link ({error})");
+        return;
+    }
+    let _alice = rig.owner();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+    let stored = state.join("state.json");
+    assert!(std::fs::symlink_metadata(&stored).unwrap().is_file());
+    let owner = std::fs::read_to_string(stored).unwrap();
+    assert_eq!(owner, r#"{"owner":"alice"}"#);
+}

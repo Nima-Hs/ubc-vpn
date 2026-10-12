@@ -161,17 +161,19 @@ impl Service {
         self.shared.logs.lines()
     }
 
-    /// Serves until accepting ends. That is an error unless the channel was
-    /// closed on purpose: a service that no longer accepts must not look
-    /// healthy.
-    pub fn wait(mut self) -> Result<(), String> {
-        self.join()
+    /// Serves until accepting ends, and returns why that is a failure. It
+    /// always is one: nothing closes the channel on purpose while the
+    /// caller waits here, so a service that returns from this has stopped
+    /// serving and must not look healthy.
+    pub fn wait(mut self) -> String {
+        self.join();
+        "The service stopped accepting connections unexpectedly.".to_string()
     }
 
-    fn join(&mut self) -> Result<(), String> {
-        let ended = self.accepting.take().map(JoinHandle::join);
-        let stopped = |_| "The service stopped accepting connections unexpectedly.".to_string();
-        ended.unwrap_or(Ok(())).map_err(stopped)
+    fn join(&mut self) {
+        if let Some(accepting) = self.accepting.take() {
+            let _ = accepting.join();
+        }
     }
 }
 
@@ -179,7 +181,7 @@ impl Drop for Service {
     /// Stops accepting, tears the tunnel down and closes every connection.
     fn drop(&mut self) {
         self.shared.listener.close();
-        let _ = self.join();
+        self.join();
         self.shared.session.stop();
         self.shared.hub.close_all();
     }

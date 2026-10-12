@@ -25,7 +25,7 @@ fn run() -> Result<(), String> {
     }
     let service = Service::start(platform(mode)?, Timeouts::default())?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
-    service.wait()
+    Err(service.wait())
 }
 
 fn platform(mode: Run) -> Result<Platform, String> {

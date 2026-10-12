@@ -39,15 +39,15 @@ pub(crate) fn save(dir: &Path, owner: &UserId) -> Result<(), String> {
     let write = || {
         fs::create_dir_all(dir)?;
         let partial = dir.join(PARTIAL);
-        // A partial file left by a crash is removed. Anything else at that
-        // name, a link above all, is not written through.
-        match fs::symlink_metadata(&partial) {
-            Ok(found) if found.is_file() => fs::remove_file(&partial)?,
-            Ok(_) => return Err(io::Error::other("the partial state file is not a file")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        // Whatever is at the partial file's name is removed first: a file a
+        // crash left, or a link someone put there. Removing a link removes
+        // the link and leaves what it points at alone.
+        match fs::remove_file(&partial) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
         }
-        // `create_new` fails if anything appeared there in the meantime.
+        // `create_new` never opens what is already there, so nothing that
+        // appears at the name in the meantime is written through either.
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
