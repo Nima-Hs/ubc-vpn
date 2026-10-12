@@ -28,7 +28,9 @@ use ubc_vpn_engine::{
 };
 use ubc_vpn_platform::Platform;
 
-use crate::client::{Client, ClientError};
+use std::time::Instant;
+
+use crate::client::{Client, ClientError, Limits};
 use crate::{FAILED, clean, describe, explain, say, settings};
 
 /// The VPN is connected, or a connect or disconnect is in progress.
@@ -76,20 +78,22 @@ pub fn connect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
+    limits: Limits,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
-    let ended = try_connect(platform, engines, ask, err);
+    let ended = try_connect(platform, engines, ask, limits, err);
     report(ended, &ConnState::Connecting, out, err)
 }
 
 /// Runs `disconnect` and returns the exit status.
 pub fn disconnect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    limits: Limits,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> u8 {
-    let ended = service(platform).and_then(|mut client| {
+    let ended = service(platform, limits).and_then(|mut client| {
         client.request(RequestBody::Disconnect).map_err(stop)?;
         follow(&mut client, &ConnState::Disconnecting)
     });
@@ -120,14 +124,18 @@ fn report(
 }
 
 /// Connects to the service as its owner, claiming it on first use.
-fn service(platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>) -> Result<Client, Stop> {
+fn service(
+    platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    limits: Limits,
+) -> Result<Client, Stop> {
     let platform = platform().map_err(|e| stop(e.into()))?;
-    owner(&platform)
+    owner(&platform, limits)
 }
 
-fn owner(platform: &Platform) -> Result<Client, Stop> {
-    let name = &platform.paths.channel_name;
-    let mut client = Client::connect(&*platform.transport, name, ClientKind::Cli).map_err(stop)?;
+fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
+    let (transport, name) = (&*platform.transport, &platform.paths.channel_name);
+    let connected = Client::connect_within(transport, name, ClientKind::Cli, limits);
+    let mut client = connected.map_err(stop)?;
     client.claim_if_unowned().map_err(stop)?;
     Ok(client)
 }
@@ -136,6 +144,7 @@ fn try_connect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
+    limits: Limits,
     err: &mut dyn Write,
 ) -> Result<ConnState, Stop> {
     let failed = |message: &str| (FAILED, message.to_string());
@@ -156,7 +165,7 @@ fn try_connect(
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
         return Err((FAILED, message));
     }
-    let mut client = owner(&platform)?;
+    let mut client = owner(&platform, limits)?;
     let now = client.request(RequestBody::Status).map_err(stop)?;
     let idle = [
         ResponseBody::Status(ConnState::Disconnected),
@@ -230,12 +239,14 @@ fn login(
     })
 }
 
-/// Waits for the state the service ends in, after it has reported `during`.
-/// States from before the request are passed over.
+/// Waits for the state the service ends in, after it has reported `during`,
+/// for no longer than [`Limits::outcome`]. States from before the request
+/// are passed over.
 fn follow(client: &mut Client, during: &ConnState) -> Result<ConnState, Stop> {
+    let deadline = Instant::now() + client.limits().outcome;
     let mut started = false;
     loop {
-        let Event::StateChanged(state) = client.next_event().map_err(stop)?;
+        let Event::StateChanged(state) = client.next_event(Some(deadline)).map_err(stop)?;
         match (state == *during, started) {
             (true, _) => started = true,
             (false, true) => return Ok(state),

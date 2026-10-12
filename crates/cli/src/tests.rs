@@ -35,7 +35,11 @@ impl Rig {
 
     pub(crate) fn service(&self) -> Service {
         let key = format!("pin-sha256:{}=", "A".repeat(43));
-        let engine = FakeEngine::new(Script::new(key.try_into().unwrap()));
+        self.service_on(FakeEngine::new(Script::new(key.try_into().unwrap())))
+    }
+
+    /// A service whose tunnels are opened by `engine`.
+    pub(crate) fn service_on(&self, engine: FakeEngine) -> Service {
         let platform = self.fake.platform(&self.root);
         Service::start(platform, Arc::new(engine), Timeouts::default()).unwrap()
     }
@@ -252,9 +256,9 @@ fn responses_are_matched_by_id_and_events_are_kept() {
     assert_eq!(client.request(RequestBody::Status), Ok(status));
     service.join().unwrap();
     let kept = Event::StateChanged(ConnState::Connecting);
-    assert_eq!(client.next_event(), Ok(kept));
+    assert_eq!(client.next_event(None), Ok(kept));
     // Nothing more was queued, and the service has gone.
-    assert!(matches!(client.next_event(), Err(ClientError::Lost(_))));
+    assert!(matches!(client.next_event(None), Err(ClientError::Lost(_))));
 }
 
 /// How long a pretend service keeps going when the client does not hang up.
@@ -501,7 +505,7 @@ fn events_are_not_kept_without_end() {
     let answer = asking.request(RequestBody::Status);
     assert!(gave_up(&answer, started), "{answer:?}");
     // What was kept is still there for whoever wants it.
-    let kept = (0..5).filter(|_| asking.next_event().is_ok()).count();
+    let kept = (0..5).filter(|_| asking.next_event(None).is_ok()).count();
     assert_eq!(kept, 5);
     drop(asking);
     flood.join().unwrap();

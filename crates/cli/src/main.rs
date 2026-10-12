@@ -164,7 +164,8 @@ fn main() -> ExitCode {
     }
     if args == ["connect"] {
         let engines = |policy: &Policy| login_engine(dev, policy);
-        let status = connect::connect(&chosen, &engines, &mut NoTerminalYet, &mut out, &mut err);
+        let (mut ask, limits) = (NoTerminalYet, client::Limits::default());
+        let status = connect::connect(&chosen, &engines, &mut ask, limits, &mut out, &mut err);
         return ExitCode::from(status);
     }
     ExitCode::from(run(args, &chosen, &mut out, &mut err))
@@ -181,7 +182,9 @@ fn run(
     let json = match args {
         ["help" | "--help" | "-h"] => return say(out, HELP, 0),
         ["version" | "--version" | "-V"] => return say(out, &format!("ubc-vpn {VERSION}"), 0),
-        ["disconnect"] => return connect::disconnect(platform, out, err),
+        ["disconnect"] => {
+            return connect::disconnect(platform, client::Limits::default(), out, err);
+        }
         ["status"] => false,
         ["status", "--json"] => true,
         _ => return say(err, HELP, USAGE),

@@ -35,6 +35,10 @@ pub struct Limits {
     /// long time must take them between requests, or the cap will end a
     /// later request.
     pub kept_events: usize,
+    /// How long a connect or a disconnect may take, once the service has
+    /// accepted it, to reach the state it ends in. The service always
+    /// reports one; this is for a service that has stopped.
+    pub outcome: Duration,
 }
 
 impl Default for Limits {
@@ -43,6 +47,7 @@ impl Default for Limits {
             answer: Duration::from_secs(10),
             write: Duration::from_secs(10),
             kept_events: 64,
+            outcome: Duration::from_secs(120),
         }
     }
 }
@@ -138,7 +143,22 @@ impl Client {
         name: &str,
         kind: ClientKind,
     ) -> Result<Self, ClientError> {
-        Self::over(transport.connect(name)?, kind, Limits::default())
+        Self::connect_within(transport, name, kind, Limits::default())
+    }
+
+    /// The same, with limits of the caller's choosing.
+    pub fn connect_within(
+        transport: &dyn Transport,
+        name: &str,
+        kind: ClientKind,
+        limits: Limits,
+    ) -> Result<Self, ClientError> {
+        Self::over(transport.connect(name)?, kind, limits)
+    }
+
+    /// The limits this client was given.
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// Says hello on a connection that is already open.
@@ -195,14 +215,15 @@ impl Client {
     }
 
     /// The next event: one kept while an answer was awaited, or else the
-    /// next to arrive, waited for as long as it takes.
-    pub fn next_event(&mut self) -> Result<Event, ClientError> {
+    /// next to arrive, waited for until `deadline`, or for as long as it
+    /// takes without one.
+    pub fn next_event(&mut self, deadline: Option<Instant>) -> Result<Event, ClientError> {
         loop {
             if let Some(event) = self.events.pop_front() {
                 return Ok(event);
             }
             // An answer nobody waits for any more is skipped, as in `request`.
-            if let ServerMessage::Event(event) = decode(&read_line(&self.conn, None)?)? {
+            if let ServerMessage::Event(event) = decode(&read_line(&self.conn, deadline)?)? {
                 return Ok(event);
             }
         }

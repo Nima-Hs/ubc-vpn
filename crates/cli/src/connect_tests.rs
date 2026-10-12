@@ -13,6 +13,7 @@ use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Op;
 use ubc_vpn_service::Service;
 
+use crate::client::Limits;
 use crate::connect::{Ask, BUSY, CANCELLED, LOGIN_REFUSED, connect, disconnect};
 use crate::tests::Rig;
 use crate::{FAILED, NOT_RUNNING};
@@ -58,6 +59,15 @@ struct Scene {
     service: Option<Service>,
 }
 
+/// A short wait for the outcome, so that a connect whose outcome never
+/// comes fails its test soon and does not hang it.
+fn brief() -> Limits {
+    Limits {
+        outcome: std::time::Duration::from_secs(5),
+        ..Limits::default()
+    }
+}
+
 fn pin() -> ubc_vpn_core::policy::Pin {
     format!("pin-sha256:{}=", "A".repeat(43))
         .try_into()
@@ -101,7 +111,7 @@ impl Scene {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
         let engines = |_: &Policy| Some(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = connect(&platform, &engines, typist, &mut out, &mut err);
+        let code = connect(&platform, &engines, typist, brief(), &mut out, &mut err);
         let text = |bytes| String::from_utf8(bytes).unwrap();
         (code, text(out), text(err))
     }
@@ -206,7 +216,7 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let mut typist = Typist::typing(&[Some(PASSWORD)]);
     let none = |_: &Policy| None;
-    let code = connect(&platform, &none, &mut typist, &mut out, &mut err);
+    let code = connect(&platform, &none, &mut typist, brief(), &mut out, &mut err);
     assert_eq!((code, out.is_empty()), (FAILED, true));
     assert!(
         String::from_utf8(err)
@@ -280,7 +290,7 @@ fn disconnect_reports_what_happened() {
     // The function behind the command, for a platform that is missing.
     let nowhere = || Err(Error::Unsupported);
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    assert_eq!(disconnect(&nowhere, &mut out, &mut err), FAILED);
+    assert_eq!(disconnect(&nowhere, brief(), &mut out, &mut err), FAILED);
     assert!(out.is_empty());
 }
 
@@ -290,4 +300,56 @@ fn the_saved_state_names_are_what_status_shows() {
     let scene = Scene::usual();
     let state: ConnState = serde_json::from_str(&scene.state()).unwrap();
     assert_eq!(state, ConnState::Disconnected);
+}
+
+// What the gateway's side says goes to the user: why the login failed, and
+// the engine's own lines about it.
+#[test]
+fn a_gateway_that_is_wrong_or_away_is_explained() {
+    let scene = Scene::usual();
+    scene.gateway.set_reachable(false);
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    let (code, out, err) = scene.connect(&mut typist);
+    assert_eq!((code, out.as_str()), (FAILED, ""));
+    assert!(err.contains("ubc-vpn: The gateway could not be reached."), "{err}");
+    assert!(err.contains("ubc-vpn: Failed to connect to the gateway"), "{err}");
+    assert!(typist.asked.is_empty(), "nothing is asked of a gateway that is away");
+
+    // A gateway whose key the policy does not pin is sent nothing.
+    let mut scene = Scene::usual();
+    let other = format!("pin-sha256:{}=", "B".repeat(43));
+    scene.gateway = FakeEngine::new(Script::new(other.try_into().unwrap()));
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!(code, FAILED);
+    assert!(err.contains("certificate is not the expected one"), "{err}");
+    assert!(typist.asked.is_empty() && !scene.gateway_was_asked());
+}
+
+// Dev mode: the service's pretend gateway and the client's are two that
+// share nothing, as in two processes. Connecting, disconnecting and
+// connecting again must work, which it does only because the service's is
+// the dev-mode kind.
+#[test]
+fn in_dev_mode_a_second_connect_works_after_a_disconnect() {
+    let mut scene = Scene::usual();
+    scene.service = None;
+    scene.service = Some(scene.rig.service_on(FakeEngine::for_dev_mode(Script::new(pin()))));
+    for round in 1..=2 {
+        let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+        let (code, out, err) = scene.connect(&mut typist);
+        assert_eq!(code, 0, "round {round}: {err}");
+        assert!(out.starts_with("Connected (fake0"), "round {round}: {out}");
+        let (code, out, _) = scene.rig.run(&["disconnect"]);
+        assert_eq!((code, out.as_str()), (0, "Disconnected\n"), "round {round}");
+    }
+
+    // With the ordinary kind the second connect is refused: the session
+    // was logged off, and nothing in this process can bring it back.
+    let scene = Scene::usual();
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, 0);
+    assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, LOGIN_REFUSED);
 }
