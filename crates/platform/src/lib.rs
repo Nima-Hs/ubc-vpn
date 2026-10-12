@@ -49,6 +49,8 @@ use ubc_vpn_core::routes::Ipv4Net;
 pub mod fake;
 #[cfg(any(test, feature = "fake"))]
 pub mod suite;
+#[cfg(unix)]
+mod unix;
 mod unsupported;
 
 #[cfg(target_os = "linux")]
@@ -888,9 +890,9 @@ mod tests {
         use unsupported::Native;
 
         let unsupported = Some(Error::Unsupported);
-        #[cfg(not(windows))]
+        #[cfg(not(any(unix, windows)))]
         assert_eq!(Platform::native(Mode::Installed).err(), unsupported);
-        #[cfg(all(not(windows), feature = "dev-mode"))]
+        #[cfg(all(not(any(unix, windows)), feature = "dev-mode"))]
         assert_eq!(Platform::native(Mode::Dev).err(), unsupported);
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let physical = PhysicalNetwork {
