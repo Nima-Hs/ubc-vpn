@@ -658,6 +658,6 @@ fn a_connect_does_not_read_settings_others_can_change() {
     let (code, out, err) = scene.connect(&mut typist);
     assert_eq!((code, out.as_str()), (FAILED, ""));
     assert!(err.contains("can be changed by other users"), "{err}");
-    assert!(err.contains("chmod go-w"), "{err}");
+    assert!(err.contains("To stop them, run: chmod go-w '"), "{err}");
     assert!(typist.asked.is_empty() && !scene.gateway_was_asked());
 }

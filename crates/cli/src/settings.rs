@@ -184,7 +184,7 @@ fn typed(input: &mut dyn BufRead) -> Result<RouteInput, SettingsFailureCode> {
 /// Why the settings folder is not used, when it is not. On Unix that is a
 /// folder its group, or anyone, may write to: whoever can write there can
 /// replace the settings, and with them the routes the next connect asks
-/// for. On Windows a folder takes its access list from the profile it is in,
+/// for. A link is judged by the folder it leads to, which is the one used. On Windows a folder takes its access list from the profile it is in,
 /// and nothing is checked.
 pub(crate) fn folder_problem(dir: &Path) -> Option<String> {
     #[cfg(unix)]
@@ -192,10 +192,11 @@ pub(crate) fn folder_problem(dir: &Path) -> Option<String> {
         use std::os::unix::fs::PermissionsExt;
         let open = |found: fs::Metadata| found.permissions().mode() & 0o022 != 0;
         if fs::metadata(dir).is_ok_and(open) {
-            let folder = crate::clean(&dir.to_string_lossy());
+            // Quoted for a shell as it stands, whatever the path holds.
+            let folder = crate::clean(&dir.to_string_lossy()).replace('\'', r"'\''");
             return Some(format!(
                 "The settings folder can be changed by other users of this computer, so it \
-                 is not used. Take that right away with: chmod go-w \"{folder}\""
+                 is not used. To stop them, run: chmod go-w '{folder}'"
             ));
         }
     }

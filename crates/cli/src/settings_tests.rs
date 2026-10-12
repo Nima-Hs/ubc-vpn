@@ -886,10 +886,8 @@ fn a_settings_folder_others_can_write_to_is_refused() {
             assert_eq!(why, SettingsFailureCode::Unreadable, "{open:o}");
             let said = machine.said.borrow().clone();
             assert!(said.contains("can be changed by other users"), "{said}");
-            assert!(
-                said.contains("chmod go-w") && said.ends_with('\n'),
-                "{said}"
-            );
+            let fix = format!("To stop them, run: chmod go-w '{}'\n", dir.display());
+            assert!(said.ends_with(&fix), "{said}");
         }
         // Checking routes reads no file, and has nothing to say about it.
         assert_eq!(machine.run(Command::CheckRoutes, GOOD).0, 0);
@@ -906,4 +904,50 @@ fn a_settings_folder_others_can_write_to_is_refused() {
         RoutesReply::Ok { .. }
     ));
     assert_eq!(*machine.said.borrow(), "");
+}
+
+// Security rule: a settings folder that is a link is judged by where it
+// leads, since that is the folder that is used: a link to a folder others
+// can write to is refused, and a link to the user's own is not.
+#[cfg(unix)]
+#[test]
+fn a_settings_folder_that_is_a_link_is_judged_by_where_it_leads() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    let real = machine.root.join("elsewhere");
+    crate::tests::settings_folder(&real);
+    std::fs::write(real.join("settings.json"), r#"{"username":"jdoe"}"#).unwrap();
+    std::os::unix::fs::symlink(&real, machine.root.join("settings")).unwrap();
+    assert_eq!(machine.view().settings.username.as_deref(), Some("jdoe"));
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o770)).unwrap();
+    for command in [Command::Get, Command::SetRoutes] {
+        let why = machine.fails(command, GOOD);
+        assert_eq!(why, SettingsFailureCode::Unreadable);
+        assert!(machine.said.borrow().contains("chmod go-w"));
+    }
+}
+
+// The command the user is given can be pasted into a shell whatever the
+// folder is called.
+#[cfg(unix)]
+#[test]
+fn the_fix_is_quoted_for_a_shell() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("ubc-vpn it's $HOME {}", std::process::id()));
+    let dir = root.join("settings");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+    let said = crate::settings::folder_problem(&dir);
+    std::fs::remove_dir_all(&root).unwrap();
+    let quoted = dir.display().to_string().replace('\'', r"'\''");
+    let fix = format!("To stop them, run: chmod go-w '{quoted}'");
+    assert!(said.is_some_and(|said| said.ends_with(&fix)));
+    assert!(fix.contains(r"it'\''s $HOME"), "{fix}");
 }
