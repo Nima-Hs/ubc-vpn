@@ -126,7 +126,7 @@ fn answer(
 
 /// The policy, if its file is there and valid. Nothing fails for want of
 /// one: the service refuses to connect without it.
-fn policy(dir: &Path) -> Option<Policy> {
+pub(crate) fn policy(dir: &Path) -> Option<Policy> {
     let text = fs::read_to_string(dir.join("policy.json")).ok()?;
     let policy: Policy = serde_json::from_str(&text).ok()?;
     policy.validate().ok().map(|()| policy)
@@ -147,7 +147,7 @@ fn typed(input: &mut dyn BufRead) -> Result<RouteInput, SettingsFailureCode> {
 
 /// The text of `settings.json`, or `None` when there is no such file. One
 /// that is there and cannot be read is an error, not "no settings".
-fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> {
+pub(crate) fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> {
     match fs::read_to_string(dir.join(SETTINGS)) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -157,7 +157,7 @@ fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> {
 
 /// The settings in `text`. Anything but a JSON object is refused, although
 /// the settings type alone would read some other shapes as defaults.
-fn understood(text: &str) -> Result<Settings, SettingsFailureCode> {
+pub(crate) fn understood(text: &str) -> Result<Settings, SettingsFailureCode> {
     let unreadable = |_| SettingsFailureCode::Unreadable;
     serde_json::from_str::<Map<String, Value>>(text).map_err(unreadable)?;
     serde_json::from_str(text).map_err(unreadable)

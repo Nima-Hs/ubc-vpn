@@ -35,13 +35,17 @@ impl Rig {
 
     pub(crate) fn service(&self) -> Service {
         let key = format!("pin-sha256:{}=", "A".repeat(43));
-        let engine = FakeEngine::new(Script::new(key.try_into().unwrap()));
+        self.service_on(FakeEngine::new(Script::new(key.try_into().unwrap())))
+    }
+
+    /// A service whose tunnels are opened by `engine`.
+    pub(crate) fn service_on(&self, engine: FakeEngine) -> Service {
         let platform = self.fake.platform(&self.root);
         Service::start(platform, Arc::new(engine), Timeouts::default()).unwrap()
     }
 
     /// Runs the command line as the fake's own user, `fake-user`.
-    fn run(&self, args: &[&str]) -> (u8, String, String) {
+    pub(crate) fn run(&self, args: &[&str]) -> (u8, String, String) {
         let platform = || Ok(self.fake.platform(&self.root));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run(args, &platform, &mut out, &mut err);
@@ -149,8 +153,11 @@ fn each_failure_has_its_own_exit_code_and_message() {
     for line in [
         "3  the service is not running",
         "6  another program",
-        "status becomes the owner of the service",
-        "The bridge claims\nnothing itself",
+        "9  cancelled",
+        "connect, disconnect or status becomes the owner",
+        "The bridge claims nothing itself",
+        "never taken from an argument, a variable or a file",
+        "interrupted after the login may still complete; disconnect undoes it",
         "bridge            Carry messages",
     ] {
         assert!(help.contains(line), "{help}");
@@ -250,9 +257,9 @@ fn responses_are_matched_by_id_and_events_are_kept() {
     assert_eq!(client.request(RequestBody::Status), Ok(status));
     service.join().unwrap();
     let kept = Event::StateChanged(ConnState::Connecting);
-    assert_eq!(client.next_event(), Ok(kept));
+    assert_eq!(client.next_event(None), Ok(kept));
     // Nothing more was queued, and the service has gone.
-    assert!(matches!(client.next_event(), Err(ClientError::Lost(_))));
+    assert!(matches!(client.next_event(None), Err(ClientError::Lost(_))));
 }
 
 /// How long a pretend service keeps going when the client does not hang up.
@@ -262,7 +269,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 
 /// Stands in for the service on `rig`'s channel: accepts one connection and
 /// hands it to `script`. Its own reads give up after [`PATIENCE`].
-fn scripted(
+pub(crate) fn scripted(
     rig: &Rig,
     script: impl FnOnce(&Connection) + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
@@ -275,7 +282,7 @@ fn scripted(
 }
 
 /// Reads the hello and answers it as an owned service of this version.
-fn greet(conn: &Connection) {
+pub(crate) fn greet(conn: &Connection) {
     conn.read_line().unwrap();
     let reply = HelloReply {
         protocol_version: PROTOCOL_VERSION,
@@ -286,7 +293,7 @@ fn greet(conn: &Connection) {
 }
 
 /// Sends one message from the pretend service. False once the client is gone.
-fn tell(conn: &Connection, message: &ServerMessage) -> bool {
+pub(crate) fn tell(conn: &Connection, message: &ServerMessage) -> bool {
     conn.write_line(encode(message).unwrap().trim_end()).is_ok()
 }
 
@@ -499,7 +506,7 @@ fn events_are_not_kept_without_end() {
     let answer = asking.request(RequestBody::Status);
     assert!(gave_up(&answer, started), "{answer:?}");
     // What was kept is still there for whoever wants it.
-    let kept = (0..5).filter(|_| asking.next_event().is_ok()).count();
+    let kept = (0..5).filter(|_| asking.next_event(None).is_ok()).count();
     assert_eq!(kept, 5);
     drop(asking);
     flood.join().unwrap();

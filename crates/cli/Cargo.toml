@@ -11,6 +11,12 @@ publish.workspace = true
 name = "ubc-vpn"
 path = "src/main.rs"
 
+[features]
+# Dev mode: the `--dev` flag, which points every command at the dev-mode
+# service's channel and files and logs in against a scripted pretend gateway.
+# Never enabled in a release build; without it the flag does not exist.
+dev-mode = ["ubc-vpn-platform/dev-mode", "ubc-vpn-engine/fake"]
+
 [dependencies]
 serde_json = "1.0.154"
 ubc-vpn-core.workspace = true

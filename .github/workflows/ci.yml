@@ -52,14 +52,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked -p ubc-vpn-engine --doc
       # On every OS: a dev-mode service runs on that OS's real channel, so its
-      # tests do different things on each.
-      - name: The service's dev mode builds and passes its tests
+      # tests do different things on each. The CLI's dev mode is the other end
+      # of that channel.
+      - name: The service's and the CLI's dev mode build and pass their tests
         # PowerShell, the default on Windows, carries on after a failing
         # command and reports only the last one.
         shell: bash
         run: |
           cargo clippy --locked -p ubc-vpn-service --features dev-mode --all-targets -- -D warnings
           cargo test --locked -p ubc-vpn-service --features dev-mode
+          cargo clippy --locked -p ubc-vpn-cli --features dev-mode --all-targets -- -D warnings
+          cargo test --locked -p ubc-vpn-cli --features dev-mode
       # A release must be built one program at a time (-p), never with
       # --workspace: features enabled by any other crate would be switched on
       # for these two as well.

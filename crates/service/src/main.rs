@@ -63,5 +63,7 @@ fn dev() -> Result<Parts, String> {
     // policy accepts it. A valid policy always has one.
     let mut policy = ubc_vpn_service::policy::load(&platform.paths.policy_dir)?;
     let script = Script::new(policy.pins.remove(0));
-    Ok((platform, Arc::new(FakeEngine::new(script))))
+    // Logging in happens in another process, so this fake keeps accepting
+    // the dev cookie after a log-off. Otherwise dev mode would connect once.
+    Ok((platform, Arc::new(FakeEngine::for_dev_mode(script))))
 }
