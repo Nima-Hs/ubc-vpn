@@ -8,7 +8,8 @@
 # check that it ever was.
 set -euo pipefail
 
-manifest=$(cd "$(dirname "$0")/.." && pwd)/out/manifest.json
+# seal.sh passes a copy of the manifest, to learn what this will make of it.
+manifest=${1:-$(cd "$(dirname "$0")/.." && pwd)/out/manifest.json}
 grep -q '^  "shippable": false,$' "$manifest"
 
 # An output that cannot name the commit of this repository it was built from
