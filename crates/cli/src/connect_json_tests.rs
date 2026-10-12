@@ -106,7 +106,9 @@ fn while_the_login_waits(
             lines.next().unwrap().unwrap();
             answer(&mut to_cli, id, value);
         }
-        wait_until("the answers to arrive", || gateway.answers().len() == 2);
+        // Three answers: the saved username, which answered for itself,
+        // and these two. Then the login is waiting on the gateway.
+        wait_until("the answers to arrive", || gateway.answers().len() == 3);
         let kept_open = act(to_cli);
         // A login that this did not stop would wait for ever. It is let go
         // after a while, and would then succeed and fail the test.
