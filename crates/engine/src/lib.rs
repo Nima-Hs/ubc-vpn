@@ -133,7 +133,14 @@
 //!   endpoint) and refuses every other host and port, an address written as
 //!   numbers included.
 //! - Never enable a software-token mode, an external-browser or
-//!   single-sign-on login, or a client certificate.
+//!   single-sign-on login, or a client certificate. The library offers
+//!   single sign-on to the gateway on every request and runs its handler
+//!   whatever the form callback answered, and no public call turns that
+//!   off. So the pinned patches must set `no_external_auth` in
+//!   `openconnect_vpninfo_new`, which stops the offer, and every native
+//!   build must be configured without external-browser login, which removes
+//!   that code. A test against the stand-in gateway must show such a login
+//!   fails, with nothing listening on the browser login's local port.
 //! - Let one thread own the library handle and make every library call on
 //!   it. Other threads touch only the write end of the command pipe from
 //!   `openconnect_setup_cmd_pipe`. On Windows that end is a socket, written
@@ -215,6 +222,13 @@
 //!   through [`Prompts::ask`], which stops the login, and never answer from
 //!   memory. Fill each field from one `ask` call and keep no copy of the
 //!   answer.
+//! - Answer each field of a form once. Setting a field again leaves the
+//!   library's earlier copy of the answer in memory.
+//! - When the library refuses to fill a field, end the login with
+//!   [`LoginError::Failed`] and send nothing.
+//! - Ask for a one-time code at most three times in one login, then fail.
+//!   A gateway can show the code form again and again, and each may send
+//!   the user another approval request.
 //! - Fail with [`LoginError::Failed`] on a form that needs a choice of group
 //!   or realm. Group selection is out of scope for v0.1.0, on the working
 //!   assumption that UBC selects the MFA method through the username. The
