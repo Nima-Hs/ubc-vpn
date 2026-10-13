@@ -12,10 +12,37 @@ use serde::{Deserialize, Serialize};
 /// It does serialise as a plain string, because it has to cross the channel.
 /// So a serialised message is itself secret: never log an encoded line that
 /// may contain one. Log the message's `Debug` form instead.
+///
+/// When a `Secret` is dropped, the bytes of its value are overwritten with
+/// zeros, in a way the compiler may not leave out, before the memory is
+/// given back. Each clone is a copy of its own and is wiped when it is
+/// dropped. What this does not reach, so that nobody assumes more:
+///
+/// - copies made before the value became a `Secret`, or after
+///   [`Secret::expose`] was used to copy it: a line read from the channel
+///   or a terminal, a string `serde` builds while it decodes or encodes a
+///   message, and an encoded message that holds one;
+/// - the copies an engine or a library makes of what it is given;
+/// - memory the string gave back as it grew, before it became a `Secret`;
+/// - whatever the OS keeps, such as a page swapped to disk.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct Secret(String);
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        // Security rule: the value does not stay behind in freed memory.
+        // Its own bytes first, in place, where a test can see them...
+        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        bytes.as_mut_slice().zeroize();
+        #[cfg(test)]
+        tests::wiped(&bytes);
+        // ...then the whole of the memory it holds, spare room included.
+        bytes.zeroize();
+    }
+}
 
 impl Secret {
     /// Wraps a secret value.
@@ -69,7 +96,47 @@ pub fn redact_line(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    thread_local! {
+        /// The bytes each `Secret` dropped on this thread held at the
+        /// moment its memory was to be given back.
+        static WIPED: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Called by `Secret`'s drop in a test build.
+    pub(super) fn wiped(bytes: &[u8]) {
+        WIPED.with(|wiped| wiped.borrow_mut().push(bytes.to_vec()));
+    }
+
+    fn take_wiped() -> Vec<Vec<u8>> {
+        WIPED.with(|wiped| std::mem::take(&mut *wiped.borrow_mut()))
+    }
+
+    // Security rule: a secret's bytes are overwritten before its memory is
+    // given back, for the secret and for each of its clones, and on every
+    // way it can go: dropped, replaced, or decoded off the wire.
+    #[test]
+    fn a_secret_is_wiped_when_it_is_dropped() {
+        take_wiped();
+        let secret = Secret::new("made-up-secret-0123");
+        let copy = secret.clone();
+        drop(secret);
+        let mut kept = Some(copy);
+        assert!(kept.is_some());
+        kept = None;
+        assert!(kept.is_none());
+        let decoded: Secret = serde_json::from_str(r#""another-made-up-value""#).unwrap();
+        drop(decoded);
+        let wiped = take_wiped();
+        let lengths: Vec<usize> = wiped.iter().map(Vec::len).collect();
+        assert_eq!(lengths, [19, 19, 21], "one record per secret dropped");
+        for bytes in wiped {
+            assert!(bytes.iter().all(|byte| *byte == 0), "{bytes:?}");
+        }
+    }
 
     #[test]
     fn debug_never_shows_the_value() {
