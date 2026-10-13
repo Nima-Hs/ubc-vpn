@@ -210,6 +210,11 @@ impl Routes for Faulty {
         self.fake.capture_physical(gateway)
     }
 
+    fn configure_tunnel(&self, tunnel: &str, address: Ipv4Addr, mtu: u16) -> Result<()> {
+        self.reached(Op::ConfigureTunnel);
+        self.fake.configure_tunnel(tunnel, address, mtu)
+    }
+
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
         self.reached(Op::AddGatewayRoute);
         self.fake.add_gateway_route(gateway, via)
