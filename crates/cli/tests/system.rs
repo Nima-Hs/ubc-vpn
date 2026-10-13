@@ -100,6 +100,14 @@ fn the_service_and_the_client_work_together() {
         bridge.until(&state("connecting"));
         bridge.until(&state("connected"));
         assert_eq!(home.run(&["status"], ""), (0, connected.to_string()));
+        // What the service logged and what it says of itself, read from a
+        // terminal's side. Each connect leaves the engine's line.
+        let (status, log) = home.run(&["logs"], "");
+        let opened = log.matches("  info   engine   CSTP connected").count();
+        assert_eq!((status, opened), (0, round), "{log}");
+        let (status, about) = home.run(&["diagnostics"], "");
+        let carrying = "State: connected, 1 subnet and 1 DNS domain";
+        assert!(status == 0 && about.contains(carrying), "{about}");
         // Connected already: busy, and nothing is asked.
         let (status, last) = home.connect(&[]);
         assert!(status == 7 && last.contains(r#""code":"busy""#), "{last}");
@@ -145,14 +153,23 @@ fn the_service_and_the_client_work_together() {
 
     // The service is killed while connected, with a bridge open. The bridge
     // says so and ends, and the client finds no service.
+    // The log is being followed too: it shows the connect as it happens,
+    // and ends when the service does.
     let mut bridge = home.client(&["bridge"]);
     bridge.until(r#""type":"ready""#);
+    let mut log = home.client(&["logs", "--follow", "--json"]);
+    let opened = r#""text":"CSTP connected""#;
+    // The two connects from before are there to begin with.
+    let earlier = [log.until(opened), log.until(opened)];
     let (status, _) = home.connect(&[Some(USERNAME), Some(PASSWORD), Some(CODE)]);
     assert_eq!(status, 0);
     bridge.until(&state("connected"));
+    let new = log.until(opened);
+    assert!(!earlier.contains(&new), "the new line is another line");
     drop(running);
     bridge.until(r#"{"type":"service_unavailable"}"#);
     assert_eq!(bridge.end(), (1, Vec::new()));
+    assert_eq!(log.end().0, 1, "following ends when the service goes");
     assert_eq!(home.run(&["status"], "").0, 3);
 
     // Started again, it listens where the killed one did, still belongs to

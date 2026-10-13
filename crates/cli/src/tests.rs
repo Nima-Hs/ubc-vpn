@@ -172,6 +172,9 @@ fn each_failure_has_its_own_exit_code_and_message() {
         "connect [--json]  Log in and connect",
         "A\ncancel line, or standard input closing, stops the login.",
         "bridge            Carry messages",
+        "logs [--json] [--follow]  Show what the service has logged",
+        "they do not make
+anyone the owner",
         "settings reset [--force] --json  Start afresh",
     ] {
         assert!(help.contains(line), "{help}");
@@ -377,7 +380,7 @@ fn every_state_is_printed_exactly() {
         (
             failed,
             "Failed: 10.19.0.0/16 is [2Jnot routed (réseau 網, می\u{200c}خواهم)\n",
-            "{\"state\":\"failed\",\"code\":\"verification_failed\",\"message\":\"10.19.0.0/16 is \\u001b[2Jnot routed \u{202e}(réseau 網, می\u{200c}خواهم)\u{200b}\\r\\n\"}",
+            "{\"state\":\"failed\",\"code\":\"verification_failed\",\"message\":\"10.19.0.0/16 is \\u001b[2Jnot routed (réseau 網, می\u{200c}خواهم)\\r\\n\"}",
         ),
         (
             ConnState::Connected { tunnel },

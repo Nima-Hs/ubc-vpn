@@ -187,21 +187,44 @@ impl Client {
     /// than [`Limits::answer`] in all. Events that arrive first are kept for
     /// [`Client::next_event`], up to [`Limits::kept_events`] of them.
     pub fn request(&mut self, body: RequestBody) -> Result<ResponseBody, ClientError> {
+        self.ask(body, true).map(|(answer, _)| answer)
+    }
+
+    /// The same, but the events that arrive first are not kept: the caller
+    /// is told only whether any came. For a caller that will ask for what
+    /// they were about, as the log's reader does: with nothing kept, no
+    /// number of events on their way can be too many. The wait still ends
+    /// with [`Limits::answer`].
+    pub fn request_past_events(
+        &mut self,
+        body: RequestBody,
+    ) -> Result<(ResponseBody, bool), ClientError> {
+        self.ask(body, false)
+    }
+
+    /// Sends a request and waits for its answer. Says also whether an event
+    /// came first, each of which is kept only if `keep` says so.
+    fn ask(&mut self, body: RequestBody, keep: bool) -> Result<(ResponseBody, bool), ClientError> {
         self.last_id += 1;
         let id = self.last_id;
         let deadline = Instant::now() + self.limits.answer;
         self.conn
             .write_line(encode(&Request { id, body })?.trim_end())?;
+        let mut came = false;
         loop {
             match decode(&read_line(&self.conn, Some(deadline))?)? {
+                ServerMessage::Event(_) if !keep => came = true,
                 ServerMessage::Event(_) if self.events.len() >= self.limits.kept_events => {
                     let flood = "the service sent events without end and no answer";
                     return Err(ClientError::Lost(flood.to_string()));
                 }
-                ServerMessage::Event(event) => self.events.push_back(event),
+                ServerMessage::Event(event) => {
+                    came = true;
+                    self.events.push_back(event);
+                }
                 ServerMessage::Response(response) if response.id == id => {
                     return match response.outcome {
-                        Outcome::Ok(body) => Ok(body),
+                        Outcome::Ok(body) => Ok((body, came)),
                         Outcome::Error(error) if error.code == ErrorCode::NotOwner => {
                             Err(ClientError::NotOwner)
                         }

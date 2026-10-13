@@ -11,7 +11,10 @@
 //! A secret the service holds is removed where it stands whole, as it was
 //! given. That is all. It is not found when it is split over two lines,
 //! when it is written with something between its characters, or in another
-//! form such as percent-encoding or base64. Nobody should assume more: the
+//! form such as percent-encoding or base64. Nor is anything shorter than
+//! four bytes removed: so short an answer is a choice, such as which way to
+//! be asked for a second factor, and not a secret, and removing every `1`
+//! would cost real lines their numbers. Nobody should assume more: the
 //! first defence is that nothing writes a secret, and this is the second.
 //!
 //! # How long the cookie is held
