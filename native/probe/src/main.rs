@@ -89,6 +89,24 @@ extern "C" {
     fn openconnect_vpninfo_free(v: *mut OcInfo);
 }
 
+// Windows' own lookup of a network adapter by name, from iphlpapi.dll. Used
+// instead of running netsh, so that the probe starts no other program.
+#[cfg(windows)]
+#[link(name = "iphlpapi", kind = "raw-dylib")]
+extern "system" {
+    fn ConvertInterfaceAliasToLuid(alias: *const u16, luid: *mut u64) -> u32;
+}
+
+/// Whether Windows has a network adapter with exactly this name.
+#[cfg(windows)]
+fn adapter_exists(name: &str) -> bool {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut luid = 0u64;
+    let rc = unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &mut luid) };
+    println!("adapter {name:?}: lookup = {rc}, luid = {luid:#x}");
+    rc == 0 && luid != 0
+}
+
 extern "C" {
     fn oc_progress_shim(p: *mut c_void, level: c_int, fmt: *const c_char, ...);
 }
@@ -240,20 +258,22 @@ fn main() {
                 ok &= rc == 0;
                 let ifname = s(openconnect_get_ifname(v));
                 println!("ifname = {ifname}");
-                let show = if cfg!(target_os = "linux") {
-                    std::process::Command::new("ip")
-                        .args(["addr", "show", "dev", &ifname])
-                        .status()
-                } else if cfg!(windows) {
-                    // Fails unless an interface with this exact name exists.
-                    std::process::Command::new("netsh")
-                        .args(["interface", "ipv4", "show", "interfaces"])
-                        .arg(format!("interface={ifname}"))
-                        .status()
-                } else {
-                    std::process::Command::new("ifconfig").arg(&ifname).status()
-                };
-                ok &= show.map(|st| st.success()).unwrap_or(false);
+                // Fails unless a device with this exact name exists.
+                #[cfg(windows)]
+                {
+                    ok &= adapter_exists(&ifname);
+                }
+                #[cfg(not(windows))]
+                {
+                    let show = if cfg!(target_os = "linux") {
+                        std::process::Command::new("ip")
+                            .args(["addr", "show", "dev", &ifname])
+                            .status()
+                    } else {
+                        std::process::Command::new("ifconfig").arg(&ifname).status()
+                    };
+                    ok &= show.map(|st| st.success()).unwrap_or(false);
+                }
             }
         }
         openconnect_vpninfo_free(v);
