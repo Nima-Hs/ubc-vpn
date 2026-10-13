@@ -19,6 +19,14 @@ Scenarios, by what the gateway does after showing the login form:
   action    shows a form whose action is a URL on the other port
   csd       offers a host-scan program to download and run
   fields    shows a form that also has a hidden field and one to ignore
+  codeagain asks for a one-time code, and asks again after every code
+  otherhost answers the first request with a redirect to another host name
+            on the same port (443)
+  otherport answers the first request with a redirect to the same host name
+            on another port (8443)
+
+The last two redirect to places a client must not go, each wrong in one way
+only. In a test the client's resolver decides where those names lead.
 
 It stops when its standard input closes, which is when the test that started
 it ends, however that test ends. Started by hand with no input, it stops at
@@ -34,7 +42,10 @@ import threading
 import time
 
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
-SCENARIOS = ("accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields")
+SCENARIOS = (
+    "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
+    "codeagain", "otherhost", "otherport",
+)
 
 
 def form(action, fields, message="Please log in.", error=None, extra=""):
@@ -135,18 +146,27 @@ class Gateway(http.server.BaseHTTPRequestHandler):
             # that accepts, so that a client that follows is seen to succeed.
             self.reply(SUCCESS, COOKIE)
         elif self.path.startswith("/code"):
-            self.reply(SUCCESS, COOKIE)
+            if scenario == "codeagain":
+                self.reply(form("/code", CODE, message="Enter the code.", error="Wrong code."))
+            else:
+                self.reply(SUCCESS, COOKIE)
         elif self.path.startswith("/auth"):
             if scenario == "hang":
                 time.sleep(3600)
             elif scenario == "reject":
                 self.reply(form("/auth", LOGIN, error="Login failed."))
-            elif scenario == "code":
+            elif scenario in ("code", "codeagain"):
                 self.reply(form("/code", CODE, message="Enter the code."))
             else:
                 self.reply(SUCCESS, COOKIE)
         elif scenario == "redirect":
             self.reply(b"", status=302, location=elsewhere + "/")
+        elif scenario == "otherhost" and self.path == "/":
+            # Wherever the client's resolver sends this name, a correct
+            # client does not ask it.
+            self.reply(b"", status=302, location="https://other.example.test/again")
+        elif scenario == "otherport" and self.path == "/":
+            self.reply(b"", status=302, location="https://vpn.example.test:8443/again")
         elif scenario == "action":
             self.reply(form(elsewhere + "/auth", LOGIN))
         elif scenario == "group":

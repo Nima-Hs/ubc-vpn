@@ -310,15 +310,19 @@ mod ffi;
 pub mod ffi;
 mod gateway;
 mod log;
+#[cfg(feature = "libopenconnect")]
+mod login;
 mod prompts;
 #[cfg(test)]
 mod tests;
 
 pub use environment::{DANGEROUS_VARIABLES, EnvironmentError, Role, check_environment};
 #[cfg(feature = "libopenconnect")]
-pub use ffi::{Prepared, prepare_environment};
+pub use ffi::{LoadError, Prepared, prepare_environment};
 pub use gateway::Gateway;
 pub use log::{DEBUG_LINES, LogLevel, LogSink, MIN_HIDDEN_LEN};
+#[cfg(feature = "libopenconnect")]
+pub use login::OpenConnect;
 
 type Hooks = (u64, Vec<(u64, Hook)>);
 pub use prompts::{Prompt, Prompts};

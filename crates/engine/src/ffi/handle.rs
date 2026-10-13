@@ -46,25 +46,26 @@ pub type Lines = Box<dyn Fn(c_int, &CStr, LineState) + Send + Sync>;
 
 /// Judges the gateway's certificate, given its `pin-sha256:` hash.
 pub type Judge = Box<dyn FnMut(&str) -> bool>;
-/// Fills in a login form.
-pub type Fill = Box<dyn FnMut(&mut Form<'_>) -> FormAnswer>;
+/// Fills in a login form. It may borrow, because filling in means asking the
+/// user, through something the caller of a login lends for that one login.
+pub type Fill<'a> = Box<dyn FnMut(&mut Form<'_>) -> FormAnswer + 'a>;
 /// Says where to connect for a host name and port, or refuses with `None`.
 pub type Resolve = Box<dyn FnMut(&str, u16) -> Option<SocketAddrV4>>;
 
 /// What the library is to call back into.
-pub struct Callbacks {
+pub struct Callbacks<'a> {
     /// Every log line.
     pub lines: Lines,
     /// Only `true` lets the connection go on.
     pub certificate: Judge,
-    pub form: Fill,
+    pub form: Fill<'a>,
     /// Says where to connect for a host name and port the library wants to
     /// reach, or refuses with `None`. Every connection the library makes to
     /// a new host or port comes through here first.
     pub resolve: Resolve,
 }
 
-impl Callbacks {
+impl Callbacks<'_> {
     /// Logs to `lines` and refuses everything else: every certificate, every
     /// form and every address.
     pub fn refusing(lines: Lines) -> Self {
@@ -78,10 +79,10 @@ impl Callbacks {
 }
 
 /// What the library's `privdata` points to for the life of a handle.
-pub struct Context {
+pub struct Context<'a> {
     lines: Lines,
     certificate: RefCell<Judge>,
-    form: RefCell<Fill>,
+    form: RefCell<Fill<'a>>,
     resolve: RefCell<Resolve>,
     /// Whether the certificate callback ran and accepted, since it was last
     /// cleared.
@@ -90,9 +91,9 @@ pub struct Context {
     handle: Cell<Option<(Library, *mut VpnInfo)>>,
 }
 
-impl Context {
+impl<'a> Context<'a> {
     /// Boxes the callbacks, so that their address never changes.
-    pub fn new(callbacks: Callbacks) -> Box<Self> {
+    pub fn new(callbacks: Callbacks<'a>) -> Box<Self> {
         Box::new(Self {
             lines: callbacks.lines,
             certificate: RefCell::new(callbacks.certificate),
@@ -116,12 +117,12 @@ impl Context {
 ///
 /// `privdata` must be null or point to a live [`Context`], and the call must
 /// be on the thread that owns it.
-unsafe fn enter<T>(privdata: *mut c_void, failure: T, body: impl FnOnce(&Context) -> T) -> T {
+unsafe fn enter<T>(privdata: *mut c_void, failure: T, body: impl FnOnce(&Context<'_>) -> T) -> T {
     if privdata.is_null() {
         return failure;
     }
     // SAFETY: by the contract above it points to a live `Context`.
-    let context = unsafe { &*privdata.cast::<Context>() };
+    let context = unsafe { &*privdata.cast::<Context<'_>>() };
     catch_unwind(AssertUnwindSafe(|| body(context))).unwrap_or(failure)
 }
 
@@ -163,7 +164,7 @@ unsafe extern "C" fn ubc_vpn_progress_line(
 ///
 /// As for [`enter`]. The library calls it on the handle's own thread.
 unsafe extern "C" fn validate_peer_cert(privdata: *mut c_void, _reason: *const c_char) -> c_int {
-    let body = |context: &Context| {
+    let body = |context: &Context<'_>| {
         context.accepted.set(false);
         let Some((library, raw)) = context.handle.get() else {
             return 1;
@@ -198,7 +199,7 @@ unsafe extern "C" fn validate_peer_cert(privdata: *mut c_void, _reason: *const c
 /// As for [`enter`], and `form` must be null or a form of the library's that
 /// is valid for the call.
 unsafe extern "C" fn process_auth_form(privdata: *mut c_void, form: *mut AuthForm) -> c_int {
-    let body = |context: &Context| {
+    let body = |context: &Context<'_>| {
         let (Some((library, _)), false) = (context.handle.get(), form.is_null()) else {
             return FormAnswer::Fail as c_int;
         };
@@ -231,7 +232,7 @@ unsafe extern "C" fn resolve(
     _hints: *const AddrInfo,
     res: *mut *mut AddrInfo,
 ) -> c_int {
-    let body = |context: &Context| {
+    let body = |context: &Context<'_>| {
         if node.is_null() || service.is_null() || res.is_null() {
             return system::EAI_FAIL;
         }
@@ -423,18 +424,18 @@ fn lend_wiped<T>(value: &Secret, call: impl FnOnce(*const c_char) -> T) -> Optio
 /// system's certificate store is not trusted, so that the certificate
 /// callback is the judge; IPv6 is off; and every address comes from the
 /// resolve callback.
-pub struct Handle {
+pub struct Handle<'a> {
     library: Library,
     raw: *mut VpnInfo,
     /// What the library holds as `privdata`. Freed after the handle.
-    context: *mut Context,
+    context: *mut Context<'a>,
     /// The write end of the command pipe, made with the handle.
     pipe: CommandPipe,
 }
 
-impl Handle {
+impl<'a> Handle<'a> {
     /// Makes a handle that calls back into `callbacks`.
-    pub fn new(library: Library, callbacks: Callbacks) -> Option<Self> {
+    pub fn new(library: Library, callbacks: Callbacks<'a>) -> Option<Self> {
         let context = Box::into_raw(Context::new(callbacks));
         // SAFETY: the library is loaded. The user agent is a NUL-terminated
         // string the library copies; the callbacks have the signatures the
@@ -491,7 +492,7 @@ impl Handle {
         ipv4_only.then_some(handle)
     }
 
-    fn context(&self) -> &Context {
+    fn context(&self) -> &Context<'a> {
         // SAFETY: `context` came from `Box::into_raw` in `new` and is freed
         // only in `drop`.
         unsafe { &*self.context }
@@ -535,7 +536,7 @@ impl Handle {
     }
 }
 
-impl Drop for Handle {
+impl Drop for Handle<'_> {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: `raw` came from `openconnect_vpninfo_new` and is freed

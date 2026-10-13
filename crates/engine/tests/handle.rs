@@ -60,8 +60,8 @@ fn handle(
     port: u16,
     reachable: &Arc<AtomicBool>,
     mut judge: Judge,
-    mut fill: Fill,
-) -> (Handle, Arc<Mutex<Seen>>) {
+    mut fill: Fill<'static>,
+) -> (Handle<'static>, Arc<Mutex<Seen>>) {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (lines, hashes, fields, resolved) =
         (seen.clone(), seen.clone(), seen.clone(), seen.clone());
@@ -250,7 +250,7 @@ fn a_panic_in_any_callback_fails_the_login_and_goes_no_further() {
     let quiet = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let judge = || -> Judge { Box::new(|_| panic!("the judge panics")) };
-    let fill = || -> Fill { Box::new(|_| panic!("the form callback panics")) };
+    let fill = || -> Fill<'_> { Box::new(|_| panic!("the form callback panics")) };
     let (first, _) = handle(library, gateway.port, &yes(), judge(), Box::new(answer));
     let rejected = (
         first.obtain_cookie(),
@@ -279,7 +279,7 @@ fn an_answer_with_a_nul_in_it_is_refused() {
     };
     let taken = Arc::new(Mutex::new(Vec::new()));
     let results = Arc::clone(&taken);
-    let fill: Fill = Box::new(move |form| {
+    let fill: Fill<'_> = Box::new(move |form| {
         let cut = form.answer(0, &Secret::new("some\0one"));
         let whole = form.answer(0, &Secret::new("someone"));
         results.lock().unwrap().extend([cut, whole]);
@@ -407,7 +407,7 @@ fn a_form_shown_again_carries_the_gateways_error() {
     };
     // Answer the first form; give up on the one that comes back.
     let mut shown = 0;
-    let fill: Fill = Box::new(move |form| {
+    let fill: Fill<'_> = Box::new(move |form| {
         shown += 1;
         if shown == 1 {
             answer(form)
