@@ -65,9 +65,15 @@ struct Restore<'a>(&'a File, Termios);
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
-        // With the keys still waiting thrown away as it takes effect: one
-        // that came after the last look was typed while nothing was shown.
-        let _ = tcsetattr(self.0, OptionalActions::Flush, &self.1);
+        // The mode first, so that from now on Ctrl-C is a signal again;
+        // then the keys still waiting are thrown away, so that one typed
+        // after the last look, while nothing was shown, is not kept.
+        //
+        // Not one call with `Flush`: that also waits until all output has
+        // been taken, and on macOS a terminal whose other end is not being
+        // read never takes it, so the program would hang here.
+        let _ = tcsetattr(self.0, OptionalActions::Now, &self.1);
+        let _ = tcflush(self.0, QueueSelector::IFlush);
         READING.store(false, Ordering::SeqCst);
     }
 }
