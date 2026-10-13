@@ -24,11 +24,23 @@ import { encodeLine, LineDecoder } from "./framing";
 import { isBridgeLine } from "./validate";
 
 /**
- * What the app may ask the service through the bridge. `connect` is left out
- * on purpose: it carries the session cookie, which the app must never hold.
- * Connecting goes through `ubc-vpn connect --json`.
+ * What the app may ask the service through the bridge: a list, as the
+ * bridge's own is, so that a method added to the protocol is not allowed
+ * just by existing. Two are left out on purpose. `connect` carries the
+ * session cookie, which the app must never hold; connecting goes through
+ * `ubc-vpn connect --json`. `add_log` is for that client to hand over a
+ * login's lines; the app has nothing to add to the service's log.
  */
-export type BridgeRequestBody = Exclude<RequestBody, { method: "connect" }>;
+export const APP_METHODS = [
+    "claim",
+    "status",
+    "disconnect",
+    "logs",
+    "watch_logs",
+    "diagnostics",
+] as const satisfies readonly RequestBody["method"][];
+
+export type BridgeRequestBody = Extract<RequestBody, { method: (typeof APP_METHODS)[number] }>;
 
 export type BridgeStatus =
     /** The first bridge has been started and has not yet said anything. */
@@ -260,10 +272,10 @@ export class BridgeClient {
      * relied on, so it is replaced: the app is not left waiting on it.
      */
     request(body: BridgeRequestBody): Promise<Outcome> {
-        // The type already forbids `connect`. This holds the line for a caller
-        // that got round the type; nothing is written, and nothing of the
-        // request is kept.
-        if ((body as RequestBody).method === "connect") {
+        // The type already allows only the listed methods. This holds the
+        // line for a caller that got round the type; nothing is written, and
+        // nothing of the request is kept.
+        if (!(APP_METHODS as readonly string[]).includes((body as RequestBody).method)) {
             return Promise.reject(new BridgeError("not_allowed"));
         }
         const child = this.child;

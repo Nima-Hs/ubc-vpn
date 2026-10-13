@@ -8,6 +8,7 @@
 // interface, and nothing is kept on disk.
 
 import {
+    EMPTY_LINE,
     type LogUpdate,
     type LogView,
     MAX_LOG_LINES,
@@ -91,7 +92,9 @@ export function takeLine(raw: unknown): ShownLine | null {
         at_unix_ms: raw.at_unix_ms,
         level: raw.level as LogLevel,
         source: raw.source as LogSource,
-        text: shown(raw.text, MAX_LOG_TEXT),
+        // The line happened, and keeps its number: if nothing of its text
+        // is left, it says so in place of an empty row.
+        text: shown(raw.text, MAX_LOG_TEXT) || EMPTY_LINE,
     };
 }
 
@@ -216,6 +219,7 @@ export class LogBook {
     private dropped = false;
     private available = true;
     private opened = false;
+    private opening: Promise<void> | null = null;
     private reading: Promise<void> | null = null;
     private readAgain = false;
 
@@ -226,13 +230,27 @@ export class LogBook {
 
     /** Starts following the log, and returns what is held once it is up to date. */
     async open(): Promise<LogView> {
-        this.opened = true;
-        await this.feed.watch((line) => this.onLine(line));
+        // Asked many times at once, or when it is open already, it is opened
+        // once: watching is turned on once, and everyone gets the same view.
+        this.opening ??= (async () => {
+            this.opened = true;
+            await this.feed.watch((line) => this.onLine(line));
+        })();
+        await this.opening;
         await this.read();
         return this.view();
     }
 
+    /** Whether the interface has the log open. */
+    isOpen(): boolean {
+        return this.opened;
+    }
+
     async close(): Promise<void> {
+        if (this.opening === null) {
+            return;
+        }
+        this.opening = null;
         this.opened = false;
         await this.feed.watch(null);
     }
@@ -313,9 +331,12 @@ export class LogBook {
                 this.dropped = false;
                 this.run = page.run;
             }
+            // Each number once: not again if it is held already, and not
+            // twice from the one page.
             const fresh: ShownLine[] = page.lines
                 .filter((line) => line.seq > this.last)
-                .sort((a, b) => a.seq - b.seq);
+                .sort((a, b) => a.seq - b.seq)
+                .filter((line, at, sorted) => at === 0 || line.seq !== sorted[at - 1]?.seq);
             // "Dropped" is the service's word that lines of this run after
             // the cursor are gone. Where they went from shows in the numbers:
             // a line that does not follow the one before it comes after a

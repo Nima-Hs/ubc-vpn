@@ -3,13 +3,19 @@
 // the report goes to the clipboard and nowhere else.
 
 import type { LinkState } from "@shared/api";
-import { type LogUpdate, MAX_LOG_LINES, MAX_LOG_TEXT } from "@shared/logs";
+import { EMPTY_LINE, LOGS_IPC, type LogUpdate, MAX_LOG_LINES, MAX_LOG_TEXT } from "@shared/logs";
 import type { LogCursor } from "@shared/protocol/LogCursor";
 import type { LogLine } from "@shared/protocol/LogLine";
 import { describe, expect, it } from "vitest";
 import { createDemoLogs, DEMO_LOG_SCENARIOS } from "../src/main/demo/demo-logs";
 import { LogBook, type LogFeed, takeDiagnostics, takeLine, takePage } from "../src/main/logs/book";
-import { copyReport } from "../src/main/logs/ipc";
+import {
+    COPY_GAP_MS,
+    CopyGate,
+    closeWhenAway,
+    copyReport,
+    logHandlers,
+} from "../src/main/logs/ipc";
 import { composeReport, REPORT_LINES } from "../src/main/logs/report";
 import { pause, until } from "./bridge-harness";
 
@@ -51,6 +57,10 @@ function service(kept: LogLine[] = [], pageSize = 100) {
         listener: null as ((line: unknown) => void) | null,
         reachable: true,
         page: null as unknown,
+        /** How often the service was asked for its account of itself. */
+        diagnosed: 0,
+        /** While set, a page is not answered until this is. */
+        hold: null as Promise<void> | null,
         /** The number this run's first line had, and the numbers it no longer holds. */
         firstEver: 0,
         lost: [] as number[],
@@ -81,6 +91,9 @@ function service(kept: LogLine[] = [], pageSize = 100) {
             state.calls.push(
                 `fetch ${after === null ? "from the start" : `${after.run}/${after.seq}`}`,
             );
+            if (state.hold !== null) {
+                await state.hold;
+            }
             if (!state.reachable) {
                 return null;
             }
@@ -102,7 +115,10 @@ function service(kept: LogLine[] = [], pageSize = 100) {
                 dropped: state.lost.some((seq) => seq > from),
             };
         },
-        diagnostics: async () => (state.reachable ? DIAGNOSTICS : null),
+        diagnostics: async () => {
+            state.diagnosed += 1;
+            return state.reachable ? DIAGNOSTICS : null;
+        },
     };
     return { state, feed };
 }
@@ -129,7 +145,10 @@ describe("a line from the service", () => {
             "a newline, a tab, a direction override and a bell",
         );
         expect(takeLine(line(1, "x".repeat(MAX_LOG_TEXT + 100)))?.text).toHaveLength(MAX_LOG_TEXT);
-        expect(takeLine(line(1, "  \n "))?.text).toBe("");
+        // A line that comes to nothing still happened: it keeps its place
+        // and says so, where an empty row would say nothing.
+        expect(takeLine(line(1, "  \n "))?.text).toBe(EMPTY_LINE);
+        expect(takeLine(line(1, "\u{e0041}\u202e"))?.text).toBe(EMPTY_LINE);
         // The tag characters, which are invisible and can spell out text
         // nobody sees, and the line and paragraph separators.
         expect(
@@ -325,6 +344,63 @@ describe("the log the app keeps", () => {
         expect(opened.view().lines.at(-1)).toMatchObject({ seq: 3, gap: true });
     });
 
+    it("takes a number once, though one page brings it twice", async () => {
+        const { book: opened, state, seqs } = book();
+        state.page = {
+            run: 1,
+            lines: [line(3), line(1), line(3), line(2), line(1)],
+            next: 3,
+            dropped: false,
+        };
+        const first = opened.open();
+        await pause(20);
+        state.page = null;
+        state.lines = [line(1), line(2), line(3)];
+        await first;
+        expect(seqs()).toEqual([1, 2, 3]);
+    });
+
+    it("turns watching on once, however many times it is opened at once", async () => {
+        const { book: opened, state } = book([line(0)]);
+        const views = await Promise.all(Array.from({ length: 50 }, () => opened.open()));
+        expect(state.calls.filter((call) => call === "watch on")).toHaveLength(1);
+        expect(views.every((view) => view.lines.length === 1)).toBe(true);
+        // Opened again while open, it is still the one watch.
+        await opened.open();
+        expect(state.calls.filter((call) => call === "watch on")).toHaveLength(1);
+        // And closing something that is not open asks the service nothing.
+        await opened.close();
+        await opened.close();
+        expect(state.calls.filter((call) => call === "watch off")).toHaveLength(1);
+        expect(opened.isOpen()).toBe(false);
+    });
+
+    it("does not take a watched line while a reading is under way", async () => {
+        const { book: opened, state, updates } = book([line(0), line(1)]);
+        await opened.open();
+        updates.length = 0;
+        // The service starts again. A reading is asked for and is slow to be
+        // answered. Meanwhile a line of the new run arrives whose number
+        // happens to follow the last one held from the old run.
+        let answer = () => {};
+        state.hold = new Promise<void>((resolve) => {
+            answer = resolve;
+        });
+        state.restart([line(0, "new run"), line(1, "new run"), line(2, "new run")]);
+        state.listener?.(line(9, "new run"));
+        await pause(20);
+        state.listener?.(line(2, "new run"));
+        await pause(20);
+        // Taken now, it would sit after the old run's lines as if it followed them.
+        expect(updates).toEqual([]);
+        expect(opened.view().lines.map((held) => held.text)).toEqual(["line 0", "line 1"]);
+        state.hold = null;
+        answer();
+        await until(() => updates.length > 0, "the reading being answered");
+        expect(updates[0]?.reset).toBe(true);
+        expect(opened.view().lines.every((held) => held.text === "new run")).toBe(true);
+    });
+
     it("orders by number, never by time", async () => {
         const early = line(1, "written second", { at_unix_ms: 1000 });
         const late = line(0, "written first", { at_unix_ms: 9000 });
@@ -515,6 +591,47 @@ describe("the service's account of itself", () => {
         expect(taken).not.toBe(DIAGNOSTICS);
     });
 
+    it("has every text in it made one plain line, so none can add a line to the report", () => {
+        const twoLines = (text: string) => `${text}\nOwner claimed: no`;
+        const dirty = {
+            ...DIAGNOSTICS,
+            service_version: twoLines("0.1.0"),
+            os: twoLines("linux"),
+            arch: twoLines("x86_64"),
+            os_version: twoLines("6.8"),
+            gateway: twoLines("vpn.example"),
+            last_error: { code: "gateway_unreachable", message: twoLines("It did not answer.") },
+        };
+        const taken = takeDiagnostics(dirty);
+        for (const text of [
+            taken?.service_version,
+            taken?.os,
+            taken?.arch,
+            taken?.os_version,
+            taken?.gateway,
+            taken?.last_error?.message,
+        ]) {
+            expect(text).not.toMatch(/[\n\r]/);
+            expect(text).toContain("Owner claimed: no");
+        }
+        const parts = {
+            appVersion: "0.1.0",
+            platform: "linux",
+            arch: "x64",
+            link: { link: "ready", conn: { state: "disconnected" } } as LinkState,
+            lines: [],
+            dropped: false,
+            now: 0,
+        };
+        const clean = composeReport({ ...parts, diagnostics: takeDiagnostics(DIAGNOSTICS) });
+        const report = composeReport({ ...parts, diagnostics: taken });
+        // The same number of lines, and the real answer still on a line of its own.
+        expect(report.text.split("\n")).toHaveLength(clean.text.split("\n").length);
+        expect(report.text.split("\n").filter((row) => row.startsWith("Owner claimed:"))).toEqual([
+            "Owner claimed: yes",
+        ]);
+    });
+
     it("may have no OS version, last error or gateway to give, and must have the rest", () => {
         const bare = { ...DIAGNOSTICS, os_version: null, last_error: null, gateway: null };
         expect(takeDiagnostics(bare)).toEqual(bare);
@@ -606,13 +723,65 @@ describe("copying the report", () => {
             }
             copied.push(text);
         },
+        focused: () => true,
+    });
+    /** A gate that lets everything by, for the tests that are about something else. */
+    const open = { allows: () => true };
+
+    it("is done once for a burst of requests, with the service asked once", async () => {
+        const { book: opened, feed, state } = book([line(0)]);
+        await opened.open();
+        const copied: string[] = [];
+        const parts = partsWith(copied);
+        const gate = new CopyGate(opened, parts.focused);
+        const results = await Promise.all(
+            Array.from({ length: 200 }, () => copyReport(opened, feed, parts, gate)),
+        );
+        expect(copied).toHaveLength(1);
+        expect(state.diagnosed).toBe(1);
+        expect(results.filter((result) => result.ok)).toHaveLength(1);
+        expect(results.filter((result) => !result.ok)).toHaveLength(199);
+    });
+
+    it("is allowed again only after a few seconds", async () => {
+        const { book: opened } = book([line(0)]);
+        await opened.open();
+        expect(COPY_GAP_MS).toBeGreaterThanOrEqual(2000);
+        const gate = new CopyGate(opened, () => true, 150);
+        expect(gate.allows()).toBe(true);
+        expect(gate.allows()).toBe(false);
+        await pause(60);
+        expect(gate.allows()).toBe(false);
+        await pause(130);
+        expect(gate.allows()).toBe(true);
+    });
+
+    it("is refused, and the service asked nothing, unless the log is open and the window in use", async () => {
+        const { book: opened, feed, state } = book([line(0)]);
+        const copied: string[] = [];
+        let focused = true;
+        const parts = { ...partsWith(copied), focused: () => focused };
+        const gate = new CopyGate(opened, parts.focused, 0);
+        // The log has never been opened.
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: false });
+        await opened.open();
+        // The window is not the one the user is working in.
+        focused = false;
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: false });
+        focused = true;
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: true, lines: 1 });
+        // And not once the log has been closed again.
+        await opened.close();
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: false });
+        expect(copied).toHaveLength(1);
+        expect(state.diagnosed).toBe(1);
     });
 
     it("puts it on the clipboard once, and answers with a count, never the text", async () => {
         const { book: opened, feed } = book([line(0), line(1, "CSTP connected")]);
         await opened.open();
         const copied: string[] = [];
-        const result = await copyReport(opened, feed, partsWith(copied));
+        const result = await copyReport(opened, feed, partsWith(copied), open);
         expect(result).toEqual({ ok: true, lines: 2 });
         expect(copied).toHaveLength(1);
         expect(copied[0]).toContain("CSTP connected");
@@ -621,13 +790,28 @@ describe("copying the report", () => {
     });
 
     it("copies nothing by itself: not on opening, not as lines arrive, not on closing", async () => {
-        const { book: opened, state } = book([line(0)]);
+        // The whole of what the interface can ask for, as the app wires it,
+        // with a window and a clipboard that only record.
+        const { feed, state } = book([line(0)]);
         const copied: string[] = [];
-        partsWith(copied);
-        await opened.open();
+        const opened = new LogBook(feed, () => {});
+        const gate = new CopyGate(opened, () => true);
+        const handlers = logHandlers(opened, feed, partsWith(copied), gate);
+        expect(Object.keys(handlers).sort()).toEqual([
+            "logs:close",
+            "logs:copy-report",
+            "logs:open",
+        ]);
+        await handlers[LOGS_IPC.open]();
         state.write(line(1));
-        await opened.close();
+        await handlers[LOGS_IPC.open]();
+        await handlers[LOGS_IPC.close]();
         expect(copied).toEqual([]);
+        expect(state.diagnosed).toBe(0);
+        // Only the one request copies, and it does.
+        await handlers[LOGS_IPC.open]();
+        expect(await handlers[LOGS_IPC.copyReport]()).toEqual({ ok: true, lines: 2 });
+        expect(copied).toHaveLength(1);
     });
 
     it("still copies what it has when the service gives no account of itself", async () => {
@@ -635,19 +819,54 @@ describe("copying the report", () => {
         await opened.open();
         state.reachable = false;
         const copied: string[] = [];
-        expect(await copyReport(opened, feed, partsWith(copied))).toEqual({ ok: true, lines: 1 });
+        expect(await copyReport(opened, feed, partsWith(copied), open)).toEqual({
+            ok: true,
+            lines: 1,
+        });
         expect(copied[0]).toContain("The service did not give its own account of itself.");
         // A service whose answer cannot be believed is treated the same.
         const broken = { diagnostics: async () => ({ ...DIAGNOSTICS, pins: "two" }) };
         // (An answer with a field out of place is no answer at all.)
-        await copyReport(opened, broken, partsWith(copied));
+        await copyReport(opened, broken, partsWith(copied), open);
         expect(copied[1]).toContain("did not give its own account");
     });
 
     it("says so when the clipboard cannot be written", async () => {
         const { book: opened, feed } = book([line(0)]);
         await opened.open();
-        expect(await copyReport(opened, feed, partsWith([], true))).toEqual({ ok: false });
+        expect(await copyReport(opened, feed, partsWith([], true), open)).toEqual({ ok: false });
+    });
+});
+
+describe("a log nobody can be looking at", () => {
+    it("is closed when the window is put away, its page loads again, or its process dies", async () => {
+        const heard = new Map<string, () => void>();
+        const window = {
+            on: (event: string, listener: () => void) => void heard.set(event, listener),
+            webContents: {
+                on: (event: string, listener: () => void) => void heard.set(event, listener),
+            },
+        };
+        const { book: opened, state } = book([line(0)]);
+        closeWhenAway(window, opened);
+        expect([...heard.keys()].sort()).toEqual([
+            "did-start-loading",
+            "hide",
+            "render-process-gone",
+        ]);
+        for (const event of ["hide", "did-start-loading", "render-process-gone"]) {
+            await opened.open();
+            expect(opened.isOpen()).toBe(true);
+            heard.get(event)?.();
+            await pause(10);
+            expect(opened.isOpen(), event).toBe(false);
+            expect(state.calls.at(-1), event).toBe("watch off");
+        }
+        // The first load of the page, before anything was opened, asks the service nothing.
+        const before = state.calls.length;
+        heard.get("did-start-loading")?.();
+        await pause(10);
+        expect(state.calls).toHaveLength(before);
     });
 });
 
