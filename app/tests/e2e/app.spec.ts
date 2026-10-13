@@ -23,6 +23,12 @@ import {
     test,
 } from "@playwright/test";
 
+/**
+ * Off the screen unless this is CI: a test run on someone's computer must
+ * not open windows over their work. See `keepHidden` in `src/main/window.ts`.
+ */
+const HIDDEN = process.env.CI ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
+
 const screenshotDir = resolve(process.env.SCREENSHOT_DIR ?? "test-results/screens");
 
 const launchArgs = () => [
@@ -60,6 +66,7 @@ const contentsOf = (folder: string): string[] =>
 const installedFolderBefore = contentsOf(installedFolder);
 const launchEnv = {
     ...process.env,
+    ...HIDDEN,
     UBC_VPN_DEMO_STEP_MS: "600",
     // Whatever desktop the test machine runs, behave as on one with a tray.
     XDG_CURRENT_DESKTOP: "e2e",
@@ -624,7 +631,11 @@ test("a login can be given up, and the keyboard goes back to Connect", async () 
     await expect(heading()).toHaveText("Not connected");
 });
 
+/** Whether this run keeps the window off the screen, so showing and hiding it cannot be watched. */
+const offScreen = Object.keys(HIDDEN).length > 0;
+
 test("putting the window away gives a login up", async () => {
+    test.skip(offScreen, "needs a window on screen; runs in CI");
     await scenario("disconnected");
     await action().click();
     await expect(heading()).toHaveText("Your password");
@@ -1037,6 +1048,7 @@ test("the keyboard enlarges, shrinks and resets the interface", async () => {
 });
 
 test("a connection in progress does not trap the user", async () => {
+    test.skip(offScreen, "needs a window on screen; runs in CI");
     await scenario("connecting");
     await expect(action()).toHaveAttribute("aria-busy", "true");
     // The window can still be put away, and the app can still be quit.
@@ -1051,6 +1063,7 @@ test("a connection in progress does not trap the user", async () => {
 });
 
 test("closing the window keeps the app in the tray", async () => {
+    test.skip(offScreen, "needs a window on screen; runs in CI");
     await page.evaluate(() => window.ubcVpn.closeWindow());
     await expect
         .poll(() =>
@@ -1058,6 +1071,31 @@ test("closing the window keeps the app in the tray", async () => {
         )
         .toBe(false);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.show());
+});
+
+test("a test run can keep the window off the screen, and only a test run", async () => {
+    const other = await electron.launch({
+        ...launchOptions,
+        args: launchArgs(),
+        env: { ...launchEnv, UBC_VPN_PROFILE: newProfile(), UBC_VPN_TEST_HIDDEN: "1" },
+    });
+    try {
+        const offPage = await other.firstWindow();
+        await offPage.waitForLoadState("domcontentloaded");
+        // It is drawn and can be driven, and it is not on screen.
+        await expect(offPage.getByRole("heading", { level: 1 })).toHaveText("Not connected");
+        const shown = () =>
+            other.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible());
+        expect(await shown()).toBe(false);
+        // Asked to come forward, as the tray and a second launch do, it stays away.
+        await offPage.evaluate(() => window.ubcVpn.connect());
+        await offPage.waitForTimeout(300);
+        expect(await shown()).toBe(false);
+        // The page runs as if it were on screen.
+        expect(await offPage.evaluate(() => document.visibilityState)).toBe("visible");
+    } finally {
+        await other.close();
+    }
 });
 
 test("nothing was blocked or broken along the way", () => {

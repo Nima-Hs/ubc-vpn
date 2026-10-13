@@ -20,7 +20,7 @@ import {
 } from "./security";
 import { createTray, trayImage } from "./tray";
 import { closeHidesWindow, connectFromTray } from "./tray-icon";
-import { createWindow, showWindow } from "./window";
+import { createWindow, keepHidden, showWindow } from "./window";
 
 // First of all, before the profile is read or anything is written to it.
 // Electron's own choice is the folder that holds the user's settings file,
@@ -145,7 +145,9 @@ async function start(): Promise<void> {
         Menu.setApplicationMenu(menu === null ? null : Menu.buildFromTemplate(menu));
     }
 
-    const window = createWindow(entryUrl, trayImage("on", 64), developmentBuild);
+    // Only for the end-to-end tests: the window is never put on screen.
+    const hidden = keepHidden(app, process);
+    const window = createWindow(entryUrl, trayImage("on", 64), developmentBuild, hidden);
     registerIpc(window, controller, settings, devServerUrl);
     // The log screen: in no production build until its contract is on main.
     // Until then the only service that can be asked for its log is the
@@ -168,7 +170,11 @@ async function start(): Promise<void> {
         quitting = true;
         app.quit();
     };
-    const show = () => showWindow(window);
+    const show = () => {
+        if (!hidden) {
+            showWindow(window);
+        }
+    };
 
     const tray = createTray(
         {

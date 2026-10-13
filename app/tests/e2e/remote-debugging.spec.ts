@@ -13,6 +13,12 @@ import { join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import electronPath from "electron";
 
+/**
+ * Off the screen unless this is CI: a test run on someone's computer must
+ * not open windows over their work. See `keepHidden` in `src/main/window.ts`.
+ */
+const HIDDEN = process.env.CI ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
+
 /** A port nothing is using right now. */
 function freePort(): Promise<number> {
     return new Promise((done, fail) => {
@@ -54,6 +60,7 @@ function launch(
             // Its own profile, never the installed product's folder.
             env: {
                 ...process.env,
+                ...HIDDEN,
                 UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
                 ...env,
             },
