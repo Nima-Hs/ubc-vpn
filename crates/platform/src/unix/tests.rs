@@ -280,6 +280,82 @@ fn closing_frees_the_name_whatever_a_started_process_still_holds() {
     assert_eq!(again.err(), None, "the name stayed taken after the close");
 }
 
+// The lock is given up when its holder is dropped, even while another copy
+// of the open file exists, as one does in a process just started.
+#[test]
+fn a_dropped_claim_frees_the_name_whatever_copies_exist() {
+    let Some(sandbox) = Sandbox::any("claim") else {
+        return;
+    };
+    let path = sandbox.dir.join("claim.lock");
+    let claim = super::Claim::take(&path).expect("take");
+    assert_eq!(super::Claim::take(&path).err(), Some(Error::AlreadyExists));
+    let _copy = claim
+        .0
+        .try_clone()
+        .expect("a copy, as a started process has");
+    drop(claim);
+    let again = super::Claim::take(&path);
+    assert_eq!(again.err(), None, "the copy kept the name taken");
+}
+
+// A `listen` that fails after taking the name gives it back, even while the
+// process is starting programs, each of which holds a copy of the open lock
+// file for a moment: every later try fails for its own reason, never because
+// the name is taken, and one succeeds once what stood in the way is gone.
+#[test]
+fn a_listen_that_fails_gives_the_name_back() {
+    let Some(sandbox) = Sandbox::any("failed listen") else {
+        return;
+    };
+    let (transport, name) = (sandbox.transport(), sandbox.name());
+    drop(transport.listen(&name).expect("make the folder"));
+    // Something that is not a socket where the socket goes.
+    fs::create_dir(&name).expect("put a folder in the way");
+    let taken = failed("the channel's path is taken");
+
+    let started = Arc::new(AtomicU32::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let starter = {
+        let (started, stop) = (Arc::clone(&started), Arc::clone(&stop));
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let program = std::env::current_exe().expect("this program");
+                let mut child = std::process::Command::new(program);
+                child.args(["--exact", "no-such-test"]);
+                child.stdout(std::process::Stdio::null());
+                child.stderr(std::process::Stdio::null());
+                child.status().expect("start a program");
+                started.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    // Until enough programs have started, and so enough copies been made,
+    // for a lock left to the closing of the file to have been seen.
+    let deadline = Instant::now() + STUCK;
+    let mut tries = 0;
+    let mut outcome = Ok(());
+    while started.load(Ordering::SeqCst) < 30 && Instant::now() < deadline {
+        tries += 1;
+        let error = transport.listen(&name).err();
+        if error != taken {
+            outcome = Err(format!("try {tries}: {error:?}"));
+            break;
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    starter.join().expect("the program starter");
+    outcome.unwrap_or_else(|why| panic!("a failed listen kept the name, {why}"));
+    assert!(
+        started.load(Ordering::SeqCst) >= 30,
+        "too few programs started"
+    );
+
+    fs::remove_dir(&name).expect("clear the way");
+    let listener = transport.listen(&name);
+    assert_eq!(listener.err(), None, "the name stayed taken");
+}
+
 // A crashed run leaves its socket file behind. It must not block the next
 // run, and nothing but a socket is ever removed to make room.
 #[test]
