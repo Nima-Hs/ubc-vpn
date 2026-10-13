@@ -5,12 +5,14 @@ on:
     paths:
       - native/macos/**
       - native/probe/**
+      - native/check-patches.sh
       - .github/workflows/native-macos.yml
   push:
     branches: [main]
     paths:
       - native/macos/**
       - native/probe/**
+      - native/check-patches.sh
       - .github/workflows/native-macos.yml
   workflow_dispatch:
 
@@ -37,6 +39,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
       # A cached build is reused only on the same runner image and with the
       # same pinned versions, Xcode included (it is named in versions.env).
       - name: Identify the runner image
@@ -90,6 +94,10 @@ jobs:
               echo "$lib: macOS $(otool -l "$lib" | awk '$1 == "minos" { print $2; exit }')"
             fi
           done
+      # Shows the build carries our patch. The probe cannot: it always makes
+      # a command pipe.
+      - name: Check that freeing a handle leaves descriptor 0 open
+        run: bash native/probe/free-without-pipe.sh "$APP"
       - name: Build the probe against it
         working-directory: native/probe
         env:

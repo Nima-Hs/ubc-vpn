@@ -5,12 +5,14 @@ on:
     paths:
       - native/linux/**
       - native/probe/**
+      - native/check-patches.sh
       - .github/workflows/native-linux.yml
   push:
     branches: [main]
     paths:
       - native/linux/**
       - native/probe/**
+      - native/check-patches.sh
       - .github/workflows/native-linux.yml
   workflow_dispatch:
 
@@ -34,6 +36,8 @@ jobs:
     container: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
       - name: Build libopenconnect
         env:
           SOURCE_COMMIT: ${{ github.sha }}
@@ -69,6 +73,10 @@ jobs:
       - name: Check that no distribution libopenconnect is installed
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
+      # Shows the build carries our patch. The probe cannot: it always makes
+      # a command pipe.
+      - name: Check that freeing a handle leaves descriptor 0 open
+        run: bash native/probe/free-without-pipe.sh stage
 
       # The probe goes in stage/bin and finds the library in stage/lib through
       # its rpath, the same layout the installed app uses.
