@@ -72,7 +72,20 @@ awk -F'","' '
             tree[substr($0, RSTART + 5, RLENGTH - 5)] = 1
         next
     }
-    ($3 in tree) && $5 != "" { print $2 "\t" $5 }' "$tools/trace.csv" "$tools/trace.csv" | sort -u >"$tools/touched.txt"
+    ($3 in tree) {
+        time = $1; sub(/^"/, "", time)
+        detail = $7; for (i = 8; i <= NF; i++) detail = detail "\",\"" $i
+        sub(/"$/, "", detail)
+        # The detail of a process or thread event holds a command line and an
+        # environment. Nothing below needs them, and this file may be uploaded.
+        if ($4 ~ /^(Process|Thread) /) detail = ""
+        print time "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" detail
+    }' "$tools/trace.csv" "$tools/trace.csv" >"$tools/probe-trace.tsv"
+# probe-trace.tsv: time, process, PID, operation, path, result, detail. When
+# the job fails the workflow uploads it, so that what touched a refused path,
+# and how, can be looked up afterwards.
+echo "Events of the probe and what it started: $(wc -l <"$tools/probe-trace.tsv"), $(wc -c <"$tools/probe-trace.tsv") bytes"
+awk -F'\t' '$5 != "" { print $2 "\t" $5 }' "$tools/probe-trace.tsv" | sort -u >"$tools/touched.txt"
 
 echo "Processes traced: $(cut -f1 "$tools/touched.txt" | sort -u | tr '\n' ' ')"
 cut -f2 "$tools/touched.txt" | grep -E '^([A-Za-z]:|\\\\)' | sort -u >"$tools/files.txt" || true
@@ -136,8 +149,16 @@ bad_keys=$(unexplained <"$tools/registry.txt")
     die "the probe read a registry key that names one of the bundled libraries"
 
 if [ -n "$bad_files$bad_keys" ]; then
+    printf '%s\n' "$bad_files" "$bad_keys" | grep . >"$tools/uncovered.txt"
     echo "error: not covered by tests/trace-allow.txt:" >&2
-    printf '%s\n' "$bad_files" "$bad_keys" | grep . | head -200 >&2
+    head -200 "$tools/uncovered.txt" >&2
+    # Which program touched each one, and how. A rule is the last resort: first
+    # find out why the path was touched.
+    echo "What touched them, as <count> <process> | <operation> | <result> | <path>:" >&2
+    awk -F'\t' '
+        NR == FNR { bad[$0] = 1; next }
+        ($5 in bad) { print $2 " | " $4 " | " $6 " | " $5 }' "$tools/uncovered.txt" "$tools/probe-trace.tsv" |
+        sort | uniq -c | head -300 >&2
     exit 1
 fi
 echo "all files and registry keys are covered by tests/trace-allow.txt"
