@@ -5,7 +5,7 @@
 //! full path and looks up each function by name, so no program that uses the
 //! engine needs a link argument, and no `libopenconnect` is in the process
 //! before `load` is called. Signatures are written by hand from
-//! `include/openconnect.h` of the pinned build. No engine uses them yet.
+//! `include/openconnect.h` of the pinned build.
 //!
 //! # What `load` controls, and what it does not
 //!
