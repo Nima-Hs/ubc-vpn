@@ -136,6 +136,22 @@ jobs:
       - name: Planted configuration files are ignored
         run: native/windows/tests/planted-files.sh
 
+      # The trace downloads Process Monitor, which cannot be pinned, and runs it
+      # as administrator on the machine that holds the output. Record what the
+      # output contains first, and upload the record so that it is out of this
+      # machine's reach.
+      - name: Record the output before the trace
+        run: |
+          native/windows/tests/seal.sh self-test
+          native/windows/tests/seal.sh record "$(cygpath -u "$RUNNER_TEMP")/seal/checksums.txt"
+          cat "$(cygpath -u "$RUNNER_TEMP")/seal/checksums.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libopenconnect-windows-x64-checksums
+          path: ${{ runner.temp }}/seal/checksums.txt
+          if-no-files-found: error
+
       - name: Trace the files and registry keys the probe touches
         timeout-minutes: 10
         run: native/windows/tests/trace.sh
@@ -157,6 +173,18 @@ jobs:
           assert built or os.environ['EVENT'] == 'pull_request', 'only a pull request may reuse a GnuTLS build'
           print('suffix=' + ('' if built else '-reused-gnutls'))
           EOF
+
+      # The last thing before the upload: the output must still be exactly
+      # what was recorded before the trace, apart from the manifest being
+      # marked as the record expected. The record is fetched back from GitHub
+      # rather than read from where this machine kept it.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-windows-x64-checksums
+          path: ${{ runner.temp }}/sealed
+
+      - name: Check the output is what was recorded before the trace
+        run: native/windows/tests/seal.sh verify "$(cygpath -u "$RUNNER_TEMP")/sealed/checksums.txt"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
