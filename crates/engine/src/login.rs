@@ -77,6 +77,8 @@ struct Notes {
     refused: Cell<bool>,
     /// Why the form callback stopped the login.
     stopped: Cell<Option<LoginError>>,
+    /// How many one-time codes the user was asked for.
+    codes: Cell<usize>,
 }
 
 /// Whether `hash`, as the library reports a certificate, is a full pin that
@@ -128,9 +130,22 @@ fn questions(fields: &[Field]) -> Result<Vec<(usize, PromptKind, &str)>, LoginEr
     Ok(questions)
 }
 
+/// The most one-time codes one login asks for. A gateway may show the code
+/// form again and again, and each code may mean an approval request on the
+/// user's phone. After this many the login ends as
+/// [`LoginError::WrongPassword`], which is what a rejected code is, and
+/// [`Prompts::asked`] tells the caller a code was involved.
+const MAX_CODES: usize = 3;
+
 /// Fills in one form by asking the user. Each field is answered once, from
 /// one `ask`, and the answer is registered with the sink and then dropped.
-fn fill(form: &mut Form<'_>, prompts: &mut Prompts<'_>, logs: &LogSink) -> Result<(), LoginError> {
+/// `codes` counts the one-time codes asked for so far in this login.
+fn fill(
+    form: &mut Form<'_>,
+    prompts: &mut Prompts<'_>,
+    logs: &LogSink,
+    codes: &Cell<usize>,
+) -> Result<(), LoginError> {
     if form.asks_for_group() {
         return Err(LoginError::Failed);
     }
@@ -139,6 +154,12 @@ fn fill(form: &mut Form<'_>, prompts: &mut Prompts<'_>, logs: &LogSink) -> Resul
     let message = form.error().or_else(|| form.message());
     let fields = form.fields();
     for (index, kind, label) in questions(&fields)? {
+        if kind == PromptKind::Code {
+            if codes.get() == MAX_CODES {
+                return Err(LoginError::WrongPassword);
+            }
+            codes.set(codes.get() + 1);
+        }
         let prompt = Prompt {
             kind,
             label: label.to_string(),
@@ -241,16 +262,18 @@ impl LoginEngine for OpenConnect {
                 judging.refused.set(judging.refused.get() || !matches);
                 matches
             }),
-            form: Box::new(move |form| match fill(form, prompts, logs) {
-                Ok(()) => FormAnswer::Submit,
-                Err(error) => {
-                    filling.stopped.set(Some(error));
-                    match error {
-                        LoginError::Cancelled => FormAnswer::Cancel,
-                        _ => FormAnswer::Fail,
+            form: Box::new(
+                move |form| match fill(form, prompts, logs, &filling.codes) {
+                    Ok(()) => FormAnswer::Submit,
+                    Err(error) => {
+                        filling.stopped.set(Some(error));
+                        match error {
+                            LoginError::Cancelled => FormAnswer::Cancel,
+                            _ => FormAnswer::Fail,
+                        }
                     }
-                }
-            }),
+                },
+            ),
             // The only host and port a login may reach are the gateway's own.
             // A redirect or a form's address that names another gets nothing.
             resolve: Box::new(move |host, port| {

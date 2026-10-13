@@ -323,6 +323,117 @@ fn a_login_never_follows_the_gateway_to_another_address() {
     }
 }
 
+// Security rule: the host and the port are each checked. Each redirect here
+// is wrong in one way only: another host name on port 443, or the gateway's
+// own name on another port. The resolver alone decides where a name leads,
+// so with either check gone this one would lead back to the stand-in, which
+// would show its form and take the answers. Nothing may be asked or sent.
+#[test]
+fn a_redirect_to_another_host_or_another_port_is_refused() {
+    let (engine, library, _guard) = engine();
+    for scenario in ["otherhost", "otherport"] {
+        let Some(stand_in) = StandIn::start(scenario) else {
+            return;
+        };
+        let pin = pin_of(library, &stand_in);
+        let attempt = attempt(engine, &gateway(&stand_in, &pin));
+        assert_eq!(attempt.result, Err(LoginError::Failed), "{scenario}");
+        assert!(attempt.prompts.is_empty(), "{scenario}");
+        assert_eq!(stand_in.requests().len(), 1, "{scenario}: only the first");
+        assert_eq!(sent(&stand_in, NAME), 0, "{scenario}");
+    }
+}
+
+// Security rule: a cancelled login never returns a session. Here the user
+// cancels while answering the last question, and the gateway then accepts.
+// The cancel arrives after the form is filled, so only the check made before
+// the session is returned can catch it.
+#[test]
+fn a_login_cancelled_in_its_last_prompt_returns_no_session() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let cancel = Cancel::new();
+    let from_inside = cancel.clone();
+    let mut ask = |prompt: &Prompt| {
+        if prompt.kind == PromptKind::Password {
+            from_inside.cancel();
+            return Some(Secret::new(PASSWORD));
+        }
+        Some(Secret::new(NAME))
+    };
+    let mut prompts = Prompts::new(&mut ask);
+    let gateway = gateway(&stand_in, &pin);
+    let result = engine.login(&gateway, &mut prompts, &cancel, &LogSink::none());
+    assert_eq!(result, Err(LoginError::Cancelled));
+}
+
+// Security rule: a field the library refuses to fill ends the login, and the
+// form is not sent with that field left out. A form sent so would count as a
+// try against the account with an answer the user never gave. A password
+// with a NUL in it is one the binding refuses.
+#[test]
+fn a_field_that_cannot_be_filled_ends_the_login_unsent() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let mut ask = |prompt: &Prompt| {
+        Some(Secret::new(match prompt.kind {
+            PromptKind::Password => "not-a-real\0password",
+            _ => NAME,
+        }))
+    };
+    let mut prompts = Prompts::new(&mut ask);
+    let gateway = gateway(&stand_in, &pin);
+    let result = engine.login(&gateway, &mut prompts, &Cancel::new(), &LogSink::none());
+    assert_eq!(result, Err(LoginError::Failed));
+    assert_eq!(
+        stand_in.requests().len(),
+        1,
+        "only the request for the form"
+    );
+    assert_eq!(sent(&stand_in, NAME), 0);
+}
+
+// A gateway that asks for a code again and again gets three, and then the
+// login ends as a wrong password. Each code may be an approval request on
+// the user's phone. The user here would keep answering.
+#[test]
+fn a_login_asks_for_at_most_three_codes() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("codeagain") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let mut codes = 0;
+    let mut ask = |prompt: &Prompt| {
+        Some(Secret::new(match prompt.kind {
+            PromptKind::Username => NAME,
+            PromptKind::Password => PASSWORD,
+            _ => {
+                codes += 1;
+                // Give up in the end, so a login without the bound ends.
+                if codes > 10 {
+                    return None;
+                }
+                CODE
+            }
+        }))
+    };
+    let mut prompts = Prompts::new(&mut ask);
+    let gateway = gateway(&stand_in, &pin);
+    let result = engine.login(&gateway, &mut prompts, &Cancel::new(), &LogSink::none());
+    assert_eq!(result, Err(LoginError::WrongPassword));
+    assert!(prompts.asked(PromptKind::Code));
+    drop(prompts);
+    assert_eq!(codes, 3);
+    assert_eq!(sent(&stand_in, CODE), 3);
+}
+
 // A cancel that is already set stops the login before anything is contacted.
 #[test]
 fn a_login_cancelled_beforehand_contacts_nothing() {
