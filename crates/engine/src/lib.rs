@@ -136,9 +136,9 @@
 //!   single-sign-on login, or a client certificate. The library offers
 //!   single sign-on to the gateway on every request and runs its handler
 //!   whatever the form callback answered, and no public call turns that
-//!   off. So the pinned patches set `no_external_auth` in
+//!   off. So the pinned patches must set `no_external_auth` in
 //!   `openconnect_vpninfo_new`, which stops the offer, and every native
-//!   build is configured without external-browser login, which removes
+//!   build must be configured without external-browser login, which removes
 //!   that code. A test against the stand-in gateway must show such a login
 //!   fails, with nothing listening on the browser login's local port.
 //! - Let one thread own the library handle and make every library call on
