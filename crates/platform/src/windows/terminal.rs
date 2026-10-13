@@ -199,6 +199,12 @@ pub(crate) fn read_hidden_from(input: HANDLE, output: HANDLE, prompt: &str) -> R
         })
     });
     wipe(&mut bytes);
+    // The mode goes back first, so that from now on a Ctrl-C is an event
+    // again and none can fall between the look below and the change. The
+    // keys already waiting are not shown by that: the console shows a key
+    // only as it is read, and these are only looked at and thrown away.
+    // SAFETY: a plain call on the console handle the caller holds open.
+    unsafe { SetConsoleMode(input, before) };
     // A Ctrl-C typed just after Enter is waiting as a key: the console was
     // not turning keys into events that end the program when it came. Left
     // there, it would never interrupt anything, and the user who pressed

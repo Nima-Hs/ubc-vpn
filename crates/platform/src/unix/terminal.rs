@@ -65,7 +65,9 @@ struct Restore<'a>(&'a File, Termios);
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
-        let _ = tcsetattr(self.0, OptionalActions::Now, &self.1);
+        // With the keys still waiting thrown away as it takes effect: one
+        // that came after the last look was typed while nothing was shown.
+        let _ = tcsetattr(self.0, OptionalActions::Flush, &self.1);
         READING.store(false, Ordering::SeqCst);
     }
 }

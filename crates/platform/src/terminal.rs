@@ -13,18 +13,19 @@
 //!   therefore also swallows the key after it.)
 //! - **Ctrl-C** gives the line up: the call fails with
 //!   [`Error::Interrupted`]. It arrives as a key and not as a signal, so the
-//!   program is still running to put the terminal back.
+//!   program is still running to put the terminal back. One typed just
+//!   after Enter, before the terminal is back to making signals, counts too.
 //! - **Ctrl-D** on an empty line, and the terminal going away, fail with
 //!   [`Error::Closed`].
 //! - A line over [`MAX_HIDDEN_LINE_BYTES`] fails with [`Error::LineTooLong`]
 //!   once Enter is pressed. It is never cut short, and the rest of it is not
 //!   left for the shell to read.
 //!
-//! Only an entered line leaves the keys after it for the next reader, which
-//! may be the next question. Keys typed before the prompt appeared are
-//! thrown away, so nothing typed blind starts a secret; and on every way out
-//! that is not an entered line, so are the keys still waiting, or the shell
-//! would read the rest of a password as a command.
+//! Keys typed before the prompt appeared are thrown away, so nothing typed
+//! blind starts a secret. So are the keys still waiting when the call ends,
+//! on every way out: after an error the shell would read the rest of a
+//! password as a command, and after an entered line they were typed while
+//! nothing was shown.
 //!
 //! The terminal's mode is put back on every way out of the call, a panic
 //! included. It is not put back if the program is killed during the call by
