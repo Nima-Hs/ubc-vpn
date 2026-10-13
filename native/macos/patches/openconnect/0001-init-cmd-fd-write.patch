@@ -1,19 +1,29 @@
-A new handle comes from calloc(), and openconnect_vpninfo_new() sets cmd_fd to
--1 but leaves cmd_fd_write at zero. openconnect_vpninfo_free() closes both when
-cmd_fd_write >= 0. So freeing a handle that never called
-openconnect_setup_cmd_pipe() closes file descriptor 0: standard input the
-first time, and after that whatever the process has since opened as 0.
+Two fields of a new handle that openconnect_vpninfo_new() leaves wrong.
 
-Set it to -1 with the others, which is what the test in
-openconnect_vpninfo_free() and the one in check_cmd_fd() expect.
+cmd_fd_write: a new handle comes from calloc(), and openconnect_vpninfo_new()
+sets cmd_fd to -1 but leaves cmd_fd_write at zero. openconnect_vpninfo_free()
+closes both when cmd_fd_write >= 0. So freeing a handle that never called
+openconnect_setup_cmd_pipe() closes file descriptor 0: standard input the
+first time, and after that whatever the process has since opened as 0. Set
+it to -1 with the others, which is what the test in openconnect_vpninfo_free()
+and the one in check_cmd_fd() expect.
+
+no_external_auth: unless it is set, every request tells the gateway that this
+client can log in by single sign-on and through an external browser, and
+there is no function to set it; only the command-line tool does. We support
+neither, so set it for every handle and never offer them. This only stops the
+offer. What stops a gateway that asks anyway is the build: it leaves out the
+external-browser login (no HPKE), and no webview callback is ever set, so a
+single sign-on form fails at once.
 
 --- a/library.c
 +++ b/library.c
-@@ -196,6 +196,7 @@
+@@ -196,6 +196,8 @@
  	vpninfo->dtls_fd = -1;
  	vpninfo->need_poll_cmd_fd = -1;
  	vpninfo->cmd_fd = -1;
 +	vpninfo->cmd_fd_write = -1;
++	vpninfo->no_external_auth = 1;
  	init_pkt_queue(&vpninfo->free_queue);
  	init_pkt_queue(&vpninfo->incoming_queue);
  	init_pkt_queue(&vpninfo->outgoing_queue);

@@ -99,14 +99,22 @@ if ! grep -qF 'vpninfo->cmd_fd_write = -1;' library.c; then
     echo "error: library.c does not initialise cmd_fd_write; the patch was not applied" >&2
     exit 1
 fi
+grep -qF 'vpninfo->no_external_auth = 1;' library.c ||
+    die "library.c does not turn off the single sign-on offer; the patch was not applied"
 ./autogen.sh
 # -ffile-prefix-map keeps this folder's path out of the DLL.
+# No external-browser login: no browser to start, and with the HKDF check
+# answered "no" no HPKE, so a gateway's single sign-on form fails at once
+# instead of the library listening on a local port for a browser.
 PKG_CONFIG_PATH=$gnutls/lib/pkgconfig ./configure \
     --with-gnutls --without-lz4 --disable-nls --disable-docs \
     --without-libproxy --without-stoken --without-libpskc --without-libpcsclite \
-    --with-vpnc-script=vpnc-script-win.js \
+    --without-external-browser --with-vpnc-script=vpnc-script-win.js \
+    ac_cv_func_gnutls_hkdf_expand=no \
     CFLAGS="-O2 -ffile-prefix-map=$(cygpath -m "$work")=."
 ! grep -q '^#define HAVE_P11KIT' config.h || die "OpenConnect was configured with PKCS#11 support"
+! grep -qE '^#define (HAVE_HPKE_SUPPORT|DEFAULT_EXTERNAL_BROWSER)' config.h ||
+    die "OpenConnect was configured with the external-browser login"
 make -j"$(nproc)" libopenconnect.la
 cp .libs/libopenconnect-5.dll "$out/bin/"
 cp COPYING.LGPL "$out/licenses/openconnect/"

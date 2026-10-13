@@ -105,11 +105,22 @@ component gnutls "$GNUTLS_VERSION" "$GNUTLS_URL" "$GNUTLS_SHA256" nocheck \
 # libxml2, so say where it is. strchrnul exists only from macOS 15.4, so make
 # openconnect use its own. The vpnc-script path is used by the command-line
 # client only, which is built but not shipped; the library never runs it.
+# No external-browser login: no browser to start, and with the HKDF check
+# answered "no" no HPKE, so a gateway's single sign-on form fails at once
+# instead of the library listening on a local port for a browser.
 sdk=$(xcrun --show-sdk-path)
 component openconnect "$OPENCONNECT_VERSION" "$OPENCONNECT_URL" "$OPENCONNECT_SHA256" nocheck \
     --with-gnutls --disable-nls --disable-docs \
     --without-libproxy --without-stoken --without-libpskc \
     --without-libpcsclite --without-lz4 --without-gssapi \
-    --with-vpnc-script=/nonexistent/vpnc-script \
-    ac_cv_func_strchrnul=no \
+    --without-external-browser --with-vpnc-script=/nonexistent/vpnc-script \
+    ac_cv_func_strchrnul=no ac_cv_func_gnutls_hkdf_expand=no \
     LIBXML2_CFLAGS="-I$sdk/usr/include/libxml2" LIBXML2_LIBS=-lxml2
+# What the build above configured and compiled. A cached build was checked
+# when it was made, with the same options: the options are in this file,
+# which is part of the cache key.
+config=$src/openconnect-$OPENCONNECT_VERSION/config.h
+if [ -f "$config" ] && grep -qE '^#define (HAVE_HPKE_SUPPORT|DEFAULT_EXTERNAL_BROWSER)' "$config"; then
+    echo "The openconnect build has the external-browser login." >&2
+    exit 1
+fi
