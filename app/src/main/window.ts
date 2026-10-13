@@ -7,9 +7,10 @@ import { webPreferences } from "./security";
 export const HIDDEN_SWITCH = "UBC_VPN_TEST_HIDDEN";
 
 /**
- * Whether the window is never to be shown. Only for the end-to-end tests,
- * which drive the window through Electron and need nobody to see it: a test
- * run on someone's computer must not open windows over their work. On only
+ * Whether the window is never to be shown, and no tray icon is made. Only
+ * for the end-to-end tests, which drive the window through Electron and need
+ * nobody to see it: a test run on someone's computer must not put anything
+ * on their screen. On only
  * when set to exactly `1`, and never in an installed app, which ignores it
  * as it ignores every other variable of this kind.
  */

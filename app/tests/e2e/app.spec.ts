@@ -1093,6 +1093,10 @@ test("a test run can keep the window off the screen, and only a test run", async
         expect(await shown()).toBe(false);
         // The page runs as if it were on screen.
         expect(await offPage.evaluate(() => document.visibilityState)).toBe("visible");
+        // And there is no tray icon: with none, closing the window would quit.
+        expect(
+            await offPage.evaluate(async () => (await window.ubcVpn.getSnapshot()).closeHides),
+        ).toBe(false);
     } finally {
         await other.close();
     }
