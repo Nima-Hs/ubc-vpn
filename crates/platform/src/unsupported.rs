@@ -18,6 +18,9 @@ impl Routes for Native {
     fn capture_physical(&self, _gateway: Ipv4Addr) -> Result<PhysicalNetwork> {
         Err(Error::Unsupported)
     }
+    fn configure_tunnel(&self, _tunnel: &str, _address: Ipv4Addr, _mtu: u16) -> Result<()> {
+        Err(Error::Unsupported)
+    }
     fn add_gateway_route(&self, _gateway: Ipv4Addr, _via: &PhysicalNetwork) -> Result<()> {
         Err(Error::Unsupported)
     }

@@ -233,6 +233,88 @@ impl RouteSet {
     }
 }
 
+/// The networks a machine was already on when a connection started, as the
+/// platform captured them before the tunnel existed.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalNetworks<'a> {
+    /// The machine's own addresses on every interface but the tunnel.
+    pub own_addresses: &'a [Ipv4Addr],
+    /// The networks those interfaces reach directly, with no router between.
+    pub on_link: &'a [Ipv4Net],
+    /// The router of the physical network, when it has one.
+    pub next_hop: Option<Ipv4Addr>,
+}
+
+/// Why a connection cannot be set up on the network the machine is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalConflict {
+    /// The gateway's address is one of this machine's own.
+    GatewayIsOwnAddress(Ipv4Addr),
+    /// The route (first) is the same as, or lies inside, a network the
+    /// machine is directly on (second).
+    InsideLocalNetwork(Ipv4Net, Ipv4Net),
+    /// The route would capture the physical network's router.
+    HoldsRouter(Ipv4Net, Ipv4Addr),
+}
+
+impl fmt::Display for LocalConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GatewayIsOwnAddress(addr) => {
+                write!(f, "the gateway address {addr} is this computer's own")
+            }
+            Self::InsideLocalNetwork(net, local) => {
+                write!(f, "{net} is part of {local}, a network this computer is on")
+            }
+            Self::HoldsRouter(net, router) => {
+                write!(f, "{net} contains {router}, the router of this network")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LocalConflict {}
+
+/// Checks a connection against the network the machine is on. The rule is
+/// the same on every OS; only how `local` is learned differs.
+///
+/// A route sent into the tunnel wins over a local network wherever it is the
+/// more specific of the two, so:
+///
+/// - A subnet that equals an on-link network, or lies inside one, is refused:
+///   it would take the machine's neighbours, and usually its router, away
+///   from the network they are really on.
+/// - A subnet wider than an on-link network is accepted. The local network
+///   stays the more specific route, so `10.0.0.0/8` works from a home network
+///   that is `10.0.0.0/24`.
+/// - A subnet that contains the router is refused unless an on-link network
+///   also contains it. That network is then the more specific of the two (a
+///   wider one would have refused the subnet already), so the router stays
+///   where it is. Without it the route to the gateway, which goes through
+///   the router, would lead into the tunnel.
+/// - The gateway's address must not be one of the machine's own.
+pub fn check_against_local(
+    subnets: &[Ipv4Net],
+    gateway: Ipv4Addr,
+    local: &LocalNetworks,
+) -> Result<(), LocalConflict> {
+    if local.own_addresses.contains(&gateway) {
+        return Err(LocalConflict::GatewayIsOwnAddress(gateway));
+    }
+    for subnet in subnets {
+        if let Some(on_link) = local.on_link.iter().find(|net| net.contains(subnet)) {
+            return Err(LocalConflict::InsideLocalNetwork(*subnet, *on_link));
+        }
+        if let Some(router) = local.next_hop
+            && subnet.contains_addr(router)
+            && !local.on_link.iter().any(|net| net.contains_addr(router))
+        {
+            return Err(LocalConflict::HoldsRouter(*subnet, router));
+        }
+    }
+    Ok(())
+}
+
 /// A plain lower-case host name: at least two dot-separated labels of
 /// letters, digits and hyphens, the last one not all digits. No wildcard, no
 /// trailing dot, no root, and so no IP address.
@@ -443,5 +525,87 @@ mod tests {
         let back: RouteSet = serde_json::from_str(&json).unwrap();
         assert_eq!(back, set(&["10.19.0.0/16"]));
         assert!(serde_json::from_str::<RouteSet>(r#"{"subnets":["10.0.0.1/8"]}"#).is_err());
+    }
+
+    /// A home network, 10.0.0.0/24 behind 10.0.0.1, and a bridge.
+    fn checked(subnet: &str, gateway: [u8; 4]) -> Result<(), LocalConflict> {
+        let local = LocalNetworks {
+            own_addresses: &[Ipv4Addr::new(10, 0, 0, 7), Ipv4Addr::new(172, 17, 0, 1)],
+            on_link: &[net("10.0.0.0/24"), net("172.17.0.0/16")],
+            next_hop: Some(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        check_against_local(&[net("192.0.2.0/24"), net(subnet)], gateway.into(), &local)
+    }
+
+    const GATEWAY: [u8; 4] = [198, 51, 100, 1];
+
+    // Security rule: a route may not take the machine's own network, or its
+    // router, into the tunnel.
+    #[test]
+    fn refuses_a_route_equal_to_or_inside_a_local_network() {
+        let home = net("10.0.0.0/24");
+        for inside in ["10.0.0.0/24", "10.0.0.0/25", "10.0.0.128/25", "10.0.0.9/32"] {
+            let refused = LocalConflict::InsideLocalNetwork(net(inside), home);
+            assert_eq!(checked(inside, GATEWAY), Err(refused), "{inside}");
+        }
+        // A bridge is a network the machine is on, as much as the physical one.
+        let bridge = LocalConflict::InsideLocalNetwork(net("172.17.3.0/24"), net("172.17.0.0/16"));
+        assert_eq!(checked("172.17.3.0/24", GATEWAY), Err(bridge));
+    }
+
+    // The local network stays the more specific route, so a campus range that
+    // happens to contain a home network must keep working.
+    #[test]
+    fn accepts_a_route_wider_than_a_local_network_or_apart_from_it() {
+        for fine in ["10.0.0.0/8", "10.0.0.0/23", "10.0.1.0/24", "172.16.0.0/12"] {
+            assert_eq!(checked(fine, GATEWAY), Ok(()), "{fine}");
+        }
+        // The gateway may sit on a local network, as long as it is not us.
+        assert_eq!(checked("10.19.0.0/16", [10, 0, 0, 9]), Ok(()));
+    }
+
+    // Security rule: the route to the gateway goes through the router, so a
+    // route that captures the router sends the tunnel into itself.
+    #[test]
+    fn refuses_a_route_that_holds_a_router_no_local_network_keeps() {
+        // A link whose router lies outside the machine's own network, as on
+        // some mobile and cloud networks.
+        let router = Ipv4Addr::new(100, 64, 0, 1);
+        let local = |on_link: &[Ipv4Net]| {
+            let own = [Ipv4Addr::new(100, 64, 5, 7)];
+            let local = LocalNetworks {
+                own_addresses: &own,
+                on_link,
+                next_hop: Some(router),
+            };
+            check_against_local(&[net("100.64.0.0/16")], GATEWAY.into(), &local)
+        };
+        let held = LocalConflict::HoldsRouter(net("100.64.0.0/16"), router);
+        assert_eq!(local(&[net("100.64.5.7/32")]), Err(held.clone()));
+        assert_eq!(local(&[]), Err(held));
+        // A local network that holds the router is more specific than the
+        // route, or the route would have been refused as lying inside it.
+        assert_eq!(local(&[net("100.64.0.0/24")]), Ok(()));
+        // No router at all: nothing to capture.
+        let direct = LocalNetworks {
+            own_addresses: &[],
+            on_link: &[],
+            next_hop: None,
+        };
+        let subnets = [net("100.64.0.0/16")];
+        assert_eq!(
+            check_against_local(&subnets, GATEWAY.into(), &direct),
+            Ok(())
+        );
+    }
+
+    // Security rule: an unprivileged client names the gateway's address. It
+    // must not be able to name this machine.
+    #[test]
+    fn refuses_a_gateway_that_is_one_of_the_machines_own_addresses() {
+        for own in [[10, 0, 0, 7], [172, 17, 0, 1]] {
+            let refused = LocalConflict::GatewayIsOwnAddress(own.into());
+            assert_eq!(checked("192.0.2.0/24", own), Err(refused));
+        }
     }
 }

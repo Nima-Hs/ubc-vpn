@@ -9,9 +9,9 @@
 //! They use addresses reserved for documentation (192.0.2.0/24 and
 //! 198.51.100.0/24), which no real network routes specially.
 //!
-//! Not checked here, and so required of each real implementation's own tests:
-//! that [`Routes::remove_all`], called from a new process, removes what an
-//! earlier process added and spares every route this product did not add.
+//! [`check_route_ownership`] restarts with a fresh instance in the same
+//! process. That a new process, and a restart of the machine, behave the same
+//! is left to each real implementation's own tests.
 
 use std::net::Ipv4Addr;
 use std::thread;
@@ -94,9 +94,99 @@ pub fn check_routes(routes: &dyn Routes, tunnel: &str) {
     routes.remove_all().expect("remove all");
 }
 
+/// Checks [`Routes::configure_tunnel`] on the device named `tunnel`, which must
+/// exist and carry no routes. The address it sets stays until the device
+/// goes.
+pub fn check_configure_tunnel(routes: &dyn Routes, tunnel: &str) {
+    let address = Ipv4Addr::new(198, 51, 100, 7);
+    routes
+        .configure_tunnel(tunnel, address, 1300)
+        .expect("configure");
+    routes
+        .configure_tunnel(tunnel, address, 1300)
+        .expect("configure again");
+    // Security rule: the address is a single host. Its neighbours, which a
+    // netmask would have put on the tunnel's link, are not routed there.
+    for neighbour in [1, 6, 8, 254].map(|n| Ipv4Addr::new(198, 51, 100, n)) {
+        let routed = routes.uses_interface(neighbour, tunnel);
+        assert_eq!(routed, Verified::No, "{neighbour} follows the address");
+    }
+}
+
+/// What a harness does as somebody other than the product, by the OS's own
+/// means: on a real OS, the system's route tool.
+pub trait Foreign {
+    /// Adds a route to `net` through the interface named `interface`.
+    fn add_route(&self, interface: &str, net: Ipv4Net);
+    /// Removes it again.
+    fn remove_route(&self, interface: &str, net: Ipv4Net);
+}
+
+/// Checks that the product removes only routes it added, in this run or after
+/// a restart. `restarted` makes a fresh instance, as the service gets when it
+/// starts again after a crash; `foreign` adds routes as somebody else.
+/// Leaves no route behind when it passes.
+pub fn check_route_ownership(
+    routes: &dyn Routes,
+    restarted: &dyn Fn() -> Box<dyn Routes>,
+    foreign: &dyn Foreign,
+    tunnel: &str,
+) {
+    let net = |a, b, c| Ipv4Net::new(Ipv4Addr::new(a, b, c, 0), 24).expect("valid network");
+    let (theirs, ours) = (net(198, 51, 100), net(192, 0, 2));
+    let (in_theirs, in_ours) = (Ipv4Addr::new(198, 51, 100, 9), Ipv4Addr::new(192, 0, 2, 9));
+    let (yes, no) = (Verified::Yes, Verified::No);
+
+    routes.remove_all().expect("remove all with nothing added");
+    foreign.add_route(tunnel, theirs);
+    assert_eq!(
+        routes.uses_interface(in_theirs, tunnel),
+        yes,
+        "the harness added nothing"
+    );
+
+    // Adding a route that is already there succeeds and does not make it ours.
+    routes
+        .add_tunnel_routes(tunnel, &[theirs, ours])
+        .expect("add over theirs");
+    routes
+        .remove_tunnel_routes(tunnel, &[theirs, ours])
+        .expect("remove");
+    assert_eq!(
+        routes.uses_interface(in_theirs, tunnel),
+        yes,
+        "removed somebody else's route"
+    );
+    assert_eq!(routes.uses_interface(in_ours, tunnel), no, "ours stayed");
+
+    // After a restart, removing everything removes only what was ours.
+    routes
+        .add_tunnel_routes(tunnel, &[theirs, ours])
+        .expect("add again");
+    restarted()
+        .remove_all()
+        .expect("remove all after a restart");
+    assert_eq!(
+        routes.uses_interface(in_theirs, tunnel),
+        yes,
+        "remove_all took theirs"
+    );
+    assert_eq!(
+        routes.uses_interface(in_ours, tunnel),
+        no,
+        "remove_all left ours"
+    );
+
+    foreign.remove_route(tunnel, theirs);
+    routes.remove_all().expect("remove all");
+}
+
 /// Checks [`Dns`] against the interface named `tunnel`, which must exist.
 /// Leaves no split DNS behind when it passes.
-pub fn check_dns(dns: &dyn Dns, tunnel: &str) {
+///
+/// `resolvers_for` asks the OS which resolvers a lookup of a name would go to
+/// now. The harness supplies it, because each OS shows that its own way.
+pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Vec<Ipv4Addr>) {
     let first = SplitDns {
         resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
         domains: vec!["suite.example".to_string()],
@@ -122,8 +212,18 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str) {
     dns.clear_split_dns().expect("clear when nothing is set");
     assert_eq!(dns.split_dns_matches(&first), no);
 
+    // Names that are not chosen: unrelated, a parent, and one that only ends
+    // in the same letters.
+    let others = ["other.example", "example", "notsuite.example"];
+    let usual = others.map(resolvers_for);
+
     // A match is exact: the same resolvers and the same domains, no more.
     dns.set_split_dns(tunnel, &first).expect("set");
+    // Security rule: only the chosen domain and the names under it change.
+    for chosen in ["suite.example", "host.suite.example"] {
+        assert_eq!(resolvers_for(chosen), first.resolvers, "{chosen}");
+    }
+    assert_eq!(others.map(resolvers_for), usual, "another name changed");
     assert_eq!(dns.split_dns_matches(&first), yes);
     assert_eq!(dns.split_dns_matches(&other_resolvers), no, "resolvers");
     assert_eq!(dns.split_dns_matches(&other_domains), no, "domains");
@@ -138,6 +238,7 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str) {
     dns.clear_split_dns().expect("clear");
     dns.clear_split_dns().expect("clear twice");
     assert_eq!(dns.split_dns_matches(&second), no);
+    assert_eq!(others.map(resolvers_for), usual);
 }
 
 /// Checks [`Transport`], using the channel `name`, which nothing may hold.
