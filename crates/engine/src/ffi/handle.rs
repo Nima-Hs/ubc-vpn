@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use ubc_vpn_core::redact::Secret;
 
 use super::{
-    AddrInfo, AuthForm, CmdPipe, FormOpt, Library, OC_CMD_CANCEL, OC_FORM_OPT_IGNORE, VpnInfo,
+    AddrInfo, AuthForm, CmdPipe, FormOpt, IpInfo, Library, OC_CMD_CANCEL, OC_CMD_DETACH,
+    OC_FORM_OPT_IGNORE, SplitInclude, VpnInfo,
 };
 
 #[link(name = "ubc_vpn_shim", kind = "static")]
@@ -420,6 +421,20 @@ fn lend_wiped<T>(value: &Secret, call: impl FnOnce(*const c_char) -> T) -> Optio
     Some((result, text))
 }
 
+/// What the gateway assigned to a tunnel, copied out of the library as text.
+/// Every field but `gateway_addr` is the gateway's say and must be checked
+/// before it is used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpInfoCopy {
+    pub address: Option<String>,
+    pub netmask: Option<String>,
+    pub dns: Vec<String>,
+    pub mtu: c_int,
+    pub split_includes: Vec<String>,
+    /// The address the connection went to, as the library found it.
+    pub gateway_addr: Option<String>,
+}
+
 /// One `openconnect_info`, freed on drop. It is not `Send`: the thread that
 /// makes it makes every library call on it.
 ///
@@ -450,10 +465,20 @@ impl Stopper {
     /// Writes `OC_CMD_CANCEL`. `None` if the handle is gone, and then
     /// nothing was written; otherwise whether the write worked.
     pub fn cancel(&self) -> Option<bool> {
+        self.send(OC_CMD_CANCEL)
+    }
+
+    /// Writes `OC_CMD_DETACH`, which stops a tunnel and leaves its session
+    /// valid at the gateway. The answer is as for [`cancel`](Self::cancel).
+    pub fn detach(&self) -> Option<bool> {
+        self.send(OC_CMD_DETACH)
+    }
+
+    fn send(&self, command: u8) -> Option<bool> {
         let pipe = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: a pipe is here only while its handle is alive: `drop`
         // takes it out, under this lock, before it frees the handle.
-        (*pipe).map(|pipe| unsafe { pipe.send(OC_CMD_CANCEL) })
+        (*pipe).map(|pipe| unsafe { pipe.send(command) })
     }
 
     fn hold(&self, pipe: Option<CommandPipe>) {
@@ -557,6 +582,94 @@ impl<'a> Handle<'a> {
         // SAFETY: `raw` is a live handle used on its own thread. The answer
         // is null or a NUL-terminated string that belongs to the handle.
         unsafe { copied((self.library.get_cookie)(self.raw)) }.map(Secret::new)
+    }
+
+    /// `openconnect_set_cookie`: the session to open a tunnel with. False if
+    /// the cookie has a NUL in it or the library refuses. The library keeps
+    /// its own copy; the one made here to hand it over is wiped.
+    pub fn set_cookie(&self, cookie: &Secret) -> bool {
+        let set = self.library.set_cookie;
+        let raw = self.raw;
+        // SAFETY: `raw` is a live handle used on its own thread, and `text`
+        // is a NUL-terminated string the library copies.
+        let taken = lend_wiped(cookie, |text| unsafe { set(raw, text) == 0 });
+        taken.is_some_and(|(taken, _wiped)| taken)
+    }
+
+    /// `openconnect_disable_dtls`: the tunnel uses its TLS connection only.
+    /// Call it before connecting. True on success.
+    pub fn disable_dtls(&self) -> bool {
+        // SAFETY: `raw` is a live handle used on its own thread.
+        unsafe { (self.library.disable_dtls)(self.raw) == 0 }
+    }
+
+    /// `openconnect_make_cstp_connection`: opens the tunnel's connection to
+    /// the gateway with the cookie. Zero on success, or a negative errno. The
+    /// record of the certificate callback is cleared first, as for a login.
+    pub fn make_cstp_connection(&self) -> c_int {
+        self.context().accepted.set(false);
+        // SAFETY: `raw` is a live handle used on its own thread.
+        unsafe { (self.library.make_cstp_connection)(self.raw) }
+    }
+
+    /// What the gateway assigned, copied out of the handle at once: the
+    /// library may free it once the main loop runs. `None` before a
+    /// connection is made. All of it but `gateway_addr` is the gateway's say.
+    pub fn ip_info(&self) -> Option<IpInfoCopy> {
+        let mut info: *const IpInfo = std::ptr::null();
+        let mut ignored: *const c_void = std::ptr::null();
+        let mut also_ignored: *const c_void = std::ptr::null();
+        // SAFETY: `raw` is a live handle used on its own thread, and the
+        // three pointers are valid to write to. What comes back is null or a
+        // structure of the library's, alive until the main loop runs; it is
+        // copied before this returns.
+        unsafe {
+            let result =
+                (self.library.get_ip_info)(self.raw, &mut info, &mut ignored, &mut also_ignored);
+            if result != 0 || info.is_null() {
+                return None;
+            }
+            let info = &*info;
+            let mut split_includes = Vec::new();
+            let mut next = info.split_includes;
+            while !next.is_null() {
+                let route: &SplitInclude = &*next;
+                split_includes.extend(copied(route.route));
+                next = route.next;
+            }
+            Some(IpInfoCopy {
+                address: copied(info.addr),
+                netmask: copied(info.netmask),
+                dns: info.dns.iter().filter_map(|dns| copied(*dns)).collect(),
+                mtu: info.mtu,
+                split_includes,
+                gateway_addr: copied(info.gateway_addr),
+            })
+        }
+    }
+
+    /// `openconnect_setup_tun_device` with no script and no name: creates
+    /// the tunnel device and changes nothing else, no route and no DNS.
+    /// Zero on success. Needs the rights to create a device.
+    pub fn setup_tun_device(&self) -> c_int {
+        // SAFETY: `raw` is a live handle used on its own thread. Both
+        // strings may be null, and are.
+        unsafe { (self.library.setup_tun_device)(self.raw, std::ptr::null(), std::ptr::null()) }
+    }
+
+    /// The tunnel device's name, copied, once there is a device.
+    pub fn ifname(&self) -> Option<String> {
+        // SAFETY: `raw` is a live handle used on its own thread. The answer
+        // is null or a NUL-terminated string that belongs to the handle.
+        unsafe { copied((self.library.get_ifname)(self.raw)) }
+    }
+
+    /// `openconnect_mainloop`: runs the tunnel until it ends, and answers
+    /// with why, as a negative errno. Gives up reconnecting after
+    /// `reconnect_timeout` seconds, trying every `reconnect_interval`.
+    pub fn mainloop(&self, reconnect_timeout: c_int, reconnect_interval: c_int) -> c_int {
+        // SAFETY: `raw` is a live handle used on its own thread.
+        unsafe { (self.library.mainloop)(self.raw, reconnect_timeout, reconnect_interval) }
     }
 
     /// The write end of the handle's command pipe. There is one per handle,
