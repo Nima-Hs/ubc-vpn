@@ -8,8 +8,8 @@ import { show, useNavigation } from "@/lib/navigation";
 import { ConnectionView } from "@/views/connection-view";
 import { RoutesView } from "@/views/routes-view";
 
-// The app's screens, in the order the switcher shows them. The log and the
-// settings will be added here; the switcher's row has room for four.
+// The app's screens, in the order the switcher shows them. The switcher's
+// row has room for four, and four is what there are.
 const views: View[] = [
     { id: "connection", label: "Connection", Component: ConnectionView },
     { id: "routes", label: "Routes", Component: RoutesView },
@@ -17,28 +17,41 @@ const views: View[] = [
     ...(__LOGS__
         ? [{ id: "logs", label: "Logs", Component: lazy(() => import("@/views/logs-view")) }]
         : []),
-    // Demo builds only: a screen showing every component.
-    ...(__DEMO__
+    // What the app keeps for the user to log in. Not in a production build yet: see `__SETTINGS__`.
+    ...(__SETTINGS__
         ? [
               {
-                  id: "components",
-                  label: "Parts",
-                  Component: lazy(() => import("@/demo/gallery-view")),
+                  id: "settings",
+                  label: "Settings",
+                  Component: lazy(() => import("@/views/settings-view")),
               },
           ]
         : []),
 ];
 
+// Demo builds only: a screen showing every component. Not a fifth tab, which
+// the row has no room for: a button in the title bar opens it.
+const gallery: View | null = __DEMO__
+    ? { id: "components", label: "Parts", Component: lazy(() => import("@/demo/gallery-view")) }
+    : null;
+
 export function App() {
     const current = useNavigation((navigation) => navigation.current);
-    const Current = (views.find((view) => view.id === current) ?? views[0])?.Component;
+    const Current = (
+        [...views, ...(gallery === null ? [] : [gallery])].find((view) => view.id === current) ??
+        views[0]
+    )?.Component;
 
     return (
         // Movement is dropped, and fades kept, for anyone who asks for less motion.
         <MotionConfig reducedMotion="user">
             <TooltipProvider>
                 <div className="flex h-full flex-col">
-                    <TitleBar />
+                    <TitleBar
+                        {...(gallery !== null && {
+                            gallery: () => show(gallery.id),
+                        })}
+                    />
                     {/* Directly under the title bar, above everything else. */}
                     <DevelopmentMark />
                     <ViewSwitcher views={views} current={current} onChange={show} />

@@ -355,6 +355,8 @@ test("the app, the client and a dev-mode service work together", async () => {
     // to ask for one.
     await expect(tab("Logs")).toHaveCount(0);
     expect(await page.evaluate(() => window.ubcVpn.logs === undefined)).toBe(true);
+    await expect(tab("Settings")).toHaveCount(0);
+    expect(await page.evaluate(() => window.ubcVpn.account === undefined)).toBe(true);
     const snapshot = await page.evaluate(() => window.ubcVpn.getSnapshot());
     expect(snapshot.development).toBe(true);
     expect(snapshot.state).toEqual({ link: "ready", conn: { state: "disconnected" } });

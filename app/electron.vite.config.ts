@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "electron-vite";
+import { version } from "./package.json";
 
 const shared = resolve(__dirname, "src/shared");
 
@@ -18,6 +19,12 @@ export default defineConfig(({ mode }) => {
         // Turning it on for production is one change, here, once the real
         // service can be asked.
         __LOGS__: JSON.stringify(mode === "demo"),
+        // The Settings screen and its requests. The client cannot yet do
+        // what it asks (the saved password lives in the client), so for now
+        // only the demo build has it, against a fake.
+        __SETTINGS__: JSON.stringify(mode === "demo"),
+        // The app's version, as the package says, for the Settings screen.
+        __APP_VERSION__: JSON.stringify(version),
     };
     return {
         main: {

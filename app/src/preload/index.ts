@@ -2,12 +2,14 @@
 // fixed list of functions; the interface never gets `ipcRenderer` itself, and
 // none of these functions takes a channel name or passes arguments through.
 
+import { ACCOUNT_IPC } from "@shared/account";
 import { DEMO_IPC, IPC, type Snapshot, type VpnApi } from "@shared/api";
 import { LOGS_IPC, type LogUpdate } from "@shared/logs";
 import { contextBridge, ipcRenderer } from "electron";
 
 declare const __DEMO__: boolean;
 declare const __LOGS__: boolean;
+declare const __SETTINGS__: boolean;
 
 const api: VpnApi = {
     platform: process.platform,
@@ -41,6 +43,15 @@ const api: VpnApi = {
                 };
             },
             copyReport: () => ipcRenderer.invoke(LOGS_IPC.copyReport),
+        },
+    }),
+    ...(__SETTINGS__ && {
+        account: {
+            get: () => ipcRenderer.invoke(ACCOUNT_IPC.get),
+            setSavePassword: (save: boolean) =>
+                ipcRenderer.invoke(ACCOUNT_IPC.setSavePassword, save),
+            forgetPassword: () => ipcRenderer.invoke(ACCOUNT_IPC.forgetPassword),
+            forgetUsername: () => ipcRenderer.invoke(ACCOUNT_IPC.forgetUsername),
         },
     }),
     ...(__DEMO__ && {

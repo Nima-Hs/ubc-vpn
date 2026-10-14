@@ -29,6 +29,9 @@ const markers = [
     "Copy report",
     "UBC VPN diagnostics report",
     "logs-new-run",
+    // The Settings screen, which no production build has yet (`__SETTINGS__`).
+    "account:set-save-password",
+    "Forget saved password",
 ];
 
 if (!existsSync(out)) {

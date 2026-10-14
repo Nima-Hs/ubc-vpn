@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { DEMO_IPC } from "@shared/api";
 import { app, type BrowserWindow, clipboard, Menu, protocol, session } from "electron";
+import type { AccountService } from "./account";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
 import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
@@ -73,6 +74,7 @@ async function start(): Promise<void> {
     let login: LoginFactory;
     let demoSettings: SettingsService | undefined;
     let logFeed: LogFeed | undefined;
+    let account: AccountService | undefined;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
@@ -81,12 +83,15 @@ async function start(): Promise<void> {
             "./demo/demo-settings"
         );
         const { createDemoLogs, DEMO_LOG_SCENARIOS } = await import("./demo/demo-logs");
+        const { createDemoAccount, DEMO_ACCOUNT_SCENARIOS } = await import("./demo/demo-account");
         const fakeSettings = createDemoSettings();
         demoSettings = fakeSettings;
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
         const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
         const fakeLogs = createDemoLogs(step);
         logFeed = fakeLogs;
+        const fakeAccount = createDemoAccount(step);
+        account = fakeAccount;
         const demo = createDemoLink(step);
         link = demo;
         let demoLogin: ReturnType<typeof createDemoLogin> | undefined;
@@ -100,6 +105,7 @@ async function start(): Promise<void> {
                 ...DEMO_LOGIN_SCENARIOS,
                 ...DEMO_SETTINGS_SCENARIOS,
                 ...DEMO_LOG_SCENARIOS,
+                ...DEMO_ACCOUNT_SCENARIOS,
             ]);
             handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
                 if (typeof name === "string") {
@@ -108,6 +114,7 @@ async function start(): Promise<void> {
                     demo.setScenario(name);
                     fakeSettings.setScenario(name);
                     fakeLogs.setScenario(name);
+                    fakeAccount.setScenario(name);
                 }
             });
         };
@@ -163,6 +170,12 @@ async function start(): Promise<void> {
             copy: (text) => clipboard.writeText(text),
             focused: () => window.isFocused(),
         });
+    }
+    // The Settings screen: in no production build until the client can do
+    // what it asks. Until then only the demo's fake answers it.
+    if (__SETTINGS__ && account !== undefined) {
+        const { registerAccount } = await import("./account");
+        registerAccount(window, devServerUrl, account);
     }
     registerDemo?.(window);
 

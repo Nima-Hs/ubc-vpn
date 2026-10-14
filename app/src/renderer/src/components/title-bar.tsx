@@ -1,4 +1,4 @@
-import { Minus, X } from "lucide-react";
+import { Minus, Shapes, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { api, useSnapshot } from "@/lib/store";
 import { IconButton } from "./ui/icon-button";
@@ -24,7 +24,12 @@ function Mark() {
  * OS. It drags the window. macOS places its window buttons at the left, so
  * there the bar leaves room for them and shows none of its own.
  */
-export function TitleBar() {
+export function TitleBar({
+    gallery,
+}: {
+    /** Demo builds only: opens the screen that shows every component. */
+    gallery?: () => void;
+}) {
     const mac = api.platform === "darwin";
     const closeHides = useSnapshot((snapshot) => snapshot.closeHides);
     return (
@@ -39,6 +44,11 @@ export function TitleBar() {
                 UBC VPN
             </span>
             <div className="ms-auto flex items-center gap-1">
+                {gallery !== undefined && (
+                    <IconButton label="Parts" tooltipSide="left" onClick={gallery}>
+                        <Shapes />
+                    </IconButton>
+                )}
                 {!mac && (
                     <>
                         <IconButton label="Minimize" onClick={() => void api.minimizeWindow()}>

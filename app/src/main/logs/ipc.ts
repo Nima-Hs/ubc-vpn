@@ -71,7 +71,7 @@ export function followWindow(
     },
     book: Pick<LogBook, "close" | "open" | "isOpen">,
     tell: (update: LogUpdate) => void,
-): void {
+): { pageClosed(): void } {
     let reopen = false;
     window.on("hide", () => {
         reopen = book.isOpen();
@@ -90,6 +90,13 @@ export function followWindow(
     };
     window.webContents.on("did-start-loading", forgotten);
     window.webContents.on("render-process-gone", forgotten);
+    // The page closed it itself: it has left the Logs screen, even if that
+    // happened while the window was away, and nothing is opened for it.
+    return {
+        pageClosed: () => {
+            reopen = false;
+        },
+    };
 }
 
 /**
@@ -142,10 +149,15 @@ export function logHandlers(
     feed: Pick<LogFeed, "diagnostics">,
     parts: ReportParts,
     gate: Pick<CopyGate, "allows">,
+    /** Told when the page itself closes the log; see `followWindow`. */
+    pageClosed: () => void = () => {},
 ): Record<(typeof LOGS_IPC)["open" | "close" | "copyReport"], () => unknown> {
     return {
         [LOGS_IPC.open]: () => book.open(),
-        [LOGS_IPC.close]: () => book.close(),
+        [LOGS_IPC.close]: () => {
+            pageClosed();
+            return book.close();
+        },
         [LOGS_IPC.copyReport]: () => copyReport(book, feed, parts, gate),
     };
 }
@@ -168,9 +180,10 @@ export function registerLogs(
     };
     const book = new LogBook(feed, tell);
     const gate = new CopyGate(book, parts.focused);
-    for (const [channel, handler] of Object.entries(logHandlers(book, feed, parts, gate))) {
+    const following = followWindow(window, book, tell);
+    const handlers = logHandlers(book, feed, parts, gate, following.pageClosed);
+    for (const [channel, handler] of Object.entries(handlers)) {
         handleFromInterface(window, devServerUrl, channel, handler);
     }
-    followWindow(window, book, tell);
     return book;
 }

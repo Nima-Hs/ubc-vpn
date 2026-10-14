@@ -910,6 +910,34 @@ describe("a log nobody can be looking at", () => {
         expect(opened.view().lines.at(-1)?.seq).toBe(4);
     });
 
+    it("is not opened on showing for a page that closed it itself while the window was away", async () => {
+        const window = fakeWindow();
+        const { book: opened, state } = book([line(0)]);
+        const following = followWindow(window, opened, () => {});
+        const handlers = logHandlers(
+            opened,
+            { diagnostics: async () => null },
+            {
+                appVersion: "0",
+                platform: "linux",
+                arch: "x64",
+                link: () => ({ link: "starting" }),
+                copy: () => {},
+                focused: () => true,
+            },
+            { allows: () => "yes" as const },
+            following.pageClosed,
+        );
+        await handlers[LOGS_IPC.open]();
+        await window.fire("hide");
+        // The page leaves the Logs screen, and says so, while the window is away.
+        await handlers[LOGS_IPC.close]();
+        const asked = state.calls.length;
+        await window.fire("show");
+        expect(opened.isOpen()).toBe(false);
+        expect(state.calls).toHaveLength(asked);
+    });
+
     it("is not opened on showing unless it was open when the window was put away", async () => {
         const window = fakeWindow();
         const { book: opened, state } = book([line(0)]);

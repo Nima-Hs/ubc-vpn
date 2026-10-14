@@ -315,6 +315,7 @@ test("the window renders, locked down", async () => {
     expect(exposed.require).toBe("undefined");
     expect(exposed.process).toBe("undefined");
     expect(exposed.api).toEqual([
+        "account",
         "answerPrompt",
         "cancelLogin",
         "checkRoutes",
@@ -504,6 +505,10 @@ test("another window cannot use the interface's functions", async () => {
                     saveRoutes: () => api.saveRoutes({ subnets: [], dns_domains: [] }),
                     minimizeWindow: () => api.minimizeWindow(),
                     closeWindow: () => api.closeWindow(),
+                    getAccount: () => api.account.get(),
+                    setSavePassword: () => api.account.setSavePassword(false),
+                    forgetPassword: () => api.account.forgetPassword(),
+                    forgetUsername: () => api.account.forgetUsername(),
                     openLogs: () => api.logs.open(),
                     closeLogs: () => api.logs.close(),
                     copyReport: () => api.logs.copyReport(),
@@ -532,6 +537,10 @@ test("another window cannot use the interface's functions", async () => {
         saveRoutes: "refused",
         minimizeWindow: "refused",
         closeWindow: "refused",
+        getAccount: "refused",
+        setSavePassword: "refused",
+        forgetPassword: "refused",
+        forgetUsername: "refused",
         openLogs: "refused",
         closeLogs: "refused",
         copyReport: "refused",
@@ -752,6 +761,76 @@ test("logs: lines are shown oldest first, and the list keeps to the newest", asy
     await newest.click();
     await expect(logLines().last()).toBeInViewport({ ratio: 0.9 });
     await expect(newest).toHaveCount(0);
+    await scenario("disconnected");
+    await tab("Connection").click();
+});
+
+test("settings: the saved password is named, can be forgotten after a question, and the switch turns", async () => {
+    await scenario("account-saved");
+    await tab("Connection").click();
+    await tab("Settings").click();
+    await expect(heading()).toHaveText("Settings");
+    await expect(page.getByText("someone", { exact: true })).toBeVisible();
+    const remember = page.getByRole("switch", { name: "Remember my password" });
+    await expect(remember).toHaveAttribute("aria-checked", "true");
+    // Its explanation is read with it.
+    await expect(remember).toHaveAccessibleDescription(/so you are asked only for the code/);
+    await shoot("settings-saved");
+
+    // Forgetting asks first; "Keep it" changes nothing.
+    await page.getByRole("button", { name: "Forget saved password" }).click();
+    await expect(page.getByRole("alert")).toContainText("Forget the saved password?");
+    await expect(page.getByRole("button", { name: "Forget it" })).toBeFocused();
+    await shoot("settings-forget-asked");
+    await page.getByRole("button", { name: "Keep it" }).click();
+    await expect(page.getByRole("button", { name: "Forget saved password" })).toBeVisible();
+    await page.getByRole("button", { name: "Forget saved password" }).click();
+    await page.keyboard.press("Enter");
+    // Once forgotten the question goes, there is nothing to forget, and the
+    // switch stays as it was.
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Forget saved password" })).toHaveCount(0);
+    await expect(remember).not.toHaveAttribute("aria-disabled");
+    await expect(remember).toHaveAttribute("aria-checked", "true");
+
+    // The switch turns from the keyboard, and turning it off is kept.
+    await remember.focus();
+    await page.keyboard.press("Space");
+    await expect(remember).toHaveAttribute("aria-checked", "false");
+
+    // The username can be forgotten too.
+    await page.getByRole("button", { name: "Forget", exact: true }).click();
+    await expect(
+        page.getByText("None yet. It is remembered after a login that works."),
+    ).toBeVisible();
+
+    // The footer fits in the window.
+    await expect(page.getByText(/^UBC VPN \d+\.\d+\.\d+\. A report for whoever/)).toBeInViewport({
+        ratio: 1,
+    });
+    await scenario("disconnected");
+    await tab("Connection").click();
+});
+
+test("settings: no keyring, and a change that cannot be saved, are said plainly", async () => {
+    await scenario("account-no-keyring");
+    await tab("Connection").click();
+    await tab("Settings").click();
+    const remember = page.getByRole("switch", { name: "Remember my password" });
+    await expect(remember).toHaveAttribute("aria-disabled", "true");
+    await expect(page.getByText("This computer has no keyring the app can use")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Forget saved password" })).toHaveCount(0);
+    await shoot("settings-no-keyring");
+
+    await scenario("account-unwritable");
+    await tab("Connection").click();
+    await tab("Settings").click();
+    await page.getByRole("button", { name: "Forget saved password" }).click();
+    await page.getByRole("button", { name: "Forget it" }).click();
+    await expect(
+        page.getByText("Your settings could not be saved, and nothing was changed."),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Forget saved password" })).toBeVisible();
     await scenario("disconnected");
     await tab("Connection").click();
 });

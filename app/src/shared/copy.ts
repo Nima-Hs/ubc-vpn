@@ -4,6 +4,7 @@
 // The rules: sentence case, plain words, no exclamation marks. A message about
 // a problem says what happened, then what to do next.
 
+import type { AccountError } from "./account";
 import type { ActionError, LinkState, LoginPrompt, LoginState, SettingsError } from "./api";
 import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
@@ -424,6 +425,53 @@ export const LOGS = {
         failed: "The report could not be put on the clipboard. Try again.",
     },
 } as const;
+
+/** The Settings screen's fixed words. */
+export const SETTINGS = {
+    title: "Settings",
+    body: "Changes are saved at once and apply to the next login.",
+    loading: "Reading your settings…",
+    loggingIn: "Logging in",
+    username: "CWL username",
+    noUsername: "None yet. It is remembered after a login that works.",
+    forgetUsername: "Forget",
+    remember: "Remember my password",
+    rememberBody: (where: string) => `Kept in ${where}, so you are asked only for the code.`,
+    noKeyring:
+        "This computer has no keyring the app can use, so the password is asked for each time.",
+    forgetPassword: "Forget saved password",
+    forgetAsk: "Forget the saved password? You will be asked for it at the next login.",
+    forgetYes: "Forget it",
+    forgetNo: "Keep it",
+    footer: (version: string) =>
+        `UBC VPN ${version}. A report for whoever is helping you is on the Logs screen.`,
+} as const;
+
+/** Where the saved password is kept, as the user knows it. */
+export function whereKept(platform: string): string {
+    switch (platform) {
+        case "win32":
+            return "Windows Credential Manager";
+        case "darwin":
+            return "the macOS Keychain";
+        default:
+            return "your keyring";
+    }
+}
+
+/** Why a change to the login details was not made, and what to do. */
+export function describeAccountError(error: AccountError): string {
+    switch (error) {
+        case "unreadable":
+            return "Your settings file is damaged, so nothing was changed. If you edited it by hand, undo the change.";
+        case "unwritable":
+            return "Your settings could not be saved, and nothing was changed. Check that your disk is not full, then try again.";
+        case "keyring_unavailable":
+            return "This computer has no keyring the app can use, so the password cannot be remembered.";
+        case "unavailable":
+            return "UBC VPN could not reach its command-line client, so nothing was changed. Try again.";
+    }
+}
 
 /** The Routes screen's fixed words. */
 export const ROUTES = {
