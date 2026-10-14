@@ -27,6 +27,7 @@ import {
     serveInterfaceFile,
     webPreferences,
 } from "../src/main/security";
+import { keepHidden } from "../src/main/window";
 
 /** A folder laid out like the built interface, with a secret beside it. */
 function interfaceFolder(): string {
@@ -310,6 +311,19 @@ describe("remote debugging", () => {
                 true,
             );
         }
+    });
+});
+
+describe("keeping the window off the screen", () => {
+    it("is for a test run only: exactly 1, and never in an installed app", () => {
+        expect(keepHidden({ isPackaged: false }, { env: { UBC_VPN_TEST_HIDDEN: "1" } })).toBe(true);
+        for (const value of [undefined, "", "0", "true", " 1", "1 ", "yes"]) {
+            expect(
+                keepHidden({ isPackaged: false }, { env: { UBC_VPN_TEST_HIDDEN: value } }),
+                String(value),
+            ).toBe(false);
+        }
+        expect(keepHidden({ isPackaged: true }, { env: { UBC_VPN_TEST_HIDDEN: "1" } })).toBe(false);
     });
 });
 

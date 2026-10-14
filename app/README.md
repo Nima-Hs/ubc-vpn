@@ -42,6 +42,8 @@ pnpm check:build     # the production build contains no demo code
 pnpm check:licenses  # everything shipped has an allowed licence
 ```
 
+The end-to-end tests keep the app's window off the screen when run on your own computer, so they do not open windows over your work: they set `UBC_VPN_TEST_HIDDEN=1`, which an app that is not installed honours by never showing its window, and an installed app ignores. In CI the window is shown, so the few tests about showing and hiding it run there and are skipped locally.
+
 The end-to-end test saves a screenshot of every state to `test-results/screens`, or to `SCREENSHOT_DIR` if that is set. On Linux without a display, run it under `xvfb-run`.
 
 `pnpm test:system` is the one test with no stand-in in it ([`tests/system/real.spec.ts`](tests/system/real.spec.ts)). It starts `ubc-vpn-service --dev`, starts the production build of the app with `UBC_VPN_DEV=1`, and drives the window: the service is found and claimed, routes are checked and saved, a login is answered, the connection comes up and goes down, a login is cancelled, a wrong password is refused. Build the two programs first and name them:

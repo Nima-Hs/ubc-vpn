@@ -3,6 +3,23 @@ import { WINDOW_BACKGROUND } from "@shared/api";
 import { BrowserWindow, screen } from "electron";
 import { webPreferences } from "./security";
 
+/** The variable that keeps the window off the screen, for the tests. */
+export const HIDDEN_SWITCH = "UBC_VPN_TEST_HIDDEN";
+
+/**
+ * Whether the window is never to be shown. Only for the end-to-end tests,
+ * which drive the window through Electron and need nobody to see it: a test
+ * run on someone's computer must not open windows over their work. On only
+ * when set to exactly `1`, and never in an installed app, which ignores it
+ * as it ignores every other variable of this kind.
+ */
+export function keepHidden(
+    app: { readonly isPackaged: boolean },
+    process: { readonly env: Record<string, string | undefined> },
+): boolean {
+    return !app.isPackaged && process.env[HIDDEN_SWITCH] === "1";
+}
+
 /** A compact, fixed-size window: the app lives in the tray. */
 const WIDTH = 380;
 const HEIGHT = 620;
@@ -11,6 +28,8 @@ export function createWindow(
     entryUrl: string,
     icon: Electron.NativeImage,
     developmentBuild: boolean,
+    /** Never show it; see `keepHidden`. */
+    hidden = false,
 ): BrowserWindow {
     const mac = process.platform === "darwin";
     const window = new BrowserWindow({
@@ -27,10 +46,17 @@ export function createWindow(
         // The interface draws its own title bar so it looks the same on every
         // OS. macOS keeps its own window buttons, placed inside that bar.
         ...(mac ? { titleBarStyle: "hiddenInset" as const } : { frame: false }),
-        webPreferences: webPreferences(join(__dirname, "../preload/index.js"), developmentBuild),
+        webPreferences: {
+            ...webPreferences(join(__dirname, "../preload/index.js"), developmentBuild),
+            // A window that is never shown still runs its page as if it
+            // were on screen: timers, animations and the page's visibility.
+            ...(hidden && { backgroundThrottling: false }),
+        },
     });
     enableKeyboardZoom(window);
-    window.once("ready-to-show", () => window.show());
+    if (!hidden) {
+        window.once("ready-to-show", () => window.show());
+    }
     void window.loadURL(entryUrl);
     return window;
 }
