@@ -472,12 +472,16 @@ pub(crate) mod tests {
 
     // Security rule: putting the terminal back never waits for its output
     // to be taken. Nobody reads this child's terminal, so the prompt it
-    // wrote is still waiting there when it is told to stop. It must still
-    // end at once, by the signal's usual handling, with the terminal
-    // showing what is typed again.
+    // wrote is still waiting there when it is told to stop. The request
+    // must still reach it at once, with the terminal showing what is typed
+    // again.
+    //
+    // Whether the child can then end is not asked: macOS keeps a process
+    // in its last close of a terminal until the output is taken, whatever
+    // the program does, so the test ends the child itself.
     #[test]
     fn the_terminal_is_put_back_though_nobody_reads_it() {
-        use std::os::unix::process::ExitStatusExt;
+        use std::io::{BufRead, BufReader};
         use std::process::{Command, Stdio};
         use std::time::Instant;
 
@@ -491,8 +495,17 @@ pub(crate) mod tests {
         let (_, tests) = module_path!().split_once("::").expect("a module path");
         let test = format!("{tests}::unread_child");
         child.args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"]);
-        child.env(QUIET_CHILD, &name).stdout(Stdio::null());
+        child.env(QUIET_CHILD, &name).stdout(Stdio::piped());
         let mut child = child.spawn().expect("start the child");
+        let printed = BufReader::new(child.stdout.take().expect("its output"));
+        let (said, heard) = mpsc::channel();
+        thread::spawn(move || {
+            for line in printed.lines().map_while(io::Result::ok) {
+                if let Some((_, what)) = line.split_once("SAYS ") {
+                    let _ = said.send(what.to_string());
+                }
+            }
+        });
         // The question is open once the mode has changed. Nothing is read
         // from the screen.
         let started = Instant::now();
@@ -503,23 +516,15 @@ pub(crate) mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let sent = Instant::now();
         // SAFETY: no memory-safety conditions; the child has not been
         // waited for, so its ID is still its own.
         assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
-        let ended = loop {
-            if let Some(status) = child.try_wait().expect("look at the child") {
-                break status;
-            }
-            if sent.elapsed() > Duration::from_secs(5) {
-                let _ = child.kill();
-                panic!("it did not end; it waits for its terminal's output");
-            }
-            thread::sleep(Duration::from_millis(10));
-        };
-        // Its own check of the mode, made just before it ended.
-        assert_eq!(ended.code(), Some(43), "{ended:?}: echo was not back on");
-        assert_eq!(ended.signal(), None);
+        let got = heard.recv_timeout(Duration::from_secs(5));
+        let _ = child.kill();
+        let _ = child.wait();
+        // Its own check of the mode, made when the request reached it.
+        let got = got.expect("the request did not come: it waits for its terminal's output");
+        assert_eq!(got, "RESTORED true");
     }
 
     // Not a test of its own: the test above runs it in a new process.
@@ -543,6 +548,8 @@ pub(crate) mod tests {
         let _ = stops.recv();
         let now = tcgetattr(&terminal).expect("its mode").local_modes;
         let shown = LocalModes::ECHO | LocalModes::ICANON | LocalModes::ISIG;
-        std::process::exit(if now.contains(shown) { 43 } else { 44 });
+        println!("SAYS RESTORED {}", now.contains(shown));
+        // Then it waits to be ended: see the test above.
+        thread::sleep(Duration::from_secs(60));
     }
 }
