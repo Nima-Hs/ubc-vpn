@@ -54,7 +54,7 @@ export default function LogsView() {
 
     const copy = async () => {
         setReport("copying");
-        setReport((await api.logs?.copyReport()) ?? { ok: false });
+        setReport((await api.logs?.copyReport()) ?? { ok: false, reason: "failed" });
     };
 
     const lines = held.state === "ready" ? held.lines : [];
@@ -94,7 +94,7 @@ export default function LogsView() {
                             {LOGS.dropped}
                         </Text>
                     )}
-                    <LogList lines={lines} className="flex-1" />
+                    <LogList lines={lines} className="min-h-32 flex-1" />
                 </>
             )}
 
@@ -102,8 +102,8 @@ export default function LogsView() {
                 {report === "asking" && (
                     // Read out as it appears: what the report holds comes
                     // before the button that copies it.
-                    <div role="alert">
-                        <Panel tone="attention">
+                    <div role="alert" className="flex max-h-48 min-h-0 flex-col">
+                        <Panel tone="attention" scrollLabel={LOGS.reportHoldsLabel}>
                             <Text>{LOGS.reportHolds}</Text>
                             <div className="flex gap-2 pt-1">
                                 {/* The question takes the keyboard, so it cannot be missed. */}
@@ -123,7 +123,7 @@ export default function LogsView() {
                 )}
                 {typeof report === "object" && !report.ok && (
                     <Panel tone="problem">
-                        <Text>{LOGS.reportFailed}</Text>
+                        <Text>{LOGS.reportRefused[report.reason]}</Text>
                     </Panel>
                 )}
                 <Button

@@ -756,6 +756,31 @@ test("logs: lines are shown oldest first, and the list keeps to the newest", asy
     await tab("Connection").click();
 });
 
+test("logs: put away and shown again, the screen carries on following the log", async () => {
+    test.skip(offScreen, "needs a window on screen; runs in CI");
+    await scenario("logs");
+    await tab("Connection").click();
+    await tab("Logs").click();
+    await expect.poll(() => logLines().count()).toBeGreaterThan(3);
+    const shown = (visible: boolean) =>
+        app.evaluate(({ BrowserWindow }, on) => {
+            const window = BrowserWindow.getAllWindows()[0];
+            if (on) {
+                window?.show();
+            } else {
+                window?.hide();
+            }
+        }, visible);
+    await shown(false);
+    await page.waitForTimeout(500);
+    await shown(true);
+    // Lines written after it was shown again reach the screen.
+    const newest = await logLines().last().textContent();
+    await expect.poll(() => logLines().last().textContent(), { timeout: 10_000 }).not.toBe(newest);
+    await scenario("disconnected");
+    await tab("Connection").click();
+});
+
 test("logs: a line is put on the page as text, whatever it holds", async () => {
     await scenario("logs-awkward");
     await tab("Connection").click();

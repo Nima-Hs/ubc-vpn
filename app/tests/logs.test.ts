@@ -9,13 +9,7 @@ import type { LogLine } from "@shared/protocol/LogLine";
 import { describe, expect, it } from "vitest";
 import { createDemoLogs, DEMO_LOG_SCENARIOS } from "../src/main/demo/demo-logs";
 import { LogBook, type LogFeed, takeDiagnostics, takeLine, takePage } from "../src/main/logs/book";
-import {
-    COPY_GAP_MS,
-    CopyGate,
-    closeWhenAway,
-    copyReport,
-    logHandlers,
-} from "../src/main/logs/ipc";
+import { COPY_GAP_MS, CopyGate, copyReport, followWindow, logHandlers } from "../src/main/logs/ipc";
 import { composeReport, REPORT_LINES } from "../src/main/logs/report";
 import { pause, until } from "./bridge-harness";
 
@@ -726,7 +720,7 @@ describe("copying the report", () => {
         focused: () => true,
     });
     /** A gate that lets everything by, for the tests that are about something else. */
-    const open = { allows: () => true };
+    const open = { allows: () => "yes" as const };
 
     it("is done once for a burst of requests, with the service asked once", async () => {
         const { book: opened, feed, state } = book([line(0)]);
@@ -741,6 +735,9 @@ describe("copying the report", () => {
         expect(state.diagnosed).toBe(1);
         expect(results.filter((result) => result.ok)).toHaveLength(1);
         expect(results.filter((result) => !result.ok)).toHaveLength(199);
+        expect(new Set(results.flatMap((result) => (result.ok ? [] : [result.reason])))).toEqual(
+            new Set(["too_soon"]),
+        );
     });
 
     it("is allowed again only after a few seconds", async () => {
@@ -748,12 +745,12 @@ describe("copying the report", () => {
         await opened.open();
         expect(COPY_GAP_MS).toBeGreaterThanOrEqual(2000);
         const gate = new CopyGate(opened, () => true, 150);
-        expect(gate.allows()).toBe(true);
-        expect(gate.allows()).toBe(false);
+        expect(gate.allows()).toBe("yes");
+        expect(gate.allows()).toBe("too_soon");
         await pause(60);
-        expect(gate.allows()).toBe(false);
+        expect(gate.allows()).toBe("too_soon");
         await pause(130);
-        expect(gate.allows()).toBe(true);
+        expect(gate.allows()).toBe("yes");
     });
 
     it("is refused, and the service asked nothing, unless the log is open and the window in use", async () => {
@@ -763,16 +760,25 @@ describe("copying the report", () => {
         const parts = { ...partsWith(copied), focused: () => focused };
         const gate = new CopyGate(opened, parts.focused, 0);
         // The log has never been opened.
-        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: false });
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({
+            ok: false,
+            reason: "closed",
+        });
         await opened.open();
         // The window is not the one the user is working in.
         focused = false;
-        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: false });
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({
+            ok: false,
+            reason: "not_in_use",
+        });
         focused = true;
         expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: true, lines: 1 });
         // And not once the log has been closed again.
         await opened.close();
-        expect(await copyReport(opened, feed, parts, gate)).toEqual({ ok: false });
+        expect(await copyReport(opened, feed, parts, gate)).toEqual({
+            ok: false,
+            reason: "closed",
+        });
         expect(copied).toHaveLength(1);
         expect(state.diagnosed).toBe(1);
     });
@@ -834,39 +840,100 @@ describe("copying the report", () => {
     it("says so when the clipboard cannot be written", async () => {
         const { book: opened, feed } = book([line(0)]);
         await opened.open();
-        expect(await copyReport(opened, feed, partsWith([], true), open)).toEqual({ ok: false });
+        expect(await copyReport(opened, feed, partsWith([], true), open)).toEqual({
+            ok: false,
+            reason: "failed",
+        });
     });
 });
 
 describe("a log nobody can be looking at", () => {
-    it("is closed when the window is put away, its page loads again, or its process dies", async () => {
+    // A window the test drives by hand.
+    function fakeWindow() {
         const heard = new Map<string, () => void>();
-        const window = {
+        return {
+            heard,
             on: (event: string, listener: () => void) => void heard.set(event, listener),
             webContents: {
                 on: (event: string, listener: () => void) => void heard.set(event, listener),
             },
+            fire: async (event: string) => {
+                heard.get(event)?.();
+                await pause(15);
+            },
         };
+    }
+
+    it("is closed when the window is put away, its page loads again, or its process dies", async () => {
+        const window = fakeWindow();
         const { book: opened, state } = book([line(0)]);
-        closeWhenAway(window, opened);
-        expect([...heard.keys()].sort()).toEqual([
+        followWindow(window, opened, () => {});
+        expect([...window.heard.keys()].sort()).toEqual([
             "did-start-loading",
             "hide",
             "render-process-gone",
+            "show",
         ]);
         for (const event of ["hide", "did-start-loading", "render-process-gone"]) {
             await opened.open();
             expect(opened.isOpen()).toBe(true);
-            heard.get(event)?.();
-            await pause(10);
+            await window.fire(event);
             expect(opened.isOpen(), event).toBe(false);
             expect(state.calls.at(-1), event).toBe("watch off");
         }
         // The first load of the page, before anything was opened, asks the service nothing.
         const before = state.calls.length;
-        heard.get("did-start-loading")?.();
-        await pause(10);
+        await window.fire("did-start-loading");
         expect(state.calls).toHaveLength(before);
+    });
+
+    it("is opened again when the window is shown, and the page is told everything afresh", async () => {
+        const window = fakeWindow();
+        const told: LogUpdate[] = [];
+        const { book: opened, state } = book([line(0), line(1)]);
+        followWindow(window, opened, (update) => told.push(update));
+        await opened.open();
+        await window.fire("hide");
+        expect(opened.isOpen()).toBe(false);
+        // Written while nobody could look.
+        state.lines.push(line(2), line(3));
+        const asked = state.calls.length;
+        await window.fire("show");
+        expect(opened.isOpen()).toBe(true);
+        // Watching first, then reading, as always.
+        expect(state.calls.slice(asked)[0]).toBe("watch on");
+        expect(state.calls.slice(asked).filter((call) => call === "watch on")).toHaveLength(1);
+        expect(told.at(-1)).toMatchObject({ reset: true, available: true });
+        expect(told.at(-1)?.lines.map((held) => held.seq)).toEqual([0, 1, 2, 3]);
+        // And it follows again: a line written now arrives.
+        state.write(line(4));
+        expect(opened.view().lines.at(-1)?.seq).toBe(4);
+    });
+
+    it("is not opened on showing unless it was open when the window was put away", async () => {
+        const window = fakeWindow();
+        const { book: opened, state } = book([line(0)]);
+        followWindow(window, opened, () => {});
+        // Never opened: hiding and showing ask the service nothing.
+        await window.fire("hide");
+        await window.fire("show");
+        expect(state.calls).toEqual([]);
+        // Opened, then the page reloaded while hidden: the page opens it
+        // itself if it still shows the log, so showing does not.
+        await opened.open();
+        await window.fire("hide");
+        await window.fire("did-start-loading");
+        const asked = state.calls.length;
+        await window.fire("show");
+        expect(state.calls).toHaveLength(asked);
+        expect(opened.isOpen()).toBe(false);
+        // Shown twice after one hide: opened once.
+        await opened.open();
+        const before = state.calls.filter((call) => call === "watch on").length;
+        await window.fire("hide");
+        await window.fire("show");
+        await window.fire("show");
+        expect(state.calls.filter((call) => call === "watch on")).toHaveLength(before + 1);
     });
 });
 

@@ -1,5 +1,5 @@
 import type { LinkState } from "@shared/api";
-import { LOGS_IPC, type ReportResult } from "@shared/logs";
+import { LOGS_IPC, type LogUpdate, type ReportResult } from "@shared/logs";
 import type { BrowserWindow } from "electron";
 import { handleFromInterface } from "../ipc";
 import { LogBook, type LogFeed, takeDiagnostics } from "./book";
@@ -37,35 +37,59 @@ export class CopyGate {
         private readonly gapMs = COPY_GAP_MS,
     ) {}
 
-    /** Whether to copy now. A yes counts as a copy, whatever comes of it. */
-    allows(): boolean {
+    /** Whether to copy now, or why not. A yes counts as a copy, whatever comes of it. */
+    allows(): "yes" | "closed" | "not_in_use" | "too_soon" {
         const now = Date.now();
-        if (!this.book.isOpen() || !this.focused() || now - this.lastAt < this.gapMs) {
-            return false;
+        if (!this.book.isOpen()) {
+            return "closed";
+        }
+        if (!this.focused()) {
+            return "not_in_use";
+        }
+        if (now - this.lastAt < this.gapMs) {
+            return "too_soon";
         }
         this.lastAt = now;
-        return true;
+        return "yes";
     }
 }
 
 /**
- * Closes the log when nobody can be looking at it: the window was put away,
- * or its page is being loaded again and has forgotten that it opened it.
- * The page opens it again when it is shown.
+ * Closes the log when nobody can be looking at it, and opens it again when
+ * someone can. Put away with the log open, the window gets it back when it
+ * is shown: the screen is still the one it was, and it is told everything
+ * afresh, as after the service has started again. A page that is loaded
+ * again, or whose process died, has forgotten it opened the log; it opens
+ * it itself if it shows the log, and nothing is opened for it.
  */
-export function closeWhenAway(
+export function followWindow(
     window: {
-        on(event: "hide", listener: () => void): unknown;
+        on(event: "hide" | "show", listener: () => void): unknown;
         webContents: {
             on(event: "did-start-loading" | "render-process-gone", listener: () => void): unknown;
         };
     },
-    book: Pick<LogBook, "close">,
+    book: Pick<LogBook, "close" | "open" | "isOpen">,
+    tell: (update: LogUpdate) => void,
 ): void {
-    const close = () => void book.close();
-    window.on("hide", close);
-    window.webContents.on("did-start-loading", close);
-    window.webContents.on("render-process-gone", close);
+    let reopen = false;
+    window.on("hide", () => {
+        reopen = book.isOpen();
+        void book.close();
+    });
+    window.on("show", () => {
+        if (!reopen) {
+            return;
+        }
+        reopen = false;
+        void book.open().then((view) => tell({ reset: true, ...view }));
+    });
+    const forgotten = () => {
+        reopen = false;
+        void book.close();
+    };
+    window.webContents.on("did-start-loading", forgotten);
+    window.webContents.on("render-process-gone", forgotten);
 }
 
 /**
@@ -79,8 +103,9 @@ export async function copyReport(
     parts: ReportParts,
     gate: Pick<CopyGate, "allows">,
 ): Promise<ReportResult> {
-    if (!gate.allows()) {
-        return { ok: false };
+    const allowed = gate.allows();
+    if (allowed !== "yes") {
+        return { ok: false, reason: allowed };
     }
     let diagnostics: ReturnType<typeof takeDiagnostics>;
     try {
@@ -103,7 +128,7 @@ export async function copyReport(
         parts.copy(report.text);
         return { ok: true, lines: report.lines };
     } catch {
-        return { ok: false };
+        return { ok: false, reason: "failed" };
     }
 }
 
@@ -136,15 +161,16 @@ export function registerLogs(
     feed: LogFeed,
     parts: ReportParts,
 ): LogBook {
-    const book = new LogBook(feed, (update) => {
+    const tell = (update: LogUpdate) => {
         if (!window.isDestroyed()) {
             window.webContents.send(LOGS_IPC.update, update);
         }
-    });
+    };
+    const book = new LogBook(feed, tell);
     const gate = new CopyGate(book, parts.focused);
     for (const [channel, handler] of Object.entries(logHandlers(book, feed, parts, gate))) {
         handleFromInterface(window, devServerUrl, channel, handler);
     }
-    closeWhenAway(window, book);
+    followWindow(window, book, tell);
     return book;
 }
