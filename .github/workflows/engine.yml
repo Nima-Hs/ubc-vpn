@@ -193,6 +193,9 @@ jobs:
             grep -q '^RAN: handle judges a trusted certificate' test.log
             grep -q '^RAN: engine refuses a trusted certificate' test.log
           fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            grep -q '^RAN: engine writes no key log' test.log
+          fi
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
           # that need no binding run in it too.

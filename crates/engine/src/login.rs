@@ -5,8 +5,7 @@
 //! here: every call into the library goes through the `ffi` module.
 //!
 //! A cancel is looked at before the login starts and before a session is
-//! returned. Stopping a login that is waiting on the gateway comes with the
-//! paths that interrupt one.
+//! returned, and in between it stops a login that is waiting on the gateway.
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_int};
@@ -166,6 +165,11 @@ fn fill(
             message: message.clone(),
         };
         let answer = prompts.ask(&prompt)?;
+        // The sink does not register an answer shorter than `MIN_HIDDEN_LEN`
+        // (4 bytes), so such an answer is not taken out of log lines. That is
+        // decided, not overlooked: an answer that short is a choice, such as
+        // `1` for a way to confirm, not a secret, and hiding every `1` would
+        // shred the log. A four-byte choice such as `push` is registered.
         logs.hide(&answer);
         if !form.answer(index, &answer) {
             return Err(LoginError::Failed);
@@ -290,7 +294,15 @@ impl LoginEngine for OpenConnect {
         if handle.parse_url(&url) != 0 {
             return Err(LoginError::Failed);
         }
+        // A cancel from another thread wakes the library through its command
+        // pipe. The hook is armed for this one call and disarmed before the
+        // handle is freed; a cancel that comes later reaches nothing.
+        let stopper = handle.stopper();
+        let armed = cancel.on_cancel(move || {
+            stopper.cancel();
+        });
         let result = handle.obtain_cookie();
+        drop(armed);
         finish(handle, result, &notes, cancel, logs)
     }
 }
