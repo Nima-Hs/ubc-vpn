@@ -559,17 +559,31 @@ describe("the pause between attempts", () => {
     it("starts over in the client once a bridge has been ready", async () => {
         const down: MockRun = { first: "service_unavailable" };
         const { bridge, statuses } = start(
-            [down, down, down, down, { later: [{ afterMs: 30, end: "service_unavailable" }] }, {}],
+            [
+                down,
+                down,
+                down,
+                down,
+                down,
+                down,
+                { later: [{ afterMs: 30, end: "service_unavailable" }] },
+                {},
+            ],
             { initialRetryDelayMs: 50, maxRetryDelayMs: 5000 },
         );
-        // Four failures: pauses of 50, 100, 200 and 400 ms. The fifth start is ready.
-        await until(() => statuses.at(-1)?.status === "ready", "ready", 10_000);
+        // Six failures: pauses of 50, 100, 200, 400, 800 and 1,600 ms. The
+        // seventh start is ready.
+        await until(() => statuses.at(-1)?.status === "ready", "ready", 15_000);
         await until(() => statuses.at(-1)?.status === "unavailable", "the bridge ending");
         const ended = Date.now();
-        await until(() => bridge.starts() === 6, "the next start");
-        // Back to 50 ms. Had the pauses carried on growing, it would be 800.
-        expect(Date.now() - ended).toBeLessThan(600);
-    });
+        await until(() => bridge.starts() === 8, "the next start");
+        // Back to 50 ms. Had the pauses carried on growing, it would be 3,200.
+        // What is measured also includes starting the mock bridge, a Node
+        // program, which on a busy machine takes hundreds of milliseconds:
+        // the gap between the two answers is wide enough that this limit
+        // leaves room on either side.
+        expect(Date.now() - ended).toBeLessThan(1500);
+    }, 30_000);
 
     it("is what the client waits between attempts", async () => {
         const { bridge } = start([{ first: "service_unavailable" }], {

@@ -1087,8 +1087,8 @@ test("a test run can keep the window off the screen, and only a test run", async
         const shown = () =>
             other.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible());
         expect(await shown()).toBe(false);
-        // Asked to come forward, as the tray and a second launch do, it stays away.
-        await offPage.evaluate(() => window.ubcVpn.connect());
+        // Asked to come forward, as a second launch asks, it stays away.
+        await other.evaluate(({ app }) => app.emit("second-instance"));
         await offPage.waitForTimeout(300);
         expect(await shown()).toBe(false);
         // The page runs as if it were on screen.
