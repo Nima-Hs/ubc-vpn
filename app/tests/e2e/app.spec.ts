@@ -1087,12 +1087,20 @@ test("a test run can keep the window off the screen, and only a test run", async
         const shown = () =>
             other.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible());
         expect(await shown()).toBe(false);
-        // Asked to come forward, as the tray and a second launch do, it stays away.
-        await offPage.evaluate(() => window.ubcVpn.connect());
+        // Asked to come forward, as a second launch asks, it stays away.
+        await other.evaluate(({ app }) => app.emit("second-instance"));
         await offPage.waitForTimeout(300);
         expect(await shown()).toBe(false);
         // The page runs as if it were on screen.
         expect(await offPage.evaluate(() => document.visibilityState)).toBe("visible");
+        // And there is no tray icon: with none, closing the window would quit.
+        // (Not on macOS, where the Dock brings a closed window back, so closing
+        // hides it whether or not there is a tray, and this cannot tell.)
+        if (process.platform !== "darwin") {
+            expect(
+                await offPage.evaluate(async () => (await window.ubcVpn.getSnapshot()).closeHides),
+            ).toBe(false);
+        }
     } finally {
         await other.close();
     }

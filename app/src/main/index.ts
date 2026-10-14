@@ -177,17 +177,21 @@ async function start(): Promise<void> {
         }
     };
 
-    const tray = createTray(
-        {
-            showWindow: show,
-            connect: () => connectFromTray(show, () => controller.connect()),
-            // An action that does not start explains itself in the window.
-            disconnect: () => void controller.disconnect().then(showIfNotice),
-            retry: () => controller.retry(),
-            quit,
-        },
-        controller.getSnapshot().state,
-    );
+    // Kept off the screen for a test run, the tray icon included. Without a
+    // tray, closing the window quits, as on a desktop that has none.
+    const tray = hidden
+        ? null
+        : createTray(
+              {
+                  showWindow: show,
+                  connect: () => connectFromTray(show, () => controller.connect()),
+                  // An action that does not start explains itself in the window.
+                  disconnect: () => void controller.disconnect().then(showIfNotice),
+                  retry: () => controller.retry(),
+                  quit,
+              },
+              controller.getSnapshot().state,
+          );
     function showIfNotice(): void {
         if (controller.getSnapshot().notice !== null) {
             show();
