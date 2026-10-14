@@ -4,7 +4,7 @@
 use std::sync::mpsc;
 
 use std::net::Ipv4Addr;
-use ubc_vpn_core::protocol::{ConnectParams, ErrorCode};
+use ubc_vpn_core::protocol::{ConnectParams, ErrorCode, LogLevel};
 use ubc_vpn_core::routes::Ipv4Net;
 use ubc_vpn_core::state::TunnelInfo;
 use ubc_vpn_engine::{Cancel, Session};
@@ -13,6 +13,7 @@ use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns};
 
 use crate::session::Machine;
 use crate::verify::{Expected, verify};
+use crate::words::counted;
 
 /// Why setup stopped: the code for the client and a sentence for the user,
 /// built only from fixed text and OS errors, so it cannot hold the cookie.
@@ -112,6 +113,19 @@ impl Machine {
         };
         let verified = verify(&*self.routes, &*self.dns, &expected);
         verified.map_err(|why| (ErrorCode::VerificationFailed, why))?;
+        // Counted, not listed: a long list would not fit in one line, and
+        // how many is what someone helping the user asks first.
+        let dns_servers = routes.len() - chosen.subnets.len();
+        let split = match dns.as_ref().map_or(0, |dns| dns.domains.len()) {
+            0 => "no split DNS".to_string(),
+            domains => format!("split DNS for {}", counted(domains, "domain")),
+        };
+        let line = format!(
+            "routes and DNS applied and checked: {}, {}, {split}",
+            counted(chosen.subnets.len(), "subnet route"),
+            counted(dns_servers, "DNS server route"),
+        );
+        self.logs.about_requests(LogLevel::Info, &line);
         Ok(TunnelInfo {
             interface: assigned.interface.clone(),
             address: assigned.address.to_string(),

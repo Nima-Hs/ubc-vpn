@@ -41,30 +41,41 @@ fn logs_prints_each_line_with_its_time_level_and_source() {
     add(&scene.rig, "Login failed.");
     let (status, out, err) = scene.rig.run(&["logs"]);
     assert_eq!((status, err.as_str()), (0, ""));
-    let lines: Vec<&str> = out.lines().collect();
+    let mut rests = Vec::new();
+    for line in out.lines() {
+        let (when, rest) = line.split_at(20);
+        // A date and a time of day in UTC, this century.
+        assert!(when.starts_with("20") && when.ends_with('Z'), "{line}");
+        assert_eq!((&when[4..5], &when[10..11], &when[13..14]), ("-", " ", ":"));
+        rests.push(rest);
+    }
+    // Among the service's own lines, in their order.
     let ends = [
         "  info   engine   CSTP connected",
         "  error  login    Login failed.",
     ];
-    assert_eq!(lines.len(), ends.len(), "{out}");
-    for (line, end) in lines.iter().zip(ends) {
-        let (when, rest) = line.split_at(20);
-        assert_eq!(rest, end, "{line}");
-        // A date and a time of day in UTC, this century.
-        assert!(when.starts_with("20") && when.ends_with('Z'), "{line}");
-        assert_eq!((&when[4..5], &when[10..11], &when[13..14]), ("-", " ", ":"));
-    }
+    let shown: Vec<&str> = rests
+        .iter()
+        .copied()
+        .filter(|rest| ends.contains(rest))
+        .collect();
+    assert_eq!(shown, ends, "{out}");
+    assert!(
+        rests[0].starts_with("  info   service  service started"),
+        "{out}"
+    );
 
     // With --json, the same lines in the protocol's own shape.
     let (status, out, err) = scene.rig.run(&["logs", "--json"]);
     assert_eq!((status, err.as_str()), (0, ""));
     let lines: Vec<LogLine> = out.lines().map(|line| decode(line).unwrap()).collect();
-    let seen = |line: &LogLine| (line.seq, line.source, line.text.as_str().to_string());
-    let expected = [
-        (1, LogSource::Engine, "CSTP connected".to_string()),
-        (2, LogSource::Login, "Login failed.".to_string()),
-    ];
-    assert_eq!(lines.iter().map(seen).collect::<Vec<_>>(), expected);
+    assert_eq!(lines.len(), rests.len());
+    let seen = |line: &LogLine| (line.source, line.text.as_str().to_string());
+    let last = lines.last().map(seen);
+    assert_eq!(last, Some((LogSource::Login, "Login failed.".to_string())));
+    let numbers: Vec<u64> = lines.iter().map(|line| line.seq).collect();
+    let in_order: Vec<u64> = (1..=lines.len() as u64).collect();
+    assert_eq!(numbers, in_order);
 }
 
 #[test]
@@ -85,13 +96,18 @@ fn a_long_log_is_read_to_its_end_and_a_loss_is_said() {
     }
     let (status, out, err) = scene.rig.run(&["logs", "--json"]);
     assert_eq!(status, 0, "{err}");
-    let seqs: Vec<u64> = out
-        .lines()
-        .map(|line| decode::<LogLine>(line).unwrap().seq)
-        .collect();
-    // The engine's line, then the hundred added lines that are still kept.
-    let kept: Vec<u64> = std::iter::once(1).chain(22..=121).collect();
+    let lines: Vec<LogLine> = out.lines().map(|line| decode(line).unwrap()).collect();
+    // The service's own lines are all still there, and of the added lines
+    // the last hundred: the newest numbers.
+    let added = |line: &&LogLine| line.source == LogSource::Login;
+    let seqs: Vec<u64> = lines.iter().filter(added).map(|line| line.seq).collect();
+    let newest = lines.last().unwrap().seq;
+    let kept: Vec<u64> = (newest - 99..=newest).collect();
     assert_eq!(seqs, kept);
+    let own = lines.iter().filter(|line| line.source != LogSource::Login);
+    let own: Vec<&str> = own.map(|line| line.text.as_str()).collect();
+    assert!(own.contains(&"CSTP connected"), "{own:?}");
+    assert!(own[0].starts_with("service started"), "{own:?}");
     assert_eq!(
         err.matches("no longer kept by the service").count(),
         1,
@@ -341,13 +357,18 @@ fn follow_prints_new_lines_as_they_come_until_the_service_goes() {
     until("the new lines", || out.text().contains("made-up line 3"));
     let text = out.text();
     let ends: Vec<&str> = text.lines().map(|line| &line[20..]).collect();
-    let expected = [
-        "  info   engine   CSTP connected",
+    // The lines there were, each once, then the new ones.
+    let new = [
         "  error  login    made-up line 1",
         "  error  login    made-up line 2",
         "  error  login    made-up line 3",
     ];
-    assert_eq!(ends, expected);
+    assert_eq!(ends[ends.len() - 3..], new);
+    let opened = ends
+        .iter()
+        .filter(|end| **end == "  info   engine   CSTP connected");
+    assert_eq!(opened.count(), 1, "{text}");
+    assert!(ends[0].starts_with("  info   service  service started"));
 
     scene.service = None;
     until("the end", || following.is_finished());

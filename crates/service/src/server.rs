@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::protocol::{
-    AddLogParams, ErrorCode, ErrorInfo, Hello, HelloReply, LogText, MAX_ADDED_LOG_LINES, Outcome,
-    PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody, ServerMessage, decode, encode,
-    peek_protocol_version,
+    AddLogParams, ClientKind, ErrorCode, ErrorInfo, Hello, HelloReply, LogText,
+    MAX_ADDED_LOG_LINES, Outcome, PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody,
+    ServerMessage, decode, encode, peek_protocol_version,
 };
 use ubc_vpn_engine::TunnelEngine;
 use ubc_vpn_platform::{Connection, Error, Listener, Platform, UserId};
@@ -20,6 +20,7 @@ use ubc_vpn_platform::{Connection, Error, Listener, Platform, UserId};
 use crate::diagnostics::About;
 use crate::hub::{Hub, send};
 use crate::session::{Session, error};
+use crate::words::counted;
 use crate::{Logs, lock, owner, policy};
 
 /// The most connections served at once. Each one holds a thread.
@@ -129,10 +130,33 @@ impl Service {
         engine: Arc<dyn TunnelEngine>,
         timeouts: Timeouts,
     ) -> Result<Self, String> {
+        Self::start_in(platform, engine, timeouts, false)
+    }
+
+    /// [`Service::start`], saying in its first log line whether this is a
+    /// dev-mode run.
+    pub fn start_in(
+        platform: Platform,
+        engine: Arc<dyn TunnelEngine>,
+        timeouts: Timeouts,
+        dev_mode: bool,
+    ) -> Result<Self, String> {
         let logs = Logs::default();
+        let how = match dev_mode {
+            true => "dev mode",
+            false => "installed",
+        };
+        logs.info(&format!(
+            "service started: version {VERSION}, protocol {PROTOCOL_VERSION}, {how}"
+        ));
         let policy = policy::load(&platform.paths.policy_dir);
-        if let Err(message) = &policy {
-            logs.error(message);
+        match &policy {
+            Ok(policy) => logs.info(&format!(
+                "policy read: gateway {}, {}",
+                policy.gateway,
+                counted(policy.pins.len(), "pin")
+            )),
+            Err(message) => logs.error(message),
         }
         let about = About::new(&policy);
         let cleaned = [platform.routes.remove_all(), platform.dns.clear_split_dns()];
@@ -169,6 +193,15 @@ impl Service {
     /// The service's log, oldest line first.
     pub fn logs(&self) -> Vec<String> {
         self.shared.logs.lines()
+    }
+
+    /// The text of each line a client handed over, oldest first.
+    pub fn login_lines(&self) -> Vec<String> {
+        let added = |line: &ubc_vpn_core::protocol::LogLine| {
+            line.source == ubc_vpn_core::protocol::LogSource::Login
+        };
+        let lines = self.shared.logs.all().into_iter().filter(added);
+        lines.map(|line| line.text.as_str().to_string()).collect()
     }
 
     /// Serves until accepting ends, and returns why that is a failure. It
@@ -262,28 +295,35 @@ impl Shared {
             conn.set_read_timeout(Some(self.timeouts.stranger)),
             conn.set_write_timeout(Some(self.timeouts.write)),
         ];
-        if limits.iter().all(Result::is_ok) && self.handshake(conn) {
+        if !limits.iter().all(Result::is_ok) {
+            return;
+        }
+        if let Some(kind) = self.handshake(conn) {
             self.hub.add(user, conn);
-            self.requests(conn, user);
+            self.requests(conn, user, kind);
         }
     }
 
     /// Always answers, so a client that cannot be served learns why. Returns
     /// whether the client speaks this version and sent a proper hello.
-    fn handshake(&self, conn: &Connection) -> bool {
+    fn handshake(&self, conn: &Connection) -> Option<ClientKind> {
         let line = conn.read_line().ok().flatten().unwrap_or_default();
-        let compatible =
-            peek_protocol_version(&line) == Ok(PROTOCOL_VERSION) && decode::<Hello>(&line).is_ok();
+        let hello = match peek_protocol_version(&line) == Ok(PROTOCOL_VERSION) {
+            true => decode::<Hello>(&line).ok(),
+            false => None,
+        };
         let reply = encode(&HelloReply {
             protocol_version: PROTOCOL_VERSION,
             service_version: VERSION.to_string(),
             owner_claimed: self.hub.owner().is_some(),
         });
         let sent = reply.is_ok_and(|line| conn.write_line(line.trim_end()).is_ok());
-        sent && compatible
+        hello.filter(|_| sent).map(|hello| hello.client)
     }
 
-    fn requests(&self, conn: &Arc<Connection>, user: &UserId) {
+    /// `kind` is what the client said it is. Nothing checks it: it is only
+    /// ever written as what the client said.
+    fn requests(&self, conn: &Arc<Connection>, user: &UserId, kind: ClientKind) {
         // How many log lines this connection has added.
         let mut added = 0;
         loop {
@@ -298,7 +338,7 @@ impl Shared {
             let Ok(Request { id, body }) = decode(&line) else {
                 return self.unreadable(user);
             };
-            let (answer, keep) = self.answer(user, conn, &mut added, body);
+            let (answer, keep) = self.answer(user, conn, kind, &mut added, body);
             let outcome = answer.map_or_else(Outcome::Error, Outcome::Ok);
             let sent = send(conn, &ServerMessage::Response(Response { id, outcome }));
             if !(sent && keep) {
@@ -314,6 +354,7 @@ impl Shared {
         &self,
         user: &UserId,
         conn: &Arc<Connection>,
+        kind: ClientKind,
         added: &mut usize,
         body: RequestBody,
     ) -> (Result<ResponseBody, ErrorInfo>, bool) {
@@ -329,7 +370,13 @@ impl Shared {
             _ if owner.as_ref() != Some(user) => self.not_owner(),
             RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
             RequestBody::Connect(params) => accepted(self.session.connect(params)),
-            RequestBody::Disconnect => accepted(self.session.disconnect()),
+            RequestBody::Disconnect => {
+                let said = match kind {
+                    ClientKind::App => "the app",
+                    ClientKind::Cli => "the command line",
+                };
+                accepted(self.session.disconnect(said))
+            }
             // The log is the owner's alone: anyone else was refused above.
             RequestBody::Logs(params) => Ok(ResponseBody::Logs(self.logs.page(params.after))),
             RequestBody::WatchLogs(params) => {
@@ -396,9 +443,18 @@ impl Shared {
     /// the owner is refused, whether they came second in a race or years
     /// later.
     fn claim(&self, user: &UserId) -> Result<ResponseBody, ErrorInfo> {
-        let persist = || owner::save(&self.state_dir, user);
+        let mut recorded = false;
+        let persist = || {
+            owner::save(&self.state_dir, user)?;
+            recorded = true;
+            Ok(())
+        };
         match self.hub.claim(user, persist) {
             Ok(true) => {
+                // Who it is, is not written: only that there now is one.
+                if recorded {
+                    self.logs.info("an owner was recorded");
+                }
                 self.narrow(user);
                 Ok(ResponseBody::Claimed)
             }

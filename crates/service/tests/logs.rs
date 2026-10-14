@@ -40,6 +40,23 @@ fn texts(lines: &[LogLine]) -> Vec<&str> {
     lines.iter().map(|line| line.text.as_str()).collect()
 }
 
+/// The lines that are not the service's own: the engine's and the ones
+/// clients added.
+fn others(lines: Vec<LogLine>) -> Vec<LogLine> {
+    let other = |line: &LogLine| line.source != LogSource::Service;
+    lines.into_iter().filter(other).collect()
+}
+
+/// The next log event that is not one of the service's own lines.
+fn next_other(peer: &mut Peer) -> LogLine {
+    loop {
+        let line = peer.log();
+        if line.source != LogSource::Service {
+            return line;
+        }
+    }
+}
+
 /// Connects and waits until the tunnel is up.
 fn connected(peer: &mut Peer) {
     let state = peer.connect_ends(good());
@@ -58,22 +75,23 @@ fn the_owner_reads_the_log_and_is_sent_new_lines_when_it_asks() {
     connected(&mut alice);
 
     // The engine's lines came as events, numbered as they are in the log.
-    let first = alice.log();
+    let first = next_other(&mut alice);
     assert_eq!(first.source, LogSource::Engine);
-    let second = alice.log();
+    let second = next_other(&mut alice);
     assert_eq!(second.seq, first.seq + 1);
     assert_eq!(
-        texts(&[first.clone(), second]),
+        texts(&[first.clone(), second.clone()]),
         ["> [redacted]", "CSTP connected"]
     );
-    let read = alice.whole_log();
+    let read = others(alice.whole_log());
     assert_eq!(read[0], first);
     assert_eq!(texts(&read), ["> [redacted]", "CSTP connected"]);
 
     // A line from elsewhere reaches the one that watches, and only it.
     assert_eq!(other.ask(add("Login failed.")), ACCEPTED);
-    let added = alice.log();
-    assert_eq!((added.seq, added.text.as_str()), (3, "Login failed."));
+    let added = next_other(&mut alice);
+    assert!(added.seq > second.seq);
+    assert_eq!(added.text.as_str(), "Login failed.");
     assert_eq!(
         (added.level, added.source),
         (LogLevel::Error, LogSource::Login)
@@ -91,7 +109,7 @@ fn the_owner_reads_the_log_and_is_sent_new_lines_when_it_asks() {
         alice.is_quiet(),
         "a line came after the watch was turned off"
     );
-    assert_eq!(alice.whole_log().len(), 4);
+    assert_eq!(others(alice.whole_log()).len(), 4);
 }
 
 // Security rule: the cookie reaches no line of the log, however it is read:
@@ -109,7 +127,7 @@ fn the_cookie_is_in_nothing_the_owner_can_read() {
         ACCEPTED
     );
     assert_eq!(alice.ask(add("password=made-up-elsewhere")), ACCEPTED);
-    let read = alice.whole_log();
+    let read = others(alice.whole_log());
     let expected = [
         "> [redacted]",
         "CSTP connected",
@@ -118,7 +136,7 @@ fn the_cookie_is_in_nothing_the_owner_can_read() {
     ];
     assert_eq!(texts(&read), expected);
     diagnostics(&mut alice);
-    (0..4).for_each(|_| drop(alice.log()));
+    (0..4).for_each(|_| drop(next_other(&mut alice)));
     for line in &alice.lines {
         assert!(!line.contains(COOKIE), "the cookie was sent: {line}");
         assert!(!line.contains("made-up-elsewhere"), "{line}");
@@ -143,7 +161,7 @@ fn a_client_may_add_only_so_much_and_only_plain_lines() {
         assert_eq!(alice.ask(add(text)), REFUSED, "{text:?}");
     }
     assert!(
-        alice.whole_log().is_empty(),
+        others(alice.whole_log()).is_empty(),
         "something of a refused line was kept"
     );
 
@@ -152,7 +170,7 @@ fn a_client_may_add_only_so_much_and_only_plain_lines() {
         assert_eq!(alice.ask(add(&format!("line {n}"))), ACCEPTED);
     }
     assert_eq!(alice.ask(add("one too many")), REFUSED);
-    assert_eq!(alice.whole_log().len(), MAX_ADDED_LOG_LINES);
+    assert_eq!(others(alice.whole_log()).len(), MAX_ADDED_LOG_LINES);
     // The limit is the connection's: the next one has its own.
     let mut again = rig.owner_again();
     assert_eq!(again.ask(add("from another connection")), ACCEPTED);
@@ -186,11 +204,12 @@ fn nothing_of_a_line_that_is_not_kept_is_logged() {
     let read = again.whole_log();
     // That a request could not be read is noted, and nothing of it.
     assert_eq!(
-        texts(&read),
-        [
+        texts(&read).last().copied(),
+        Some(
             "a request from the owner could not be understood; later ones are not noted while this line is in the log"
-        ]
+        )
     );
+    assert!(others(read).is_empty(), "a refused line was kept");
     let sent = [alice.lines, again.lines, rig.logs()].concat();
     assert!(!sent.join("\n").contains(VALUE), "{sent:?}");
 }
@@ -202,11 +221,10 @@ fn nothing_of_a_line_that_is_not_kept_is_logged() {
 fn the_log_is_read_in_pages_and_says_what_it_lost() {
     let mut rig = rig();
     let mut alice = rig.owner();
+    // The service's own lines about starting, and about the owner.
     let before = page(&mut alice, None);
-    assert_eq!(
-        (before.lines.len(), before.next, before.dropped),
-        (0, 0, false)
-    );
+    let own = before.lines.len() as u64;
+    assert_eq!((before.next, before.dropped), (own, false));
 
     // The longest lines there may be, with the worst text for size, from as
     // many connections as it takes to lose some.
@@ -220,8 +238,9 @@ fn the_log_is_read_in_pages_and_says_what_it_lost() {
     }
     let first = page(&mut alice, None);
     assert!(first.dropped, "a first read after a loss must say so");
-    let lost = (sent - KEPT_ADDED_LOG_LINES) as u64;
-    assert_eq!(first.lines[0].seq, lost + 1);
+    let lost = own + (sent - KEPT_ADDED_LOG_LINES) as u64;
+    let last = own + sent as u64;
+    assert_eq!(first.lines[own as usize].seq, lost + 1);
     assert!(
         first.lines.len() < KEPT_ADDED_LOG_LINES,
         "it cannot all fit"
@@ -229,7 +248,7 @@ fn the_log_is_read_in_pages_and_says_what_it_lost() {
 
     let read = alice.whole_log();
     let seqs: Vec<u64> = read.iter().map(|line| line.seq).collect();
-    let kept: Vec<u64> = (lost + 1..=sent as u64).collect();
+    let kept: Vec<u64> = (1..=own).chain(lost + 1..=last).collect();
     assert_eq!(seqs, kept, "every line once, in order");
     for line in &alice.lines {
         assert!(line.len() < MAX_LINE_BYTES, "{} bytes", line.len());
@@ -238,11 +257,8 @@ fn the_log_is_read_in_pages_and_says_what_it_lost() {
     let at = |seq| Some(LogCursor { run, seq });
     assert!(page(&mut alice, at(lost - 1)).dropped);
     assert!(!page(&mut alice, at(lost)).dropped);
-    let end = page(&mut alice, at(sent as u64));
-    assert_eq!(
-        (end.lines.len(), end.next, end.dropped),
-        (0, sent as u64, false)
-    );
+    let end = page(&mut alice, at(last));
+    assert_eq!((end.lines.len(), end.next, end.dropped), (0, last, false));
 
     // Another run: its lines start at 1 again, and the old place means
     // nothing in it.
@@ -250,12 +266,13 @@ fn the_log_is_read_in_pages_and_says_what_it_lost() {
     rig.start().unwrap();
     let mut alice = rig.owner_again();
     assert_eq!(alice.ask(add("in the new run")), ACCEPTED);
-    let old = page(&mut alice, at(sent as u64));
+    let old = page(&mut alice, at(last));
     assert_ne!(old.run, run);
-    assert_eq!(
-        (texts(&old.lines), old.next, old.dropped),
-        (vec!["in the new run"], 1, false)
-    );
+    assert_eq!(old.lines[0].seq, 1);
+    assert!(old.lines[0].text.as_str().starts_with("service started"));
+    let lines = texts(&old.lines);
+    assert_eq!(lines.last(), Some(&"in the new run"));
+    assert_eq!((old.next, old.dropped), (lines.len() as u64, false));
 }
 
 // What the service says about itself: enough to help, and nothing that
@@ -361,10 +378,20 @@ fn no_number_of_requests_pushes_the_earlier_lines_out() {
     }
     let read = alice.whole_log();
     let lines = texts(&read);
-    assert!(lines[0].contains("policy file"), "the first line is gone");
-    assert_eq!(lines.len(), 3, "{lines:?}");
-    assert!(lines[1].contains("from the owner could not be understood"));
-    assert!(lines[2].contains("clearing split DNS failed"));
+    assert!(
+        lines[0].starts_with("service started"),
+        "the first line is gone"
+    );
+    assert!(lines[1].contains("policy file"), "the second line is gone");
+    let count = |what: &str| lines.iter().filter(|line| line.contains(what)).count();
+    assert_eq!(count("from the owner could not be understood"), 1);
+    assert_eq!(count("clearing split DNS failed"), 1);
+    // Each failed disconnect is its own failure, up to the budget for
+    // lines that requests cause; then one line says so.
+    use ubc_vpn_service::{NOT_LOGGED, REQUEST_LINES};
+    assert_eq!(count("failed: internal:"), REQUEST_LINES);
+    assert_eq!(count(NOT_LOGGED), 1);
+    assert_eq!(lines.last(), Some(&NOT_LOGGED));
     assert!(!page(&mut alice, None).dropped);
 }
 
@@ -381,9 +408,99 @@ fn diagnostics_say_when_there_is_no_policy() {
     );
     // Why is in the log, as an error of the service's own.
     let read = alice.whole_log();
+    assert!(read[0].text.as_str().starts_with("service started"));
     assert_eq!(
-        (read[0].seq, read[0].level, read[0].source),
-        (1, LogLevel::Error, LogSource::Service)
+        (read[1].seq, read[1].level, read[1].source),
+        (2, LogLevel::Error, LogSource::Service)
     );
-    assert!(read[0].text.as_str().contains("policy file"));
+    assert!(read[1].text.as_str().contains("policy file"));
+}
+
+/// The service's own lines, as text.
+fn own_lines(peer: &mut Peer) -> Vec<String> {
+    let own = |line: &LogLine| line.source == LogSource::Service;
+    let lines = peer.whole_log().into_iter().filter(own);
+    lines.map(|line| line.text.as_str().to_string()).collect()
+}
+
+// What someone helping the user reads after an ordinary session, a connect
+// refused for its routes, and a disconnect when nothing was connected: a
+// line for each thing that happened, in order, and none that only repeats.
+#[test]
+fn an_ordinary_session_is_in_the_log() {
+    let allowed = r#","allowed_routes":["10.255.0.0/24","192.0.2.0/24"]"#;
+    let mut rig = Rig::stopped(policy('A', allowed));
+    rig.start().unwrap();
+    let mut alice = rig.owner();
+    // Claiming again changes nothing, and is not news.
+    assert_eq!(alice.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
+    connected(&mut alice);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+    let elsewhere = connect(COOKIE, GATEWAY, &["10.1.0.0/24"], &[]);
+    assert_eq!(alice.ask(elsewhere), Err(ErrorCode::RouteRefused));
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+
+    let started = format!(
+        "service started: version {}, protocol 3, installed",
+        ubc_vpn_core::VERSION
+    );
+    let expected = [
+        started.as_str(),
+        "policy read: gateway vpn.example.test, 1 pin",
+        "an owner was recorded",
+        "connect admitted (2 subnets and 1 DNS domain)",
+        "routes and DNS applied and checked: 2 subnet routes, 1 DNS server route, \
+         split DNS for 1 domain",
+        "connected",
+        // The harness says it is the app; the service cannot tell.
+        "disconnect requested by a client that said it was the app",
+        "everything applied for the connection was removed",
+        "disconnected",
+        "connect refused: route_refused",
+    ];
+    assert_eq!(own_lines(&mut alice), expected);
+    // An owner already stored is not recorded again by a restart.
+    rig.stop();
+    rig.start().unwrap();
+    let mut again = rig.owner_again();
+    assert_eq!(again.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
+    let lines = own_lines(&mut again);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+}
+
+// Security rule: no line the service writes names the user or a path under
+// the folder its files are in, which stands for a home folder here. The
+// session above, a failure, and a refusal, all searched for both.
+#[test]
+fn no_line_names_the_user_or_a_path() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+    rig.engine.set_reachable(false);
+    let failed = alice.connect_ends(good());
+    assert!(matches!(failed, ConnState::Failed { .. }), "{failed:?}");
+    rig.fake
+        .set_failure(Op::ClearSplitDns, Some(Error::PermissionDenied));
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    alice.state();
+    // Someone else, whom the channel refuses.
+    assert!(rig.raw("mallory").is_err());
+
+    let lines = alice.whole_log();
+    assert!(lines.len() > 8, "{:?}", texts(&lines));
+    let root = rig.root.to_string_lossy().to_string();
+    let parent = rig.root.parent().unwrap().to_string_lossy().to_string();
+    for line in texts(&lines) {
+        for name in ["alice", "mallory", root.as_str(), parent.as_str()] {
+            assert!(!line.contains(name), "{name} in {line}");
+        }
+    }
 }

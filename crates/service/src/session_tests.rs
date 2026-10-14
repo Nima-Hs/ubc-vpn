@@ -56,7 +56,7 @@ fn a_cookie_is_wiped_on_an_idle_service_when_its_time_is_up() {
         matches!(hub.state(), ConnState::Connected { .. })
     });
     assert_eq!(logs.held(), 1, "the cookie is held while the tunnel is up");
-    session.disconnect().unwrap();
+    session.disconnect("the made-up kind").unwrap();
     until("disconnected", || hub.state() == ConnState::Disconnected);
 
     // Asked for nothing more, and counted without wiping.

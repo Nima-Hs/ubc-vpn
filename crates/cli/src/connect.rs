@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::protocol::LogLevel as LineLevel;
 use ubc_vpn_core::protocol::{
     AddLogParams, ClientKind, ConnectParams, ErrorCode, Event, LogText, MAX_ADDED_LOG_LINES,
     RequestBody, ResponseBody,
@@ -339,10 +340,19 @@ pub(crate) fn start(
     } = match logged_in {
         Ok(session) => session,
         Err(stop) => {
-            // Why a login failed is what the log is most wanted for. A
-            // user who gave up is leaving, and is not kept waiting for it.
-            if stop.code != LoginErrorCode::Cancelled {
-                hand_over(&mut client, &said);
+            // Why a login failed is what the log is most wanted for: the
+            // lines the login printed, and how it ended. A user who gave up
+            // is told only that, since nothing went wrong; and one who
+            // pressed Ctrl-C at a question is leaving at once, and is not
+            // kept waiting for it.
+            let outcome = (
+                LineLevel::Error,
+                format!("login failed: {}", word(&stop.code)),
+            );
+            match stop.code {
+                LoginErrorCode::Cancelled if ask.interrupted() => {}
+                LoginErrorCode::Cancelled => hand_over(&mut client, &[], outcome),
+                _ => hand_over(&mut client, &said, outcome),
             }
             // The gateway does not say which answer it refused. A saved
             // username may be the one, and nothing else lets the user
@@ -373,7 +383,8 @@ pub(crate) fn start(
     let asked = client.request(RequestBody::Connect(params));
     // After the request, so that the service holds the cookie by now and
     // removes it from these lines as well, should one have kept it.
-    hand_over(&mut client, &said);
+    let outcome = (LineLevel::Info, "login succeeded".to_string());
+    hand_over(&mut client, &said, outcome);
     asked.map_err(stop)?;
     // Only now, with the login good and the connect accepted, is a username
     // the user typed worth keeping.
@@ -417,18 +428,38 @@ fn saved(platform: &Platform) -> Result<Settings, Stop> {
 /// than one connection may add. A line too long to keep is left out with
 /// the marker. This never fails a connect: it stops at the first line the
 /// service does not take, and whatever broke shows at the next request.
-pub(crate) fn hand_over(client: &mut Client, said: &[String]) {
+pub(crate) fn hand_over(client: &mut Client, said: &[String], outcome: (LineLevel, String)) {
     let said: Vec<&String> = said.iter().filter(|line| !line.trim().is_empty()).collect();
-    let from = said.len().saturating_sub(MAX_ADDED_LOG_LINES);
-    for line in &said[from..] {
+    // The outcome is always sent, and last, so the lines before it leave
+    // room for it.
+    let from = said.len().saturating_sub(MAX_ADDED_LOG_LINES - 1);
+    // Only what failed is printed, so the printed lines are errors.
+    let printed = said[from..]
+        .iter()
+        .map(|line| (LineLevel::Error, line.as_str()));
+    let (level, text) = (outcome.0, outcome.1.as_str());
+    for (level, line) in printed.chain([(level, text)]) {
         let text = LogText::cleaned(line).unwrap_or_else(|_| LogText::left_out());
-        // Only what failed is printed, so only that is handed over.
-        let (level, text) = (ubc_vpn_core::protocol::LogLevel::Error, text.into());
-        let add = RequestBody::AddLog(AddLogParams { level, text });
+        let add = RequestBody::AddLog(AddLogParams {
+            level,
+            text: text.into(),
+        });
         if client.request(add).is_err() {
             return;
         }
     }
+}
+
+/// How a login failed, for the log: the word the protocol sends, such as
+/// `gateway_unreachable`. Not for a refused login: its word holds `pass`,
+/// which the log takes for the start of a secret and cuts, so that one is
+/// said in other words.
+fn word(code: &LoginErrorCode) -> String {
+    if *code == LoginErrorCode::WrongPassword {
+        return "refused by the gateway".to_string();
+    }
+    let quoted = serde_json::to_string(code).unwrap_or_default();
+    quoted.trim_matches('"').to_string()
 }
 
 /// What a login starts with and what it leaves behind.

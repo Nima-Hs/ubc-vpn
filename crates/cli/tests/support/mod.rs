@@ -122,7 +122,13 @@ pub struct Home {
     pub root: PathBuf,
     pub variables: Vec<(&'static str, PathBuf)>,
     pub said: Said,
+    /// The dev policy file, which the test may write again.
+    pub policy: PathBuf,
 }
+
+/// The user's name as every program this test starts is told it, made up
+/// so that a test can look for it in what they write.
+pub const MADE_UP_USER: &str = "made-up-user-7f3a";
 
 impl Home {
     pub fn new() -> Self {
@@ -141,7 +147,7 @@ impl Home {
         });
         let root = root.expect("a new temporary folder");
         let at = |name: &str| root.join(name);
-        let variables = match cfg!(windows) {
+        let mut variables = match cfg!(windows) {
             true => vec![("USERPROFILE", at("profile"))],
             false => vec![
                 ("HOME", at("home")),
@@ -150,6 +156,11 @@ impl Home {
                 ("TMPDIR", at("tmp")),
             ],
         };
+        // Not folders: names. Nothing should read them; if anything does,
+        // a test that looks for this name finds it.
+        for name in ["USER", "USERNAME", "LOGNAME"] {
+            variables.push((name, PathBuf::from(MADE_UP_USER)));
+        }
         // Where dev mode keeps its files, by the platform crate's table.
         let dev = if cfg!(windows) {
             at("profile").join(r"AppData\Local\UBC VPN Dev")
@@ -158,7 +169,8 @@ impl Home {
         } else {
             at("config").join("ubc-vpn-dev")
         };
-        let mut folders: Vec<PathBuf> = variables.iter().map(|(_, at)| at.clone()).collect();
+        let places = variables.iter().filter(|(_, at)| at.is_absolute());
+        let mut folders: Vec<PathBuf> = places.map(|(_, at)| at.clone()).collect();
         folders.push(dev.join("policy"));
         for folder in folders {
             std::fs::create_dir_all(folder).unwrap();
@@ -166,12 +178,14 @@ impl Home {
         // A developer writes the dev policy by hand; so does this test.
         let pin = format!("pin-sha256:{}=", "A".repeat(43));
         let policy = format!(r#"{{"gateway":"vpn.example.test","pins":["{pin}"]}}"#);
-        std::fs::write(dev.join("policy/policy.json"), policy).unwrap();
+        let policy_file = dev.join("policy/policy.json");
+        std::fs::write(&policy_file, policy).unwrap();
         let said = Said::default();
         Self {
             root,
             variables,
             said,
+            policy: policy_file,
         }
     }
 

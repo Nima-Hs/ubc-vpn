@@ -23,8 +23,9 @@ mod server;
 mod session;
 mod teardown;
 mod verify;
+mod words;
 
-pub use logs::{CAPACITY as LOG_CAPACITY, LINGER, Logs};
+pub use logs::{CAPACITY as LOG_CAPACITY, LINGER, Logs, NOT_LOGGED, REQUEST_LINES};
 pub use server::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS, Service, Timeouts};
 
 /// Locks a mutex, carrying on after another thread panicked while holding it.

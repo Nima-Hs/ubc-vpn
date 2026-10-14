@@ -29,7 +29,9 @@ mod support;
 
 use std::path::Path;
 
-use support::{CODE, COOKIE, Home, PASSWORD, ROUTES, Running, SERVICE, USERNAME, within};
+use support::{
+    CODE, COOKIE, Home, MADE_UP_USER, PASSWORD, ROUTES, Running, SERVICE, USERNAME, within,
+};
 
 #[test]
 fn the_service_and_the_client_work_together() {
@@ -138,6 +140,41 @@ fn the_service_and_the_client_work_together() {
     let (_, shown) = home.run(&["settings", "get", "--json"], "");
     assert!(shown.contains(r#""username":null"#), "{shown}");
     assert_eq!(home.run(&["status"], ""), (0, "Disconnected".to_string()));
+
+    // What someone helping the user reads afterwards: each step of an
+    // ordinary session, in order, and how each login ended.
+    let (status, log) = home.run(&["logs", "--json"], "");
+    assert_eq!(status, 0, "{log}");
+    let at = |text: &str| {
+        let line = format!(r#""text":"{text}""#);
+        log.find(&line)
+            .unwrap_or_else(|| panic!("no line {text:?} in:\n{log}"))
+    };
+    let session = [
+        "an owner was recorded",
+        "connect admitted (1 subnet and 1 DNS domain)",
+        "routes and DNS applied and checked: 1 subnet route, 1 DNS server route, \
+         split DNS for 1 domain",
+        "connected",
+        "disconnect requested by a client that said it was the command line",
+        "everything applied for the connection was removed",
+        "disconnected",
+    ];
+    let places: Vec<usize> = session.iter().map(|text| at(text)).collect();
+    assert!(places.is_sorted(), "out of order:\n{log}");
+    // This service says it runs in dev mode, as it does.
+    let started = format!(
+        "service started: version {}, protocol 3, dev mode",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(at(&started) < places[0], "{log}");
+    at("login succeeded");
+    at("login failed: refused by the gateway");
+    at("login failed: cancelled");
+    // A login that failed is not followed by a failed connection: nothing
+    // reached the service.
+    assert!(!log.contains(r#""text":"failed: "#), "{log}");
+
     // In a terminal's place there is a pipe here, so the plain connect asks
     // nothing and says why.
     assert_eq!(home.run(&["connect"], "").0, 1);
@@ -175,6 +212,14 @@ fn the_service_and_the_client_work_together() {
     // Started again, it listens where the killed one did, still belongs to
     // this user, and holds no connection. The bridge claims nothing, so
     // what it is told about the owner is what the service remembered.
+    //
+    // It starts with a policy that allows other routes than the saved
+    // ones. The policy is put back as it was once it has read it, so the
+    // client, which checks the routes first, lets them through, and the
+    // service is the one to refuse them.
+    let policy = std::fs::read_to_string(&home.policy).unwrap();
+    let narrow = policy.replace(r#""pins":"#, r#""allowed_routes":["192.0.2.0/24"],"pins":"#);
+    std::fs::write(&home.policy, narrow).unwrap();
     let _running = start();
     let ready = within("the service to listen again", || {
         let mut bridge = home.client(&["bridge"]);
@@ -183,6 +228,40 @@ fn the_service_and_the_client_work_together() {
     });
     assert!(ready.contains(r#""owner_claimed":true"#), "{ready}");
     assert_eq!(home.run(&["status"], ""), (0, "Disconnected".to_string()));
+
+    // A connect whose routes the service refuses, though the client let
+    // them through: the log says the login succeeded and the connect was
+    // refused, and why.
+    std::fs::write(&home.policy, &policy).unwrap();
+    let (status, last) = home.connect(&[Some(PASSWORD), Some(CODE)]);
+    assert!(
+        status == 1 && last.contains(r#""code":"route_refused""#),
+        "{last}"
+    );
+    let (_, log) = home.run(&["logs", "--json"], "");
+    let refused = r#""text":"connect refused: route_refused""#;
+    assert!(log.contains(refused), "{log}");
+    assert!(log.contains(r#""text":"login succeeded""#), "{log}");
+
+    // Security rule: the log names no user and no folder of theirs: not
+    // the name every program here was told, not the one the test runs as,
+    // not the login's username, and no path under the made-up home.
+    let real = ["USERNAME", "USER"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok());
+    let root = home.root.to_string_lossy().to_string();
+    // The path also as JSON writes it, with each backslash doubled.
+    let escaped = root.replace('\\', "\\\\");
+    let mut names = vec![
+        MADE_UP_USER.to_string(),
+        USERNAME.to_string(),
+        root,
+        escaped,
+    ];
+    names.extend(real.filter(|name| name.len() >= 4));
+    for name in &names {
+        assert!(!log.contains(name.as_str()), "{name} is in the log:\n{log}");
+    }
 
     // Security rule: no password, code or cookie in anything any of the
     // programs wrote, on standard output or standard error.

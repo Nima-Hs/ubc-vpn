@@ -1,6 +1,7 @@
 //! Removing everything a connection applied. Used by disconnect, by every
 //! failure, by the tunnel's own ending, before each connect and at shutdown.
 
+use ubc_vpn_core::protocol::LogLevel;
 use ubc_vpn_engine::{CloseMode, Tunnel};
 use ubc_vpn_platform::Result;
 
@@ -38,6 +39,9 @@ impl Machine {
     /// applied, both succeeded.
     pub(crate) fn teardown(&mut self) -> bool {
         let mut applied = std::mem::take(&mut self.applied);
+        let had_some = applied.tunnel.is_some()
+            || applied.gateway_route.is_some()
+            || !applied.routes.is_empty();
         let mut tunnel = Closing(applied.tunnel.take());
         let logs = self.logs.clone();
         // A step that keeps failing the same way is logged once, so that no
@@ -66,6 +70,13 @@ impl Machine {
         if let Some(hidden) = self.hidden.take() {
             hidden.linger();
         }
-        dns_clear && routes_clear
+        let clean = dns_clear && routes_clear;
+        // Said only when something had been applied: a teardown before each
+        // connect usually finds nothing, and that is not news.
+        if had_some && clean {
+            let line = "everything applied for the connection was removed";
+            self.logs.about_requests(LogLevel::Info, line);
+        }
+        clean
     }
 }

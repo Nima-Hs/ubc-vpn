@@ -31,6 +31,8 @@ pub(crate) struct Typist {
     answers: VecDeque<Option<&'static str>>,
     asked: Vec<PromptKind>,
     unusable: Option<String>,
+    /// Whether a `None` answer is Ctrl-C rather than giving up.
+    interrupted: bool,
 }
 
 impl Typist {
@@ -50,6 +52,10 @@ impl Ask for Typist {
     fn ask(&mut self, prompt: &Prompt) -> Option<Secret> {
         self.asked.push(prompt.kind);
         self.answers.pop_front().flatten().map(Secret::new)
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted
     }
 }
 
@@ -572,8 +578,11 @@ fn the_logins_lines_follow_the_connect_request() {
     let (code, _, err) = scene.connect(&mut typist);
     service.join().unwrap();
     assert_eq!(code, LOGIN_REFUSED, "{err}");
-    // Two answers and the cookie, each in a line of its own.
-    let order = ["status", "connect", "add_log", "add_log", "add_log"];
+    // Two answers and the cookie, each in a line of its own, then how the
+    // login ended.
+    let order = [
+        "status", "connect", "add_log", "add_log", "add_log", "add_log",
+    ];
     assert_eq!(*asked.lock().unwrap(), order);
 }
 
@@ -784,16 +793,34 @@ fn what_a_failed_login_wrote_is_handed_to_the_service() {
         err.contains("ubc-vpn: Failed to connect to the gateway\n"),
         "{err}"
     );
-    let logs = scene.service.as_ref().unwrap().logs();
-    assert_eq!(logs, ["Failed to connect to the gateway"]);
+    let logs = scene.service.as_ref().unwrap().login_lines();
+    let outcome = "login failed: gateway_unreachable";
+    assert_eq!(logs, ["Failed to connect to the gateway", outcome]);
 }
 
-// A user who gave up is leaving: the login's lines are printed, since they
-// were written, but the program does not stay to hand them over. The
-// careless gateway writes a line for the username before the password is
-// asked for, so there is a line that could have been handed over.
+// How a login ended is in the log whether or not the library printed
+// anything: a success, and a wrong password.
 #[test]
-fn a_login_the_user_gave_up_hands_nothing_over() {
+fn every_finished_login_says_how_it_ended() {
+    let scene = Scene::usual();
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
+    assert_eq!(scene.connect(&mut typist).0, 0);
+    assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
+    let mut wrong = Typist::typing(&[Some("wrong-password-0000"), Some(CODE), Some(PASSWORD)]);
+    assert_eq!(scene.connect(&mut wrong).0, LOGIN_REFUSED);
+    let logs = scene.service.as_ref().unwrap().login_lines();
+    assert_eq!(
+        logs,
+        ["login succeeded", "login failed: refused by the gateway"]
+    );
+}
+
+// A user who gave up is told only that, since nothing went wrong: the lines
+// the login printed are not handed over. The careless gateway writes a line
+// for the username before the password is asked for, so there is a line
+// that could have been.
+#[test]
+fn a_login_the_user_gave_up_hands_over_only_that() {
     let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
     let mut script = Script::new(pin());
     script.leaks = true;
@@ -802,7 +829,19 @@ fn a_login_the_user_gave_up_hands_nothing_over() {
     let (code, _, err) = scene.connect(&mut typist);
     assert_eq!(code, CANCELLED, "{err}");
     assert!(err.contains("ubc-vpn: > [redacted]\n"), "{err}");
-    let logs = scene.service.as_ref().unwrap().logs();
+    let logs = scene.service.as_ref().unwrap().login_lines();
+    assert_eq!(logs, ["login failed: cancelled"]);
+}
+
+// Ctrl-C at a question ends the program at once: nothing is handed over.
+#[test]
+fn a_login_left_with_ctrl_c_hands_over_nothing() {
+    let scene = Scene::usual();
+    let mut typist = Typist::typing(&[None]);
+    typist.interrupted = true;
+    let (ended, _, _) = scene.connect_watched(&mut typist, &Progress::default());
+    assert_eq!(ended, Ended::Interrupted);
+    let logs = scene.service.as_ref().unwrap().login_lines();
     assert_eq!(logs, [""; 0], "a line was handed over");
 }
 
@@ -823,10 +862,16 @@ fn only_the_last_lines_are_handed_over_and_none_is_cut() {
         .map(|n| format!("line {n}"))
         .collect();
     said.extend(["  ".to_string(), "x".repeat(600)]);
-    crate::connect::hand_over(&mut client, &said);
-    let logs = scene.service.as_ref().unwrap().logs();
+    let outcome = (
+        ubc_vpn_core::protocol::LogLevel::Info,
+        "made-up outcome".to_string(),
+    );
+    crate::connect::hand_over(&mut client, &said, outcome);
+    let logs = scene.service.as_ref().unwrap().login_lines();
+    // The outcome last, and room left for it.
     assert_eq!(logs.len(), MAX_ADDED_LOG_LINES);
-    assert_eq!(logs[0], "line 4");
-    assert_eq!(logs[MAX_ADDED_LOG_LINES - 2], "line 22");
-    assert_eq!(logs[MAX_ADDED_LOG_LINES - 1], LogText::LEFT_OUT);
+    assert_eq!(logs[0], "line 5");
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 3], "line 22");
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 2], LogText::LEFT_OUT);
+    assert_eq!(logs[MAX_ADDED_LOG_LINES - 1], "made-up outcome");
 }

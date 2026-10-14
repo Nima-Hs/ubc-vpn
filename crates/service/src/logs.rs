@@ -35,6 +35,13 @@
 //! holds one copy of it at most, and never none once it has happened; and
 //! nothing a client sends, and no fault that persists, can push the
 //! earlier lines out.
+//!
+//! The lines a client causes just by asking, about the connects and
+//! disconnects it asks for and what came of them, go through
+//! [`Logs::about_requests`]. At most [`REQUEST_LINES`] of them are kept in
+//! any [`REQUEST_WINDOW`]; past that one line says the rest were not, and
+//! nothing more is kept until the window has passed. Ordinary use writes
+//! a handful in an hour.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +64,16 @@ pub const CAPACITY: usize = 500;
 /// How long the cookie is still held, for cleaning only, after everything
 /// for its connection has been torn down.
 pub const LINGER: Duration = Duration::from_secs(30);
+
+/// How many lines caused by clients' requests are kept in one
+/// [`REQUEST_WINDOW`].
+pub const REQUEST_LINES: usize = 30;
+
+/// See [`REQUEST_LINES`].
+pub const REQUEST_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// What stands for the lines about requests that were not kept.
+pub const NOT_LOGGED: &str = "more requests were not logged";
 
 /// Who hears of each line as it is kept.
 type Tell = Box<dyn Fn(&LogLine) + Send>;
@@ -104,6 +121,11 @@ struct Inner {
     /// again and again.
     about: Vec<(&'static str, u64)>,
     tell: Option<Tell>,
+    /// When the present window for lines about requests began, how many it
+    /// has kept, and whether it has said that it keeps no more.
+    window: Option<Instant>,
+    in_window: usize,
+    said_full: bool,
 }
 
 impl Inner {
@@ -239,6 +261,36 @@ impl Logs {
         self.keep(LogLevel::Warn, LogSource::Service, None, text);
     }
 
+    /// Keeps a line about what happened, that happens once.
+    pub fn info(&self, text: &str) {
+        self.keep(LogLevel::Info, LogSource::Service, None, text);
+    }
+
+    /// Keeps a line that a client caused by asking, within the budget for
+    /// such lines: see the module documentation.
+    pub(crate) fn about_requests(&self, level: LogLevel, text: &str) {
+        let now = (self.0.clock)();
+        let kept = {
+            let mut inner = lock(&self.0.inner);
+            let over = |began: Instant| now.saturating_duration_since(began) >= REQUEST_WINDOW;
+            if inner.window.is_none_or(over) {
+                (inner.window, inner.in_window, inner.said_full) = (Some(now), 0, false);
+            }
+            if inner.in_window < REQUEST_LINES {
+                inner.in_window += 1;
+                Some((level, text))
+            } else if !inner.said_full {
+                inner.said_full = true;
+                Some((LogLevel::Warn, NOT_LOGGED))
+            } else {
+                None
+            }
+        };
+        if let Some((level, text)) = kept {
+            self.keep(level, LogSource::Service, None, text);
+        }
+    }
+
     /// Keeps a line about a failure that can happen again and again, named
     /// by `what`, unless it repeats the last line about it and that line is
     /// still in the log.
@@ -362,11 +414,16 @@ impl Logs {
 
     /// The text of every line kept, oldest first.
     pub fn lines(&self) -> Vec<String> {
+        let text = |line: LogLine| line.text.as_str().to_string();
+        self.all().into_iter().map(text).collect()
+    }
+
+    /// Every line kept, oldest first.
+    pub fn all(&self) -> Vec<LogLine> {
         let inner = lock(&self.0.inner);
-        let mut lines: Vec<&LogLine> = inner.own.iter().chain(&inner.added).collect();
+        let mut lines: Vec<LogLine> = inner.own.iter().chain(&inner.added).cloned().collect();
         lines.sort_by_key(|line| line.seq);
-        let text = |line: &LogLine| line.text.as_str().to_string();
-        lines.into_iter().map(text).collect()
+        lines
     }
 
     /// Where an engine logs while it holds `cookie`: into this log, never a

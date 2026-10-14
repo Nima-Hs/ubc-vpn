@@ -17,7 +17,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use ubc_vpn_core::policy::Policy;
-use ubc_vpn_core::protocol::{ConnectParams, ErrorCode, ErrorInfo, is_plausible_gateway_addr};
+use ubc_vpn_core::protocol::{
+    ConnectParams, ErrorCode, ErrorInfo, LastError, LogLevel, is_plausible_gateway_addr,
+};
 use ubc_vpn_core::routes::Ipv4Net;
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
@@ -26,6 +28,7 @@ use ubc_vpn_platform::{Dns, PhysicalNetwork, Platform, Routes};
 use crate::diagnostics::failure;
 use crate::hub::Hub;
 use crate::logs::Held;
+use crate::words::{counted, word};
 use crate::{Logs, lock};
 
 /// Builds the error a request is refused with.
@@ -82,6 +85,9 @@ pub(crate) struct Machine {
     /// Keeps the cookie of the connection in hand out of the log, from the
     /// moment its request is admitted until everything is torn down.
     pub(crate) hidden: Option<Held>,
+    /// Whether the last state written to the log was `disconnected`. It is
+    /// where the service starts.
+    disconnected: bool,
     /// Counts tunnels, so an ending is matched to the tunnel it came from.
     tunnels: u64,
     hub: Arc<Hub>,
@@ -126,6 +132,7 @@ impl Session {
             logs: logs.clone(),
             applied: Applied::default(),
             hidden: None,
+            disconnected: true,
             tunnels: 0,
             hub,
             gate: gate.clone(),
@@ -146,7 +153,27 @@ impl Session {
     /// applied for a request that is refused here. A connect is admitted
     /// only when nothing is connected or in progress: to replace a
     /// connection the client disconnects first.
+    ///
+    /// Whether it was admitted is logged: with what it carries, counted, or
+    /// with the code it was refused with. Nothing else from the request: it
+    /// holds the cookie. An admitted one is logged before the worker has it,
+    /// so that the line comes before any the connect leads to.
     pub(crate) fn connect(&self, params: ConnectParams) -> Result<(), ErrorInfo> {
+        let routes = &params.routes;
+        let carries = format!(
+            "{} and {}",
+            counted(routes.subnets.len(), "subnet"),
+            counted(routes.dns_domains.len(), "DNS domain")
+        );
+        let admitted = self.admit(params, &carries);
+        if let Err(refusal) = &admitted {
+            let line = format!("connect refused: {}", word!(refusal.code));
+            self.logs.about_requests(LogLevel::Warn, &line);
+        }
+        admitted
+    }
+
+    fn admit(&self, params: ConnectParams, carries: &str) -> Result<(), ErrorInfo> {
         let refused = |code, message: String| Err(error(code, message));
         let allowed = match &self.allowed {
             Ok(allowed) => allowed.as_deref(),
@@ -172,17 +199,25 @@ impl Session {
         // Held from here on, before the request is anywhere a line could
         // be written about it.
         let hidden = self.logs.hold(&params.cookie);
+        let line = format!("connect admitted ({carries})");
+        self.logs.about_requests(LogLevel::Info, &line);
         self.send(Command::Connect(params, gate.cancel.clone(), hidden))
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
-    /// connect cancels it first.
-    pub(crate) fn disconnect(&self) -> Result<(), ErrorInfo> {
+    /// connect cancels it first. `said` is what kind of client the client
+    /// said it was; when there was something to disconnect it is logged as
+    /// that, since nothing checks it.
+    pub(crate) fn disconnect(&self, said: &str) -> Result<(), ErrorInfo> {
         let mut gate = lock(&self.gate);
         match gate.phase {
             Phase::Stopping => return Err(busy()),
             Phase::Connecting => gate.cancel.cancel(),
             Phase::Idle | Phase::Connected => {}
+        }
+        if gate.phase != Phase::Idle {
+            let line = format!("disconnect requested by a client that said it was {said}");
+            self.logs.about_requests(LogLevel::Info, &line);
         }
         gate.phase = Phase::Stopping;
         self.send(Command::Disconnect)
@@ -265,9 +300,37 @@ impl Machine {
     /// Tells the owner's connections the new state. A failure is also kept
     /// for the diagnostics, cleaned here and now, while the service still
     /// holds what the failed connection's lines must not show.
-    fn publish(&self, state: ConnState) {
+    fn publish(&mut self, state: ConnState) {
         let failure = failure(&state, &self.logs);
+        self.say(&state, failure.as_ref());
         self.hub.publish(state, failure);
+    }
+
+    /// Writes a line for a state that ends something. Connecting and
+    /// disconnecting are not written: the request just before says so. Nor
+    /// is a disconnected that follows one, as after asking to disconnect
+    /// when nothing was connected.
+    fn say(&mut self, state: &ConnState, failure: Option<&LastError>) {
+        let ending = match state {
+            ConnState::Connecting | ConnState::Disconnecting => return,
+            ConnState::Disconnected if self.disconnected => return,
+            ConnState::Disconnected => (LogLevel::Info, "disconnected".to_string()),
+            ConnState::Connected { .. } => (LogLevel::Info, "connected".to_string()),
+            ConnState::LoginNeeded => (
+                LogLevel::Info,
+                "the session ended: the user must log in again".to_string(),
+            ),
+            ConnState::Failed { code, .. } => {
+                let message = failure.map_or("", |failure| failure.message.as_str());
+                (
+                    LogLevel::Error,
+                    format!("failed: {}: {message}", word!(code)),
+                )
+            }
+        };
+        self.disconnected = matches!(state, ConnState::Disconnected);
+        let (level, line) = ending;
+        self.logs.about_requests(level, &line);
     }
 
     fn handle(&mut self, command: Command) {
