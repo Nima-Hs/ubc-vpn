@@ -520,6 +520,9 @@ pub(crate) mod tests {
         // waited for, so its ID is still its own.
         assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
         let got = heard.recv_timeout(Duration::from_secs(5));
+        // Only now is the screen read: on macOS a process cannot finish
+        // ending, even when killed, while its terminal's output waits.
+        let _ = read_from(&pty.ours, None, 300);
         let _ = child.kill();
         let _ = child.wait();
         // Its own check of the mode, made when the request reached it.
