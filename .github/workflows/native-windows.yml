@@ -27,10 +27,6 @@ defaults:
   run:
     shell: bash
 
-env:
-  WINTUN_URL: https://www.wintun.net/builds/wintun-0.14.1.zip
-  WINTUN_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
-
 jobs:
   build:
     name: Build and probe libopenconnect
@@ -121,6 +117,41 @@ jobs:
           PATH="$ours:$windows" ./target/release/oc-probe.exe probe https://127.0.0.1:4444 | tee probe.txt
           grep -qE '^version  = v9\.21(-|$)' probe.txt
           grep -qx 'RESULT: PASS' probe.txt
+
+      # native/windows/wintun.pin is the one place the Wintun version and
+      # checksum are written down. It must be exactly these two lines, so it
+      # cannot set anything else in the environment.
+      - name: Read the Wintun pin
+        run: |
+          read_pin() {
+            local url='^WINTUN_URL=https://www\.wintun\.net/builds/[A-Za-z0-9._-]+\.zip$'
+            local sha='^WINTUN_SHA256=[0-9a-f]{64}$'
+            local lines
+            mapfile -t lines < "$1"
+            [ "${#lines[@]}" -eq 2 ] && [[ ${lines[0]} =~ $url ]] && [[ ${lines[1]} =~ $sha ]] &&
+              printf '%s\n' "${lines[@]}"
+          }
+          # A check that refuses nothing looks the same as one that passes, so
+          # first prove it refuses what it must: another host, a third line,
+          # a carriage return, the lines swapped, a short digest.
+          digest=$(printf '07%.0s' {1..32})
+          good='https://www.wintun.net/builds/w.zip'
+          bad=$(mktemp)
+          for sample in \
+            "WINTUN_URL=https://example.com/w.zip\nWINTUN_SHA256=$digest\n" \
+            "WINTUN_URL=$good\nWINTUN_SHA256=$digest\nGITHUB_PATH=x\n" \
+            "WINTUN_URL=$good\r\nWINTUN_SHA256=$digest\n" \
+            "WINTUN_SHA256=$digest\nWINTUN_URL=$good\n" \
+            "WINTUN_URL=$good\nWINTUN_SHA256=${digest:1}\n"; do
+            printf "$sample" > "$bad"
+            if read_pin "$bad" > /dev/null; then
+              echo "The pin check accepted a bad file."
+              exit 1
+            fi
+          done
+          printf "WINTUN_URL=$good\nWINTUN_SHA256=$digest\n" > "$bad"
+          read_pin "$bad" > /dev/null
+          read_pin native/windows/wintun.pin >> "$GITHUB_ENV"
 
       # Wintun is used for the tests only. It is not part of the build output.
       - name: Connect (login, connection and Wintun tunnel device)
