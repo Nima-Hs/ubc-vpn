@@ -275,8 +275,8 @@ impl Machine {
             Command::Connect(params, cancel, hidden) => self.connect(params, &cancel, hidden),
             Command::Disconnect => {
                 self.publish(ConnState::Disconnecting);
-                self.finish(ConnState::Disconnected);
-                lock(&self.gate).phase = Phase::Idle;
+                let idle = |phase: &mut Phase| *phase = Phase::Idle;
+                self.finish_then_open(ConnState::Disconnected, idle);
             }
             // Only the ending of the tunnel that is open now counts. One
             // from a tunnel that teardown closed must not undo a later
@@ -288,18 +288,21 @@ impl Machine {
                 // here and in `set_up` (subscribe to `NetworkEvents`, keep
                 // the session, reopen). Until then nothing is retried and
                 // the cookie is already forgotten.
-                self.finish(match event {
+                let state = match event {
                     TunnelEvent::Closed => ConnState::Disconnected,
                     TunnelEvent::LoginNeeded => ConnState::LoginNeeded,
                     TunnelEvent::ConnectionLost => failed(
                         ErrorCode::EngineFailed,
                         "The connection to the gateway was lost.",
                     ),
-                });
-                let mut gate = lock(&self.gate);
-                if gate.phase == Phase::Connected {
-                    gate.phase = Phase::Idle;
-                }
+                };
+                // A disconnect already on its way keeps its own phase.
+                let idle = |phase: &mut Phase| {
+                    if *phase == Phase::Connected {
+                        *phase = Phase::Idle;
+                    }
+                };
+                self.finish_then_open(state, idle);
             }
             Command::Ended(..) | Command::Shutdown => {}
         }
@@ -341,12 +344,20 @@ impl Machine {
     /// Tears everything down, then reports `state`, or a failure if something
     /// may have been left applied.
     fn finish(&mut self, state: ConnState) {
+        self.finish_then_open(state, |_| {});
+    }
+
+    /// The same, with `open` deciding the gate's phase between the teardown
+    /// and the report: a client that hears the last state may ask again at
+    /// once, and must not be told it is busy.
+    fn finish_then_open(&mut self, state: ConnState, open: impl FnOnce(&mut Phase)) {
         let clean = self.teardown();
         let state = if clean {
             state
         } else {
             failed(ErrorCode::Internal, LEFT_BEHIND)
         };
+        open(&mut lock(&self.gate).phase);
         self.publish(state);
     }
 
