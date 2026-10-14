@@ -36,12 +36,16 @@
 //! nothing a client sends, and no fault that persists, can push the
 //! earlier lines out.
 //!
-//! The lines a client causes just by asking, about the connects and
-//! disconnects it asks for and what came of them, go through
-//! [`Logs::about_requests`]. At most [`REQUEST_LINES`] of them are kept in
-//! any [`REQUEST_WINDOW`]; past that one line says the rest were not, and
-//! nothing more is kept until the window has passed. Ordinary use writes
-//! a handful in an hour.
+//! The lines a request causes by itself (a connect admitted or refused, a
+//! disconnect asked for) go through [`Logs::about_requests`]. At most
+//! [`REQUEST_LINES`] of them are kept in any [`REQUEST_WINDOW`]; past that
+//! one line says the rest were not, and nothing more is kept until the
+//! window has passed. Ordinary use writes a handful in an hour.
+//!
+//! What came of a connect (its routes, its states, its teardown) is not in
+//! that budget: it follows only an admitted connect, which costs a real
+//! attempt at the gateway, as the engine's lines do. So asking again and
+//! again can never hide the next failure, or the next `connected`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -264,6 +268,17 @@ impl Logs {
     /// Keeps a line about what happened, that happens once.
     pub fn info(&self, text: &str) {
         self.keep(LogLevel::Info, LogSource::Service, None, text);
+    }
+
+    /// Keeps a line of the service's own at `level`.
+    pub(crate) fn at(&self, level: LogLevel, text: &str) {
+        self.keep(level, LogSource::Service, None, text);
+    }
+
+    /// The same for a line about `what`, under the repeat rule: see the
+    /// module documentation.
+    pub(crate) fn at_about(&self, level: LogLevel, what: &'static str, text: &str) {
+        self.keep(level, LogSource::Service, Some(what), text);
     }
 
     /// Keeps a line that a client caused by asking, within the budget for

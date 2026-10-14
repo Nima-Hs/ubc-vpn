@@ -386,13 +386,57 @@ fn no_number_of_requests_pushes_the_earlier_lines_out() {
     let count = |what: &str| lines.iter().filter(|line| line.contains(what)).count();
     assert_eq!(count("from the owner could not be understood"), 1);
     assert_eq!(count("clearing split DNS failed"), 1);
-    // Each failed disconnect is its own failure, up to the budget for
-    // lines that requests cause; then one line says so.
-    use ubc_vpn_service::{NOT_LOGGED, REQUEST_LINES};
-    assert_eq!(count("failed: internal:"), REQUEST_LINES);
-    assert_eq!(count(NOT_LOGGED), 1);
-    assert_eq!(lines.last(), Some(&NOT_LOGGED));
+    // A disconnect of nothing writes no line of its own, and the same
+    // failure again and again, with nothing between, is said once.
+    assert_eq!(count("failed: internal:"), 1);
+    assert_eq!(count(ubc_vpn_service::NOT_LOGGED), 0);
     assert!(!page(&mut alice, None).dropped);
+}
+
+// Security rule: the budget for lines that requests cause can never hide
+// what came of a connect. Once a client has spent it on connects that are
+// refused (as the app's renderer could on purpose), the next `connected`
+// and the next failure are still written.
+#[test]
+fn a_spent_budget_hides_no_connection_or_failure() {
+    use ubc_vpn_service::{NOT_LOGGED, REQUEST_LINES};
+    let rig = rig();
+    let mut alice = rig.owner();
+    for _ in 0..REQUEST_LINES + 5 {
+        let elsewhere = connect(COOKIE, [0, 0, 0, 0], &["10.255.0.0/24"], &[]);
+        assert_eq!(alice.ask(elsewhere), Err(ErrorCode::BadRequest));
+    }
+    connected(&mut alice);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+    rig.engine.set_reachable(false);
+    let failed = alice.connect_ends(good());
+    assert!(matches!(failed, ConnState::Failed { .. }), "{failed:?}");
+
+    let lines = own_lines(&mut alice);
+    let after = lines.iter().position(|line| line == NOT_LOGGED);
+    let after = &lines[after.expect("the budget was spent") + 1..];
+    let said = |what: &str| after.iter().any(|line| line.starts_with(what));
+    assert!(said("connected"), "{after:?}");
+    assert!(said("routes and DNS applied"), "{after:?}");
+    assert!(
+        said("everything applied for the connection was removed"),
+        "{after:?}"
+    );
+    assert!(said("disconnected"), "{after:?}");
+    assert!(said("failed: gateway_unreachable"), "{after:?}");
+    // And the requests themselves are not: the budget is spent.
+    assert!(!said("connect admitted"), "{after:?}");
+}
+
+// The first line says which kind of run this is.
+#[test]
+fn the_first_line_says_installed() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    let lines = own_lines(&mut alice);
+    assert!(lines[0].ends_with(", installed"), "{lines:?}");
 }
 
 // With no policy the service still answers, and says so.

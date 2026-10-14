@@ -125,7 +125,7 @@ impl Machine {
             counted(chosen.subnets.len(), "subnet route"),
             counted(dns_servers, "DNS server route"),
         );
-        self.logs.about_requests(LogLevel::Info, &line);
+        self.logs.at(LogLevel::Info, &line);
         Ok(TunnelInfo {
             interface: assigned.interface.clone(),
             address: assigned.address.to_string(),

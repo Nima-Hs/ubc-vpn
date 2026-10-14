@@ -75,7 +75,7 @@ impl Machine {
         // connect usually finds nothing, and that is not news.
         if had_some && clean {
             let line = "everything applied for the connection was removed";
-            self.logs.about_requests(LogLevel::Info, line);
+            self.logs.at(LogLevel::Info, line);
         }
         clean
     }

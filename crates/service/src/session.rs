@@ -310,6 +310,11 @@ impl Machine {
     /// disconnecting are not written: the request just before says so. Nor
     /// is a disconnected that follows one, as after asking to disconnect
     /// when nothing was connected.
+    ///
+    /// These lines are outside the budget for requests, so that asking can
+    /// never hide one. A state that only repeats the last one, with nothing
+    /// between, is passed over while that line is in the log: a disconnect
+    /// asked for again and again while a fault persists says it once.
     fn say(&mut self, state: &ConnState, failure: Option<&LastError>) {
         let ending = match state {
             ConnState::Connecting | ConnState::Disconnecting => return,
@@ -330,7 +335,7 @@ impl Machine {
         };
         self.disconnected = matches!(state, ConnState::Disconnected);
         let (level, line) = ending;
-        self.logs.about_requests(level, &line);
+        self.logs.at_about(level, "the connection's state", &line);
     }
 
     fn handle(&mut self, command: Command) {
