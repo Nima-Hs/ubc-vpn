@@ -1,0 +1,17 @@
+removal names no protocol	    let header = rtmsg(net.prefix_len(), LINUX_ROUTE_PROTOCOL, RT_SCOPE_NOWHERE, 0);	    let header = rtmsg(net.prefix_len(), 0, RT_SCOPE_NOWHERE, 0);
+remove_all takes every route	        .filter(|route| route.protocol == LINUX_ROUTE_PROTOCOL);	        .filter(|_| true);
+add replaces	    match request(RTM_NEWROUTE, NLM_F_CREATE | NLM_F_EXCL, &body) {	    match request(RTM_NEWROUTE, NLM_F_CREATE | 0x100, &body) {
+identical ignores the interface	            && route.oif == Some(oif)	            && true
+identical ignores the next hop	            && route.gateway == via	            && true
+any route there counts as identical	    match identical {	    match true {
+address with a netmask	            let body = Body::new(&ifaddrmsg(32, link.index))	            let body = Body::new(&ifaddrmsg(24, link.index))
+other addresses stay	            if index != link.index {	            if true {
+any device is the tunnel	    if !link.tun {	    if false {
+ipv6 left on	        no_ipv6(&link)?;	        let _ = &link;
+size not checked	    if !TUNNEL_MTU.contains(&mtu) {	    if false {
+size not set	        let up = Body::new(&ifinfomsg(link.index, IFF_UP, IFF_UP)).u32(IFLA_MTU, mtu.into());	        let up = Body::new(&ifinfomsg(link.index, IFF_UP, IFF_UP));
+not brought up	        let up = Body::new(&ifinfomsg(link.index, IFF_UP, IFF_UP)).u32(IFLA_MTU, mtu.into());	        let up = Body::new(&ifinfomsg(link.index, 0, IFF_UP)).u32(IFLA_MTU, mtu.into());
+replies from anyone	        if from.map(|from| from.pid()) != Some(0) {	        if false {
+replies to any request	            if seq != SEQ {	            if false {
+gateway route by no router	        add_route(host(gateway), link.index, via.next_hop)	        add_route(host(gateway), link.index, None)
+unreachable is unknown	            Ok(_) => Verified::No,	            Ok(_) => Verified::Unknown,

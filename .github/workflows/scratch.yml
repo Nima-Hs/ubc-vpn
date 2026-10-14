@@ -1,0 +1,43 @@
+name: Scratch (linux routes mutants)
+
+on:
+  push:
+    branches: [test/linux-routes-mutants]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Mutants
+        run: |
+          set +e
+          run() {
+            cargo test --locked -q -p ubc-vpn-platform --features dev-mode --no-run --message-format=json > build.json 2> build.err || { echo "BUILD FAILED"; tail -5 build.err; return; }
+            tests=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' build.json)
+            sudo env UBC_VPN_REQUIRE_ROOT=1 perl -e 'alarm shift; exec @ARGV' 300 "$tests" linux_routes --test-threads=1 > r.log 2>&1
+            echo "RESULT $(grep 'test result' r.log)"
+            grep -E "^test .* FAILED" r.log
+            grep -A2 "panicked" r.log | grep -v -E "panicked|^--|note:" | head -3
+            # Leave nothing behind for the next mutant.
+            for proto in 181; do sudo ip route flush proto $proto 2>/dev/null; done
+          }
+          echo "=== as written"; run
+          while IFS=$'\t' read -r name old new; do
+            echo "=== mutant: $name"
+            OLD="$old" NEW="$new" perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/' crates/platform/src/linux/routes.rs crates/platform/src/linux/netlink.rs
+            if git diff --quiet; then echo "NOT APPLIED"; continue; fi
+            run
+            git checkout -q -- crates
+          done < mutants.txt
