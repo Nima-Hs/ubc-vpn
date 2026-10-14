@@ -186,6 +186,7 @@ jobs:
           # The real library logged in to it, and was refused by it.
           grep -q '^RAN: handle logs in' test.log
           grep -q '^RAN: handle rejects' test.log
+          grep -q '^RAN: handle opens a tunnel connection' test.log
           # So did the engine.
           grep -q '^RAN: engine logs in' test.log
           grep -q '^RAN: engine refuses a wrong pin' test.log
