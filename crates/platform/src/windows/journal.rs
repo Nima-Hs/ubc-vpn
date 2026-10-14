@@ -13,14 +13,13 @@
 //! A route line holds the destination, the interface's LUID, the next hop
 //! and, last so that it may contain spaces, the interface's name.
 
-use std::fs;
-use std::io::Write;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::PathBuf;
 
 use ubc_vpn_core::routes::Ipv4Net;
 
-use crate::{Error, Result};
+use crate::{Error, Mode, Paths, Result, StateDir};
 
 /// One route exactly as it was added.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,47 +55,63 @@ impl Boot {
     }
 }
 
-pub(super) struct Journal {
-    path: PathBuf,
+/// Where the journal is kept: the service's checked state folder, opened
+/// when the journal is first used, so that a process that never touches a
+/// route (such as the command-line client) never opens it.
+pub(super) enum Store {
+    Checked(Mode, Paths),
+    #[cfg(test)]
+    Unchecked(PathBuf),
 }
+
+pub(super) struct Journal {
+    store: Store,
+    opened: Option<StateDir>,
+}
+
+const FILE: &str = "routes.journal";
 
 fn corrupt() -> Error {
     Error::Failed("the route journal cannot be read".to_string())
 }
 
 impl Journal {
-    pub(super) fn new(state_dir: &Path) -> Self {
+    pub(super) fn new(store: Store) -> Self {
         Self {
-            path: state_dir.join("routes.journal"),
+            store,
+            opened: None,
         }
+    }
+
+    /// The state folder. `StateDir` checks it before every read and write.
+    fn state(&mut self) -> Result<&StateDir> {
+        if self.opened.is_none() {
+            self.opened = Some(match &self.store {
+                Store::Checked(mode, paths) => StateDir::open(*mode, paths)?,
+                #[cfg(test)]
+                Store::Unchecked(dir) => StateDir::unchecked(dir)?,
+            });
+        }
+        Ok(self.opened.as_ref().expect("opened just now"))
     }
 
     /// The rows written in boot `now`. Rows from another boot are dropped,
     /// with nothing removed: the routes they stood for went with the
     /// restart, and an identical one there now is somebody else's.
-    pub(super) fn rows(&self, now: Boot) -> Result<Vec<Row>> {
-        let text = match fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
+    pub(super) fn rows(&mut self, now: Boot) -> Result<Vec<Row>> {
+        let Some(bytes) = self.state()?.read(FILE)? else {
+            return Ok(Vec::new());
         };
+        let text = String::from_utf8(bytes).map_err(|_| corrupt())?;
         let (boot, rows) = parse(&text).ok_or_else(corrupt)?;
         Ok(if boot.same_as(&now) { rows } else { Vec::new() })
     }
 
-    /// Replaces the journal with `rows`, for boot `now`. Written to a new
-    /// file and moved into place, so a crash leaves the old or the new.
-    pub(super) fn write(&self, now: Boot, rows: &[Row]) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let fresh = self.path.with_extension("journal.new");
-        let mut file = fs::File::create(&fresh)?;
-        file.write_all(render(now, rows).as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&fresh, &self.path)?;
-        Ok(())
+    /// Replaces the journal with `rows`, for boot `now`. A crash leaves the
+    /// old journal or the new one.
+    pub(super) fn write(&mut self, now: Boot, rows: &[Row]) -> Result<()> {
+        let text = render(now, rows);
+        self.state()?.write(FILE, text.as_bytes())
     }
 }
 
@@ -141,6 +156,7 @@ fn parse(text: &str) -> Option<(Boot, Vec<Row>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn row(dest: &str, interface: &str) -> Row {
         Row {
@@ -166,7 +182,7 @@ mod tests {
     #[test]
     fn round_trips_rows_with_spaces_in_the_name() {
         let dir = scratch("round");
-        let journal = Journal::new(&dir);
+        let mut journal = Journal::new(Store::Unchecked(dir.clone()));
         assert_eq!(journal.rows(BOOT), Ok(vec![]), "no file is no rows");
         let rows = [
             row("192.0.2.0/24", "Wi-Fi 2"),
@@ -185,7 +201,7 @@ mod tests {
     #[test]
     fn rows_from_another_boot_are_dropped() {
         let dir = scratch("boot");
-        let journal = Journal::new(&dir);
+        let mut journal = Journal::new(Store::Unchecked(dir.clone()));
         journal
             .write(BOOT, &[row("192.0.2.0/24", "ubc-vpn0")])
             .unwrap();
@@ -233,7 +249,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("routes.journal"), "boot 1\n").unwrap();
         assert!(matches!(
-            Journal::new(&dir).rows(BOOT),
+            Journal::new(Store::Unchecked(dir.clone())).rows(BOOT),
             Err(Error::Failed(_))
         ));
         fs::remove_dir_all(&dir).unwrap();

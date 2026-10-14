@@ -70,7 +70,7 @@ const TEST_RANGES: [&str; 4] = [
 /// it ends.
 fn scrub(dirs: &[PathBuf]) {
     for dir in dirs {
-        let _ = WinRoutes::new(dir).remove_all();
+        let _ = WinRoutes::unchecked(dir).remove_all();
     }
     let ranges = TEST_RANGES.map(|range| range.parse::<Ipv4Net>().expect("a range"));
     for row in super::routes::route_table().unwrap_or_default() {
@@ -146,7 +146,7 @@ impl Outsider {
         let luid = luid(interface).expect("the interface");
         // The interface's usual router, when the default route uses it.
         let default =
-            WinRoutes::new(&state_dir("probe")).capture_physical(Ipv4Addr::new(192, 0, 2, 1));
+            WinRoutes::unchecked(&state_dir("probe")).capture_physical(Ipv4Addr::new(192, 0, 2, 1));
         let hop = default
             .ok()
             .filter(|physical| physical.interface() == interface)
@@ -210,13 +210,13 @@ fn passes_the_shared_route_suite_on_a_wintun_adapter() {
     // Dropped in reverse: the routes go first, then the adapter.
     let _adapter = wintun.adapter(tunnel);
     let _cleanup = Cleanup(vec![dir.clone()]);
-    let routes = WinRoutes::new(&dir);
+    let routes = WinRoutes::unchecked(&dir);
     step("check_configure_tunnel");
     suite::check_configure_tunnel(&routes, &Outsider, tunnel);
     step("check_routes");
     suite::check_routes(&routes, tunnel);
     step("check_route_ownership");
-    let restarted = || Box::new(WinRoutes::new(&dir)) as Box<dyn Routes>;
+    let restarted = || Box::new(WinRoutes::unchecked(&dir)) as Box<dyn Routes>;
     suite::check_route_ownership(&routes, &restarted, &Outsider, tunnel);
     ran("routes");
 }
@@ -231,7 +231,7 @@ fn the_tunnel_has_no_ipv6_address_after_each_configure() {
     let dir = state_dir("ipv6");
     let _adapter = wintun.adapter(tunnel);
     let _cleanup = Cleanup(vec![dir.clone()]);
-    let routes = WinRoutes::new(&dir);
+    let routes = WinRoutes::unchecked(&dir);
     let luid = luid(tunnel).unwrap();
     let ipv6 = || {
         let rows = super::routes::addresses_of(windows_sys::Win32::Networking::WinSock::AF_INET6);
@@ -260,7 +260,7 @@ fn a_row_whose_route_was_never_added_is_dropped_at_the_next_start() {
     let Some(_wintun) = wintun() else { return };
     let dir = state_dir("orphan-row");
     let _cleanup = Cleanup(vec![dir.clone()]);
-    let routes = WinRoutes::new(&dir);
+    let routes = WinRoutes::unchecked(&dir);
     let physical = routes
         .capture_physical(Ipv4Addr::new(192, 0, 2, 1))
         .unwrap();
@@ -270,9 +270,9 @@ fn a_row_whose_route_was_never_added_is_dropped_at_the_next_start() {
         next_hop: physical.next_hop().unwrap_or(Ipv4Addr::UNSPECIFIED),
         interface: physical.interface().to_string(),
     };
-    let journal = super::journal::Journal::new(&dir);
+    let mut journal = super::journal::Journal::new(super::journal::Store::Unchecked(dir.clone()));
     journal.write(super::routes::boot(), &[row]).unwrap();
-    WinRoutes::new(&dir)
+    WinRoutes::unchecked(&dir)
         .remove_all()
         .expect("remove all at the next start");
     assert_eq!(journal.rows(super::routes::boot()), Ok(vec![]));
@@ -287,7 +287,7 @@ fn refuses_to_treat_the_physical_interface_as_the_tunnel() {
     let Some(_wintun) = wintun() else { return };
     let dir = state_dir("physical");
     let _cleanup = Cleanup(vec![dir.clone()]);
-    let routes = WinRoutes::new(&dir);
+    let routes = WinRoutes::unchecked(&dir);
     let physical = routes
         .capture_physical(Ipv4Addr::new(192, 0, 2, 1))
         .unwrap();
@@ -316,7 +316,7 @@ fn crash_child() {
     let wintun = Wintun::load().expect("the library");
     let tunnel = "ubc-vpn-crash0";
     let adapter = wintun.adapter(tunnel);
-    let routes = WinRoutes::new(&PathBuf::from(dir));
+    let routes = WinRoutes::unchecked(&PathBuf::from(dir));
     let gateway = Ipv4Addr::new(192, 0, 2, 1);
     step("child: capture_physical");
     let physical = routes.capture_physical(gateway).unwrap();
@@ -345,7 +345,7 @@ fn crash_child() {
 
 /// Whether the system's table has a route to `dest` through `interface`.
 fn has_route(dest: &str, interface: &str) -> bool {
-    let routes = WinRoutes::new(&state_dir("look"));
+    let routes = WinRoutes::unchecked(&state_dir("look"));
     let addr: Ipv4Net = dest.parse().unwrap();
     routes.uses_interface(addr.addr(), interface) == Verified::Yes
 }
@@ -407,14 +407,14 @@ fn a_killed_service_leaves_what_start_up_removes() {
         "the journal lost the gateway route"
     );
 
-    WinRoutes::new(&dir)
+    WinRoutes::unchecked(&dir)
         .remove_all()
         .expect("remove all at the next start");
     let left = std::fs::read_to_string(dir.join("routes.journal")).unwrap();
     assert_eq!(left.lines().count(), 1, "rows left: {left}");
     // The gateway's address now follows the default route again, whatever
     // that is: the host route of ours is gone.
-    let routes = WinRoutes::new(&state_dir("after"));
+    let routes = WinRoutes::unchecked(&state_dir("after"));
     let physical = routes
         .capture_physical(Ipv4Addr::new(192, 0, 2, 1))
         .unwrap();

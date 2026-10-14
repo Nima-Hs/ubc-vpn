@@ -89,7 +89,7 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
     let me = security::process_user()?;
     let paths = paths(mode, &me)?;
     Ok(Platform {
-        routes: Arc::new(routes::WinRoutes::new(&paths.state_dir)),
+        routes: Arc::new(routes::WinRoutes::new(mode, &paths)),
         dns: Arc::new(Native),
         events: Arc::new(Native),
         paths,

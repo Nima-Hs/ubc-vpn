@@ -9,6 +9,7 @@
 //! and fails with `AlreadyExists` when the destination is routed elsewhere.
 
 use std::net::Ipv4Addr;
+#[cfg(test)]
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Mutex;
@@ -33,9 +34,9 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
-use super::journal::{Boot, Journal, Row};
+use super::journal::{Boot, Journal, Row, Store};
 use super::security::{os_error, wide};
-use crate::{Error, PhysicalNetwork, Result, Routes, TUNNEL_MTU, Verified, lock};
+use crate::{Error, Mode, Paths, PhysicalNetwork, Result, Routes, TUNNEL_MTU, Verified, lock};
 
 pub(super) fn v4(addr: Ipv4Addr) -> SOCKADDR_INET {
     // SAFETY: SOCKADDR_INET is a plain union for which all zeroes is valid.
@@ -218,15 +219,26 @@ pub(crate) struct WinRoutes {
 }
 
 impl WinRoutes {
-    pub(crate) fn new(state_dir: &Path) -> Self {
+    /// Routes whose journal is in the service's state folder for `mode`.
+    pub(crate) fn new(mode: Mode, paths: &Paths) -> Self {
+        let store = Store::Checked(mode, paths.clone());
         Self {
-            journal: Mutex::new(Journal::new(state_dir)),
+            journal: Mutex::new(Journal::new(store)),
+        }
+    }
+
+    /// Routes whose journal is in `dir`, with no checks on the folder.
+    #[cfg(test)]
+    pub(crate) fn unchecked(dir: &Path) -> Self {
+        let store = Store::Unchecked(dir.to_path_buf());
+        Self {
+            journal: Mutex::new(Journal::new(store)),
         }
     }
 
     /// Adds one route the exclusive way the contract asks for.
     fn add(&self, row: Row) -> Result<()> {
-        let journal = lock(&self.journal);
+        let mut journal = lock(&self.journal);
         match present(&row)? {
             Present::Identical => return Ok(()),
             Present::Elsewhere => return Err(Error::AlreadyExists),
@@ -258,7 +270,7 @@ impl WinRoutes {
 
     /// Removes the rows `which` picks out, and their routes.
     fn remove(&self, which: impl Fn(&Row) -> bool) -> Result<()> {
-        let journal = lock(&self.journal);
+        let mut journal = lock(&self.journal);
         let now = boot();
         let rows = journal.rows(now)?;
         let mut kept = Vec::new();
