@@ -281,6 +281,14 @@ impl Logs {
         self.keep(level, LogSource::Service, Some(what), text);
     }
 
+    /// Ends the repeat of the last line about `what`: the next line about it
+    /// is kept even if it says the same.
+    pub(crate) fn forget(&self, what: &'static str) {
+        lock(&self.0.inner)
+            .about
+            .retain(|(about, _)| *about != what);
+    }
+
     /// Keeps a line that a client caused by asking, within the budget for
     /// such lines: see the module documentation.
     pub(crate) fn about_requests(&self, level: LogLevel, text: &str) {

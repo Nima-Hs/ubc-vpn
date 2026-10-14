@@ -430,6 +430,54 @@ fn a_spent_budget_hides_no_connection_or_failure() {
     assert!(!said("connect admitted"), "{after:?}");
 }
 
+// Each connect that was admitted has its outcome in the log, even when it
+// ends the same way as the one before: a user who retries while something
+// is wrong is exactly who the log is for.
+#[test]
+fn every_admitted_connect_has_its_outcome_written() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    rig.engine.set_reachable(false);
+    for _ in 0..2 {
+        let failed = alice.connect_ends(good());
+        assert!(matches!(failed, ConnState::Failed { .. }), "{failed:?}");
+    }
+    let lines = own_lines(&mut alice);
+    let ends = |line: &&String| line.starts_with("connect admitted") || line.starts_with("failed:");
+    let kinds: Vec<_> = lines.iter().filter(ends).map(|line| &line[..8]).collect();
+    assert_eq!(
+        kinds,
+        ["connect ", "failed: ", "connect ", "failed: "],
+        "{lines:?}"
+    );
+}
+
+// The same for a connect stopped by a disconnect before it was up, in a
+// service whose last state line was already `disconnected`.
+#[test]
+fn a_cancelled_connect_has_its_outcome_written() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+    rig.engine.hold();
+    assert_eq!(alice.ask(good()), ACCEPTED);
+    rig.engine.wait_until_blocked();
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    let heard = [alice.state(), alice.state(), alice.state()];
+    assert_eq!(heard[2], ConnState::Disconnected, "{heard:?}");
+    rig.engine.release();
+
+    let lines = own_lines(&mut alice);
+    let last = lines
+        .iter()
+        .rposition(|line| line.starts_with("connect admitted"));
+    let after = &lines[last.expect("a connect was admitted") + 1..];
+    assert!(after.iter().any(|line| line == "disconnected"), "{lines:?}");
+}
+
 // The first line says which kind of run this is.
 #[test]
 fn the_first_line_says_installed() {

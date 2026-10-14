@@ -61,6 +61,10 @@ enum Command {
     Shutdown,
 }
 
+/// What the lines about the connection's state are about, for the repeat
+/// rule.
+const STATE: &str = "the connection's state";
+
 /// What is applied to the system right now, as far as setup got. Teardown
 /// works from this, so it is filled in before each step is attempted.
 #[derive(Default)]
@@ -314,7 +318,9 @@ impl Machine {
     /// These lines are outside the budget for requests, so that asking can
     /// never hide one. A state that only repeats the last one, with nothing
     /// between, is passed over while that line is in the log: a disconnect
-    /// asked for again and again while a fault persists says it once.
+    /// asked for again and again while a fault persists says it once. An
+    /// admitted connect ends the repeat (see [`Self::connect`]), so every
+    /// attempt's outcome is written.
     fn say(&mut self, state: &ConnState, failure: Option<&LastError>) {
         let ending = match state {
             ConnState::Connecting | ConnState::Disconnecting => return,
@@ -335,7 +341,7 @@ impl Machine {
         };
         self.disconnected = matches!(state, ConnState::Disconnected);
         let (level, line) = ending;
-        self.logs.at_about(level, "the connection's state", &line);
+        self.logs.at_about(level, STATE, &line);
     }
 
     fn handle(&mut self, command: Command) {
@@ -374,6 +380,10 @@ impl Machine {
     }
 
     fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
+        // A new attempt: whatever it ends in is news, even the same as the
+        // last one's.
+        self.disconnected = false;
+        self.logs.forget(STATE);
         self.publish(ConnState::Connecting);
         let clean = self.teardown();
         // After the teardown, which lets go of the hold before this one.

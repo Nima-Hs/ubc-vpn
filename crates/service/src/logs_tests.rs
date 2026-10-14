@@ -358,6 +358,24 @@ fn a_repeat_is_written_again_once_its_line_has_been_pushed_out() {
     assert_eq!(texts(&logs).last().map(String::as_str), Some(failed));
 }
 
+// Forgetting the last line about one thing lets the same line about it be
+// written again, and leaves the repeat rule for every other thing as it was.
+#[test]
+fn forgetting_ends_the_repeat_of_that_thing_only() {
+    let logs = Logs::default();
+    logs.error_about("accepting", "accepting failed: denied");
+    logs.warn_about("a step", "a step failed: denied");
+    logs.forget("a step");
+    logs.error_about("accepting", "accepting failed: denied");
+    logs.warn_about("a step", "a step failed: denied");
+    let lines = [
+        "accepting failed: denied",
+        "a step failed: denied",
+        "a step failed: denied",
+    ];
+    assert_eq!(texts(&logs), lines);
+}
+
 // Security rule: the lines a client causes by asking have a budget, so that
 // no client can push the earlier lines out by asking again and again. Past
 // it one line says so; once the window has passed they are kept again.
