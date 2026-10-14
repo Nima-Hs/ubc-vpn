@@ -567,6 +567,40 @@ fn a_cookie_opens_a_tunnel_connection_and_the_assignment_is_read() {
     println!("RAN: handle opens a tunnel connection");
 }
 
+// Security rule: the record that the certificate callback accepted is
+// cleared before a tunnel connection too. Here the handle has logged in,
+// which set it; then the tunnel connection is made with the resolver
+// refusing everything. The library reuses the connection the login left
+// open, asks no resolver and judges no certificate, and still reports
+// success. The record must say nothing was judged, which is why the tunnel
+// engine refuses a connection whose record is false.
+#[test]
+fn the_record_of_acceptance_is_cleared_before_a_tunnel_connection() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    let reachable = yes();
+    let (handle, seen) = handle(
+        library,
+        gateway.port,
+        &reachable,
+        Box::new(|_| true),
+        Box::new(answer),
+    );
+    assert_eq!(handle.obtain_cookie(), 0);
+    assert!(handle.certificate_accepted(), "the login set the record");
+    reachable.store(false, Ordering::SeqCst);
+    let judged = seen.lock().unwrap().hashes.len();
+    assert_eq!(handle.make_cstp_connection(), 0);
+    assert_eq!(
+        seen.lock().unwrap().hashes.len(),
+        judged,
+        "a certificate was judged"
+    );
+    assert!(!handle.certificate_accepted());
+}
+
 // Security rule: a gateway that refuses the cookie gives an answer of its
 // own, `-EPERM`, which the tunnel engine reports as "log in again".
 #[test]
