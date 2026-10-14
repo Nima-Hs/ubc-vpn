@@ -216,6 +216,20 @@ pub fn check_route_ownership(
     assert_eq!(kept, yes, "the route through the other interface went");
     foreign.remove_route(&wire, elsewhere);
 
+    // A host route to the gateway through another interface: the gateway
+    // route is refused and that one stays.
+    let elsewhere = Ipv4Net::new(gateway, 32).expect("valid network");
+    foreign.add_route(tunnel, elsewhere);
+    let refused = routes.add_gateway_route(gateway, &physical);
+    assert_eq!(
+        refused,
+        Err(Error::AlreadyExists),
+        "replaced a gateway route"
+    );
+    let kept = routes.uses_interface(gateway, tunnel);
+    assert_eq!(kept, yes, "the gateway route through the tunnel went");
+    foreign.remove_route(tunnel, elsewhere);
+
     // The same for the gateway's host route. Somebody else's sends the
     // gateway out of a subnet that is otherwise tunnelled; while it is there,
     // the gateway still leaves by the physical interface.

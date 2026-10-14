@@ -11,6 +11,7 @@ on:
     paths:
       - crates/platform/**
       - crates/core/**
+      - native/windows/wintun.pin
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/platform-windows.yml
@@ -19,6 +20,7 @@ on:
     paths:
       - crates/platform/**
       - crates/core/**
+      - native/windows/wintun.pin
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/platform-windows.yml
@@ -62,6 +64,31 @@ jobs:
           grep -q "interrupt (line [0-9]*) - compile fail ... ok" doc.log
           # Nor a way to start a program in a terminal made for a test.
           grep -q "terminal (line [0-9]*) - compile fail ... ok" doc.log
+      # The routes are tested on a Wintun adapter, the device that ships. The
+      # library is the one native/windows/wintun.pin names, checked against
+      # its digest, kept outside the checkout, loaded by test code only, and
+      # never uploaded: used here, not redistributed.
+      - name: Fetch the pinned Wintun library for the tests
+        shell: bash
+        run: |
+          mapfile -t pin < native/windows/wintun.pin
+          url='^WINTUN_URL=(https://www\.wintun\.net/builds/[A-Za-z0-9._-]+\.zip)$'
+          sha='^WINTUN_SHA256=([0-9a-f]{64})$'
+          if [ "${#pin[@]}" -ne 2 ] || ! [[ ${pin[0]} =~ $url ]]; then
+            echo "native/windows/wintun.pin is not as expected."
+            exit 1
+          fi
+          zip_url=${BASH_REMATCH[1]}
+          if ! [[ ${pin[1]} =~ $sha ]]; then
+            echo "native/windows/wintun.pin is not as expected."
+            exit 1
+          fi
+          digest=${BASH_REMATCH[1]}
+          cd "$RUNNER_TEMP"
+          curl -fsSLo wintun.zip "$zip_url"
+          echo "$digest *wintun.zip" | sha256sum -c -
+          unzip -q wintun.zip
+          echo "UBC_VPN_TEST_WINTUN=$(cygpath -w "$RUNNER_TEMP/wintun/bin/amd64/wintun.dll")" >> "$GITHUB_ENV"
       # The second user exists for this one step. Its random password stays in
       # this step's memory: it is handed to the tests through their
       # environment and never written to a file, a log or a command line.
@@ -90,7 +117,7 @@ jobs:
       - name: The elevated tests really ran
         shell: bash
         run: |
-          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat"; do
+          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row"; do
             if ! grep -q "RAN: $test" test.log; then
               echo "The elevated test '$test' did not run."
               exit 1
