@@ -30,6 +30,7 @@
 pub(crate) mod interrupt;
 mod pipe;
 mod security;
+pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
 mod tests;

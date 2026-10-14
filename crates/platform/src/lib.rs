@@ -35,7 +35,7 @@
 use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -48,6 +48,7 @@ use ubc_vpn_core::routes::Ipv4Net;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod interrupt;
+mod state_plain;
 #[cfg(any(test, feature = "fake"))]
 pub mod suite;
 pub mod terminal;
@@ -735,6 +736,99 @@ pub struct Paths {
     pub channel_name: String,
 }
 
+/// The service's state folder ([`Paths::state_dir`]). Everything the service
+/// keeps there, such as the owner in `state.json`, is read and written
+/// through this, never with plain file calls.
+///
+/// The folder decides who controls the service, so nobody but the system's
+/// administrators may have made or changed it. An ordinary user can create a
+/// folder under `ProgramData` before the service does, and would own it.
+///
+/// - [`StateDir::open`] creates the folder when it is missing, with an access
+///   list of its own that inherits nothing: on Windows SYSTEM and the
+///   Administrators group have full control, and nobody else has any. In dev
+///   mode the folder is the current user's.
+/// - Before every read and write, the folder, and the file read, must be
+///   owned by SYSTEM, Administrators or TrustedInstaller (in dev mode, the
+///   current user), and no one else may be allowed to write to it. If not,
+///   the call fails and says why. It never takes ownership of a folder or
+///   changes its access list to make it pass: an administrator must remove
+///   such a folder.
+///
+/// On Windows these checks are in force. On macOS and Linux they are not
+/// written yet: the folder is only created, and that platform's author must
+/// add the same rule (owned by root, writable by root alone).
+#[derive(Debug, Clone)]
+pub struct StateDir {
+    mode: Mode,
+    path: PathBuf,
+    checked: bool,
+}
+
+impl StateDir {
+    /// The state folder for `mode`, created if missing and then checked.
+    pub fn open(mode: Mode, paths: &Paths) -> Result<Self> {
+        let path = paths.state_dir.clone();
+        #[cfg(windows)]
+        os::state::prepare(mode, &path)?;
+        #[cfg(not(windows))]
+        state_plain::prepare(&path)?;
+        Ok(Self {
+            mode,
+            path,
+            checked: cfg!(windows),
+        })
+    }
+
+    /// A folder with no checks at all, for tests and the fake's dev mode.
+    #[cfg(any(test, feature = "fake"))]
+    pub fn unchecked(path: &Path) -> Result<Self> {
+        state_plain::prepare(path)?;
+        Ok(Self {
+            mode: Mode::Installed,
+            path: path.to_path_buf(),
+            checked: false,
+        })
+    }
+
+    /// Where the folder is, for messages.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The file's whole contents, or `None` when there is no such file.
+    pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let file = self.file(name)?;
+        #[cfg(windows)]
+        if self.checked {
+            return os::state::read(self.mode, &self.path, &file);
+        }
+        let _ = self.mode;
+        state_plain::read(&file)
+    }
+
+    /// Replaces the file's contents. A crash leaves the old contents or the
+    /// new, never part of either.
+    pub fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let file = self.file(name)?;
+        let fresh = self.path.join(format!(".{name}.new"));
+        #[cfg(windows)]
+        if self.checked {
+            os::state::check_folder(self.mode, &self.path)?;
+        }
+        state_plain::write(&file, &fresh, bytes)
+    }
+
+    /// `name` inside the folder. It must be a plain file name.
+    fn file(&self, name: &str) -> Result<PathBuf> {
+        let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+        if name.is_empty() || name.starts_with('.') || !name.chars().all(plain) {
+            return Err(Error::Failed("not a state file name".to_string()));
+        }
+        Ok(self.path.join(name))
+    }
+}
+
 /// Everything the service needs from the OS, in one value.
 ///
 /// The parts are separate so dev mode can combine real ones with fakes.
@@ -1038,6 +1132,31 @@ mod tests {
         for odd in odd {
             assert!(odd.parse::<UserId>().is_err(), "{odd:?}");
         }
+    }
+
+    // The state folder takes plain file names only, and replaces a file
+    // whole.
+    #[test]
+    fn the_state_folder_reads_and_replaces_plain_files_only() {
+        let dir = std::env::temp_dir().join(format!("ubc-vpn-state-{}", std::process::id()));
+        let state = StateDir::unchecked(&dir).unwrap();
+        assert_eq!(state.read("state.json"), Ok(None));
+        state.write("state.json", b"{\"owner\":\"a\"}").unwrap();
+        state.write("state.json", b"{}").unwrap();
+        assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../state.json",
+            "a/b",
+            "a\\b",
+            ".state.json.new",
+        ] {
+            assert!(state.read(bad).is_err(), "{bad:?}");
+            assert!(state.write(bad, b"").is_err(), "{bad:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // Until an OS is implemented it must say so, not pretend to succeed, and

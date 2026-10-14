@@ -175,7 +175,7 @@ pub(super) fn is_the_service(mode: Mode, me: &str, owner: &str) -> bool {
 }
 
 /// A SID as canonical text: `S-1-…`, upper case.
-fn sid_text(sid: PSID) -> Result<String> {
+pub(super) fn sid_text(sid: PSID) -> Result<String> {
     let mut text = null_mut();
     // SAFETY: the caller passes a valid SID; the out pointer is valid.
     if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
