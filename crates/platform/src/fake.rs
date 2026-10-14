@@ -103,6 +103,8 @@ struct State {
     on_link: Vec<Ipv4Net>,
     subscribers: Vec<Sender<NetworkEvent>>,
     listeners: HashMap<String, Endpoint>,
+    /// Checks that answer `Unobservable` where they would answer `Yes`.
+    unobservable: HashSet<Op>,
 }
 
 impl Default for State {
@@ -121,6 +123,17 @@ impl Default for State {
             on_link: home.into_iter().collect(),
             subscribers: Vec::new(),
             listeners: HashMap::new(),
+            unobservable: HashSet::new(),
+        }
+    }
+}
+
+impl State {
+    /// What check `op` answers when what it asks about is in effect.
+    fn confirmed(&self, op: Op) -> Verified {
+        match self.unobservable.contains(&op) {
+            true => Verified::Unobservable,
+            false => Verified::Yes,
         }
     }
 }
@@ -220,6 +233,19 @@ impl Fake {
         match error {
             Some(error) => state.failures.insert(op, error),
             None => state.failures.remove(&op),
+        };
+    }
+
+    /// Makes every later check `op` ([`Op::VerifyRoute`] or
+    /// [`Op::VerifyDns`]) answer [`Verified::Unobservable`] where it would
+    /// answer `Yes`, as Windows does for split DNS; `false` ends that. A
+    /// `No` stays `No`. A real route check never answers it; the fake can,
+    /// so that tests show the service refuses it.
+    pub fn cannot_observe(&self, op: Op, unobservable: bool) {
+        let mut state = self.state();
+        match unobservable {
+            true => state.unobservable.insert(op),
+            false => state.unobservable.remove(&op),
         };
     }
 
@@ -507,7 +533,7 @@ impl Routes for Fake {
             (None, None) => PHYSICAL_INTERFACE,
         };
         match used == interface {
-            true => Verified::Yes,
+            true => state.confirmed(Op::VerifyRoute),
             false => Verified::No,
         }
     }
@@ -544,11 +570,14 @@ impl Dns for Fake {
     }
 
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
-        let verdict = self.run(Op::VerifyDns, |applied| match &applied.split_dns {
-            Some((_, set)) if set == dns => Verified::Yes,
+        let (state, outcome) = self.start(Op::VerifyDns);
+        if outcome.is_err() {
+            return Verified::Unknown;
+        }
+        match &state.applied.split_dns {
+            Some((_, set)) if set == dns => state.confirmed(Op::VerifyDns),
             _ => Verified::No,
-        });
-        verdict.unwrap_or(Verified::Unknown)
+        }
     }
 }
 
@@ -988,6 +1017,37 @@ mod tests {
         assert_eq!(route, Verified::Unknown);
         assert_eq!(fake.split_dns_matches(&dns), Verified::Unknown);
         assert_ne!(Verified::Unknown, Verified::No);
+    }
+
+    // A check that cannot be observed answers so only where it would have
+    // answered "yes". A setting that differs is still "no", and a check
+    // that could not ask is still "could not tell".
+    #[test]
+    fn cannot_observe_replaces_only_a_yes() {
+        let fake = Fake::new();
+        let dns = SplitDns {
+            resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
+            domains: vec!["ece.example".to_string()],
+        };
+        let other = SplitDns {
+            domains: vec!["other.example".to_string()],
+            ..dns.clone()
+        };
+        fake.set_split_dns(TUNNEL, &dns).unwrap();
+        fake.cannot_observe(Op::VerifyDns, true);
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Unobservable);
+        assert_eq!(fake.split_dns_matches(&other), Verified::No);
+        // Only the check it was asked for.
+        let route = fake.uses_interface(GATEWAY, PHYSICAL_INTERFACE);
+        assert_eq!(route, Verified::Yes);
+        fake.set_failure(Op::VerifyDns, failed());
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Unknown);
+        fake.set_failure(Op::VerifyDns, None);
+        fake.cannot_observe(Op::VerifyDns, false);
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Yes);
+        fake.cannot_observe(Op::VerifyRoute, true);
+        let route = fake.uses_interface(GATEWAY, PHYSICAL_INTERFACE);
+        assert_eq!(route, Verified::Unobservable);
     }
 
     #[test]

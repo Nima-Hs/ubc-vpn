@@ -1,5 +1,7 @@
 //! Checking that what was applied is really in effect. Any answer but "yes"
-//! is a failure: "could not tell" is never "probably fine".
+//! is a failure: "could not tell" is never "probably fine". The one
+//! exception is split DNS that reads back exactly but whose use the OS
+//! cannot show ([`Verified::Unobservable`]), which is accepted and logged.
 
 use std::net::Ipv4Addr;
 
@@ -25,13 +27,28 @@ fn probe(subnet: &Ipv4Net, gateway: Ipv4Addr) -> Option<Ipv4Addr> {
     candidates.into_iter().find(usable)
 }
 
+/// What the log says when split DNS was set but the OS cannot show whether
+/// its resolver took it in.
+pub const DNS_UNCONFIRMED: &str = "split DNS is set and reads back exactly, but this system \
+    cannot show whether its resolver uses it";
+
+/// How far the checks could confirm the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Confirmed {
+    /// Every check answered `Yes`.
+    Fully,
+    /// Every check answered `Yes` but split DNS, which answered
+    /// [`Verified::Unobservable`].
+    DnsUnobservable,
+}
+
 /// Asks the OS about every chosen subnet, the gateway, each resolver and the
 /// split DNS. The error says which check did not pass.
 pub(crate) fn verify(
     routes: &dyn Routes,
     dns: &dyn Dns,
     expected: &Expected,
-) -> Result<(), String> {
+) -> Result<Confirmed, String> {
     let through = |addr, interface| routes.uses_interface(addr, interface) == Verified::Yes;
     for subnet in expected.subnets {
         let inside = probe(subnet, expected.gateway);
@@ -43,7 +60,7 @@ pub(crate) fn verify(
         return Err("The gateway is not reached through the physical network.".to_string());
     }
     let Some(split) = expected.dns else {
-        return Ok(());
+        return Ok(Confirmed::Fully);
     };
     if split.resolvers.is_empty() {
         return Err("The gateway offered no DNS server for the chosen domains.".to_string());
@@ -55,8 +72,11 @@ pub(crate) fn verify(
             ));
         }
     }
+    // The one exception to "yes or nothing": the rules read back exactly,
+    // and the OS cannot show more. Routes never get it.
     match dns.split_dns_matches(split) {
-        Verified::Yes => Ok(()),
+        Verified::Yes => Ok(Confirmed::Fully),
+        Verified::Unobservable => Ok(Confirmed::DnsUnobservable),
         Verified::No | Verified::Unknown => Err("Split DNS is not in effect.".to_string()),
     }
 }
@@ -73,7 +93,7 @@ mod tests {
 
     /// Applies a correct setup except for what `skip` names, lets `spoil`
     /// change it further, and verifies.
-    fn check(skip: &str, spoil: impl FnOnce(&Fake)) -> Result<(), String> {
+    fn check(skip: &str, spoil: impl FnOnce(&Fake)) -> Result<Confirmed, String> {
         let fake = Fake::new();
         let subnets = ["192.0.2.0/24", "10.255.0.0/24"].map(|s| s.parse::<Ipv4Net>().unwrap());
         let mut split = SplitDns {
@@ -104,12 +124,15 @@ mod tests {
         verify(&fake, &fake, &expected)
     }
 
-    // Security rule: each check stands alone. Removing any one of them, or
-    // letting "could not tell" pass, makes this test fail.
+    // Security rule: each check stands alone, and every check must answer
+    // "yes", except that split DNS may answer "cannot be observed". Removing
+    // any one check, letting "could not tell" pass, or letting "cannot be
+    // observed" pass for a route makes this test fail.
     #[test]
-    fn every_check_must_answer_yes() {
+    fn every_check_must_answer_yes_but_dns_may_be_unobservable() {
         let unknown = |op| move |fake: &Fake| fake.set_failure(op, Some(Error::Unsupported));
-        assert_eq!(check("nothing", |_| {}), Ok(()));
+        let unobservable = |op| move |fake: &Fake| fake.cannot_observe(op, true);
+        assert_eq!(check("nothing", |_| {}), Ok(Confirmed::Fully));
         let failures = [
             check("one subnet", |_| {}),
             check("gateway route", |_| {}),
@@ -118,6 +141,9 @@ mod tests {
             check("dns", |_| {}),
             check("nothing", unknown(Op::VerifyRoute)),
             check("nothing", unknown(Op::VerifyDns)),
+            check("nothing", unobservable(Op::VerifyRoute)),
+            // What could not be observed must still read back as set.
+            check("dns", unobservable(Op::VerifyDns)),
         ];
         let reasons = failures.map(|failure| failure.unwrap_err());
         assert!(
@@ -133,6 +159,11 @@ mod tests {
         assert!(reasons[4].contains("Split DNS"), "{reasons:?}");
         assert!(reasons[5].contains("is not routed"), "{reasons:?}");
         assert!(reasons[6].contains("Split DNS"), "{reasons:?}");
+        assert!(reasons[7].contains("is not routed"), "{reasons:?}");
+        assert!(reasons[8].contains("Split DNS"), "{reasons:?}");
+        // The one exception, said as such so that the caller can log it.
+        let dns = check("nothing", unobservable(Op::VerifyDns));
+        assert_eq!(dns, Ok(Confirmed::DnsUnobservable));
     }
 
     // The gateway may sit inside a chosen subnet, where its own route leads
