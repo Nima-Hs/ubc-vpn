@@ -408,12 +408,19 @@ describe("the files behind the commands", () => {
 
 describe("a client that does not behave", () => {
     it("is given a time limit, and is ended when it runs out", async () => {
-        const { runner, pids } = client({ get: { hang: true } }, { timeoutMs: 300 });
+        const { runner } = client({ get: { hang: true } }, { timeoutMs: 300 });
+        const spawned = vi.mocked(spawn);
+        spawned.mockClear();
         const started = Date.now();
         await expect(runner.getSettings()).resolves.toEqual({ ok: false, error: "unavailable" });
         expect(Date.now() - started).toBeGreaterThanOrEqual(290);
-        const [pid = 0] = pids();
-        await until(() => !alive(pid), "the client ending");
+        // The process the app started, as it started it. Not the number the
+        // mock writes down once it is running: on a busy machine the limit
+        // can end it before it gets that far, and an empty list read as
+        // process 0 is always "alive", which kept this test waiting.
+        const pid = (spawned.mock.results.at(-1)?.value as { pid?: number } | undefined)?.pid;
+        expect(pid).toBeGreaterThan(0);
+        await until(() => !alive(pid as number), "the client ending");
     });
 
     it("is given up on when the limit passes, even if it ignores being ended", async () => {

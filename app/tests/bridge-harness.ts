@@ -86,6 +86,9 @@ export async function until(
 
 /** Whether a process is still running. */
 export function alive(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) {
+        throw new Error(`${pid} is not one process`);
+    }
     try {
         process.kill(pid, 0);
         return true;
