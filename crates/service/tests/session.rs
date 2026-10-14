@@ -703,3 +703,17 @@ fn a_panic_in_the_teardown_at_shutdown_does_not_stop_the_cleanup() {
         assert_eq!(modes, [CloseMode::LogOff], "{step:?}");
     }
 }
+
+// A client that has heard how a disconnect ended may ask again at once, and
+// is not told the service is busy: the service is ready for it before it
+// says so. Many times over, since the wrong order shows only now and then.
+#[test]
+fn whoever_hears_the_end_may_ask_again_at_once() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    for round in 0..300 {
+        assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED, "{round}");
+        assert_eq!(alice.state(), ConnState::Disconnecting);
+        assert_eq!(alice.state(), ConnState::Disconnected);
+    }
+}
