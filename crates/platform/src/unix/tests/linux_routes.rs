@@ -105,6 +105,16 @@ fn the_linux_routes_pass_the_suite() {
     let routes = LinuxRoutes;
     routes.remove_all().expect("start clean");
     suite::check_configure_tunnel(&routes, &IpTool, &device.name);
+    // Up, with the size asked for, and with no IPv6 address the kernel made
+    // when it came up.
+    routes
+        .configure_tunnel(&device.name, Ipv4Addr::new(198, 51, 100, 7), 1400)
+        .expect("configure");
+    let link = ip(&["-o", "link", "show", "dev", &device.name]);
+    assert!(link.contains(" mtu 1400 "), "{link}");
+    assert!(link.contains(",UP"), "{link}");
+    let ipv6 = ip(&["-6", "-o", "addr", "show", "dev", &device.name]);
+    assert_eq!(ipv6.trim(), "", "an IPv6 address");
     suite::check_routes(&routes, &device.name);
     let restarted = || Box::new(LinuxRoutes) as Box<dyn Routes>;
     suite::check_route_ownership(&routes, &restarted, &IpTool, &device.name);
