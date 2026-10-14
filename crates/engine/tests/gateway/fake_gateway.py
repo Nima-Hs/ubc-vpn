@@ -24,8 +24,17 @@ Scenarios, by what the gateway does after showing the login form:
             on the same port (443)
   otherport answers the first request with a redirect to the same host name
             on another port (8443)
+  csdstub   offers a host-scan program whose stub is on the gateway's own
+            host, so that a client fetches it before refusing to run it.
+            Unpatched libopenconnect 9.21 crashes on it on macOS and Linux,
+            when the login address has no path; no test uses it yet
+  sso       shows a single sign-on form for an external browser, whose
+            login page is on the other listener
 
-The last two redirect to places a client must not go, each wrong in one way
+Never run a client against "sso" that may have the external-browser login:
+such a client starts a browser on the machine it runs on.
+
+The two redirect scenarios redirect to places a client must not go, each wrong in one way
 only. In a test the client's resolver decides where those names lead.
 
 It stops when its standard input closes, which is when the test that started
@@ -44,8 +53,27 @@ import time
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
-    "codeagain", "otherhost", "otherport",
+    "codeagain", "otherhost", "otherport", "sso", "csdstub",
 )
+
+
+def sso_form(elsewhere):
+    """A form that asks the client to log in by single sign-on in an
+    external browser, the way the library reads one."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<config-auth client="vpn" type="auth-request">'
+        '<version who="sg">0.1(1)</version>'
+        '<auth id="main"><message>Log in with your browser.</message>'
+        "<sso-v2-login>%s/sso</sso-v2-login>"
+        "<sso-v2-login-final>%s/sso/done</sso-v2-login-final>"
+        "<sso-v2-token-cookie-name>acSamlv2Token</sso-v2-token-cookie-name>"
+        "<sso-v2-error-cookie-name>acSamlv2Error</sso-v2-error-cookie-name>"
+        "<sso-v2-browser-mode>external</sso-v2-browser-mode>"
+        '<form method="post" action="/auth">'
+        '<input type="sso" name="sso-token" label="" /></form></auth>'
+        "</config-auth>" % (elsewhere, elsewhere)
+    ).encode()
 
 
 def form(action, fields, message="Please log in.", error=None, extra=""):
@@ -161,6 +189,19 @@ class Gateway(http.server.BaseHTTPRequestHandler):
                 self.reply(SUCCESS, COOKIE)
         elif scenario == "redirect":
             self.reply(b"", status=302, location=elsewhere + "/")
+        elif scenario == "csdstub" and self.path == "/":
+            # The stub to run is on the gateway's own host. Each platform's
+            # client reads its own tag; all three are here.
+            own = "https://vpn.example.test"
+            tags = "".join(
+                '<%s stuburl="%s/CACHE/stub" starturl="%s/CACHE/start" '
+                'waiturl="/+CSCOE+/sdesktop/wait.html" />' % (tag, own, own)
+                for tag in ("csd", "csdLinux", "csdMac")
+            )
+            body = form("/auth", LOGIN, extra=host_scan(own))
+            self.reply(body.replace(b'<auth id="main">', b'<auth id="main">' + tags.encode()))
+        elif scenario == "sso":
+            self.reply(sso_form(elsewhere))
         elif scenario == "otherhost" and self.path == "/":
             # Wherever the client's resolver sends this name, a correct
             # client does not ask it.

@@ -18,7 +18,7 @@ use gateway::Gateway as StandIn;
 use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::policy::{Pin, Policy};
 use ubc_vpn_core::redact::{REDACTED, Secret};
-use ubc_vpn_engine::ffi::{Callbacks, Handle, Library};
+use ubc_vpn_engine::ffi::{Callbacks, FieldKind, FormAnswer, Handle, Library};
 use ubc_vpn_engine::{
     Cancel, Gateway, LogLevel, LogSink, LoginEngine, LoginError, OpenConnect, Prompt, Prompts,
     Role, Session, prepare_environment,
@@ -41,6 +41,11 @@ fn engine() -> (&'static OpenConnect, Library, MutexGuard<'static, ()>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let engine = LOADED.get_or_init(|| {
         let prepared = prepare_environment(Role::Client, None).expect("the environment is clean");
+        // Only in the control child of the key-log test.
+        #[cfg(windows)]
+        if let Some(file) = std::env::var_os(PUT_BACK) {
+            put_key_log_back(&file);
+        }
         let libs = Path::new(env!("UBC_VPN_NATIVE_LIBS"));
         OpenConnect::load(libs, &prepared).expect("the pinned library loads")
     });
@@ -281,6 +286,113 @@ fn a_form_with_a_choice_of_group_fails_unasked() {
     }
 }
 
+// Security rule: a login never offers the gateway a single sign-on or an
+// external-browser login. The library offers both in every request unless
+// the patch has set `no_external_auth`; the stand-in gateway records what
+// each request carried.
+#[test]
+fn a_login_offers_no_single_sign_on() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    assert!(attempt(engine, &gateway(&stand_in, &pin)).result.is_ok());
+    let requests = stand_in.requests();
+    // The first request is the one that says what this client can do.
+    assert!(requests[0].contains("capabilities"), "{requests:?}");
+    assert_eq!(sent(&stand_in, "single-sign-on"), 0, "{requests:?}");
+    println!("RAN: engine offers no single sign-on");
+}
+
+// Security rule: no single sign-on and no external browser. A gateway that
+// asks for a login in an external browser gets nothing: the login fails at
+// once, and the library never listens on its port for the browser (29786)
+// and so never waits for one. Our libraries are built without that login,
+// and the engine never sets a single sign-on handler.
+//
+// Only ever run this against such a library: one with the external-browser
+// login would start a browser on this machine. So the test first refuses,
+// loudly, to run against a library file that has that login in it.
+//
+// It also shows the single sign-on form is what ended the login, not some
+// other step: a handle of its own sees exactly the form the gateway sent.
+#[test]
+fn a_single_sign_on_form_fails_at_once_and_nothing_listens() {
+    let library_file = Path::new(env!("UBC_VPN_NATIVE_LIBS")).join(ubc_vpn_engine::ffi::FILE);
+    let bytes = std::fs::read(&library_file).expect("the library file can be read");
+    let marker = b"single-sign-on-external-browser";
+    assert!(
+        !bytes.windows(marker.len()).any(|window| window == marker),
+        "{} has the external-browser login; this test would start a browser. \
+         Use a library built from main after #119.",
+        library_file.display()
+    );
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("sso") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    // The marker: what a handle's form callback is shown, and what the
+    // library then makes of the form.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let shown = Arc::clone(&seen);
+    let port = stand_in.port;
+    let mut callbacks = Callbacks::refusing(Box::new(|_, _, _| {}));
+    callbacks.certificate = Box::new(|_| true);
+    callbacks.resolve = Box::new(move |_, _| Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)));
+    callbacks.form = Box::new(move |form| {
+        let fields: Vec<(FieldKind, String)> = form
+            .fields()
+            .into_iter()
+            .map(|field| (field.kind, field.name))
+            .collect();
+        shown.lock().unwrap().push((form.message(), fields));
+        FormAnswer::Fail
+    });
+    let handle = Handle::new(library, callbacks).expect("the library makes a handle");
+    assert_eq!(handle.parse_url(c"https://vpn.example.test"), 0);
+    assert_ne!(handle.obtain_cookie(), 0);
+    drop(handle);
+    let only_sso = vec![(
+        Some("Log in with your browser.".to_string()),
+        vec![(FieldKind::Other, "sso-token".to_string())],
+    )];
+    assert_eq!(*seen.lock().unwrap(), only_sso);
+    let gateway = gateway(&stand_in, &pin);
+    let done = std::sync::mpsc::channel();
+    // On a thread of its own, so that a library waiting for a browser fails
+    // this test and does not hold it.
+    std::thread::spawn(move || {
+        let attempt = attempt(engine, &gateway);
+        let _ = done.0.send((attempt.result, attempt.prompts.len()));
+    });
+    let browser_ports = [
+        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 29786)),
+        std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 29786)),
+    ];
+    let mut listened = false;
+    let started = std::time::Instant::now();
+    let ended = loop {
+        for port in &browser_ports {
+            listened |=
+                std::net::TcpStream::connect_timeout(port, Duration::from_millis(100)).is_ok();
+        }
+        if let Ok(ended) = done.1.try_recv() {
+            break Some(ended);
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!listened, "something listened on port 29786 for a browser");
+    assert_eq!(ended, Some((Err(LoginError::Failed), 0)));
+    // Nothing went to the login page the gateway named.
+    assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
+    println!("RAN: engine refuses single sign-on");
+}
+
 // Security rule: one handle for one attempt. A handle asked for a cookie a
 // second time reports success without connecting to anything, so a login
 // that reused one would succeed here, where the user gives up.
@@ -436,8 +548,12 @@ fn a_login_asks_for_at_most_three_codes() {
 }
 
 // Security rule: the engine sets no host-scan wrapper, so a gateway's offer
-// of a program to download and run ends the login. Nothing is fetched from
-// where the offer points, nothing is run, and the user is asked nothing.
+// of a program to download and run ends the login: nothing is run, and the
+// user is asked nothing. The library does fetch the program's stub first,
+// if the offer names one, and refuses to run it only afterwards. So a stub
+// elsewhere is a fetch the resolver must refuse; this offer points at the
+// other listener, which gets nothing. A stub on the gateway's own host would
+// be fetched from the pinned gateway and then not run.
 #[test]
 fn an_offer_of_a_host_scan_program_ends_the_login() {
     let (engine, library, _guard) = engine();
@@ -515,10 +631,33 @@ fn child() {
     println!("CHILD LOGIN: {}", attempt.result.is_ok());
 }
 
+/// Set, with a file name, for the control child of the key-log test. That
+/// child puts `SSLKEYLOGFILE` back where the libraries read it, after the
+/// environment step and before loading, as a careless program could.
+#[cfg(windows)]
+const PUT_BACK: &str = "UBC_VPN_TEST_PUT_BACK_KEY_LOG";
+
+/// Sets `SSLKEYLOGFILE` in this program's C runtime, the copy of the
+/// environment the libraries read. For the control child only.
+#[cfg(windows)]
+fn put_key_log_back(file: &std::ffi::OsStr) {
+    unsafe extern "C" {
+        fn _putenv_s(name: *const std::ffi::c_char, value: *const std::ffi::c_char) -> i32;
+    }
+    let file = std::ffi::CString::new(file.to_str().expect("a plain path")).unwrap();
+    // SAFETY: both are NUL-terminated strings that outlive the call, which
+    // copies them. The child runs this one test, before any library code.
+    let set = unsafe { _putenv_s(c"SSLKEYLOGFILE".as_ptr(), file.as_ptr()) };
+    assert_eq!(set, 0);
+}
+
 // Security rule: on Windows the start-up step removes `SSLKEYLOGFILE` where
 // the libraries read it, so a TLS key log is never written, whatever the
-// program was started with. Watched here on a real login: with the variable
-// left in place, GnuTLS writes the session's keys to the file it names.
+// program was started with. Watched here on a real login.
+//
+// The control puts the variable back after the step and before loading, and
+// then the key log must appear. Without it, this test would also pass if a
+// future GnuTLS stopped reading the variable, and would then show nothing.
 #[cfg(windows)]
 #[test]
 fn a_key_log_named_in_the_environment_is_never_written() {
@@ -526,19 +665,30 @@ fn a_key_log_named_in_the_environment_is_never_written() {
     if StandIn::start("accept").is_none() {
         return;
     }
-    let file = std::env::temp_dir().join(format!("ubc-vpn-test-keys-{}", std::process::id()));
-    let _ = std::fs::remove_file(&file);
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["child", "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD, "1")
-        .env("SSLKEYLOGFILE", &file)
-        .output()
-        .expect("the child starts");
-    let written = file.exists();
-    let _ = std::fs::remove_file(&file);
-    let said = String::from_utf8_lossy(&output.stdout);
-    assert!(said.contains("CHILD LOGIN: true"), "{said}");
-    assert!(!written, "a TLS key log was written");
+    let run = |put_back: bool| {
+        let name = format!("ubc-vpn-test-keys-{}-{put_back}", std::process::id());
+        let file = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&file);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["child", "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("SSLKEYLOGFILE", &file);
+        if put_back {
+            child.env(PUT_BACK, &file);
+        }
+        let output = child.output().expect("the child starts");
+        let written = file.exists();
+        let _ = std::fs::remove_file(&file);
+        let said = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(said.contains("CHILD LOGIN: true"), "{said}");
+        written
+    };
+    assert!(
+        run(true),
+        "the control wrote no key log: the test cannot see one"
+    );
+    assert!(!run(false), "a TLS key log was written");
     println!("RAN: engine writes no key log");
 }
 
