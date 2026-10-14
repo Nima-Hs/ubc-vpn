@@ -134,6 +134,10 @@ if ! grep -qF 'vpninfo->no_external_auth = 1;' library.c; then
     echo "error: library.c does not turn off the single sign-on offer" >&2
     exit 1
 fi
+if ! grep -qF 'vpninfo->urlpath ? strdup(vpninfo->urlpath) : NULL' auth.c; then
+    echo "error: auth.c still copies a null path for a host-scan tag" >&2
+    exit 1
+fi
 make -j"$(nproc)" libopenconnect.la
 make install-libLTLIBRARIES install-includeHEADERS install-pkgconfigDATA
 
