@@ -796,6 +796,21 @@ impl StateDir {
         &self.path
     }
 
+    /// A folder for temporary files, inside this one, made and checked by
+    /// the same rules. The service points the VPN library's temporary files
+    /// here: a system-wide temporary folder such as `C:\Windows\Temp` lets
+    /// ordinary users create files in it.
+    pub fn temp_dir(&self) -> Result<PathBuf> {
+        let path = self.path.join("temp");
+        #[cfg(windows)]
+        if self.checked {
+            os::state::prepare(self.mode, &path)?;
+            return Ok(path);
+        }
+        state_plain::prepare(&path)?;
+        Ok(path)
+    }
+
     /// The file's whole contents, or `None` when there is no such file.
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let file = self.file(name)?;
@@ -815,7 +830,9 @@ impl StateDir {
         let fresh = self.path.join(format!(".{name}.new"));
         #[cfg(windows)]
         if self.checked {
-            os::state::check_folder(self.mode, &self.path)?;
+            // Held open until the file is in place.
+            let _held = os::state::check_folder(self.mode, &self.path)?;
+            return state_plain::write(&file, &fresh, bytes);
         }
         state_plain::write(&file, &fresh, bytes)
     }

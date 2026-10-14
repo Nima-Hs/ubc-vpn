@@ -19,7 +19,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     GetFileInformationByHandle, OPEN_EXISTING, READ_CONTROL,
 };
 
@@ -177,7 +177,7 @@ fn check_handle(handle: &Handle, what: &Path, trusted: &[String]) -> Result<()> 
 }
 
 /// Opens `path`, a folder or a file, without following a link.
-fn open(path: &Path, access: u32) -> Result<Option<Handle>> {
+fn open(path: &Path, access: u32, share: u32) -> Result<Option<Handle>> {
     let name = wide(&path.to_string_lossy());
     let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
     // SAFETY: `name` is NUL-terminated and outlives the call; the optional
@@ -186,7 +186,7 @@ fn open(path: &Path, access: u32) -> Result<Option<Handle>> {
         CreateFileW(
             name.as_ptr(),
             access,
-            FILE_SHARE_READ,
+            share,
             null_mut(),
             OPEN_EXISTING,
             flags,
@@ -202,11 +202,20 @@ fn open(path: &Path, access: u32) -> Result<Option<Handle>> {
     Ok(Some(Handle(handle)))
 }
 
+/// The folder, held open while it is used. It is opened without letting
+/// anyone delete or rename it, so a folder above it cannot be renamed and
+/// swapped for another between the check and the use.
+pub(crate) struct Held {
+    _folder: Handle,
+}
+
 /// Refuses the folder unless the trusted users alone own it and may change
-/// it.
-pub(crate) fn check_folder(mode: Mode, dir: &Path) -> Result<()> {
-    let folder = open(dir, READ_CONTROL)?.ok_or(Error::NotFound)?;
-    check_handle(&folder, dir, &trusted(mode)?)
+/// it, and holds it open for as long as the result is kept.
+pub(crate) fn check_folder(mode: Mode, dir: &Path) -> Result<Held> {
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    let folder = open(dir, READ_CONTROL, share)?.ok_or(Error::NotFound)?;
+    check_handle(&folder, dir, &trusted(mode)?)?;
+    Ok(Held { _folder: folder })
 }
 
 /// Creates the folder with its own access list when it is missing, then
@@ -230,14 +239,14 @@ pub(crate) fn prepare(mode: Mode, dir: &Path) -> Result<()> {
             return Err(os_error(code));
         }
     }
-    check_folder(mode, dir)
+    check_folder(mode, dir).map(drop)
 }
 
 /// The file's contents, after checking the folder and the file itself.
 pub(crate) fn read(mode: Mode, dir: &Path, file: &Path) -> Result<Option<Vec<u8>>> {
-    check_folder(mode, dir)?;
+    let _held = check_folder(mode, dir)?;
     const FILE_GENERIC_READ: u32 = 0x0012_0089;
-    let Some(handle) = open(file, FILE_GENERIC_READ)? else {
+    let Some(handle) = open(file, FILE_GENERIC_READ, FILE_SHARE_READ)? else {
         return Ok(None);
     };
     check_handle(&handle, file, &trusted(mode)?)?;
@@ -314,10 +323,32 @@ mod tests {
             "O:BAD:(A;;SD;;;WD)",
             // No access list at all: anyone may do anything.
             "O:BAD:NO_ACCESS_CONTROL",
+            // Entry kinds the check does not read: one for an object type,
+            // and one with a condition.
+            "O:BAD:(A;;FA;;;SY)(OA;;FA;;;BU)",
+            "O:BAD:(A;;FA;;;SY)(XA;;FA;;;BU;(Member_of {SID(BA)}))",
         ];
         for sddl in refused {
             assert!(verdict(sddl).is_some(), "{sddl}");
         }
+    }
+
+    // In dev mode the folder is the current user's: one owned by another
+    // user is refused, as is one an ordinary group may change.
+    #[cfg(feature = "dev-mode")]
+    #[test]
+    fn dev_mode_trusts_only_the_current_user() {
+        let trusted = trusted(Mode::Dev).unwrap();
+        let me = super::super::security::process_user().unwrap();
+        let fresh = new_folder_sddl(Mode::Dev).unwrap();
+        let (owner, dacl) = parsed(&fresh);
+        assert_eq!(judge(&owner, dacl.as_deref(), &trusted), None);
+        let other = format!("O:S-1-5-21-1-2-3-1001D:P(A;;FA;;;{me})");
+        let (owner, dacl) = parsed(&other);
+        assert!(judge(&owner, dacl.as_deref(), &trusted).is_some());
+        let shared = format!("O:{me}D:P(A;;FA;;;{me})(A;;0x2;;;BU)");
+        let (owner, dacl) = parsed(&shared);
+        assert!(judge(&owner, dacl.as_deref(), &trusted).is_some());
     }
 
     #[test]
