@@ -8,7 +8,7 @@ Builds `libopenconnect` v9.21 (GnuTLS backend) for x64 from the pinned upstream 
 | `check-probe.sh` | Runs the probe and requires the expected version and `RESULT: PASS` |
 | `load-test.sh` | Runs the probe in another distribution's container with only the declared packages installed |
 
-There is one patch, in `patches/openconnect/`: it stops the library closing file descriptor 0 when a handle is freed that never made a command pipe. The Windows and macOS builds apply the same one.
+There is one patch, in `patches/openconnect/`: it stops the library closing file descriptor 0 when a handle is freed that never made a command pipe, and stops every handle offering single sign-on to the gateway. The Windows and macOS builds apply the same one.
 
 ## Building
 

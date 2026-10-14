@@ -77,6 +77,8 @@ jobs:
       # a command pipe.
       - name: Check that freeing a handle leaves descriptor 0 open
         run: bash native/probe/free-without-pipe.sh stage
+      - name: Check that the library has no external-browser login
+        run: bash native/probe/no-external-browser.sh stage/lib/libopenconnect.so.5
 
       # The probe goes in stage/bin and finds the library in stage/lib through
       # its rpath, the same layout the installed app uses.

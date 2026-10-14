@@ -98,6 +98,8 @@ jobs:
       # a command pipe.
       - name: Check that freeing a handle leaves descriptor 0 open
         run: bash native/probe/free-without-pipe.sh "$APP"
+      - name: Check that the library has no external-browser login
+        run: bash native/probe/no-external-browser.sh "$APP/lib/libopenconnect.5.dylib"
       - name: Build the probe against it
         working-directory: native/probe
         env:

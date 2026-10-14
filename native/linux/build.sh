@@ -123,6 +123,17 @@ PKG_CONFIG_PATH="$work/deps/lib/pkgconfig" ./configure --prefix="$work/stage" \
     ac_cv_func_gnutls_pkcs11_add_provider=no \
     ac_cv_func_gnutls_hkdf_expand=no \
     CFLAGS=-O2 LDFLAGS=-Wl,-z,defs,-z,relro,-z,now
+# Without HPKE a gateway's single sign-on form fails at once, instead of the
+# library listening on a local port for a browser. The patch also stops it
+# offering single sign-on at all.
+if grep -qE '^#define (HAVE_HPKE_SUPPORT|DEFAULT_EXTERNAL_BROWSER)' config.h; then
+    echo "error: openconnect was configured with the external-browser login" >&2
+    exit 1
+fi
+if ! grep -qF 'vpninfo->no_external_auth = 1;' library.c; then
+    echo "error: library.c does not turn off the single sign-on offer" >&2
+    exit 1
+fi
 make -j"$(nproc)" libopenconnect.la
 make install-libLTLIBRARIES install-includeHEADERS install-pkgconfigDATA
 

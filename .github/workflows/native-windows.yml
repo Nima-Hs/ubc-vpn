@@ -67,6 +67,9 @@ jobs:
           CHERE_INVOKING: "yes"
         run: native/windows/tests/scan-strings.sh
 
+      - name: Check that the library has no external-browser login
+        run: bash native/probe/no-external-browser.sh native/windows/out/bin/libopenconnect-5.dll
+
       - name: Check that PKCS#11 support is absent
         shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
         env:
