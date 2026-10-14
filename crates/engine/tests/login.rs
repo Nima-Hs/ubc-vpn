@@ -18,7 +18,7 @@ use gateway::Gateway as StandIn;
 use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::policy::{Pin, Policy};
 use ubc_vpn_core::redact::{REDACTED, Secret};
-use ubc_vpn_engine::ffi::{Callbacks, Handle, Library};
+use ubc_vpn_engine::ffi::{Callbacks, FieldKind, FormAnswer, Handle, Library};
 use ubc_vpn_engine::{
     Cancel, Gateway, LogLevel, LogSink, LoginEngine, LoginError, OpenConnect, Prompt, Prompts,
     Role, Session, prepare_environment,
@@ -286,6 +286,25 @@ fn a_form_with_a_choice_of_group_fails_unasked() {
     }
 }
 
+// Security rule: a login never offers the gateway a single sign-on or an
+// external-browser login. The library offers both in every request unless
+// the patch has set `no_external_auth`; the stand-in gateway records what
+// each request carried.
+#[test]
+fn a_login_offers_no_single_sign_on() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    assert!(attempt(engine, &gateway(&stand_in, &pin)).result.is_ok());
+    let requests = stand_in.requests();
+    // The first request is the one that says what this client can do.
+    assert!(requests[0].contains("capabilities"), "{requests:?}");
+    assert_eq!(sent(&stand_in, "single-sign-on"), 0, "{requests:?}");
+    println!("RAN: engine offers no single sign-on");
+}
+
 // Security rule: no single sign-on and no external browser. A gateway that
 // asks for a login in an external browser gets nothing: the login fails at
 // once, and the library never listens on its port for the browser (29786)
@@ -293,14 +312,53 @@ fn a_form_with_a_choice_of_group_fails_unasked() {
 // and the engine never sets a single sign-on handler.
 //
 // Only ever run this against such a library: one with the external-browser
-// login would start a browser on this machine.
+// login would start a browser on this machine. So the test first refuses,
+// loudly, to run against a library file that has that login in it.
+//
+// It also shows the single sign-on form is what ended the login, not some
+// other step: a handle of its own sees exactly the form the gateway sent.
 #[test]
 fn a_single_sign_on_form_fails_at_once_and_nothing_listens() {
+    let library_file = Path::new(env!("UBC_VPN_NATIVE_LIBS")).join(ubc_vpn_engine::ffi::FILE);
+    let bytes = std::fs::read(&library_file).expect("the library file can be read");
+    let marker = b"single-sign-on-external-browser";
+    assert!(
+        !bytes.windows(marker.len()).any(|window| window == marker),
+        "{} has the external-browser login; this test would start a browser. \
+         Use a library built from main after #119.",
+        library_file.display()
+    );
     let (engine, library, _guard) = engine();
     let Some(stand_in) = StandIn::start("sso") else {
         return;
     };
     let pin = pin_of(library, &stand_in);
+    // The marker: what a handle's form callback is shown, and what the
+    // library then makes of the form.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let shown = Arc::clone(&seen);
+    let port = stand_in.port;
+    let mut callbacks = Callbacks::refusing(Box::new(|_, _, _| {}));
+    callbacks.certificate = Box::new(|_| true);
+    callbacks.resolve = Box::new(move |_, _| Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)));
+    callbacks.form = Box::new(move |form| {
+        let fields: Vec<(FieldKind, String)> = form
+            .fields()
+            .into_iter()
+            .map(|field| (field.kind, field.name))
+            .collect();
+        shown.lock().unwrap().push((form.message(), fields));
+        FormAnswer::Fail
+    });
+    let handle = Handle::new(library, callbacks).expect("the library makes a handle");
+    assert_eq!(handle.parse_url(c"https://vpn.example.test"), 0);
+    assert_ne!(handle.obtain_cookie(), 0);
+    drop(handle);
+    let only_sso = vec![(
+        Some("Log in with your browser.".to_string()),
+        vec![(FieldKind::Other, "sso-token".to_string())],
+    )];
+    assert_eq!(*seen.lock().unwrap(), only_sso);
     let gateway = gateway(&stand_in, &pin);
     let done = std::sync::mpsc::channel();
     // On a thread of its own, so that a library waiting for a browser fails
@@ -309,12 +367,17 @@ fn a_single_sign_on_form_fails_at_once_and_nothing_listens() {
         let attempt = attempt(engine, &gateway);
         let _ = done.0.send((attempt.result, attempt.prompts.len()));
     });
-    let browser_port = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 29786));
+    let browser_ports = [
+        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 29786)),
+        std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 29786)),
+    ];
     let mut listened = false;
     let started = std::time::Instant::now();
     let ended = loop {
-        listened |=
-            std::net::TcpStream::connect_timeout(&browser_port, Duration::from_millis(100)).is_ok();
+        for port in &browser_ports {
+            listened |=
+                std::net::TcpStream::connect_timeout(port, Duration::from_millis(100)).is_ok();
+        }
         if let Ok(ended) = done.1.try_recv() {
             break Some(ended);
         }
