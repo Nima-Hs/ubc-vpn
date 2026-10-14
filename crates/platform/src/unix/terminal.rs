@@ -470,11 +470,12 @@ pub(crate) mod tests {
     /// Names the terminal the child below is to ask its question in.
     const QUIET_CHILD: &str = "UBC_VPN_TERMINAL_UNREAD_CHILD";
 
-    // Security rule: putting the terminal back never waits for its output
-    // to be taken. Nobody reads this child's terminal, so the prompt it
-    // wrote is still waiting there when it is told to stop. The request
-    // must still reach it at once, with the terminal showing what is typed
-    // again.
+    // Security rule: neither changing the terminal's mode nor putting it
+    // back waits for its output to be taken. Nobody reads this child's
+    // terminal, so what it wrote before the question is still waiting there
+    // when the question starts, and the prompt too when the child is told to
+    // stop. The question must still be asked, and the request must still
+    // reach it at once, with the terminal showing what is typed again.
     //
     // Whether the child can then end is not asked: macOS keeps a process
     // in its last close of a terminal until the output is taken, whatever
@@ -545,6 +546,10 @@ pub(crate) mod tests {
         let terminal = open(name, flags, Mode::empty()).expect("open the terminal");
         ioctl_tiocsctty(&terminal).expect("make it this process's terminal");
         let stops = crate::interrupt::watch().expect("watch");
+        // Something already written and not taken, as the line of an
+        // earlier question would be: the question must not wait for it.
+        let mut written = File::from(terminal.try_clone().expect("another handle"));
+        written.write_all(b"Username: made-up\n").expect("write");
         thread::spawn(|| crate::terminal::read_hidden_line("Password: "));
         // The request comes after the terminal has been put back, if that
         // returned at all.
