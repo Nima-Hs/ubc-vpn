@@ -76,8 +76,13 @@ pub enum Error {
     PermissionDenied,
     /// The thing acted on does not exist, such as a channel nobody listens on.
     NotFound,
-    /// The name is taken, such as a channel another process already holds.
+    /// The name is taken, such as a channel another process already holds,
+    /// or the destination is: a route to it exists through another
+    /// interface or next hop.
     AlreadyExists,
+    /// An argument is outside the range the operation accepts, such as a
+    /// packet size. Nothing was changed.
+    InvalidInput,
     /// Something listens on the channel, but it is not the service. Nothing
     /// was sent to it. Trying again will not help until the real service
     /// holds the name.
@@ -110,6 +115,7 @@ impl fmt::Display for Error {
             Self::PermissionDenied => "permission denied",
             Self::NotFound => "not found",
             Self::AlreadyExists => "already exists",
+            Self::InvalidInput => "a value is out of range",
             Self::NotTheService => "the channel is held by a program that is not the service",
             Self::NotATerminal => "there is no terminal to ask in",
             Self::Interrupted => "the user pressed Ctrl-C at a question",
@@ -152,20 +158,29 @@ pub enum Verified {
 }
 
 /// The network the machine uses without the tunnel: an interface and the next
-/// hop on it.
+/// hop on it, with the machine's own addresses and the networks it is
+/// directly on.
 ///
 /// Only [`Routes::capture_physical`] produces one. There is deliberately no
 /// other way to build it and no way to store it: the caller captures it before
 /// the tunnel exists and passes the same value back for the life of the
 /// connection.
+///
+/// It is a snapshot. Nothing in it follows the machine afterwards: when the
+/// network changes, [`NetworkEvent::PhysicalChanged`] says so and the value
+/// is no longer valid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalNetwork {
     pub(crate) interface: String,
     pub(crate) next_hop: Option<Ipv4Addr>,
+    pub(crate) own_addresses: Vec<Ipv4Addr>,
+    pub(crate) on_link: Vec<Ipv4Net>,
 }
 
 impl PhysicalNetwork {
-    /// The interface's name.
+    /// The interface, as the token this OS knows it by: a name. It is only
+    /// good for passing back to this crate, which looks the interface up
+    /// again on every call.
     pub fn interface(&self) -> &str {
         &self.interface
     }
@@ -175,47 +190,144 @@ impl PhysicalNetwork {
     pub fn next_hop(&self) -> Option<Ipv4Addr> {
         self.next_hop
     }
+
+    /// Every IPv4 address the machine had at capture, on any interface.
+    /// No tunnel of ours existed then, so none of them is the tunnel's.
+    pub fn own_addresses(&self) -> &[Ipv4Addr] {
+        &self.own_addresses
+    }
+
+    /// The networks the machine was directly on at capture: for every
+    /// interface, the network of each of its addresses, which is the address
+    /// with its prefix and the host bits cleared. Interfaces that are not
+    /// hardware count, such as a bridge made by a container or virtual
+    /// machine program. The service refuses routes that would take one of
+    /// these into the tunnel; the rule is
+    /// [`check_against_local`](ubc_vpn_core::routes::check_against_local).
+    pub fn on_link(&self) -> &[Ipv4Net] {
+        &self.on_link
+    }
 }
 
-/// The routing table. IPv4 only; IPv6 is never touched.
+/// The routing table and the tunnel device's address. IPv4 only. IPv6 is
+/// left as it is: nothing here adds an IPv6 address or route, and nothing
+/// may let the OS add one on our behalf.
 ///
-/// An implementation must mark or record every route **when it adds it**, so
-/// that [`Routes::remove_all`] can find it later, even from a new process
-/// after a crash: a private route protocol value on Linux, a route flag on
-/// macOS, an admin-only journal in the state folder on Windows.
+/// # Which routes are ours
+///
+/// Every operation that removes a route removes only routes this product
+/// added.
+///
+/// Adding is exclusive: an `add_*` creates a route, and never replaces or
+/// changes one that is there. Two routes are identical when they have the
+/// same destination, the same interface and the same next hop. When an
+/// identical route is already there the add succeeds, but that route is not
+/// ours, and every later removal leaves it alone. When a route to the same
+/// destination is there through another interface or next hop, the add
+/// fails with [`Error::AlreadyExists`] and changes nothing: traffic would
+/// go where the caller did not ask.
+///
+/// So that [`Routes::remove_all`] can tell after a crash, from a new process,
+/// an implementation marks or records each route **when it adds it**:
+///
+/// - **Linux** gives its routes the route protocol number
+///   [`LINUX_ROUTE_PROTOCOL`], one the system's tables do not list, and
+///   removes exactly the routes that carry it. No journal is needed. The
+///   number never changes, so a later version finds an earlier one's routes.
+/// - **macOS** writes the exact route to a journal in the state folder, which
+///   only an administrator can write, and also sets a route flag. It removes
+///   a route only when it matches a journal row and carries the flag.
+/// - **Windows** has nothing to mark a route with. It writes the exact route
+///   to the same kind of journal and removes only exact matches.
+///
+/// A journal row is written **before** the route is added, so a crash between
+/// the two leaves a row without a route and never a route without a row. If
+/// the OS then reports that the route already existed, the row is withdrawn:
+/// that route was there first and must not become ours. The journal records
+/// the time the machine was started, and rows from another start are
+/// discarded without removing anything: routes do not outlive a restart, and
+/// an identical one found later is somebody else's.
+///
+/// One case is accepted: a crash between writing a row and adding the route,
+/// followed in the same boot by somebody else adding the identical route,
+/// lets [`Routes::remove_all`] remove that route. It needs the same
+/// destination, interface and next hop, within one boot, after a crash.
+///
+/// The `tunnel` and `interface` arguments are names, as an OS-defined token.
+/// An implementation resolves the name on every call and, where it is told
+/// the name is the tunnel, checks that the device it finds is one.
 pub trait Routes: Send + Sync {
-    /// Records how the OS reaches `gateway` right now. Call it once, before
+    /// Records how the OS reaches `gateway` right now, together with the
+    /// machine's own addresses and on-link networks. Call it once, before
     /// the tunnel device exists: called later it could describe the tunnel,
     /// so an implementation may refuse when it can tell.
     fn capture_physical(&self, gateway: Ipv4Addr) -> Result<PhysicalNetwork>;
 
+    /// Gives the tunnel device named `tunnel` its address and its largest
+    /// packet size, and brings it up. The VPN engine creates the device and
+    /// sets nothing on it.
+    ///
+    /// The address is set as a single host, never with the netmask the
+    /// gateway assigned: an OS routes a whole on-link network to the device
+    /// it is configured on, which would send a subnet the user did not
+    /// choose into the tunnel. Only [`Routes::add_tunnel_routes`] decides
+    /// what the tunnel carries.
+    ///
+    /// Where the OS would give a device an IPv6 address of its own accord
+    /// when it comes up, the implementation turns that off first.
+    ///
+    /// The device ends up with this one IPv4 address and no other: any other
+    /// IPv4 address it has, such as one left on a reused adapter, is
+    /// removed.
+    ///
+    /// The packet size must be in [`TUNNEL_MTU`], 576 to 1500; anything else
+    /// fails with [`Error::InvalidInput`] and changes nothing.
+    ///
+    /// Succeeds when the device already has this address and size. Fails
+    /// with [`Error::NotFound`] when there is no such device. There is no
+    /// operation to undo it: the address goes when the engine closes the
+    /// device.
+    fn configure_tunnel(&self, tunnel: &str, address: Ipv4Addr, mtu: u16) -> Result<()>;
+
     /// Routes the one address `gateway` through the physical network, so
-    /// traffic to the gateway never enters its own tunnel. Succeeds if the
-    /// route is already there.
+    /// traffic to the gateway never enters its own tunnel. An exclusive add,
+    /// as "Which routes are ours" says: it succeeds over an identical route
+    /// and fails with [`Error::AlreadyExists`] over a different one.
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()>;
 
-    /// Removes that route. Succeeds if it is not there, and when the physical
-    /// interface no longer exists.
+    /// Removes that route if this product added it. Succeeds if it is not
+    /// there, and when the physical interface no longer exists.
     fn remove_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()>;
 
     /// Routes `subnets` through the interface named `tunnel`. Never disturbs a
-    /// gateway route, even when a subnet contains the gateway. Succeeds for
-    /// routes already there. On error some may have been added: remove them.
+    /// gateway route, even when a subnet contains the gateway. Exclusive adds,
+    /// as "Which routes are ours" says. On error some may have been added:
+    /// remove them.
     fn add_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()>;
 
-    /// Removes those routes and nothing else; a gateway route stays. Succeeds
-    /// for any that are not there, and when the interface no longer exists.
+    /// Removes those of the routes that this product added, and nothing else;
+    /// a gateway route stays. Succeeds for any that are not there, and when
+    /// the interface no longer exists.
     fn remove_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()>;
 
-    /// Removes every route this product added, in this run or an earlier one.
-    /// Succeeds when there are none. The service calls it at start-up and as
-    /// the last step of every teardown.
+    /// Removes every route this product added, in this run or an earlier one,
+    /// and no other. Succeeds when there are none. The service calls it at
+    /// start-up and as the last step of every teardown.
     fn remove_all(&self) -> Result<()>;
 
     /// Asks the OS which interface it would really use to reach `dest`, and
     /// whether that is `interface`.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified;
 }
+
+/// The route protocol number Linux marks this product's routes with (see
+/// [`Routes`]). It is not in the system's list of protocol numbers, and it
+/// never changes.
+pub const LINUX_ROUTE_PROTOCOL: u8 = 0xb5;
+
+/// The packet sizes [`Routes::configure_tunnel`] accepts: from the smallest
+/// every IPv4 host must take to an Ethernet frame's payload.
+pub const TUNNEL_MTU: std::ops::RangeInclusive<u16> = 576..=1500;
 
 /// Resolvers that answer for some domains only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,21 +342,55 @@ pub struct SplitDns {
 }
 
 /// Split DNS. There is at most one tunnel, so at most one setting.
+///
+/// The setting lives in the OS's own resolver, as a rule the product can
+/// recognise as its own:
+///
+/// - **Linux**: systemd-resolved, on the tunnel's link: its DNS servers, the
+///   domains as routing-only domains, and the link's default-route, LLMNR and
+///   multicast DNS switched off.
+/// - **macOS**: a supplemental resolver entry for the domains, flagged so
+///   they are not added to the search list, set as a temporary value that the
+///   implementation holds for the life of the connection.
+/// - **Windows**: name-resolution policy rules for the domains, under keys
+///   with identifiers that are the product's own.
 pub trait Dns: Send + Sync {
-    /// Sends lookups for `dns.domains` to `dns.resolvers`, replacing whatever
-    /// this product set before. `tunnel` tells an OS that attaches DNS to an
-    /// interface where to attach it; Windows has no such notion and ignores
-    /// it.
+    /// Sends lookups for `dns.domains`, and the names under them, to
+    /// `dns.resolvers`, replacing whatever this product set before. `tunnel`
+    /// tells an OS that attaches DNS to an interface where to attach it;
+    /// Windows has no such notion and ignores it.
+    ///
+    /// It changes how no other name is resolved: not the search list, not
+    /// the resolvers other names use, and not a name that merely ends in the
+    /// same letters as a chosen domain.
+    ///
+    /// Fails with [`Error::Unsupported`], having changed nothing, when the OS
+    /// would not honour such a rule. On Linux that is when systemd-resolved
+    /// is absent or masked, or when programs are not asking it (its
+    /// `resolv.conf` mode is neither `stub` nor `static`). On Windows it is
+    /// when name-resolution rules from group policy exist, which replace
+    /// local ones. macOS always can.
     fn set_split_dns(&self, tunnel: &str, dns: &SplitDns) -> Result<()>;
 
     /// Removes any split DNS this product set, including what an earlier run
-    /// of the process left behind. Succeeds when nothing is set, so teardown
-    /// and crash recovery call it unconditionally.
+    /// of the process left behind, and nothing anyone else set. Succeeds
+    /// when nothing is set, so teardown calls it unconditionally.
+    ///
+    /// The service must call it at start-up on every OS, before anything
+    /// else: a rule can outlive the process that set it, and on Windows a
+    /// restart of the machine too. What it removes is: on Windows, the keys
+    /// with the product's identifiers; on macOS, the product's resolver
+    /// entry; on Linux, the settings it put on the tunnel's link.
     fn clear_split_dns(&self) -> Result<()>;
 
     /// Whether the split DNS this product set is in effect and is exactly
     /// `dns`: these domains, these resolvers, nothing more. The interface is
     /// not part of the question, so the answer means the same on every OS.
+    ///
+    /// The answer is read back from the OS's resolver, not remembered from
+    /// what was set. Where the OS can only show what was written and not
+    /// what its resolver took in, the answer is [`Verified::Unknown`], never
+    /// `Yes`.
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified;
 }
 
@@ -254,9 +400,11 @@ pub enum NetworkEvent {
     /// The physical network being watched changed or went away. The
     /// [`PhysicalNetwork`] is no longer valid.
     PhysicalChanged,
-    /// The system is about to sleep.
+    /// The system is about to sleep. Best effort: some machines and some
+    /// kinds of sleep give no warning, so nothing may depend on receiving
+    /// it.
     Sleeping,
-    /// The system woke up.
+    /// The system woke up. Best effort, like [`NetworkEvent::Sleeping`].
     Woke,
 }
 
@@ -903,6 +1051,8 @@ mod tests {
         let physical = PhysicalNetwork {
             interface: "eth0".to_string(),
             next_hop: None,
+            own_addresses: Vec::new(),
+            on_link: Vec::new(),
         };
         let subnets = ["192.0.2.0/24".parse().unwrap()];
         let dns = SplitDns {
@@ -912,6 +1062,7 @@ mod tests {
 
         assert_eq!(Native.capture_physical(gateway).err(), unsupported);
         let results = [
+            Native.configure_tunnel("tun0", gateway, 1300),
             Native.add_gateway_route(gateway, &physical),
             Native.remove_gateway_route(gateway, &physical),
             Native.add_tunnel_routes("tun0", &subnets),
@@ -920,7 +1071,7 @@ mod tests {
             Native.set_split_dns("tun0", &dns),
             Native.clear_split_dns(),
         ];
-        assert_eq!(results, [const { Err(Error::Unsupported) }; 7]);
+        assert_eq!(results, [const { Err(Error::Unsupported) }; 8]);
         assert_eq!(Native.uses_interface(gateway, "tun0"), Verified::Unknown);
         assert_eq!(Native.split_dns_matches(&dns), Verified::Unknown);
         assert_eq!(Native.subscribe(&physical).err(), unsupported);
@@ -938,6 +1089,8 @@ mod tests {
         let physical = PhysicalNetwork {
             interface: "eth0".to_string(),
             next_hop: None,
+            own_addresses: Vec::new(),
+            on_link: Vec::new(),
         };
         let dns = SplitDns {
             resolvers: vec![gateway],
@@ -951,6 +1104,8 @@ mod tests {
         for mode in modes {
             let native = Platform::native(mode).expect("a platform");
             assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
+            let configured = native.routes.configure_tunnel("tun0", gateway, 1300);
+            assert_eq!(configured.err(), unsupported);
             assert_eq!(native.routes.remove_all().err(), unsupported);
             let routed = native.routes.uses_interface(gateway, "tun0");
             assert_eq!(routed, Verified::Unknown);

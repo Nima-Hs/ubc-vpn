@@ -1024,6 +1024,8 @@ fn native_has_a_real_channel_and_nothing_else_yet() {
     let physical = PhysicalNetwork {
         interface: "eth0".to_string(),
         next_hop: None,
+        own_addresses: Vec::new(),
+        on_link: Vec::new(),
     };
     let dns = SplitDns {
         resolvers: vec![gateway],
@@ -1034,6 +1036,8 @@ fn native_has_a_real_channel_and_nothing_else_yet() {
     for mode in modes.into_iter().flatten() {
         let native = Platform::native(mode).expect("a platform");
         assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
+        let configured = native.routes.configure_tunnel("tun0", gateway, 1300);
+        assert_eq!(configured.err(), unsupported);
         assert_eq!(native.routes.remove_all().err(), unsupported);
         let routed = native.routes.uses_interface(gateway, "tun0");
         assert_eq!(routed, Verified::Unknown);
