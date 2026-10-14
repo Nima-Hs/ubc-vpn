@@ -852,13 +852,21 @@ fn a_dev_state_folder_is_made_and_checked_for_the_current_user() {
     tool("icacls", &grant);
     let me = process_user().unwrap();
     let made = folder_sddl(&dir);
-    assert!(made.starts_with(&format!("O:{me}D:P")), "{made}");
+    // Windows writes some users short, such as LA for the local Administrator
+    // the CI runner uses; spell the owner as Windows does.
+    let spelled = text_of(
+        Descriptor::parse(&format!("O:{me}D:P(A;;FA;;;SY)"))
+            .unwrap()
+            .as_ptr(),
+    );
+    let mine = spelled.split("D:").next().unwrap().to_string() + "D:P";
+    assert!(made.starts_with(&mine), "{made}");
     assert!(!made.contains(";ID;") && !made.contains("WD)"), "{made}");
     // Its temporary folder is made the same way, inside it.
     let temp = state.temp_dir().unwrap();
     assert_eq!(temp, dir.join("temp"));
     let temp_made = folder_sddl(&temp);
-    assert!(temp_made.starts_with(&format!("O:{me}D:P")), "{temp_made}");
+    assert!(temp_made.starts_with(&mine), "{temp_made}");
     state.write("state.json", b"{\"owner\":1}").unwrap();
     state.write("state.json", b"{}").unwrap();
     assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
