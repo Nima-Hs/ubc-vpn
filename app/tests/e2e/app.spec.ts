@@ -962,12 +962,19 @@ test("logs: the report is copied only after the user is told what it holds, and 
 });
 
 test("every state, photographed", async () => {
+    // Over fifty states, each set and photographed in turn.
+    test.setTimeout(240_000);
     const scenarios = (await page.evaluate(() => window.ubcVpn.demo?.listScenarios())) ?? [];
     expect(scenarios.length).toBeGreaterThan(20);
     for (const name of scenarios) {
         await scenario(name);
         // A routes state is seen on the Routes screen, opened afresh so it reads the state.
         await tab("Connection").click();
+        if (name.startsWith("account")) {
+            await tab("Settings").click();
+            await expect(heading()).toHaveText("Settings");
+            await expect(page.getByText("Reading your settings…")).toHaveCount(0);
+        }
         if (name.startsWith("logs")) {
             await tab("Logs").click();
             await expect(heading()).toHaveText("Logs");
