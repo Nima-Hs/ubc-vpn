@@ -86,6 +86,7 @@ What this still leaves:
 - **The trace's verdict.** A tampered Process Monitor could report a clean trace. It can no longer change what ships.
 - **GitHub.** We trust its runner images, that a job's outputs and result reach the next job unchanged, and its artifact store to the extent of the checksums above.
 - **The build machine.** It still runs the unpinned MSYS2 base and the runner's own tools while it makes the output and the record.
+- **The artifact's name.** A hostile trace job could upload an artifact of its own named `libopenconnect-windows-x64`. That is safe only because the approve job's upload of the same name then fails, so the run fails, and consumers take artifacts from successful runs only. So never set `overwrite: true` on the final upload, and anything that picks an artifact must keep asking for successful runs only (for example `gh run list --status success`).
 
 ## The output
 
