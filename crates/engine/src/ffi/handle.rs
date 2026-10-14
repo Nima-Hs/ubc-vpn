@@ -613,8 +613,9 @@ impl<'a> Handle<'a> {
     }
 
     /// What the gateway assigned, copied out of the handle at once: the
-    /// library may free it once the main loop runs. `None` before a
-    /// connection is made. All of it but `gateway_addr` is the gateway's say.
+    /// library may free it once the main loop runs. Before a connection it
+    /// is empty, and `None` only if the library has none to give. All of it
+    /// but `gateway_addr` is the gateway's say.
     pub fn ip_info(&self) -> Option<IpInfoCopy> {
         let mut info: *const IpInfo = std::ptr::null();
         let mut ignored: *const c_void = std::ptr::null();

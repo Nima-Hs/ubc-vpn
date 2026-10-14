@@ -37,6 +37,12 @@ such a client starts a browser on the machine it runs on.
 The two redirect scenarios redirect to places a client must not go, each wrong in one way
 only. In a test the client's resolver decides where those names lead.
 
+A tunnel: in every scenario, a CONNECT that carries the session cookie gets
+the addresses below (TUNNEL) and the connection is then held open, without
+passing any traffic, until the client closes it. A CONNECT without that
+cookie is refused with 401, as a gateway refuses a session that has ended.
+In the scenario "ended" every CONNECT is refused so.
+
 It stops when its standard input closes, which is when the test that started
 it ends, however that test ends. Started by hand with no input, it stops at
 once: give it a terminal, or a pipe that stays open.
@@ -53,7 +59,21 @@ import time
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
-    "codeagain", "otherhost", "otherport", "sso", "csdstub",
+    "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended",
+)
+# What a tunnel is given. Made-up, private addresses only.
+TUNNEL = (
+    ("X-CSTP-Version", "1"),
+    ("X-CSTP-Address", "10.11.12.13"),
+    ("X-CSTP-Netmask", "255.255.255.0"),
+    ("X-CSTP-DNS", "10.11.0.1"),
+    ("X-CSTP-DNS", "10.11.0.2"),
+    ("X-CSTP-MTU", "1300"),
+    ("X-CSTP-Split-Include", "10.0.0.0/255.0.0.0"),
+    ("X-CSTP-Split-Include", "192.0.2.0/255.255.255.0"),
+    ("X-CSTP-Keepalive", "20"),
+    ("X-CSTP-DPD", "30"),
+    ("X-CSTP-Idle-Timeout", "1800"),
 )
 
 
@@ -220,6 +240,31 @@ class Gateway(http.server.BaseHTTPRequestHandler):
             self.reply(form("/auth", LOGIN))
 
     do_GET = do_POST
+
+    def do_CONNECT(self):
+        cookies = self.headers.get_all("Cookie") or []
+        has_cookie = any(COOKIE in cookie for cookie in cookies)
+        # Logged as whether the cookie came, not the cookie itself.
+        self.record(b"cookie" if has_cookie else b"no cookie")
+        if self.listener != "main" or not has_cookie or self.scenario == "ended":
+            self.send_response(401, "Unauthorized")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            self.close_connection = True
+            return
+        self.send_response(200, "CONNECTED")
+        for name, value in TUNNEL:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.flush()
+        # Hold the tunnel open and drop what the client sends, until it
+        # closes the connection.
+        try:
+            while self.rfile.read1(4096):
+                pass
+        except OSError:
+            pass
+        self.close_connection = True
 
 
 class Server(http.server.ThreadingHTTPServer):

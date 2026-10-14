@@ -504,3 +504,145 @@ fn hidden_and_ignored_fields_are_told_apart() {
     ];
     assert_eq!(fields, expected);
 }
+
+/// The stand-in gateway's session cookie.
+const COOKIE: &str = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef";
+
+/// How many tunnel requests reached the gateway, and how many of those
+/// carried the cookie.
+fn connects(gateway: &Gateway) -> (usize, usize) {
+    let requests = gateway.requests();
+    let connects: Vec<&String> = requests
+        .iter()
+        .filter(|request| request.contains(r#""method": "CONNECT""#))
+        .collect();
+    let with_cookie = connects
+        .iter()
+        .filter(|request| request.contains(r#""body": "cookie""#))
+        .count();
+    (connects.len(), with_cookie)
+}
+
+// The tunnel's first step through the binding: the cookie is handed over,
+// the connection is made with it, and what the gateway assigned comes back,
+// copied, with the address the connection really went to.
+#[test]
+fn a_cookie_opens_a_tunnel_connection_and_the_assignment_is_read() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    let (handle, seen) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    // Before connecting the library answers with an empty assignment.
+    let before = handle.ip_info();
+    assert_eq!(before.and_then(|info| info.address), None);
+    assert!(handle.set_cookie(&Secret::new(COOKIE)));
+    assert!(handle.disable_dtls());
+    assert_eq!(handle.make_cstp_connection(), 0);
+    assert!(handle.certificate_accepted());
+    let info = handle.ip_info().expect("a connection has an assignment");
+    let text = |value: &str| Some(value.to_string());
+    assert_eq!(info.address, text("10.11.12.13"));
+    assert_eq!(info.netmask, text("255.255.255.0"));
+    assert_eq!(info.dns, ["10.11.0.1", "10.11.0.2"]);
+    assert_eq!(info.mtu, 1300);
+    // The library keeps them newest first; the order means nothing.
+    let mut routes = info.split_includes.clone();
+    routes.sort();
+    assert_eq!(routes, ["10.0.0.0/255.0.0.0", "192.0.2.0/255.255.255.0"]);
+    assert_eq!(info.gateway_addr, text("127.0.0.1"));
+    // The tunnel asks the resolver like a login, and nothing else asked.
+    assert_eq!(
+        seen.lock().unwrap().resolved,
+        [(HOST.to_string(), gateway.port)]
+    );
+    assert!(seen.lock().unwrap().fields.is_empty());
+    assert_eq!(connects(&gateway), (1, 1));
+    println!("RAN: handle opens a tunnel connection");
+}
+
+// Security rule: a gateway that refuses the cookie gives an answer of its
+// own, `-EPERM`, which the tunnel engine reports as "log in again".
+#[test]
+fn a_refused_cookie_is_told_apart() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("ended") else {
+        return;
+    };
+    let (handle, _) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    assert!(handle.set_cookie(&Secret::new(COOKIE)));
+    assert!(handle.disable_dtls());
+    // EPERM is 1 on all three systems.
+    assert_eq!(handle.make_cstp_connection(), -1);
+    assert_eq!(connects(&gateway), (1, 1));
+}
+
+// Security rule: the cookie goes to no gateway the certificate check
+// refused. It is sent only after the pin check, and here it never is.
+#[test]
+fn a_refused_certificate_means_the_cookie_is_not_sent() {
+    let (library, _guard) = library();
+    let Some(gateway) = Gateway::start("accept") else {
+        return;
+    };
+    let (handle, seen) = handle(
+        library,
+        gateway.port,
+        &yes(),
+        Box::new(|_| false),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    assert!(handle.set_cookie(&Secret::new(COOKIE)));
+    assert!(handle.disable_dtls());
+    assert_ne!(handle.make_cstp_connection(), 0);
+    assert!(!handle.certificate_accepted());
+    assert_eq!(seen.lock().unwrap().hashes.len(), 1);
+    assert_eq!(gateway.requests(), Vec::<String>::new());
+}
+
+// Security rule: a cookie with a NUL in it is refused, not cut short and
+// sent; and the copy made to hand a cookie over is wiped (the same lending
+// as for an answer, tested in the binding's own unit tests).
+#[test]
+fn a_cookie_with_a_nul_in_it_is_refused() {
+    let (library, _guard) = library();
+    let (handle, _) = handle(
+        library,
+        8443,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    assert!(!handle.set_cookie(&Secret::new("webvpn=FAKE\0COOKIE")));
+    assert!(handle.set_cookie(&Secret::new(COOKIE)));
+}
+
+// A detach reaches a live handle, and nothing reaches a dropped one, as for
+// a cancel.
+#[test]
+fn a_detach_reaches_a_live_handle_only() {
+    let (library, _guard) = library();
+    let (handle, _) = handle(
+        library,
+        8443,
+        &yes(),
+        Box::new(|_| true),
+        Box::new(|_| FormAnswer::Fail),
+    );
+    let stopper = handle.stopper();
+    assert_eq!(stopper.detach(), Some(true));
+    drop(handle);
+    assert_eq!(stopper.detach(), None);
+}
