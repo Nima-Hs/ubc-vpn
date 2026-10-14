@@ -9,5 +9,18 @@
  * It does serialise as a plain string, because it has to cross the channel.
  * So a serialised message is itself secret: never log an encoded line that
  * may contain one. Log the message's `Debug` form instead.
+ *
+ * When a `Secret` is dropped, the bytes of its value are overwritten with
+ * zeros, in a way the compiler may not leave out, before the memory is
+ * given back. Each clone is a copy of its own and is wiped when it is
+ * dropped. What this does not reach, so that nobody assumes more:
+ *
+ * - copies made before the value became a `Secret`, or after
+ *   [`Secret::expose`] was used to copy it: a line read from the channel
+ *   or a terminal, a string `serde` builds while it decodes or encodes a
+ *   message, and an encoded message that holds one;
+ * - the copies an engine or a library makes of what it is given;
+ * - memory the string gave back as it grew, before it became a `Secret`;
+ * - whatever the OS keeps, such as a page swapped to disk.
  */
 export type Secret = string;
