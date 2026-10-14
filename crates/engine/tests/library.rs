@@ -241,6 +241,11 @@ fn the_declared_functions_are_the_reviewed_ones() {
         "set_cookie",
         "mainloop",
         "set_option_value",
+        "disable_dtls",
+        "make_cstp_connection",
+        "get_ip_info",
+        "setup_tun_device",
+        "get_ifname",
     ];
     let names: Vec<String> = reviewed
         .iter()

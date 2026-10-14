@@ -51,8 +51,8 @@ mod handle;
 // For the tests now, and for the engines when they come.
 #[allow(unused_imports)]
 pub use handle::{
-    Callbacks, CommandPipe, Context, Field, FieldKind, Fill, Form, FormAnswer, Handle, Judge,
-    LineState, Lines, Resolve, Stopper,
+    Callbacks, CommandPipe, Context, Field, FieldKind, Fill, Form, FormAnswer, Handle, IpInfoCopy,
+    Judge, LineState, Lines, Resolve, Stopper,
 };
 
 /// The version string of the one release this binding is written for.
@@ -101,6 +101,34 @@ pub(crate) struct AuthForm {
     /// Not null when the form asks for a choice of group.
     pub(crate) authgroup_opt: *mut c_void,
     authgroup_selection: c_int,
+}
+
+/// `struct oc_split_include`: one route of a list the gateway sent.
+#[repr(C)]
+pub(crate) struct SplitInclude {
+    pub(crate) route: *const c_char,
+    pub(crate) next: *const SplitInclude,
+}
+
+/// `struct oc_ip_info`: what the gateway assigned. The library owns it, and
+/// may free or replace it once the main loop runs, so it is copied at once.
+/// Everything but `gateway_addr` comes from the gateway's headers.
+#[repr(C)]
+pub(crate) struct IpInfo {
+    pub(crate) addr: *const c_char,
+    pub(crate) netmask: *const c_char,
+    addr6: *const c_char,
+    netmask6: *const c_char,
+    pub(crate) dns: [*const c_char; 3],
+    nbns: [*const c_char; 3],
+    domain: *const c_char,
+    proxy_pac: *const c_char,
+    pub(crate) mtu: c_int,
+    split_dns: *const SplitInclude,
+    pub(crate) split_includes: *const SplitInclude,
+    split_excludes: *const SplitInclude,
+    /// The address the tunnel is connected to, made by the library itself.
+    pub(crate) gateway_addr: *const c_char,
 }
 
 /// The C library's `struct addrinfo`. Its first four fields are the same
@@ -260,6 +288,16 @@ library! {
     fn set_cookie(*mut VpnInfo, *const c_char) -> c_int;
     fn mainloop(*mut VpnInfo, c_int, c_int) -> c_int;
     fn set_option_value(*mut FormOpt, *const c_char) -> c_int;
+    fn disable_dtls(*mut VpnInfo) -> c_int;
+    fn make_cstp_connection(*mut VpnInfo) -> c_int;
+    fn get_ip_info(
+        *mut VpnInfo,
+        *mut *const IpInfo,
+        *mut *const c_void,
+        *mut *const c_void
+    ) -> c_int;
+    fn setup_tun_device(*mut VpnInfo, *const c_char, *const c_char) -> c_int;
+    fn get_ifname(*mut VpnInfo) -> *const c_char;
 }
 
 impl Library {
