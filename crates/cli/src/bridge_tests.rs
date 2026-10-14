@@ -17,6 +17,7 @@ use ubc_vpn_platform::{Listener, RawConnection, Transport};
 use super::*;
 use crate::client::Limits;
 use crate::tests::Rig;
+use ubc_vpn_engine::fake::{FakeEngine, Script};
 
 const COOKIE: &str = "Zq7-made-up-0123456789";
 
@@ -555,7 +556,23 @@ impl Write for Breaking {
 fn an_output_that_breaks_ends_the_bridge() {
     for lines_taken in 0..4 {
         let rig = Rig::new();
-        let _service = rig.service();
+        // The service gives a user who is not the owner only so long to
+        // say something, and then closes, which also ends the bridge with
+        // status 1. Here that is a minute: far longer than this test takes
+        // on a busy machine, and longer than `finish` waits, so a bridge
+        // that ends only then fails the test.
+        let engine = FakeEngine::new(Script::new(
+            format!("pin-sha256:{}=", "A".repeat(43))
+                .try_into()
+                .unwrap(),
+        ));
+        let patient = ubc_vpn_service::Timeouts {
+            stranger: Duration::from_secs(60),
+            ..ubc_vpn_service::Timeouts::default()
+        };
+        let platform = rig.fake.platform(&rig.root);
+        let _service =
+            ubc_vpn_service::Service::start(platform, Arc::new(engine), patient).unwrap();
         let (app, lines): (Sender<Vec<u8>>, _) = mpsc::channel();
         let (fake, root) = (rig.fake.clone(), rig.root.clone());
         let exit = thread::spawn(move || {
@@ -571,15 +588,14 @@ fn an_output_that_breaks_ends_the_bridge() {
             format!(r#"{{"cookie":"{COOKIE}","gateway_addr":"192.0.2.1","routes":{routes}}}"#);
         let connect = format!(r#"{{"id":1,"body":{{"method":"connect","params":{params}}}}}"#);
         let status = |id: u32| format!(r#"{{"id":{id},"body":{{"method":"status"}}}}"#);
-        let started = Instant::now();
         for request in [connect, status(2), status(3)] {
             let _ = app.send(format!("{request}\n").into_bytes());
         }
+        // At that line, and not later when the service tires of the app:
+        // that would be after `finish` has failed the test. No other
+        // limit on time, which a busy machine could pass.
         let status = finish(exit, &Captured::default());
         assert_eq!(status, 1, "after {lines_taken} lines");
-        // At that line, and not later when the service tires of the app.
-        let waited = started.elapsed();
-        assert!(waited < Duration::from_secs(2), "{lines_taken}: {waited:?}");
         drop(app);
     }
 }

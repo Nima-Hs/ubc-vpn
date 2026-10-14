@@ -26,7 +26,8 @@ fn run() -> Result<(), String> {
     let mode = args::parse(std::env::args_os().skip(1))?;
     args::check_environment(mode)?;
     let (platform, engine) = parts(mode)?;
-    let service = Service::start(platform, engine, Timeouts::default())?;
+    let dev_mode = mode != Run::Installed;
+    let service = Service::start_in(platform, engine, Timeouts::default(), dev_mode)?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
     Err(service.wait())
 }

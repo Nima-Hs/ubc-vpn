@@ -53,6 +53,11 @@ fn connected(alice: &mut Peer) -> ConnState {
 fn connect_applies_in_order_and_verifies_before_connected() {
     let rig = rig();
     let (mut alice, mut second) = (rig.owner(), rig.peer("alice"));
+    // An answered request shows the service has taken the second connection
+    // in. Without it, on a busy machine, the connect below could begin
+    // before that, and the second would hear one state fewer.
+    let idle = Ok(ResponseBody::Status(ConnState::Disconnected));
+    assert_eq!(second.ask(RequestBody::Status), idle);
     let state = connected(&mut alice);
     assert_eq!(rig.spy.opens()[0].1, BEFORE_OPEN, "before the tunnel");
     assert_eq!(

@@ -357,3 +357,55 @@ fn a_repeat_is_written_again_once_its_line_has_been_pushed_out() {
     assert_eq!(about_it(&logs), 1, "written again, and once");
     assert_eq!(texts(&logs).last().map(String::as_str), Some(failed));
 }
+
+// Forgetting the last line about one thing lets the same line about it be
+// written again, and leaves the repeat rule for every other thing as it was.
+#[test]
+fn forgetting_ends_the_repeat_of_that_thing_only() {
+    let logs = Logs::default();
+    logs.error_about("accepting", "accepting failed: denied");
+    logs.warn_about("a step", "a step failed: denied");
+    logs.forget("a step");
+    logs.error_about("accepting", "accepting failed: denied");
+    logs.warn_about("a step", "a step failed: denied");
+    let lines = [
+        "accepting failed: denied",
+        "a step failed: denied",
+        "a step failed: denied",
+    ];
+    assert_eq!(texts(&logs), lines);
+}
+
+// Security rule: the lines a client causes by asking have a budget, so that
+// no client can push the earlier lines out by asking again and again. Past
+// it one line says so; once the window has passed they are kept again.
+#[test]
+fn lines_caused_by_requests_have_a_budget() {
+    let (logs, pass) = with_a_clock();
+    logs.error("the line before");
+    for n in 0..REQUEST_LINES + 40 {
+        logs.about_requests(LogLevel::Info, &format!("asked {n}"));
+    }
+    let kept = texts(&logs);
+    assert_eq!(kept.len(), 1 + REQUEST_LINES + 1);
+    assert_eq!(kept[0], "the line before");
+    assert_eq!(kept[REQUEST_LINES], format!("asked {}", REQUEST_LINES - 1));
+    assert_eq!(kept.last().map(String::as_str), Some(NOT_LOGGED));
+    // Other lines are not held back by it.
+    logs.error("a line of the service's own");
+    assert_eq!(texts(&logs).len(), kept.len() + 1);
+
+    // Just before the window has passed, still nothing; then it begins
+    // again, with a whole budget.
+    pass(REQUEST_WINDOW - Duration::from_millis(1));
+    logs.about_requests(LogLevel::Info, "too soon");
+    pass(Duration::from_millis(1));
+    for n in 0..REQUEST_LINES {
+        logs.about_requests(LogLevel::Info, &format!("later {n}"));
+    }
+    let now = texts(&logs);
+    assert!(!now.iter().any(|line| line == "too soon"));
+    let later = now.iter().filter(|line| line.starts_with("later ")).count();
+    assert_eq!(later, REQUEST_LINES);
+    assert_eq!(now.iter().filter(|line| *line == NOT_LOGGED).count(), 1);
+}

@@ -285,7 +285,8 @@ fn without_a_valid_policy_every_connect_is_refused() {
         let mut alice = rig.owner();
         assert_eq!(alice.ask(good()), Err(ErrorCode::PolicyInvalid));
         assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
-        assert!(rig.logs()[0].contains("policy file"));
+        // Just after the line that says the service started.
+        assert!(rig.logs()[1].contains("policy file"));
     }
 }
 
