@@ -23,11 +23,7 @@ Cargo does not manage native libraries, build and packaging tools, GitHub Action
   - The output that ships is uploaded by another job, on a machine that never ran Process Monitor. That job checks every file against SHA-256 checksums recorded by the build job, and checks the list of them against a checksum the build job gave out as a job output.
   - So a tampered Process Monitor could report a clean trace, but could not change what ships. The signature check is what we rely on for the trace's verdict.
   - Each machine is GitHub's and is discarded after the run, and the workflow uses no secrets and has read-only access to the repository.
-- Approved exception: the MSYS2 base that the Windows native build runs in is not pinned. The build uses the MSYS2 already installed on GitHub's `windows-latest` runner, which changes when GitHub updates the image.
-  - Pinned, by file name and SHA-256: the build tools in `native/windows/tools.lock` and the compiler and libraries in `native/windows/packages.lock`. `build.sh` stops if the installed ones differ.
-  - Not pinned: everything those run on, such as the shell, coreutils, tar, curl, gpg and pacman.
-  - It could be pinned by starting from a dated `msys2-base` archive with a known checksum instead of the runner's copy. That is not done yet.
-  - Nothing from the base ships: every DLL in the output comes from our own build or from a package in `packages.lock`, and the build stops on any other. The output's `build-packages.txt` records every installed package and its version, and the workflow's tests run on the output itself.
+- The Windows native build does not use the MSYS2 that GitHub's runner comes with. It installs MSYS2 from a dated `msys2-base` archive pinned by SHA-256 in `native/windows/base.lock`, then the tools and libraries pinned in `tools.lock` and `packages.lock`, and stops if any installed package is not one of those. What runs before MSYS2 (Git Bash, and its `curl` and `tar`, which fetch and unpack the archive after its checksum is checked) is the runner's own, like the rest of the runner image.
 
 ## Licenses
 

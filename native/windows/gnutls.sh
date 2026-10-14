@@ -16,7 +16,7 @@ SIGNER=5D46CB0F763405A7053556F47A75A648B3F9220C
 
 tarball=$GNUTLS_TARBALL
 key=$(cat "$here"/common.sh "$here"/gnutls.sh "$here"/patches/gnutls/*.patch \
-    "$here"/packages.lock "$here"/tools.lock "$here"/sources.lock | sha256sum | cut -d' ' -f1)
+    "$here"/base.lock "$here"/packages.lock "$here"/tools.lock "$here"/sources.lock | sha256sum | cut -d' ' -f1)
 if [ "$(cat "$gnutls/.key" 2>/dev/null)" = "$key" ]; then
     echo "GnuTLS $GNUTLS_VERSION: reusing the build in $gnutls"
     exit 0
