@@ -14,7 +14,7 @@ use rustix::termios::{
 };
 use ubc_vpn_core::redact::Secret;
 
-use crate::terminal::read_keys;
+use crate::terminal::{read_keys, wipe};
 use crate::{Error, Result};
 
 /// Whether a call is in progress, and the settings it changed as they were
@@ -65,7 +65,15 @@ struct Restore<'a>(&'a File, Termios);
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
+        // The mode first, so that from now on Ctrl-C is a signal again;
+        // then the keys still waiting are thrown away, so that one typed
+        // after the last look, while nothing was shown, is not kept.
+        //
+        // Not one call with `Flush`: that also waits until all output has
+        // been taken, and on macOS a terminal whose other end is not being
+        // read never takes it, so the program would hang here.
         let _ = tcsetattr(self.0, OptionalActions::Now, &self.1);
+        let _ = tcflush(self.0, QueueSelector::IFlush);
         READING.store(false, Ordering::SeqCst);
     }
 }
@@ -125,15 +133,46 @@ pub(crate) fn read_hidden_from(terminal: &File, prompt: &str) -> Result<Secret> 
             }
         })
     });
-    // Security rule: unless a line was entered, the keys still waiting are
-    // thrown away. The shell would read them next: the rest of a password,
-    // run as a command.
-    if typed.is_err() {
-        let _ = tcflush(terminal, QueueSelector::IFlush);
-    }
+    // A Ctrl-C typed just after Enter is waiting as a key: the terminal
+    // was not turning keys into signals when it came. Left there, it would
+    // never interrupt anything, and the user who pressed it would see the
+    // program go on.
+    let typed = match typed {
+        Ok(_) if interrupted_since(terminal, &quiet) => Err(Error::Interrupted),
+        typed => typed,
+    };
+    // Security rule: the keys still waiting are thrown away on every way
+    // out. After an error the shell would read them next: the rest of a
+    // password, run as a command. After an entered line they were typed
+    // while nothing was shown, and are not kept either.
+    let _ = tcflush(terminal, QueueSelector::IFlush);
     // The newline that Enter did not show.
     let _ = terminal.write_all(b"\n");
     typed
+}
+
+/// Whether Ctrl-C is among the keys already waiting in `terminal`, which is
+/// in the mode `quiet`. Every key that waits is read and forgotten, none is
+/// shown, and the call never waits for one.
+fn interrupted_since(terminal: &File, quiet: &Termios) -> bool {
+    let mut at_once = quiet.clone();
+    at_once.special_codes[SpecialCodeIndex::VMIN] = 0;
+    at_once.special_codes[SpecialCodeIndex::VTIME] = 0;
+    if tcsetattr(terminal, OptionalActions::Now, &at_once).is_err() {
+        return false;
+    }
+    let (mut terminal, mut keys, mut found) = (terminal, [0u8; 256], false);
+    // Not for ever: keys that keep coming must not keep the program here.
+    // What is left after this is thrown away by the caller.
+    for _ in 0..16 {
+        match terminal.read(&mut keys) {
+            Ok(read) if read > 0 => found |= keys[..read].contains(&0x03),
+            _ => break,
+        }
+    }
+    // They may be the start of the next secret, typed early.
+    wipe(&mut keys);
+    found
 }
 
 /// For tests only: a new terminal, as the end a test types into and reads,
@@ -300,30 +339,58 @@ pub(crate) mod tests {
         assert_eq!(pty.mode(), before, "after a long line");
     }
 
-    // Security rule: the rest of a password given up on is not left for the
-    // shell to run as a command. After an entered line, what follows stays:
-    // it is the answer to the next question.
+    // Security rule: no key that was waiting when the call ended is left
+    // for the next reader, and none is ever shown. After a password given
+    // up on, the shell would run the rest of it as a command. After an
+    // entered line, what was typed next was typed while nothing was shown.
     #[test]
-    fn only_an_entered_line_leaves_keys_for_the_next_reader() {
+    fn no_key_typed_during_the_call_is_left_for_the_next_reader() {
         let long = [vec![b'a'; MAX_HIDDEN_LINE_BYTES + 40], b"\rNEXT\r".to_vec()].concat();
         let not_text = Error::Failed("the line is not text".to_string());
-        let cases: [(&[u8], Result<&str>, &str); 5] = [
-            (b"\xff\rNEXT\r", Err(not_text), ""),
-            (
-                b"half\x03REST-OF-FAKE-SECRET\r",
-                Err(Error::Interrupted),
-                "",
-            ),
-            (b"\x04REST\r", Err(Error::Closed), ""),
-            (&long, Err(Error::LineTooLong), ""),
-            (b"fake\rNEXT\r", Ok("fake"), "NEXT\n"),
+        let cases: [(&[u8], Result<&str>); 5] = [
+            (b"\xff\rNEXT\r", Err(not_text)),
+            (b"half\x03REST-OF-FAKE-SECRET\r", Err(Error::Interrupted)),
+            (b"\x04REST\r", Err(Error::Closed)),
+            (&long, Err(Error::LineTooLong)),
+            (b"fake\rNEXT\r", Ok("fake")),
         ];
-        for (keys, read, left) in cases {
+        for (keys, read) in cases {
             let pty = pty();
-            let (got, _) = pty.ask(keys);
+            let before = pty.mode();
+            let (got, screen) = pty.ask(keys);
             assert_eq!(got, read.map(str::to_string));
-            assert_eq!(pty.left(), left, "left for the next reader");
+            assert_eq!(screen, "Password: \r\n", "something typed was shown");
+            assert_eq!(pty.left(), "", "left for the next reader");
+            assert_eq!(pty.mode(), before, "the mode was not put back");
         }
+    }
+
+    // A Ctrl-C typed just after Enter, before the terminal is back to
+    // turning it into a signal, is waiting as a key. It still interrupts:
+    // the line is given up, though it was entered, and nothing typed after
+    // it is kept or shown. The keys arrive in one write, so the Ctrl-C is
+    // there before Enter is read.
+    #[test]
+    fn a_ctrl_c_typed_just_after_enter_still_interrupts() {
+        let cases: [&[u8]; 3] = [
+            b"123456\r\x03",
+            b"123456\rREST-OF-\x03FAKE-SECRET\r",
+            b"123456\r\x03\x03",
+        ];
+        for keys in cases {
+            let pty = pty();
+            let before = pty.mode();
+            let (got, screen) = pty.ask(keys);
+            assert_eq!(got, Err(Error::Interrupted), "{keys:?}");
+            assert_eq!(screen, "Password: \r\n", "something typed was shown");
+            assert_eq!(pty.left(), "", "left for the next reader");
+            assert_eq!(pty.mode(), before, "the mode was not put back");
+        }
+        // With no Ctrl-C waiting none is made up, and the call does not
+        // wait for more keys once the line is entered.
+        let pty = pty();
+        let (got, _) = pty.ask(b"123456\r");
+        assert_eq!(got, Ok("123456".to_string()));
     }
 
     // Security rule: keys typed before the prompt was there, blind and
