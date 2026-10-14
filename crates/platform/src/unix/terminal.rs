@@ -33,8 +33,8 @@ pub(crate) fn read_hidden_line(prompt: &str) -> Result<Secret> {
 }
 
 /// See `terminal::restore_after_signal` for what this may be called from,
-/// and so for what it may do: no lock, no allocation, and no call but
-/// `open`, `tcgetattr`, `tcsetattr` and `close`.
+/// and so for what it may do: no lock, no allocation, no wait, and no call
+/// but `open`, `tcgetattr`, `tcsetattr`, `tcflush` and `close`.
 pub(crate) fn restore_after_signal() {
     if !READING.load(Ordering::SeqCst) {
         return;
@@ -57,7 +57,11 @@ fn restore_saved(terminal: impl AsFd) {
     now.local_modes = LocalModes::from_bits_retain(LOCAL_MODES.load(Ordering::SeqCst) as _);
     now.special_codes[SpecialCodeIndex::VMIN] = VMIN.load(Ordering::SeqCst);
     now.special_codes[SpecialCodeIndex::VTIME] = VTIME.load(Ordering::SeqCst);
-    let _ = tcsetattr(&terminal, OptionalActions::Flush, &now);
+    // At once, then the keys. Not one call with `Flush`: that also waits
+    // until all output has been taken, and a signal handler that waits on
+    // a terminal nobody reads would never let the program end.
+    let _ = tcsetattr(&terminal, OptionalActions::Now, &now);
+    let _ = tcflush(&terminal, QueueSelector::IFlush);
 }
 
 /// Puts the terminal's mode back when dropped, so on every way out.
@@ -110,13 +114,17 @@ pub(crate) fn read_hidden_from(terminal: &File, prompt: &str) -> Result<Secret> 
     // Security rule: keys typed before the prompt are thrown away with the
     // change of mode. They were typed blind, and shown, and are no secret's
     // beginning.
+    // At once, then the keys: one call with `Flush` would also wait for
+    // all output to be taken, which never happens on a terminal whose other
+    // end is not being read.
     loop {
-        match tcsetattr(terminal, OptionalActions::Flush, &quiet) {
+        match tcsetattr(terminal, OptionalActions::Now, &quiet) {
             // A signal arrived first: nothing was changed, so again.
             Err(Errno::INTR) => {}
             changed => break changed.map_err(io::Error::from)?,
         }
     }
+    let _ = tcflush(terminal, QueueSelector::IFlush);
 
     let mut terminal = terminal;
     let prompted = terminal.write_all(prompt.as_bytes());
@@ -457,5 +465,99 @@ pub(crate) mod tests {
     /// One whole line in one write, because CI looks for it.
     fn say(line: &[u8]) {
         io::stderr().write_all(line).expect("say");
+    }
+
+    /// Names the terminal the child below is to ask its question in.
+    const QUIET_CHILD: &str = "UBC_VPN_TERMINAL_UNREAD_CHILD";
+
+    // Security rule: neither changing the terminal's mode nor putting it
+    // back waits for its output to be taken. Nobody reads this child's
+    // terminal, so what it wrote before the question is still waiting there
+    // when the question starts, and the prompt too when the child is told to
+    // stop. The question must still be asked, and the request must still
+    // reach it at once, with the terminal showing what is typed again.
+    //
+    // Whether the child can then end is not asked: macOS keeps a process
+    // in its last close of a terminal until the output is taken, whatever
+    // the program does, so the test ends the child itself.
+    #[test]
+    fn the_terminal_is_put_back_though_nobody_reads_it() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        use rustix::pty::ptsname;
+
+        let pty = pty();
+        let before = pty.mode();
+        let name = ptsname(&pty.ours, Vec::new()).expect("its name");
+        let name = name.into_string().expect("UTF-8");
+        let mut child = Command::new(std::env::current_exe().expect("this program"));
+        let (_, tests) = module_path!().split_once("::").expect("a module path");
+        let test = format!("{tests}::unread_child");
+        child.args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"]);
+        child.env(QUIET_CHILD, &name).stdout(Stdio::piped());
+        let mut child = child.spawn().expect("start the child");
+        let printed = BufReader::new(child.stdout.take().expect("its output"));
+        let (said, heard) = mpsc::channel();
+        thread::spawn(move || {
+            for line in printed.lines().map_while(io::Result::ok) {
+                if let Some((_, what)) = line.split_once("SAYS ") {
+                    let _ = said.send(what.to_string());
+                }
+            }
+        });
+        // The question is open once the mode has changed. Nothing is read
+        // from the screen.
+        let started = Instant::now();
+        while pty.mode() == before {
+            if started.elapsed() > Duration::from_secs(20) {
+                let _ = child.kill();
+                panic!("the question was never asked");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: no memory-safety conditions; the child has not been
+        // waited for, so its ID is still its own.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+        let got = heard.recv_timeout(Duration::from_secs(5));
+        // Only now is the screen read: on macOS a process cannot finish
+        // ending, even when killed, while its terminal's output waits.
+        let _ = read_from(&pty.ours, None, 300);
+        let _ = child.kill();
+        let _ = child.wait();
+        // Its own check of the mode, made when the request reached it.
+        let got = got.expect("the request did not come: it waits for its terminal's output");
+        assert_eq!(got, "RESTORED true");
+    }
+
+    // Not a test of its own: the test above runs it in a new process.
+    #[test]
+    fn unread_child() {
+        use rustix::fs::{Mode, OFlags, open};
+        use rustix::process::{ioctl_tiocsctty, setsid};
+
+        let Some(name) = std::env::var_os(QUIET_CHILD) else {
+            return;
+        };
+        // A session of its own, with the test's terminal as its terminal.
+        setsid().expect("a new session");
+        let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
+        let terminal = open(name, flags, Mode::empty()).expect("open the terminal");
+        ioctl_tiocsctty(&terminal).expect("make it this process's terminal");
+        let stops = crate::interrupt::watch().expect("watch");
+        // Something already written and not taken, as the line of an
+        // earlier question would be: the question must not wait for it.
+        let mut written = File::from(terminal.try_clone().expect("another handle"));
+        written.write_all(b"Username: made-up\n").expect("write");
+        thread::spawn(|| crate::terminal::read_hidden_line("Password: "));
+        // The request comes after the terminal has been put back, if that
+        // returned at all.
+        let _ = stops.recv();
+        let now = tcgetattr(&terminal).expect("its mode").local_modes;
+        let shown = LocalModes::ECHO | LocalModes::ICANON | LocalModes::ISIG;
+        println!("SAYS RESTORED {}", now.contains(shown));
+        // Then it waits to be ended: see the test above.
+        thread::sleep(Duration::from_secs(60));
     }
 }
