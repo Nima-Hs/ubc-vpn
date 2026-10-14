@@ -11,7 +11,7 @@ Builds `libopenconnect` for macOS 13 or later on Apple silicon, from source, as 
 | Nettle | 4.0 | LGPL-3.0-or-later or GPL-2.0-or-later | `libnettle.9.dylib`, `libhogweed.7.dylib` |
 | GMP | 6.3.0 | LGPL-3.0-or-later or GPL-2.0-or-later | `libgmp.10.dylib` |
 
-Download addresses and SHA-256 checksums are in `versions.env`. Every archive is checked before it is unpacked. There is one patch, in `patches/openconnect/`: it stops the library closing file descriptor 0 when a handle is freed that never made a command pipe, and stops every handle offering single sign-on to the gateway. The Windows and Linux builds apply the same one.
+Download addresses and SHA-256 checksums are in `versions.env`. Every archive is checked before it is unpacked. There is one patch, in `patches/openconnect/`: it stops the library closing file descriptor 0 when a handle is freed that never made a command pipe, stops every handle offering single sign-on to the gateway, and stops a host-scan tag in the reply to an address with no path crashing the library. The Windows and Linux builds apply the same one.
 
 The external-browser login is left out, as on Linux and Windows: `--without-external-browser`, and `ac_cv_func_gnutls_hkdf_expand=no`, which turns off HPKE. Without HPKE a gateway's single sign-on form fails at once; with it, the library would listen on local port 29786 for a browser and wait. The probe job checks the built library has none of that code.
 

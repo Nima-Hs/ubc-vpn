@@ -1,4 +1,4 @@
-Two fields of a new handle that openconnect_vpninfo_new() leaves wrong.
+Three things libopenconnect gets wrong that a client cannot work around.
 
 cmd_fd_write: a new handle comes from calloc(), and openconnect_vpninfo_new()
 sets cmd_fd to -1 but leaves cmd_fd_write at zero. openconnect_vpninfo_free()
@@ -16,6 +16,13 @@ offer. What stops a gateway that asks anyway is the build: it leaves out the
 external-browser login (no HPKE), and no webview callback is ever set, so a
 single sign-on form fails at once.
 
+csd_preurl: for every host-scan <csd> tag in a gateway's reply,
+parse_auth_node() copies urlpath with strdup(). urlpath is NULL when the
+address being fetched has no path, as "https://<host>" has none, and
+strdup(NULL) crashes with glibc and on macOS (Windows' C runtime returns NULL
+instead). So one tag from the gateway crashes the client. Copy it only when
+there is one: nothing reads csd_preurl, it is only freed.
+
 --- a/library.c
 +++ b/library.c
 @@ -196,6 +196,8 @@
@@ -27,3 +34,12 @@ single sign-on form fails at once.
  	init_pkt_queue(&vpninfo->free_queue);
  	init_pkt_queue(&vpninfo->incoming_queue);
  	init_pkt_queue(&vpninfo->outgoing_queue);
+--- a/auth.c
++++ b/auth.c
+@@ -492,5 +492,5 @@
+ 			xmlnode_get_prop(xml_node, "starturl", &vpninfo->csd_starturl);
+ 			xmlnode_get_prop(xml_node, "waiturl", &vpninfo->csd_waiturl);
+-			vpninfo->csd_preurl = strdup(vpninfo->urlpath);
++			vpninfo->csd_preurl = vpninfo->urlpath ? strdup(vpninfo->urlpath) : NULL;
+ 		}
+ 	}

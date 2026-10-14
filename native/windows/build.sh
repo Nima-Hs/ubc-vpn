@@ -101,6 +101,8 @@ if ! grep -qF 'vpninfo->cmd_fd_write = -1;' library.c; then
 fi
 grep -qF 'vpninfo->no_external_auth = 1;' library.c ||
     die "library.c does not turn off the single sign-on offer; the patch was not applied"
+grep -qF 'vpninfo->urlpath ? strdup(vpninfo->urlpath) : NULL' auth.c ||
+    die "auth.c still copies a null path for a host-scan tag; the patch was not applied"
 ./autogen.sh
 # -ffile-prefix-map keeps this folder's path out of the DLL.
 # No external-browser login: no browser to start, and with the HKDF check
