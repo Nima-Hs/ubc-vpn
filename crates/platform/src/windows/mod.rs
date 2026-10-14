@@ -27,6 +27,7 @@
 //! One difference from a socket: a pipe's name stays taken while any instance
 //! is open, so closing the listener also closes the connections it accepted.
 
+mod dns;
 pub(crate) mod interrupt;
 mod journal;
 mod pipe;
@@ -91,7 +92,7 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
     let paths = paths(mode, &me)?;
     Ok(Platform {
         routes: Arc::new(routes::WinRoutes::new(mode, &paths)),
-        dns: Arc::new(Native),
+        dns: Arc::new(dns::WinDns),
         events: Arc::new(Native),
         paths,
         transport: Arc::new(PipeTransport { mode, me }),
