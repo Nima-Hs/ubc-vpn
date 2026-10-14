@@ -116,6 +116,8 @@ jobs:
           tests=("squatted socket" narrowing suite dev)
           # macOS alone lets a file's owner mark it unchangeable.
           if [ "$RUNNER_OS" = macOS ]; then tests+=(flags "flags loop"); fi
+          # Linux alone has real routes so far.
+          if [ "$RUNNER_OS" = Linux ]; then tests+=(routes); fi
           for test in "${tests[@]}"; do
             if ! grep -qx "RAN AS ROOT: $test" root.log; then
               echo "The root-only test '$test' did not run."

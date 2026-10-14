@@ -28,6 +28,9 @@ use crate::{
     Verified, lock, os, suite,
 };
 
+#[cfg(target_os = "linux")]
+mod linux_routes;
+
 /// Two users that are neither root nor whoever runs the tests. Root can
 /// become any user ID, so they need no account.
 const STRANGER: u32 = 54_321;
@@ -1035,12 +1038,16 @@ fn native_has_a_real_channel_and_nothing_else_yet() {
     let modes = [Some(Mode::Installed), DEV];
     for mode in modes.into_iter().flatten() {
         let native = Platform::native(mode).expect("a platform");
-        assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
-        let configured = native.routes.configure_tunnel("tun0", gateway, 1300);
-        assert_eq!(configured.err(), unsupported);
-        assert_eq!(native.routes.remove_all().err(), unsupported);
-        let routed = native.routes.uses_interface(gateway, "tun0");
-        assert_eq!(routed, Verified::Unknown);
+        // Linux has real routes, which `linux_routes` tests.
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
+            let configured = native.routes.configure_tunnel("tun0", gateway, 1300);
+            assert_eq!(configured.err(), unsupported);
+            assert_eq!(native.routes.remove_all().err(), unsupported);
+            let routed = native.routes.uses_interface(gateway, "tun0");
+            assert_eq!(routed, Verified::Unknown);
+        }
         assert_eq!(native.dns.clear_split_dns().err(), unsupported);
         assert_eq!(native.dns.split_dns_matches(&dns), Verified::Unknown);
         assert_eq!(native.events.subscribe(&physical).err(), unsupported);

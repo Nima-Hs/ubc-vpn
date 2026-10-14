@@ -47,7 +47,8 @@ pub(crate) fn clear_flags(path: &Path) -> io::Result<()> {
 pub(crate) const ROOT_ONLY: &str = "/Library/Application Support";
 
 pub(crate) fn native(mode: Mode) -> Result<Platform> {
-    Ok(unix::native(mode, paths(mode, &unix::real_env)?))
+    let routes = std::sync::Arc::new(crate::unsupported::Native);
+    Ok(unix::native(mode, paths(mode, &unix::real_env)?, routes))
 }
 
 /// Security rule: nothing the installed service uses comes from the

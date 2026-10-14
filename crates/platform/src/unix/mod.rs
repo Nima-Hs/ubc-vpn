@@ -95,8 +95,8 @@ use rustix::process::geteuid;
 
 use crate::unsupported::Native;
 use crate::{
-    Connection, Error, Listener, Mode, Paths, Platform, RawConnection, Result, Transport, UserId,
-    lock, os,
+    Connection, Error, Listener, Mode, Paths, Platform, RawConnection, Result, Routes, Transport,
+    UserId, lock, os,
 };
 
 /// What `listen` reports for a folder that breaks the rule. A client reports
@@ -138,9 +138,11 @@ pub(crate) fn dev_paths(dev: &Path, env: Env<'_>, variable: &str) -> Paths {
     }
 }
 
-pub(crate) fn native(mode: Mode, paths: Paths) -> Platform {
+/// The platform with the socket channel, the OS module's `routes`, and
+/// nothing yet for DNS and network events.
+pub(crate) fn native(mode: Mode, paths: Paths, routes: Arc<dyn Routes>) -> Platform {
     Platform {
-        routes: Arc::new(Native),
+        routes,
         dns: Arc::new(Native),
         events: Arc::new(Native),
         transport: Arc::new(SocketTransport { mode }),

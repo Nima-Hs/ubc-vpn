@@ -1,6 +1,10 @@
 //! Linux: the channel is a Unix socket (see `unix`), and the folders follow
-//! the usual system places and the XDG rules. Routes, DNS and network events
-//! are not implemented yet and report that they are unsupported.
+//! the usual system places and the XDG rules. Routes and the tunnel device
+//! go through rtnetlink (`routes`). DNS and network events are not
+//! implemented yet and report that they are unsupported.
+
+mod netlink;
+pub(crate) mod routes;
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -40,7 +44,8 @@ pub(crate) fn socket() -> io::Result<OwnedFd> {
 pub(crate) const ROOT_ONLY: &str = "/run";
 
 pub(crate) fn native(mode: Mode) -> Result<Platform> {
-    Ok(unix::native(mode, paths(mode, &unix::real_env)?))
+    let routes = std::sync::Arc::new(routes::LinuxRoutes);
+    Ok(unix::native(mode, paths(mode, &unix::real_env)?, routes))
 }
 
 /// Security rule: nothing the installed service uses comes from the
