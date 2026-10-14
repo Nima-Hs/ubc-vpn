@@ -800,12 +800,14 @@ fn a_fresh_state_folder_belongs_to_the_administrators_alone() {
     }
     let dir = program_data_folder("state-fresh");
     let state = crate::StateDir::open(Mode::Installed, &state_paths(&dir)).expect("open");
-    let text = folder_sddl(&dir);
-    assert!(
-        text.ends_with("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)") && text.starts_with("O:BA"),
-        "{text}"
-    );
+    // P: inherits nothing from ProgramData. Only SYSTEM and Administrators.
+    let protected = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    assert_eq!(folder_sddl(&dir), protected);
     state.write("state.json", b"{}").expect("write");
+    // The file takes the folder's access list, not the writer's default.
+    let file = folder_sddl(&dir.join("state.json"));
+    let inherited = file.contains("(A;ID;FA;;;SY)(A;ID;FA;;;BA)");
+    assert!(inherited && file.matches("(A;").count() == 2, "{file}");
     assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
     assert_eq!(state.read("missing.json"), Ok(None));
     std::fs::remove_dir_all(&dir).unwrap();
