@@ -9,6 +9,11 @@ import type { LogLine } from "./protocol/LogLine";
 export const MAX_LOG_LINES = 1000;
 /** The longest a line's text may be when shown. */
 export const MAX_LOG_TEXT = 512;
+/**
+ * What stands in for a line whose text came to nothing once it was cleaned.
+ * The line keeps its number and its place; an empty row would say nothing.
+ */
+export const EMPTY_LINE = "[a line with nothing that can be shown]";
 
 /** A line as the interface is given it: checked, cleaned and plain. */
 export interface ShownLine extends LogLine {

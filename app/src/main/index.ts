@@ -159,8 +159,9 @@ async function start(): Promise<void> {
             platform: process.platform,
             arch: process.arch,
             link: () => controller.getSnapshot().state,
-            // Only ever called for the interface's "copy" press.
+            // Only reached through the gate in `logs/ipc.ts`.
             copy: (text) => clipboard.writeText(text),
+            focused: () => window.isFocused(),
         });
     }
     registerDemo?.(window);

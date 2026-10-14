@@ -13,17 +13,75 @@ export interface ReportParts {
     link(): LinkState;
     /** Puts text on the clipboard. The one place a report goes. */
     copy(text: string): void;
+    /** Whether the app's window is the one the user is working in. */
+    focused(): boolean;
+}
+
+/** The least time between one copy of the report and the next. */
+export const COPY_GAP_MS = 3_000;
+
+/**
+ * Decides whether a copy that the interface asks for is made. The main
+ * process cannot see a key press, so it cannot know the user asked. It
+ * holds to what a user's own press would look like instead: the log is open
+ * on screen, the window is the one in use, and it is not one of a stream.
+ * Without this a page gone wrong could write over the clipboard, and ask
+ * the service for its account of itself, as often as it liked.
+ */
+export class CopyGate {
+    private lastAt = Number.NEGATIVE_INFINITY;
+
+    constructor(
+        private readonly book: Pick<LogBook, "isOpen">,
+        private readonly focused: () => boolean,
+        private readonly gapMs = COPY_GAP_MS,
+    ) {}
+
+    /** Whether to copy now. A yes counts as a copy, whatever comes of it. */
+    allows(): boolean {
+        const now = Date.now();
+        if (!this.book.isOpen() || !this.focused() || now - this.lastAt < this.gapMs) {
+            return false;
+        }
+        this.lastAt = now;
+        return true;
+    }
 }
 
 /**
- * Makes and copies the report. Called only for the interface's own "copy"
- * press. The answer says how many lines went, and never carries the text.
+ * Closes the log when nobody can be looking at it: the window was put away,
+ * or its page is being loaded again and has forgotten that it opened it.
+ * The page opens it again when it is shown.
+ */
+export function closeWhenAway(
+    window: {
+        on(event: "hide", listener: () => void): unknown;
+        webContents: {
+            on(event: "did-start-loading" | "render-process-gone", listener: () => void): unknown;
+        };
+    },
+    book: Pick<LogBook, "close">,
+): void {
+    const close = () => void book.close();
+    window.on("hide", close);
+    window.webContents.on("did-start-loading", close);
+    window.webContents.on("render-process-gone", close);
+}
+
+/**
+ * Makes and copies the report, if `gate` allows it. The answer says how
+ * many lines went, and never carries the text. A copy that is not allowed
+ * asks the service nothing and writes nothing.
  */
 export async function copyReport(
     book: Pick<LogBook, "view">,
     feed: Pick<LogFeed, "diagnostics">,
     parts: ReportParts,
+    gate: Pick<CopyGate, "allows">,
 ): Promise<ReportResult> {
+    if (!gate.allows()) {
+        return { ok: false };
+    }
     let diagnostics: ReturnType<typeof takeDiagnostics>;
     try {
         diagnostics = takeDiagnostics(await feed.diagnostics());
@@ -50,6 +108,24 @@ export async function copyReport(
 }
 
 /**
+ * What each of the interface's three requests does, by channel. Kept apart
+ * from Electron so that it can be tested whole: opening and closing only
+ * open and close, and nothing but the copy request ever copies.
+ */
+export function logHandlers(
+    book: Pick<LogBook, "open" | "close" | "view">,
+    feed: Pick<LogFeed, "diagnostics">,
+    parts: ReportParts,
+    gate: Pick<CopyGate, "allows">,
+): Record<(typeof LOGS_IPC)["open" | "close" | "copyReport"], () => unknown> {
+    return {
+        [LOGS_IPC.open]: () => book.open(),
+        [LOGS_IPC.close]: () => book.close(),
+        [LOGS_IPC.copyReport]: () => copyReport(book, feed, parts, gate),
+    };
+}
+
+/**
  * The few things the interface can ask about the log. Each is checked to
  * come from the interface's own page, like every other request, and none
  * takes an argument.
@@ -65,10 +141,10 @@ export function registerLogs(
             window.webContents.send(LOGS_IPC.update, update);
         }
     });
-    const handle = (channel: string, handler: () => unknown) =>
+    const gate = new CopyGate(book, parts.focused);
+    for (const [channel, handler] of Object.entries(logHandlers(book, feed, parts, gate))) {
         handleFromInterface(window, devServerUrl, channel, handler);
-    handle(LOGS_IPC.open, () => book.open());
-    handle(LOGS_IPC.close, () => book.close());
-    handle(LOGS_IPC.copyReport, () => copyReport(book, feed, parts));
+    }
+    closeWhenAway(window, book);
     return book;
 }

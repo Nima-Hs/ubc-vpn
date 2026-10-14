@@ -9,6 +9,7 @@ import type { Event } from "@shared/protocol/Event";
 import type { RequestBody } from "@shared/protocol/RequestBody";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+    APP_METHODS,
     Backoff,
     BRIDGE_ENV,
     BridgeClient,
@@ -339,6 +340,24 @@ describe("events and requests", () => {
         };
         // @ts-expect-error The type does not accept `connect`; this checks the guard behind it.
         const typed: BridgeRequestBody = connect;
+        // The type check fails here, too, if `add_log` ever becomes something
+        // the app may send: an "expected error" that stops being one is an error.
+        const addLog: RequestBody = { method: "add_log", params: { level: "info", text: "x" } };
+        // @ts-expect-error The app has nothing to add to the service's log.
+        const added: BridgeRequestBody = addLog;
+        await expect(client.request(added)).rejects.toMatchObject({ reason: "not_allowed" });
+        // What it may send is a list, not "everything but": a method the
+        // protocol gains later is not allowed until it is put here.
+        expect([...APP_METHODS]).toEqual([
+            "claim",
+            "status",
+            "disconnect",
+            "logs",
+            "watch_logs",
+            "diagnostics",
+        ]);
+        const unheard = { method: "summon_comet" } as unknown as BridgeRequestBody;
+        await expect(client.request(unheard)).rejects.toMatchObject({ reason: "not_allowed" });
         const error = await client.request(typed).catch((caught: unknown) => caught);
 
         expect(error).toBeInstanceOf(BridgeError);
