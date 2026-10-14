@@ -26,6 +26,7 @@ const markers = [
     // The log screen, which no production build has yet (`__LOGS__`): its
     // IPC, its words, and the main-process code that carries lines to it.
     "logs:copy-report",
+    "Copy report",
     "UBC VPN diagnostics report",
     "logs-new-run",
 ];

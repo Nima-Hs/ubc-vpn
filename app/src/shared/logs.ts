@@ -41,7 +41,14 @@ export interface LogUpdate {
 }
 
 /** What copying the report came to. Never the report itself. */
-export type ReportResult = { ok: true; lines: number } | { ok: false };
+export type ReportResult =
+    | { ok: true; lines: number }
+    /**
+     * Why it was not copied, so the screen can say something true: the log
+     * was not open, another window was in use, it was copied a moment ago,
+     * or writing the clipboard failed. Never any part of the report.
+     */
+    | { ok: false; reason: "closed" | "not_in_use" | "too_soon" | "failed" };
 
 /** Present only in builds that have the log screen. */
 export interface LogsApi {

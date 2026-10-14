@@ -108,6 +108,8 @@ const TEXT_PAIRS: [string, string][] = [
     ["--c-text-secondary", "--c-danger-subtle"],
     ["--c-danger", "--c-bg"],
     ["--c-danger", "--c-surface"],
+    // A log line's "Warning", on the list's surface.
+    ["--c-attention", "--c-surface"],
     ["--c-text", "--c-accent-subtle"],
 ];
 
