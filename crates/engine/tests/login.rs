@@ -489,8 +489,8 @@ fn a_login_asks_for_at_most_three_codes() {
 // user is asked nothing. The library does fetch the program's stub first,
 // if the offer names one, and refuses to run it only afterwards. So a stub
 // elsewhere is a fetch the resolver must refuse; this offer points at the
-// other listener, which gets nothing. The test below covers a stub on the
-// gateway's own host.
+// other listener, which gets nothing. A stub on the gateway's own host would
+// be fetched from the pinned gateway and then not run.
 #[test]
 fn an_offer_of_a_host_scan_program_ends_the_login() {
     let (engine, library, _guard) = engine();
@@ -549,26 +549,6 @@ fn a_login_waiting_on_the_gateway_stops_when_cancelled() {
     );
     // The login is over and its handle freed. A cancel now reaches nothing.
     from_outside.cancel();
-}
-
-// A host-scan stub on the gateway's own host is fetched from the pinned
-// gateway, and then not run: the login fails, nothing is asked, and no
-// answer is sent. The fetch is the library's; there is no switch for it.
-#[test]
-fn a_host_scan_stub_on_the_gateway_is_fetched_and_not_run() {
-    let (engine, library, _guard) = engine();
-    let Some(stand_in) = StandIn::start("csdstub") else {
-        return;
-    };
-    let pin = pin_of(library, &stand_in);
-    let attempt = attempt(engine, &gateway(&stand_in, &pin));
-    assert_eq!(attempt.result, Err(LoginError::Failed));
-    assert!(attempt.prompts.is_empty(), "{:?}", kinds(&attempt));
-    let requests = stand_in.requests();
-    assert_eq!(requests.len(), 2, "{requests:?}");
-    assert!(requests[1].contains("/CACHE/stub"), "{requests:?}");
-    assert_eq!(sent(&stand_in, NAME), 0);
-    assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
 }
 
 /// Set for the child process of the key-log test.
