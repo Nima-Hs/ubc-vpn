@@ -136,11 +136,16 @@
 //!   single-sign-on login, or a client certificate. The library offers
 //!   single sign-on to the gateway on every request and runs its handler
 //!   whatever the form callback answered, and no public call turns that
-//!   off. So the pinned patches must set `no_external_auth` in
+//!   off. So the pinned patches set `no_external_auth` in
 //!   `openconnect_vpninfo_new`, which stops the offer, and every native
-//!   build must be configured without external-browser login, which removes
-//!   that code. A test against the stand-in gateway must show such a login
-//!   fails, with nothing listening on the browser login's local port.
+//!   build is configured without external-browser login and without HPKE
+//!   (`ac_cv_func_gnutls_hkdf_expand=no`). Without HPKE the external
+//!   browser handler is a stub that fails, which is what actually closes
+//!   it; the build option alone does not. Never set a webview callback:
+//!   without one the remaining single sign-on mode fails too. Tests against
+//!   the stand-in gateway show the login request offers no single sign-on,
+//!   and that such a login fails with nothing listening on the browser
+//!   login's local port.
 //! - Let one thread own the library handle and make every library call on
 //!   it. Other threads touch only the write end of the command pipe from
 //!   `openconnect_setup_cmd_pipe`. On Windows that end is a socket, written
@@ -251,6 +256,9 @@
 //!   to equals the session's and report it in [`Assigned::gateway_addr`].
 //! - Hand the cookie to the library with `openconnect_set_cookie`, after
 //!   registering it with [`LogSink::hide`].
+//! - Turn DTLS off with `openconnect_disable_dtls` before connecting, so
+//!   the tunnel has one transport and one path to test. The cost is the
+//!   speed UDP would give; this holds for v0.1.0.
 //! - Make the tunnel side's own auth-form callback cancel. A gateway that
 //!   answers a cookie with a login form has refused the session, which is
 //!   [`TunnelError::LoginNeeded`].
