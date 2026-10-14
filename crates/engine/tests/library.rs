@@ -215,6 +215,14 @@ fn child() {
 // Security rule: the declared functions are spelled out here, so that a
 // change to the table is a visible change to this list. Each signature was
 // checked against `openconnect.h` of v9.21.
+//
+// Security rule: some functions must never join this list, because what keeps
+// a hostile gateway out depends on their never being called. Without
+// `openconnect_set_webview_callback` the library has no single sign-on
+// handler, so a single sign-on form fails at once; our builds have no
+// external-browser login either. Without `openconnect_set_external_browser_callback`
+// nothing can start a browser, and without `openconnect_setup_csd` no
+// host-scan program is ever run. Adding any of them fails this test.
 #[test]
 fn the_declared_functions_are_the_reviewed_ones() {
     let reviewed = [

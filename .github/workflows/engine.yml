@@ -189,6 +189,7 @@ jobs:
           # So did the engine.
           grep -q '^RAN: engine logs in' test.log
           grep -q '^RAN: engine refuses a wrong pin' test.log
+          grep -q '^RAN: engine refuses single sign-on' test.log
           if [ "$RUNNER_OS" = Linux ]; then
             grep -q '^RAN: handle judges a trusted certificate' test.log
             grep -q '^RAN: engine refuses a trusted certificate' test.log

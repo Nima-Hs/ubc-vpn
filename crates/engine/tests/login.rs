@@ -281,6 +281,50 @@ fn a_form_with_a_choice_of_group_fails_unasked() {
     }
 }
 
+// Security rule: no single sign-on and no external browser. A gateway that
+// asks for a login in an external browser gets nothing: the login fails at
+// once, and the library never listens on its port for the browser (29786)
+// and so never waits for one. Our libraries are built without that login,
+// and the engine never sets a single sign-on handler.
+//
+// Only ever run this against such a library: one with the external-browser
+// login would start a browser on this machine.
+#[test]
+fn a_single_sign_on_form_fails_at_once_and_nothing_listens() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("sso") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let gateway = gateway(&stand_in, &pin);
+    let done = std::sync::mpsc::channel();
+    // On a thread of its own, so that a library waiting for a browser fails
+    // this test and does not hold it.
+    std::thread::spawn(move || {
+        let attempt = attempt(engine, &gateway);
+        let _ = done.0.send((attempt.result, attempt.prompts.len()));
+    });
+    let browser_port = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 29786));
+    let mut listened = false;
+    let started = std::time::Instant::now();
+    let ended = loop {
+        listened |=
+            std::net::TcpStream::connect_timeout(&browser_port, Duration::from_millis(100)).is_ok();
+        if let Ok(ended) = done.1.try_recv() {
+            break Some(ended);
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!listened, "something listened on port 29786 for a browser");
+    assert_eq!(ended, Some((Err(LoginError::Failed), 0)));
+    // Nothing went to the login page the gateway named.
+    assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
+    println!("RAN: engine refuses single sign-on");
+}
+
 // Security rule: one handle for one attempt. A handle asked for a cookie a
 // second time reports success without connecting to anything, so a login
 // that reused one would succeed here, where the user gives up.
