@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use rustix::process::geteuid;
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 
-use super::{NOT_A_FOLDER, SocketTransport, TOO_OPEN, WRONG_OWNER, set_mode};
+use super::{NOT_A_FOLDER, SocketTransport, TOO_OPEN, WRONG_OWNER, set_mode, state};
 use crate::{
     Connection, Error, Listener, Mode, PhysicalNetwork, Platform, SplitDns, Transport, UserId,
     Verified, lock, os, suite,
@@ -630,6 +630,96 @@ fn listen_refuses_a_folder_others_could_change() {
         assert_eq!(listen(&link.join("ch")), failed(NOT_A_FOLDER), "parent");
         assert!(!real.join("ch").exists(), "made a folder through a link");
     }
+}
+
+// Security rule: the state folder and the files in it can be changed by
+// nobody but the service's user. What breaks that is refused and left as it
+// was found, never fixed.
+#[test]
+fn the_state_folder_and_its_files_are_the_services_alone() {
+    let Some(sandbox) = Sandbox::any("state folder") else {
+        return;
+    };
+    let mode = sandbox.mode;
+    let installed = mode == Mode::Installed;
+    let prepare = |dir: &Path| crate::prepare_state_dir(mode, dir).err();
+    let check = |file: &Path| crate::check_state_file(mode, file).err();
+
+    // Made when missing, closed to others' writing, and fine the second time.
+    let dir = sandbox.dir.join("state");
+    assert_eq!(prepare(&dir), None, "make");
+    let made = if installed { 0o755 } else { 0o700 };
+    assert_eq!(owner_and_mode(&dir), (me(), made));
+    assert_eq!(prepare(&dir), None, "again");
+    // Whatever the umask.
+    let masked = sandbox.dir.join("masked");
+    assert_eq!(with_umask(0o777, || prepare(&masked)), None, "make masked");
+    assert_eq!(owner_and_mode(&masked), (me(), made), "the umask won");
+
+    for (name, bit) in [("group", 0o020), ("world", 0o002)] {
+        let open = sandbox.folder(name, 0o700 | bit);
+        assert_eq!(prepare(&open), failed(state::TOO_OPEN), "{name}-writable");
+        assert_eq!(owner_and_mode(&open), (me(), 0o700 | bit), "changed it");
+    }
+    let real = sandbox.folder("real", 0o700);
+    let link = sandbox.dir.join("link");
+    symlink(&real, &link).expect("link");
+    assert_eq!(prepare(&link), failed(state::NOT_A_FOLDER));
+    // Another user's folder: one handed to a stranger as root, and the root
+    // folder for anyone else.
+    let foreign = if me() == 0 {
+        let foreign = sandbox.folder("foreign", 0o700);
+        chown(&foreign, Some(STRANGER), None).expect("hand over");
+        foreign
+    } else {
+        PathBuf::from("/")
+    };
+    assert_eq!(prepare(&foreign), failed(state::WRONG_OWNER));
+    if me() == 0 {
+        assert_eq!(owner_and_mode(&foreign), (STRANGER, 0o700), "took it");
+    }
+    // Installed, the same holds for every folder on the way, and nothing is
+    // made inside one that breaks it.
+    if installed {
+        let open = sandbox.folder("open", 0o777);
+        let inside = open.join("state");
+        assert_eq!(prepare(&inside), failed(state::TOO_OPEN), "parent");
+        assert!(!inside.exists(), "made a folder in it");
+        set_mode(&real, 0o755).expect("open the real folder");
+        assert_eq!(prepare(&link.join("state")), failed(state::NOT_A_FOLDER));
+        assert!(!real.join("state").exists(), "made a folder through a link");
+    }
+
+    // A file in the state folder.
+    let file = dir.join("state.json");
+    assert_eq!(check(&file), None, "a missing file");
+    fs::write(&file, "{}").expect("write");
+    set_mode(&file, 0o644).expect("mode");
+    assert_eq!(check(&file), None, "a file of the service's own");
+    for bit in [0o020, 0o002] {
+        set_mode(&file, 0o644 | bit).expect("open it");
+        assert_eq!(check(&file), failed(state::FILE_OPEN), "{bit:o}");
+        assert_eq!(owner_and_mode(&file), (me(), 0o644 | bit), "changed it");
+    }
+    set_mode(&file, 0o644).expect("close it");
+    let linked = dir.join("linked.json");
+    symlink(&file, &linked).expect("link");
+    assert_eq!(check(&linked), failed(state::NOT_A_FILE), "a link");
+    let folder = dir.join("folder.json");
+    fs::create_dir(&folder).expect("a folder");
+    assert_eq!(check(&folder), failed(state::NOT_A_FILE), "a folder");
+    if me() == 0 {
+        chown(&file, Some(STRANGER), None).expect("hand over");
+        assert_eq!(check(&file), failed(state::FILE_OWNER));
+        assert_eq!(owner_and_mode(&file), (STRANGER, 0o644), "took it");
+    }
+    // A file is no better than its folder.
+    let open = sandbox.folder("open-state", 0o722);
+    assert_eq!(
+        check(&open.join("state.json")),
+        failed(state::TOO_OPEN),
+        "a file in an open folder"
+    );
 }
 
 // Security rule: the folder's and the socket's owner and mode are set

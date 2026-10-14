@@ -35,7 +35,7 @@
 use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -757,6 +757,43 @@ impl Platform {
     /// `mode`.
     pub fn native(mode: Mode) -> Result<Self> {
         os::native(mode)
+    }
+}
+
+/// Makes the state folder [`Paths::state_dir`] when it is missing, and
+/// checks it. The service calls it before it reads or writes anything there.
+///
+/// Security rule: nobody but the service's user can change the folder or
+/// what is in it. Installed on macOS and Linux, the folder and every folder
+/// above it must be real folders, root's, and writable by root alone; in dev
+/// mode the folder must be the developer's and closed to others. A folder
+/// that breaks the rule is refused with [`Error::Failed`] and left as it was:
+/// nothing here changes the owner or mode of anything it did not make.
+///
+/// Not implemented on Windows, which reports [`Error::Unsupported`].
+pub fn prepare_state_dir(mode: Mode, dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    return unix::state::prepare(mode, dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (mode, dir);
+        Err(Error::Unsupported)
+    }
+}
+
+/// Checks a file in the state folder, and the folder, before the service
+/// reads or replaces it. A missing file passes. Installed on macOS and Linux
+/// the file must be a real file, root's, and writable by root alone; a file
+/// that breaks the rule is refused with [`Error::Failed`] and left as it was.
+///
+/// Not implemented on Windows, which reports [`Error::Unsupported`].
+pub fn check_state_file(mode: Mode, file: &Path) -> Result<()> {
+    #[cfg(unix)]
+    return unix::state::check_file(mode, file);
+    #[cfg(not(unix))]
+    {
+        let _ = (mode, file);
+        Err(Error::Unsupported)
     }
 }
 
