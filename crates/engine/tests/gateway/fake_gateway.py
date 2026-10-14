@@ -24,6 +24,8 @@ Scenarios, by what the gateway does after showing the login form:
             on the same port (443)
   otherport answers the first request with a redirect to the same host name
             on another port (8443)
+  csdstub   offers a host-scan program whose stub is on the gateway's own
+            host, so that a client fetches it before refusing to run it
   sso       shows a single sign-on form for an external browser, whose
             login page is on the other listener
 
@@ -49,7 +51,7 @@ import time
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
-    "codeagain", "otherhost", "otherport", "sso",
+    "codeagain", "otherhost", "otherport", "sso", "csdstub",
 )
 
 
@@ -185,6 +187,17 @@ class Gateway(http.server.BaseHTTPRequestHandler):
                 self.reply(SUCCESS, COOKIE)
         elif scenario == "redirect":
             self.reply(b"", status=302, location=elsewhere + "/")
+        elif scenario == "csdstub" and self.path == "/":
+            # The stub to run is on the gateway's own host. Each platform's
+            # client reads its own tag; all three are here.
+            own = "https://vpn.example.test"
+            tags = "".join(
+                '<%s stuburl="%s/CACHE/stub" starturl="%s/CACHE/start" '
+                'waiturl="/+CSCOE+/sdesktop/wait.html" />' % (tag, own, own)
+                for tag in ("csd", "csdLinux", "csdMac")
+            )
+            body = form("/auth", LOGIN, extra=host_scan(own))
+            self.reply(body.replace(b'<auth id="main">', b'<auth id="main">' + tags.encode()))
         elif scenario == "sso":
             self.reply(sso_form(elsewhere))
         elif scenario == "otherhost" and self.path == "/":

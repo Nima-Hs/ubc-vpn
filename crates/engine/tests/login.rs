@@ -41,6 +41,11 @@ fn engine() -> (&'static OpenConnect, Library, MutexGuard<'static, ()>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let engine = LOADED.get_or_init(|| {
         let prepared = prepare_environment(Role::Client, None).expect("the environment is clean");
+        // Only in the control child of the key-log test.
+        #[cfg(windows)]
+        if let Some(file) = std::env::var_os(PUT_BACK) {
+            put_key_log_back(&file);
+        }
         let libs = Path::new(env!("UBC_VPN_NATIVE_LIBS"));
         OpenConnect::load(libs, &prepared).expect("the pinned library loads")
     });
@@ -480,8 +485,12 @@ fn a_login_asks_for_at_most_three_codes() {
 }
 
 // Security rule: the engine sets no host-scan wrapper, so a gateway's offer
-// of a program to download and run ends the login. Nothing is fetched from
-// where the offer points, nothing is run, and the user is asked nothing.
+// of a program to download and run ends the login: nothing is run, and the
+// user is asked nothing. The library does fetch the program's stub first,
+// if the offer names one, and refuses to run it only afterwards. So a stub
+// elsewhere is a fetch the resolver must refuse; this offer points at the
+// other listener, which gets nothing. The test below covers a stub on the
+// gateway's own host.
 #[test]
 fn an_offer_of_a_host_scan_program_ends_the_login() {
     let (engine, library, _guard) = engine();
@@ -542,6 +551,26 @@ fn a_login_waiting_on_the_gateway_stops_when_cancelled() {
     from_outside.cancel();
 }
 
+// A host-scan stub on the gateway's own host is fetched from the pinned
+// gateway, and then not run: the login fails, nothing is asked, and no
+// answer is sent. The fetch is the library's; there is no switch for it.
+#[test]
+fn a_host_scan_stub_on_the_gateway_is_fetched_and_not_run() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("csdstub") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert_eq!(attempt.result, Err(LoginError::Failed));
+    assert!(attempt.prompts.is_empty(), "{:?}", kinds(&attempt));
+    let requests = stand_in.requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests[1].contains("/CACHE/stub"), "{requests:?}");
+    assert_eq!(sent(&stand_in, NAME), 0);
+    assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
+}
+
 /// Set for the child process of the key-log test.
 const CHILD: &str = "UBC_VPN_TEST_LOGIN_CHILD";
 
@@ -559,10 +588,33 @@ fn child() {
     println!("CHILD LOGIN: {}", attempt.result.is_ok());
 }
 
+/// Set, with a file name, for the control child of the key-log test. That
+/// child puts `SSLKEYLOGFILE` back where the libraries read it, after the
+/// environment step and before loading, as a careless program could.
+#[cfg(windows)]
+const PUT_BACK: &str = "UBC_VPN_TEST_PUT_BACK_KEY_LOG";
+
+/// Sets `SSLKEYLOGFILE` in this program's C runtime, the copy of the
+/// environment the libraries read. For the control child only.
+#[cfg(windows)]
+fn put_key_log_back(file: &std::ffi::OsStr) {
+    unsafe extern "C" {
+        fn _putenv_s(name: *const std::ffi::c_char, value: *const std::ffi::c_char) -> i32;
+    }
+    let file = std::ffi::CString::new(file.to_str().expect("a plain path")).unwrap();
+    // SAFETY: both are NUL-terminated strings that outlive the call, which
+    // copies them. The child runs this one test, before any library code.
+    let set = unsafe { _putenv_s(c"SSLKEYLOGFILE".as_ptr(), file.as_ptr()) };
+    assert_eq!(set, 0);
+}
+
 // Security rule: on Windows the start-up step removes `SSLKEYLOGFILE` where
 // the libraries read it, so a TLS key log is never written, whatever the
-// program was started with. Watched here on a real login: with the variable
-// left in place, GnuTLS writes the session's keys to the file it names.
+// program was started with. Watched here on a real login.
+//
+// The control puts the variable back after the step and before loading, and
+// then the key log must appear. Without it, this test would also pass if a
+// future GnuTLS stopped reading the variable, and would then show nothing.
 #[cfg(windows)]
 #[test]
 fn a_key_log_named_in_the_environment_is_never_written() {
@@ -570,19 +622,30 @@ fn a_key_log_named_in_the_environment_is_never_written() {
     if StandIn::start("accept").is_none() {
         return;
     }
-    let file = std::env::temp_dir().join(format!("ubc-vpn-test-keys-{}", std::process::id()));
-    let _ = std::fs::remove_file(&file);
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["child", "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD, "1")
-        .env("SSLKEYLOGFILE", &file)
-        .output()
-        .expect("the child starts");
-    let written = file.exists();
-    let _ = std::fs::remove_file(&file);
-    let said = String::from_utf8_lossy(&output.stdout);
-    assert!(said.contains("CHILD LOGIN: true"), "{said}");
-    assert!(!written, "a TLS key log was written");
+    let run = |put_back: bool| {
+        let name = format!("ubc-vpn-test-keys-{}-{put_back}", std::process::id());
+        let file = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&file);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["child", "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("SSLKEYLOGFILE", &file);
+        if put_back {
+            child.env(PUT_BACK, &file);
+        }
+        let output = child.output().expect("the child starts");
+        let written = file.exists();
+        let _ = std::fs::remove_file(&file);
+        let said = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(said.contains("CHILD LOGIN: true"), "{said}");
+        written
+    };
+    assert!(
+        run(true),
+        "the control wrote no key log: the test cannot see one"
+    );
+    assert!(!run(false), "a TLS key log was written");
     println!("RAN: engine writes no key log");
 }
 
