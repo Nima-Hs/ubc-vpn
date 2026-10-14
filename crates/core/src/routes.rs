@@ -255,6 +255,9 @@ pub enum LocalConflict {
     InsideLocalNetwork(Ipv4Net, Ipv4Net),
     /// The route would capture the physical network's router.
     HoldsRouter(Ipv4Net, Ipv4Addr),
+    /// The route is the gateway's own address, which is routed through the
+    /// physical network, never the tunnel.
+    IsGateway(Ipv4Net),
 }
 
 impl fmt::Display for LocalConflict {
@@ -268,6 +271,9 @@ impl fmt::Display for LocalConflict {
             }
             Self::HoldsRouter(net, router) => {
                 write!(f, "{net} contains {router}, the router of this network")
+            }
+            Self::IsGateway(net) => {
+                write!(f, "{net} is the gateway itself, which cannot be tunnelled")
             }
         }
     }
@@ -293,6 +299,9 @@ impl std::error::Error for LocalConflict {}
 ///   where it is. Without it the route to the gateway, which goes through
 ///   the router, would lead into the tunnel.
 /// - The gateway's address must not be one of the machine's own.
+/// - A subnet that is the gateway's address alone is refused. The gateway is
+///   always reached through the physical network, by a host route of its
+///   own; a wider subnet that contains it is fine.
 pub fn check_against_local(
     subnets: &[Ipv4Net],
     gateway: Ipv4Addr,
@@ -302,6 +311,9 @@ pub fn check_against_local(
         return Err(LocalConflict::GatewayIsOwnAddress(gateway));
     }
     for subnet in subnets {
+        if subnet.prefix_len() == 32 && subnet.addr() == gateway {
+            return Err(LocalConflict::IsGateway(*subnet));
+        }
         if let Some(on_link) = local.on_link.iter().find(|net| net.contains(subnet)) {
             return Err(LocalConflict::InsideLocalNetwork(*subnet, *on_link));
         }
@@ -597,6 +609,34 @@ mod tests {
             check_against_local(&subnets, GATEWAY.into(), &direct),
             Ok(())
         );
+    }
+
+    // Every subnet is checked, not only the last: here the conflict comes
+    // first and the rest are fine.
+    #[test]
+    fn checks_every_subnet_wherever_the_conflict_is() {
+        let local = LocalNetworks {
+            own_addresses: &[Ipv4Addr::new(10, 0, 0, 7)],
+            on_link: &[net("10.0.0.0/24")],
+            next_hop: Some(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        let subnets = [net("10.0.0.0/25"), net("192.0.2.0/24"), net("10.19.0.0/16")];
+        let refused = LocalConflict::InsideLocalNetwork(net("10.0.0.0/25"), net("10.0.0.0/24"));
+        let checked = check_against_local(&subnets, GATEWAY.into(), &local);
+        assert_eq!(checked, Err(refused));
+    }
+
+    // Security rule: the gateway's own address is routed through the
+    // physical network. A route for it alone would contend with that one.
+    #[test]
+    fn refuses_a_host_route_to_the_gateway_but_not_a_subnet_holding_it() {
+        let host = net("198.51.100.1/32");
+        assert_eq!(
+            checked("198.51.100.1/32", GATEWAY),
+            Err(LocalConflict::IsGateway(host))
+        );
+        assert_eq!(checked("198.51.100.0/24", GATEWAY), Ok(()));
+        assert_eq!(checked("198.51.100.2/32", GATEWAY), Ok(()));
     }
 
     // Security rule: an unprivileged client names the gateway's address. It

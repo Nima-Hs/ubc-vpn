@@ -76,8 +76,13 @@ pub enum Error {
     PermissionDenied,
     /// The thing acted on does not exist, such as a channel nobody listens on.
     NotFound,
-    /// The name is taken, such as a channel another process already holds.
+    /// The name is taken, such as a channel another process already holds,
+    /// or the destination is: a route to it exists through another
+    /// interface or next hop.
     AlreadyExists,
+    /// An argument is outside the range the operation accepts, such as a
+    /// packet size. Nothing was changed.
+    InvalidInput,
     /// Something listens on the channel, but it is not the service. Nothing
     /// was sent to it. Trying again will not help until the real service
     /// holds the name.
@@ -110,6 +115,7 @@ impl fmt::Display for Error {
             Self::PermissionDenied => "permission denied",
             Self::NotFound => "not found",
             Self::AlreadyExists => "already exists",
+            Self::InvalidInput => "a value is out of range",
             Self::NotTheService => "the channel is held by a program that is not the service",
             Self::NotATerminal => "there is no terminal to ask in",
             Self::Interrupted => "the user pressed Ctrl-C at a question",
@@ -192,7 +198,8 @@ impl PhysicalNetwork {
     }
 
     /// The networks the machine was directly on at capture: for every
-    /// interface, each address with its prefix. Interfaces that are not
+    /// interface, the network of each of its addresses, which is the address
+    /// with its prefix and the host bits cleared. Interfaces that are not
     /// hardware count, such as a bridge made by a container or virtual
     /// machine program. The service refuses routes that would take one of
     /// these into the tunnel; the rule is
@@ -209,16 +216,24 @@ impl PhysicalNetwork {
 /// # Which routes are ours
 ///
 /// Every operation that removes a route removes only routes this product
-/// added. A route that was already there when an `add_*` was called is not
-/// ours, even when it is identical to the one asked for: the add succeeds,
-/// and every later removal leaves that route alone.
+/// added.
+///
+/// Adding is exclusive: an `add_*` creates a route, and never replaces or
+/// changes one that is there. Two routes are identical when they have the
+/// same destination, the same interface and the same next hop. When an
+/// identical route is already there the add succeeds, but that route is not
+/// ours, and every later removal leaves it alone. When a route to the same
+/// destination is there through another interface or next hop, the add
+/// fails with [`Error::AlreadyExists`] and changes nothing: traffic would
+/// go where the caller did not ask.
 ///
 /// So that [`Routes::remove_all`] can tell after a crash, from a new process,
 /// an implementation marks or records each route **when it adds it**:
 ///
-/// - **Linux** gives its routes a route protocol number of its own, one the
-///   system's tables do not list, and removes exactly the routes that carry
-///   it. No journal is needed.
+/// - **Linux** gives its routes the route protocol number
+///   [`LINUX_ROUTE_PROTOCOL`], one the system's tables do not list, and
+///   removes exactly the routes that carry it. No journal is needed. The
+///   number never changes, so a later version finds an earlier one's routes.
 /// - **macOS** writes the exact route to a journal in the state folder, which
 ///   only an administrator can write, and also sets a route flag. It removes
 ///   a route only when it matches a journal row and carries the flag.
@@ -232,6 +247,11 @@ impl PhysicalNetwork {
 /// the time the machine was started, and rows from another start are
 /// discarded without removing anything: routes do not outlive a restart, and
 /// an identical one found later is somebody else's.
+///
+/// One case is accepted: a crash between writing a row and adding the route,
+/// followed in the same boot by somebody else adding the identical route,
+/// lets [`Routes::remove_all`] remove that route. It needs the same
+/// destination, interface and next hop, within one boot, after a crash.
 ///
 /// The `tunnel` and `interface` arguments are names, as an OS-defined token.
 /// An implementation resolves the name on every call and, where it is told
@@ -256,6 +276,13 @@ pub trait Routes: Send + Sync {
     /// Where the OS would give a device an IPv6 address of its own accord
     /// when it comes up, the implementation turns that off first.
     ///
+    /// The device ends up with this one IPv4 address and no other: any other
+    /// IPv4 address it has, such as one left on a reused adapter, is
+    /// removed.
+    ///
+    /// The packet size must be in [`TUNNEL_MTU`], 576 to 1500; anything else
+    /// fails with [`Error::InvalidInput`] and changes nothing.
+    ///
     /// Succeeds when the device already has this address and size. Fails
     /// with [`Error::NotFound`] when there is no such device. There is no
     /// operation to undo it: the address goes when the engine closes the
@@ -263,8 +290,9 @@ pub trait Routes: Send + Sync {
     fn configure_tunnel(&self, tunnel: &str, address: Ipv4Addr, mtu: u16) -> Result<()>;
 
     /// Routes the one address `gateway` through the physical network, so
-    /// traffic to the gateway never enters its own tunnel. Succeeds if the
-    /// route is already there, whoever added it.
+    /// traffic to the gateway never enters its own tunnel. An exclusive add,
+    /// as "Which routes are ours" says: it succeeds over an identical route
+    /// and fails with [`Error::AlreadyExists`] over a different one.
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()>;
 
     /// Removes that route if this product added it. Succeeds if it is not
@@ -272,9 +300,9 @@ pub trait Routes: Send + Sync {
     fn remove_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()>;
 
     /// Routes `subnets` through the interface named `tunnel`. Never disturbs a
-    /// gateway route, even when a subnet contains the gateway. Succeeds for
-    /// routes already there, whoever added them. On error some may have been
-    /// added: remove them.
+    /// gateway route, even when a subnet contains the gateway. Exclusive adds,
+    /// as "Which routes are ours" says. On error some may have been added:
+    /// remove them.
     fn add_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()>;
 
     /// Removes those of the routes that this product added, and nothing else;
@@ -291,6 +319,15 @@ pub trait Routes: Send + Sync {
     /// whether that is `interface`.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified;
 }
+
+/// The route protocol number Linux marks this product's routes with (see
+/// [`Routes`]). It is not in the system's list of protocol numbers, and it
+/// never changes.
+pub const LINUX_ROUTE_PROTOCOL: u8 = 0xb5;
+
+/// The packet sizes [`Routes::configure_tunnel`] accepts: from the smallest
+/// every IPv4 host must take to an Ethernet frame's payload.
+pub const TUNNEL_MTU: std::ops::RangeInclusive<u16> = 576..=1500;
 
 /// Resolvers that answer for some domains only.
 #[derive(Debug, Clone, PartialEq, Eq)]

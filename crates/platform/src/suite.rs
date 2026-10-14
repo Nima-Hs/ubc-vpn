@@ -97,29 +97,52 @@ pub fn check_routes(routes: &dyn Routes, tunnel: &str) {
 /// Checks [`Routes::configure_tunnel`] on the device named `tunnel`, which must
 /// exist and carry no routes. The address it sets stays until the device
 /// goes.
-pub fn check_configure_tunnel(routes: &dyn Routes, tunnel: &str) {
-    let address = Ipv4Addr::new(198, 51, 100, 7);
-    routes
-        .configure_tunnel(tunnel, address, 1300)
-        .expect("configure");
-    routes
-        .configure_tunnel(tunnel, address, 1300)
-        .expect("configure again");
+pub fn check_configure_tunnel(routes: &dyn Routes, foreign: &dyn Foreign, tunnel: &str) {
+    let address = |n| Ipv4Addr::new(198, 51, 100, n);
+    // A reused adapter can keep an address from before; it does not stay.
+    foreign.add_address(tunnel, address(99));
+    let configure = |n, mtu| routes.configure_tunnel(tunnel, address(n), mtu);
+    configure(7, 1300).expect("configure");
+    configure(7, 1300).expect("configure again");
+    assert_eq!(
+        foreign.addresses(tunnel),
+        [address(7)],
+        "another address stayed"
+    );
+
     // Security rule: the address is a single host. Its neighbours, which a
     // netmask would have put on the tunnel's link, are not routed there.
-    for neighbour in [1, 6, 8, 254].map(|n| Ipv4Addr::new(198, 51, 100, n)) {
+    for neighbour in [1, 6, 8, 254].map(address) {
         let routed = routes.uses_interface(neighbour, tunnel);
         assert_eq!(routed, Verified::No, "{neighbour} follows the address");
+    }
+
+    // A new address replaces the old one.
+    configure(8, 1400).expect("configure another address");
+    assert_eq!(foreign.addresses(tunnel), [address(8)]);
+
+    // A packet size out of range changes nothing.
+    for mtu in [0, 575, 1501, u16::MAX] {
+        assert_eq!(configure(9, mtu), Err(Error::InvalidInput), "{mtu}");
+    }
+    assert_eq!(foreign.addresses(tunnel), [address(8)]);
+    for mtu in [576, 1500] {
+        configure(8, mtu).expect("a size at the edge of the range");
     }
 }
 
 /// What a harness does as somebody other than the product, by the OS's own
-/// means: on a real OS, the system's route tool.
+/// means: on a real OS, the system's route and address tools.
 pub trait Foreign {
-    /// Adds a route to `net` through the interface named `interface`.
+    /// Adds a route to `net` through the interface named `interface`, by
+    /// the interface's usual router when it has one.
     fn add_route(&self, interface: &str, net: Ipv4Net);
     /// Removes it again.
     fn remove_route(&self, interface: &str, net: Ipv4Net);
+    /// Gives the interface another IPv4 address.
+    fn add_address(&self, interface: &str, address: Ipv4Addr);
+    /// The interface's IPv4 addresses, as the OS lists them.
+    fn addresses(&self, interface: &str) -> Vec<Ipv4Addr>;
 }
 
 /// Checks that the product removes only routes it added, in this run or after
@@ -136,8 +159,11 @@ pub fn check_route_ownership(
     let (theirs, ours) = (net(198, 51, 100), net(192, 0, 2));
     let (in_theirs, in_ours) = (Ipv4Addr::new(198, 51, 100, 9), Ipv4Addr::new(192, 0, 2, 9));
     let (yes, no) = (Verified::Yes, Verified::No);
+    let gateway = Ipv4Addr::new(203, 0, 113, 1);
 
     routes.remove_all().expect("remove all with nothing added");
+    let physical = routes.capture_physical(gateway).expect("capture");
+    let wire = physical.interface().to_string();
     foreign.add_route(tunnel, theirs);
     assert_eq!(
         routes.uses_interface(in_theirs, tunnel),
@@ -178,6 +204,43 @@ pub fn check_route_ownership(
     );
 
     foreign.remove_route(tunnel, theirs);
+    routes.remove_all().expect("remove all");
+
+    // A route to the same destination through another interface is not
+    // replaced, and the add says so.
+    let elsewhere = net(198, 18, 0);
+    foreign.add_route(&wire, elsewhere);
+    let refused = routes.add_tunnel_routes(tunnel, &[elsewhere]);
+    assert_eq!(refused, Err(Error::AlreadyExists), "replaced a route");
+    let kept = routes.uses_interface(Ipv4Addr::new(198, 18, 0, 9), &wire);
+    assert_eq!(kept, yes, "the route through the other interface went");
+    foreign.remove_route(&wire, elsewhere);
+
+    // The same for the gateway's host route. Somebody else's sends the
+    // gateway out of a subnet that is otherwise tunnelled; while it is there,
+    // the gateway still leaves by the physical interface.
+    let gateway_host = Ipv4Net::new(gateway, 32).expect("valid network");
+    foreign.add_route(tunnel, net(203, 0, 113));
+    foreign.add_route(&wire, gateway_host);
+    let via_wire = || routes.uses_interface(gateway, &wire);
+    assert_eq!(via_wire(), yes, "the harness added nothing");
+    routes
+        .add_gateway_route(gateway, &physical)
+        .expect("add over theirs");
+    routes
+        .remove_gateway_route(gateway, &physical)
+        .expect("remove");
+    assert_eq!(via_wire(), yes, "removed somebody else's gateway route");
+    routes
+        .add_gateway_route(gateway, &physical)
+        .expect("add again");
+    restarted()
+        .remove_all()
+        .expect("remove all after a restart");
+    assert_eq!(via_wire(), yes, "remove_all took their gateway route");
+
+    foreign.remove_route(&wire, gateway_host);
+    foreign.remove_route(tunnel, net(203, 0, 113));
     routes.remove_all().expect("remove all");
 }
 

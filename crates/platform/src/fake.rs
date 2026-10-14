@@ -91,8 +91,10 @@ struct State {
     applied: Applied,
     /// Every `configure_tunnel` call, in order, failed ones included.
     configured: Vec<Configured>,
-    /// The address and packet size each tunnel device has now.
-    addresses: HashMap<String, (Ipv4Addr, u16)>,
+    /// The IPv4 addresses each device has now, in the order they were added.
+    addresses: HashMap<String, Vec<Ipv4Addr>>,
+    /// The packet size each configured device has now.
+    mtus: HashMap<String, u16>,
     /// Devices a test took away.
     absent: HashSet<String>,
     /// Routes somebody else added: the interface and the destination.
@@ -112,6 +114,7 @@ impl Default for State {
             applied: Applied::default(),
             configured: Vec::new(),
             addresses: HashMap::new(),
+            mtus: HashMap::new(),
             absent: HashSet::new(),
             foreign: Vec::new(),
             own_addresses: vec![OWN_ADDRESS],
@@ -119,6 +122,52 @@ impl Default for State {
             subscribers: Vec::new(),
             listeners: HashMap::new(),
         }
+    }
+}
+
+/// What is already there for one destination.
+enum Present {
+    None,
+    /// A route through the interface asked for.
+    Identical,
+    /// A route through another interface.
+    Elsewhere,
+}
+
+/// The host route for `addr`.
+fn host(addr: Ipv4Addr) -> Result<Ipv4Net> {
+    Ipv4Net::new(addr, 32).map_err(|e| Error::Failed(e.to_string()))
+}
+
+impl State {
+    /// Every route on the fake machine as the OS would list it, the
+    /// product's and anybody else's, as interface and destination.
+    fn table(&self) -> Vec<(String, Ipv4Net)> {
+        let gateway = self.applied.gateway_routes.iter();
+        let gateway =
+            gateway.filter_map(|(dest, via)| Some((via.interface.clone(), host(*dest).ok()?)));
+        let tunnel = self.applied.tunnel_routes.iter().cloned();
+        gateway
+            .chain(tunnel)
+            .chain(self.foreign.iter().cloned())
+            .collect()
+    }
+
+    fn route_to(&self, net: Ipv4Net, interface: &str) -> Present {
+        let table = self.table();
+        let mut same = table.iter().filter(|(_, dest)| *dest == net);
+        match same.next() {
+            None => Present::None,
+            Some(_) if table.iter().any(|(i, d)| *d == net && i != interface) => Present::Elsewhere,
+            Some(_) => Present::Identical,
+        }
+    }
+
+    /// The OS holds one route per destination and interface. When the
+    /// product removes its own, an identical one recorded as somebody
+    /// else's goes too, so an implementation that took one over shows it.
+    fn forget(&mut self, interface: &str, net: Ipv4Net) {
+        self.foreign.retain(|(i, d)| !(i == interface && *d == net));
     }
 }
 
@@ -181,11 +230,27 @@ impl Fake {
         self.state().configured.clone()
     }
 
-    /// The address and largest packet size the device `tunnel` has now. It is
-    /// not part of [`Applied`]: no teardown step removes it, it goes with the
-    /// device, which a test plays with [`Fake::set_device`].
-    pub fn tunnel_address(&self, tunnel: &str) -> Option<(Ipv4Addr, u16)> {
-        self.state().addresses.get(tunnel).copied()
+    /// The IPv4 addresses the device `name` has now. They are not part of
+    /// [`Applied`]: no teardown step removes them, they go with the device,
+    /// which a test plays with [`Fake::set_device`].
+    pub fn device_addresses(&self, name: &str) -> Vec<Ipv4Addr> {
+        let state = self.state();
+        state.addresses.get(name).cloned().unwrap_or_default()
+    }
+
+    /// The largest packet size the device `name` was configured with.
+    pub fn device_mtu(&self, name: &str) -> Option<u16> {
+        self.state().mtus.get(name).copied()
+    }
+
+    /// Gives the device `name` an address as somebody else would, such as
+    /// one an adapter kept from an earlier use.
+    pub fn add_foreign_address(&self, name: &str, address: Ipv4Addr) {
+        let mut state = self.state();
+        let addresses = state.addresses.entry(name.to_string()).or_default();
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
     }
 
     /// Takes the device `name` away, or brings it back bare. Every name is a
@@ -200,6 +265,7 @@ impl Fake {
         }
         state.absent.insert(name.to_string());
         state.addresses.remove(name);
+        state.mtus.remove(name);
         state.foreign.retain(|(interface, _)| interface != name);
         let routes = &mut state.applied.tunnel_routes;
         routes.retain(|(interface, _)| interface != name);
@@ -325,42 +391,52 @@ impl Routes for Fake {
     }
 
     /// Sets the address and nothing more: no network comes with it, so a
-    /// service that counted on one fails its tests.
+    /// service that counted on one fails its tests. Any other address the
+    /// device had is removed.
     fn configure_tunnel(&self, tunnel: &str, address: Ipv4Addr, mtu: u16) -> Result<()> {
         let (mut state, outcome) = self.start(Op::ConfigureTunnel);
         state.configured.push((tunnel.to_string(), address, mtu));
         outcome?;
+        if !crate::TUNNEL_MTU.contains(&mtu) {
+            return Err(Error::InvalidInput);
+        }
         if state.absent.contains(tunnel) {
             return Err(Error::NotFound);
         }
-        state.addresses.insert(tunnel.to_string(), (address, mtu));
+        state.addresses.insert(tunnel.to_string(), vec![address]);
+        state.mtus.insert(tunnel.to_string(), mtu);
         Ok(())
     }
 
-    /// A host route to the gateway that somebody else added is left as it
-    /// is and never recorded as the product's.
+    /// An exclusive add, as the contract says. The fake has no next hops, so
+    /// the interface alone tells routes to one destination apart.
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
         let (mut state, outcome) = self.start(Op::AddGatewayRoute);
         outcome?;
-        let host = Ipv4Net::new(gateway, 32).map_err(|e| Error::Failed(e.to_string()))?;
-        if state.foreign.contains(&(via.interface.clone(), host)) {
-            return Ok(());
+        let host = host(gateway)?;
+        match state.route_to(host, &via.interface) {
+            Present::Identical => return Ok(()),
+            Present::Elsewhere => return Err(Error::AlreadyExists),
+            Present::None => {}
         }
-        let routes = &mut state.applied.gateway_routes;
-        routes.retain(|(dest, _)| *dest != gateway);
-        routes.push((gateway, via.clone()));
+        state.applied.gateway_routes.push((gateway, via.clone()));
         Ok(())
     }
 
     fn remove_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
-        self.run(Op::RemoveGatewayRoute, |applied| {
-            let routes = &mut applied.gateway_routes;
-            routes.retain(|(dest, net)| !(*dest == gateway && net == via));
-        })
+        let (mut state, outcome) = self.start(Op::RemoveGatewayRoute);
+        outcome?;
+        let ours = |(dest, net): &(Ipv4Addr, PhysicalNetwork)| *dest == gateway && net == via;
+        if state.applied.gateway_routes.iter().any(ours) {
+            state.applied.gateway_routes.retain(|route| !ours(route));
+            state.forget(&via.interface, host(gateway)?);
+        }
+        Ok(())
     }
 
-    /// A route somebody else added is left as it is and never recorded as
-    /// the product's.
+    /// Exclusive adds, as the contract says. On a route to the same
+    /// destination through another interface it stops there, keeping those
+    /// added before it.
     fn add_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()> {
         let (mut state, outcome) = self.start(Op::AddTunnelRoutes);
         if outcome.is_ok() && state.absent.contains(tunnel) {
@@ -368,27 +444,47 @@ impl Routes for Fake {
         }
         let skipped = usize::from(outcome.is_err() && !subnets.is_empty());
         for subnet in &subnets[..subnets.len() - skipped] {
-            let route = (tunnel.to_string(), *subnet);
-            let there = state.foreign.contains(&route);
-            if !there && !state.applied.tunnel_routes.contains(&route) {
-                state.applied.tunnel_routes.push(route);
+            match state.route_to(*subnet, tunnel) {
+                Present::Identical => {}
+                Present::Elsewhere => return Err(Error::AlreadyExists),
+                Present::None => {
+                    let route = (tunnel.to_string(), *subnet);
+                    state.applied.tunnel_routes.push(route);
+                }
             }
         }
         outcome
     }
 
     fn remove_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()> {
-        self.run(Op::RemoveTunnelRoutes, |applied| {
-            let routes = &mut applied.tunnel_routes;
-            routes.retain(|(name, subnet)| !(name == tunnel && subnets.contains(subnet)));
-        })
+        let (mut state, outcome) = self.start(Op::RemoveTunnelRoutes);
+        outcome?;
+        let ours = |(name, subnet): &(String, Ipv4Net)| name == tunnel && subnets.contains(subnet);
+        let removed: Vec<_> = state
+            .applied
+            .tunnel_routes
+            .iter()
+            .filter(|r| ours(r))
+            .cloned()
+            .collect();
+        state.applied.tunnel_routes.retain(|route| !ours(route));
+        for (name, subnet) in removed {
+            state.forget(&name, subnet);
+        }
+        Ok(())
     }
 
     fn remove_all(&self) -> Result<()> {
-        self.run(Op::RemoveAllRoutes, |applied| {
-            applied.gateway_routes.clear();
-            applied.tunnel_routes.clear();
-        })
+        let (mut state, outcome) = self.start(Op::RemoveAllRoutes);
+        outcome?;
+        let applied = std::mem::take(&mut state.applied.gateway_routes);
+        for (gateway, via) in applied {
+            state.forget(&via.interface, host(gateway)?);
+        }
+        for (name, subnet) in std::mem::take(&mut state.applied.tunnel_routes) {
+            state.forget(&name, subnet);
+        }
+        Ok(())
     }
 
     /// Picks a route as an OS does: the most specific one wins, so a host
@@ -425,6 +521,14 @@ impl crate::suite::Foreign for Fake {
 
     fn remove_route(&self, interface: &str, net: Ipv4Net) {
         self.remove_foreign_route(interface, net);
+    }
+
+    fn add_address(&self, interface: &str, address: Ipv4Addr) {
+        self.add_foreign_address(interface, address);
+    }
+
+    fn addresses(&self, interface: &str) -> Vec<Ipv4Addr> {
+        self.device_addresses(interface)
     }
 }
 
@@ -643,7 +747,7 @@ mod tests {
     fn passes_the_shared_suite_and_ends_clean() {
         let fake = Fake::new();
         suite::check_routes(&fake, TUNNEL);
-        suite::check_configure_tunnel(&fake, TUNNEL);
+        suite::check_configure_tunnel(&fake, &fake, TUNNEL);
         let restarted = || Box::new(fake.clone()) as Box<dyn Routes>;
         suite::check_route_ownership(&fake, &restarted, &fake, TUNNEL);
         suite::check_dns(&fake, TUNNEL, &|name| fake.resolvers_for(name));
@@ -711,13 +815,19 @@ mod tests {
             Op::AddTunnelRoutes,
         ];
         assert_eq!(fake.calls(), order);
-        assert_eq!(fake.tunnel_address(TUNNEL), Some((address, 1300)));
+        assert_eq!(
+            (fake.device_addresses(TUNNEL), fake.device_mtu(TUNNEL)),
+            (vec![address], Some(1300))
+        );
 
         fake.set_failure(Op::ConfigureTunnel, failed());
         let other = Ipv4Addr::new(10, 255, 0, 3);
         assert_eq!(fake.configure_tunnel(TUNNEL, other, 1400).err(), failed());
         // The failed call is recorded and changed nothing.
-        assert_eq!(fake.tunnel_address(TUNNEL), Some((address, 1300)));
+        assert_eq!(
+            (fake.device_addresses(TUNNEL), fake.device_mtu(TUNNEL)),
+            (vec![address], Some(1300))
+        );
         let tunnel = TUNNEL.to_string();
         let expected = [(tunnel.clone(), address, 1300), (tunnel, other, 1400)];
         assert_eq!(fake.configured(), expected);
@@ -732,7 +842,10 @@ mod tests {
         fake.configure_tunnel(TUNNEL, address, 1300).unwrap();
         fake.add_tunnel_routes(TUNNEL, &subnets()).unwrap();
         fake.set_device(TUNNEL, false);
-        assert_eq!(fake.tunnel_address(TUNNEL), None);
+        assert_eq!(
+            (fake.device_addresses(TUNNEL), fake.device_mtu(TUNNEL)),
+            (vec![], None)
+        );
         assert_eq!(fake.applied(), Applied::default());
         let gone = fake.configure_tunnel(TUNNEL, address, 1300);
         assert_eq!(gone, Err(Error::NotFound));
