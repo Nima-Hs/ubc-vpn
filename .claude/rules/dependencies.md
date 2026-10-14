@@ -19,9 +19,10 @@ Cargo does not manage native libraries, build and packaging tools, GitHub Action
 - Approved exception: Process Monitor, Microsoft's tracing tool, is not pinned. Only the Windows native workflow uses it, in `native/windows/tests/trace.sh`, to record what the probe touches. It is never shipped.
   - It is downloaded on each run from `https://live.sysinternals.com/Procmon64.exe`. Microsoft publishes only the current version there, with no versioned address, so a pinned checksum would stop matching whenever the file is replaced and the old version could not be fetched again.
   - Before it runs, the script requires a valid Authenticode signature whose publisher is Microsoft Corporation, and prints the version in the log.
-  - It runs as administrator on the build machine after the output is built and before it is uploaded. Before it is downloaded, the workflow records the SHA-256 of every file of the output and uploads that record. Immediately before the upload it fetches the record back and fails if a file has changed, gone missing or been added.
-  - That catches a tool that alters the output by accident or in passing. It does not stop a program running as administrator that sets out to defeat the check, so the signature check is still what we rely on against that.
-  - The machine is GitHub's and is discarded after the run, and the workflow uses no secrets and has read-only access to the repository.
+  - It runs as administrator, in a job of its own, on a machine that uploads nothing. That job works on a copy of the output and gives the rest of the workflow only its result, pass or fail.
+  - The output that ships is uploaded by another job, on a machine that never ran Process Monitor. That job checks every file against SHA-256 checksums recorded by the build job, and checks the list of them against a checksum the build job gave out as a job output.
+  - So a tampered Process Monitor could report a clean trace, but could not change what ships. The signature check is what we rely on for the trace's verdict.
+  - Each machine is GitHub's and is discarded after the run, and the workflow uses no secrets and has read-only access to the repository.
 - Approved exception: the MSYS2 base that the Windows native build runs in is not pinned. The build uses the MSYS2 already installed on GitHub's `windows-latest` runner, which changes when GitHub updates the image.
   - Pinned, by file name and SHA-256: the build tools in `native/windows/tools.lock` and the compiler and libraries in `native/windows/packages.lock`. `build.sh` stops if the installed ones differ.
   - Not pinned: everything those run on, such as the shell, coreutils, tar, curl, gpg and pacman.
