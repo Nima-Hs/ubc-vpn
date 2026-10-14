@@ -803,7 +803,8 @@ impl StateDir {
         if self.checked {
             return os::state::read(self.mode, &self.path, &file);
         }
-        let _ = self.mode;
+        // Read on every OS, though only Windows acts on them yet.
+        let _ = (self.mode, self.checked);
         state_plain::read(&file)
     }
 
