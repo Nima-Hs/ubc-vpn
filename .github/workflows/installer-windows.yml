@@ -64,6 +64,14 @@ jobs:
 
       - name: The setup program refuses another folder
         run: pwsh -NoProfile -File "$CHECK" refuse-folder dist/ubc-vpn-setup-*.exe
+      # The same setup program, built with its last folder step made to fail
+      # (packaging/windows/tests/fail-step.nsh). It must stop with an error
+      # and leave nothing behind, so a failure never leaves an install
+      # owned by whoever ran it.
+      - name: A setup program whose folder step fails leaves nothing behind
+        run: |
+          pnpm exec electron-builder --win --publish never             -c.nsis.include=../packaging/windows/tests/fail-step.nsh -c.directories.output=dist/fail
+          pwsh -NoProfile -File "$CHECK" install-fails dist/fail/ubc-vpn-setup-*.exe
       - name: Install
         run: pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*.exe
       - name: Every file is installed as built
@@ -92,6 +100,7 @@ jobs:
         run: |
           pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*.exe
           pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
+          pwsh -NoProfile -File "$CHECK" who-can-change
       - name: Uninstall
         run: pwsh -NoProfile -File "$CHECK" uninstall
       - name: Nothing is left but the user's data
