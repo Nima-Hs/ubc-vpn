@@ -41,7 +41,8 @@ impl Rig {
     /// A service whose tunnels are opened by `engine`.
     pub(crate) fn service_on(&self, engine: FakeEngine) -> Service {
         let platform = self.fake.platform(&self.root);
-        Service::start(platform, Arc::new(engine), Timeouts::default()).unwrap()
+        let state = ubc_vpn_platform::StateDir::unchecked(&platform.paths.state_dir).unwrap();
+        Service::start(platform, state, Arc::new(engine), Timeouts::default()).unwrap()
     }
 
     /// Runs the command line as the fake's own user, `fake-user`.
@@ -130,7 +131,12 @@ fn each_failure_has_its_own_exit_code_and_message() {
     assert!(err.contains("Another program is answering"), "{err}");
     rig.fake.set_failure(Op::Connect, None);
     assert!(
-        !rig.fake.platform(&rig.root).paths.state_dir.exists(),
+        !rig.fake
+            .platform(&rig.root)
+            .paths
+            .state_dir
+            .join("state.json")
+            .exists(),
         "no claim was sent"
     );
 
@@ -153,7 +159,7 @@ fn each_failure_has_its_own_exit_code_and_message() {
     let rig = Rig::new();
     let _service = rig.service();
     let state = rig.fake.platform(&rig.root).paths.state_dir;
-    std::fs::create_dir_all(state.join("state.json.tmp")).unwrap();
+    std::fs::create_dir_all(state.join(".state.json.new")).unwrap();
     let (code, out, err) = rig.run(&["status"]);
     assert_eq!((code, out.as_str()), (FAILED, ""));
     assert!(err.contains("The owner could not be saved"), "{err}");

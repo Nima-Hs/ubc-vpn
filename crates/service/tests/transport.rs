@@ -183,7 +183,7 @@ fn start(rig: &Rig, channel: &Scripted, timeouts: Timeouts) -> Service {
         transport: Arc::new(channel.clone()),
         ..rig.platform()
     };
-    Service::start(platform, rig.spy.clone(), timeouts).unwrap()
+    Service::start(platform, rig.state(), rig.spy.clone(), timeouts).unwrap()
 }
 
 /// Waits for something that should happen soon. A regression fails here.

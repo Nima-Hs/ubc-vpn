@@ -334,7 +334,7 @@ fn the_cookie_appears_nowhere() {
 
     let logs = rig.logs();
     assert!(logs.contains(&"> [redacted]".to_string()), "{logs:?}");
-    let files = std::fs::read_dir(rig.root.join("state")).unwrap();
+    let files = std::fs::read_dir(rig.state_dir()).unwrap();
     let files = files.map(|file| std::fs::read_to_string(file.unwrap().path()).unwrap());
     let shown = [
         logs,

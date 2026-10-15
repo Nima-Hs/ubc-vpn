@@ -6,11 +6,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use ubc_vpn_engine::TunnelEngine;
-use ubc_vpn_platform::Platform;
+use ubc_vpn_platform::{Platform, StateDir};
 use ubc_vpn_service::args::{self, Run};
 use ubc_vpn_service::{Service, Timeouts};
 
-type Parts = (Platform, Arc<dyn TunnelEngine>);
+type Parts = (Platform, StateDir, Arc<dyn TunnelEngine>);
 
 fn main() -> ExitCode {
     match run() {
@@ -25,9 +25,9 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mode = args::parse(std::env::args_os().skip(1))?;
     args::check_environment(mode)?;
-    let (platform, engine) = parts(mode)?;
+    let (platform, state, engine) = parts(mode)?;
     let dev_mode = mode != Run::Installed;
-    let service = Service::start_in(platform, engine, Timeouts::default(), dev_mode)?;
+    let service = Service::start_in(platform, state, engine, Timeouts::default(), dev_mode)?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
     Err(service.wait())
 }
@@ -64,7 +64,10 @@ fn dev() -> Result<Parts, String> {
     // policy accepts it. A valid policy always has one.
     let mut policy = ubc_vpn_service::policy::load(&platform.paths.policy_dir)?;
     let script = Script::new(policy.pins.remove(0));
+    // Checked as the installed service's is, but for this user: see `StateDir`.
+    let state = StateDir::open(Mode::Dev, &platform.paths)
+        .map_err(|e| format!("The state folder cannot be used: {e}."))?;
     // Logging in happens in another process, so this fake keeps accepting
     // the dev cookie after a log-off. Otherwise dev mode would connect once.
-    Ok((platform, Arc::new(FakeEngine::for_dev_mode(script))))
+    Ok((platform, state, Arc::new(FakeEngine::for_dev_mode(script))))
 }

@@ -96,7 +96,7 @@ fn a_non_owner_is_refused_and_disconnected() {
     };
     let made_up = |line: &LogLine| line.text.as_str() == "made up";
     assert!(!page.lines.iter().any(made_up), "a stranger added a line");
-    let stored = std::fs::read_to_string(rig.root.join("state/state.json")).unwrap();
+    let stored = std::fs::read_to_string(rig.state_dir().join("state.json")).unwrap();
     assert_eq!(stored, r#"{"owner":"alice"}"#);
 }
 
@@ -155,6 +155,32 @@ fn the_owner_survives_a_restart_and_nobody_else_can_claim() {
     assert_eq!(alice.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
 }
 
+// Security rule: the owner is read and written only through the state
+// folder the service was given, which is what checks who may change it. A
+// file at the plain path, which a standard user could have made, is neither
+// read nor written.
+#[test]
+fn the_owner_is_kept_only_in_the_state_folder_the_service_was_given() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    let plain = rig.fake.platform(&rig.root).paths.state_dir;
+    assert_ne!(plain, rig.state_dir());
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("state.json"), r#"{"owner":"mallory"}"#).unwrap();
+    rig.start().unwrap();
+    assert!(
+        !rig.peer("mallory").hello.owner_claimed,
+        "the plain file was read"
+    );
+    let _alice = rig.owner();
+    let stored = std::fs::read_to_string(rig.state_dir().join("state.json")).unwrap();
+    assert_eq!(stored, r#"{"owner":"alice"}"#);
+    let untouched = std::fs::read_to_string(plain.join("state.json")).unwrap();
+    assert_eq!(
+        untouched, r#"{"owner":"mallory"}"#,
+        "the plain file was written"
+    );
+}
+
 // Security rule: with an owner on record, a service that cannot have the OS
 // keep the channel to that owner does not serve at all.
 #[test]
@@ -174,8 +200,8 @@ fn a_stored_owner_the_channel_cannot_be_kept_to_stops_the_service() {
 #[test]
 fn a_damaged_or_unreadable_state_file_stops_the_service() {
     let mut rig = Rig::stopped(policy('A', ""));
-    let file = rig.root.join("state/state.json");
-    std::fs::create_dir_all(rig.root.join("state")).unwrap();
+    let file = rig.state_dir().join("state.json");
+    std::fs::create_dir_all(rig.state_dir()).unwrap();
     for damaged in ["", "{}", r#"{"owner":"two words"}"#] {
         std::fs::write(&file, damaged).unwrap();
         assert!(rig.start().unwrap_err().contains("damaged"), "{damaged:?}");
@@ -193,21 +219,21 @@ fn a_damaged_or_unreadable_state_file_stops_the_service() {
 #[test]
 fn a_claim_that_cannot_be_stored_makes_no_owner() {
     let rig = rig();
-    let partial = rig.root.join("state/state.json.tmp");
+    let partial = rig.state_dir().join(".state.json.new");
     // Not a file, so it is not written through or replaced.
     std::fs::create_dir_all(&partial).unwrap();
     let mut alice = rig.peer("alice");
     assert_eq!(alice.ask(RequestBody::Claim), Err(ErrorCode::Internal));
     assert_eq!(alice.ask(RequestBody::Status), Err(ErrorCode::NotClaimed));
     assert!(!rig.peer("bob").hello.owner_claimed);
-    assert!(!rig.root.join("state/state.json").exists());
+    assert!(!rig.state_dir().join("state.json").exists());
 
     // A partial file left by a crash is no obstacle, and does not survive.
     std::fs::remove_dir(&partial).unwrap();
     std::fs::write(&partial, "left behind").unwrap();
     assert_eq!(alice.ask(RequestBody::Claim), Ok(ResponseBody::Claimed));
     assert!(!partial.exists());
-    let stored = std::fs::read_to_string(rig.root.join("state/state.json")).unwrap();
+    let stored = std::fs::read_to_string(rig.state_dir().join("state.json")).unwrap();
     assert_eq!(stored, r#"{"owner":"alice"}"#);
 }
 
@@ -415,11 +441,11 @@ fn link_to_file(target: &std::path::Path, link: &std::path::Path) -> std::io::Re
 #[test]
 fn the_owner_is_never_written_through_a_link() {
     let rig = rig();
-    let state = rig.root.join("state");
+    let state = rig.state_dir();
     std::fs::create_dir_all(&state).unwrap();
     let target = rig.root.join("someone-elses-file");
     std::fs::write(&target, "precious").unwrap();
-    if let Err(error) = link_to_file(&target, &state.join("state.json.tmp")) {
+    if let Err(error) = link_to_file(&target, &state.join(".state.json.new")) {
         // Windows lets only an admin, or anyone in Developer Mode, make one.
         eprintln!("SKIPPED the_owner_is_never_written_through_a_link: no link ({error})");
         return;
@@ -430,4 +456,65 @@ fn the_owner_is_never_written_through_a_link() {
     assert!(std::fs::symlink_metadata(&stored).unwrap().is_file());
     let owner = std::fs::read_to_string(stored).unwrap();
     assert_eq!(owner, r#"{"owner":"alice"}"#);
+}
+
+/// A checked state folder, as dev mode opens it, at the rig's state folder,
+/// and a way to let everyone change it, as a standard user could have.
+#[cfg(all(windows, feature = "dev-mode"))]
+mod checked {
+    use super::*;
+    use ubc_vpn_platform::Mode;
+
+    pub fn open(rig: &Rig) -> StateDir {
+        let paths = ubc_vpn_platform::Paths {
+            state_dir: rig.state_dir(),
+            ..rig.platform().paths
+        };
+        StateDir::open(Mode::Dev, &paths).expect("a fresh dev-mode state folder")
+    }
+
+    /// Grants Everyone modify on the folder and what it holds.
+    pub fn open_to_everyone(rig: &Rig) {
+        let granted = std::process::Command::new("icacls")
+            .arg(rig.state_dir())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)(M)"])
+            .output()
+            .expect("icacls runs");
+        assert!(granted.status.success(), "{granted:?}");
+    }
+}
+
+// Security rule: the owner is read through the state folder's checks, not
+// around them. A folder anyone may change stops the service, even when it
+// holds a well-formed owner.
+#[cfg(all(windows, feature = "dev-mode"))]
+#[test]
+fn a_state_folder_others_may_change_is_not_read() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    let state = checked::open(&rig);
+    state.write("state.json", br#"{"owner":"alice"}"#).unwrap();
+    rig.start_with(state.clone())
+        .expect("a safe folder is used");
+    rig.stop();
+    checked::open_to_everyone(&rig);
+    let refused = rig.start_with(state).unwrap_err();
+    assert!(refused.contains("not safe to use"), "{refused}");
+    assert!(!refused.contains(".."), "{refused}");
+    assert_eq!(rig.raw("alice").err(), Some(Error::NotFound));
+}
+
+// Security rule: the owner is written through the same checks. A claim made
+// after the folder was opened to others is refused, and nobody owns the
+// service.
+#[cfg(all(windows, feature = "dev-mode"))]
+#[test]
+fn a_state_folder_others_may_change_is_not_written() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    let state = checked::open(&rig);
+    rig.start_with(state).expect("a safe folder is used");
+    checked::open_to_everyone(&rig);
+    let mut alice = rig.peer("alice");
+    assert_eq!(alice.ask(RequestBody::Claim), Err(ErrorCode::Internal));
+    assert_eq!(alice.ask(RequestBody::Status), Err(ErrorCode::NotClaimed));
+    assert!(!rig.state_dir().join("state.json").exists());
 }
