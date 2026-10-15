@@ -198,6 +198,16 @@ impl fmt::Display for RouteError {
 impl std::error::Error for RouteError {}
 
 impl RouteSet {
+    /// Whether these are the same routes as `subnets` and `dns_domains`,
+    /// as sets: in any order, with duplicates counted once. A tunnel that
+    /// carries those carries these.
+    pub fn is_carried_by(&self, subnets: &[Ipv4Net], dns_domains: &[String]) -> bool {
+        use std::collections::HashSet;
+        let set = |nets: &[Ipv4Net]| nets.iter().copied().collect::<HashSet<_>>();
+        let names = |names: &[String]| names.iter().cloned().collect::<HashSet<_>>();
+        set(&self.subnets) == set(subnets) && names(&self.dns_domains) == names(dns_domains)
+    }
+
     /// Applies the service's acceptance rule.
     ///
     /// Every subnet must be no wider than [`MIN_PREFIX_LEN`], touch no
@@ -360,6 +370,24 @@ mod tests {
             subnets: subnets.iter().map(|s| net(s)).collect(),
             dns_domains: vec![],
         }
+    }
+
+    // Routes are the same as sets: order and repeats do not matter, and a
+    // missing or extra entry does.
+    #[test]
+    fn routes_are_compared_as_sets() {
+        let carried = [net("10.255.0.0/24"), net("192.0.2.0/24")];
+        let domains = ["ece.example.test".to_string()];
+        let mut asked = set(&["192.0.2.0/24", "10.255.0.0/24", "192.0.2.0/24"]);
+        asked.dns_domains = vec!["ece.example.test".to_string(); 2];
+        assert!(asked.is_carried_by(&carried, &domains));
+        assert!(!set(&["10.255.0.0/24"]).is_carried_by(&carried, &[]));
+        let mut more = set(&["10.255.0.0/24", "192.0.2.0/24", "198.51.100.0/24"]);
+        more.dns_domains = domains.to_vec();
+        assert!(!more.is_carried_by(&carried, &domains));
+        let mut other = set(&["10.255.0.0/24", "192.0.2.0/24"]);
+        other.dns_domains = vec!["cs.example.test".to_string()];
+        assert!(!other.is_carried_by(&carried, &domains));
     }
 
     #[test]

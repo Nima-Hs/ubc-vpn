@@ -357,7 +357,7 @@ impl Session {
             let message = "The connection's network is not known.";
             return refused(ErrorCode::Internal, message.to_string());
         };
-        if routes.subnets == live.tunnel.subnets && routes.dns_domains == live.tunnel.dns_domains {
+        if routes.is_carried_by(&live.tunnel.subnets, &live.tunnel.dns_domains) {
             return Ok(Admitted::Unchanged(live.tunnel.clone()));
         }
         let local = LocalNetworks {

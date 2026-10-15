@@ -33,7 +33,7 @@ pub(crate) fn apply(platform: &Platform, routes: &RouteSet, limits: Limits) -> L
         Ok(ResponseBody::Accepted) => outcome(&mut client, routes),
         // The connection carries them already: nothing was changed.
         Ok(ResponseBody::Status(ConnState::Connected { tunnel }))
-            if tunnel.subnets == routes.subnets && tunnel.dns_domains == routes.dns_domains =>
+            if routes.is_carried_by(&tunnel.subnets, &tunnel.dns_domains) =>
         {
             LiveRoutes::Applied
         }
@@ -68,7 +68,7 @@ fn outcome(client: &mut Client, routes: &RouteSet) -> LiveRoutes {
         };
         match state {
             ConnState::Connected { tunnel }
-                if tunnel.subnets == routes.subnets && tunnel.dns_domains == routes.dns_domains =>
+                if routes.is_carried_by(&tunnel.subnets, &tunnel.dns_domains) =>
             {
                 return LiveRoutes::Applied;
             }

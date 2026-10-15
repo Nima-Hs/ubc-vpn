@@ -353,11 +353,68 @@ fn the_same_routes_again_change_nothing() {
         panic!("no status");
     };
     let (calls, before) = (rig.fake.calls(), own_lines(&mut alice).len());
-    let same = update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]);
-    assert_eq!(alice.ask(same), Ok(ResponseBody::Status(state)));
+    // Compared as sets: in another order, or with an entry twice, they are
+    // still the same routes.
+    let same = [
+        update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]),
+        update(&["192.0.2.0/24", "10.255.0.0/24"], &["ece.example.test"]),
+        update(
+            &["10.255.0.0/24", "192.0.2.0/24", "10.255.0.0/24"],
+            &["ece.example.test", "ece.example.test"],
+        ),
+    ];
+    for request in same {
+        let what = format!("{request:?}");
+        assert_eq!(
+            alice.ask(request),
+            Ok(ResponseBody::Status(state.clone())),
+            "{what}"
+        );
+    }
     assert!(alice.is_quiet(), "a state was reported");
     assert_eq!(rig.fake.calls(), calls, "something was done");
     assert_eq!(own_lines(&mut alice).len(), before, "something was logged");
+
+    // While something else is in progress, even no change is busy. The
+    // disconnect is held in its teardown so that it is still going on.
+    rig.os.hold_at(Op::RemoveTunnelRoutes);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    rig.os.wait_until_held();
+    let same = update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]);
+    let asked = alice.ask(same);
+    rig.os.release();
+    assert_eq!(asked, Err(ErrorCode::Busy));
+}
+
+// Security rule: after a change, what the tunnel carries is what a later
+// change is compared with. Changed to other routes and back, the second
+// change is really applied: the tunnel carries the first routes again and
+// the other one's extra is gone, and nothing is left outside the tunnel
+// while the reply says applied.
+#[test]
+fn a_change_then_back_is_applied_both_times() {
+    let rig = rig();
+    let mut alice = connected(&rig);
+    let first = || update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]);
+    let other = update(&["10.255.0.0/24", "198.51.100.0/24"], &["ece.example.test"]);
+    assert_eq!(alice.ask(other), ACCEPTED);
+    let state = alice.state();
+    assert_eq!(
+        subnets_of(&state),
+        [net("10.255.0.0/24"), net("198.51.100.0/24")]
+    );
+    assert_eq!(alice.ask(first()), ACCEPTED, "taken for no change");
+    let state = alice.state();
+    assert_eq!(
+        subnets_of(&state),
+        [net("10.255.0.0/24"), net("192.0.2.0/24")]
+    );
+    assert_eq!(
+        rig.fake.applied().tunnel_routes,
+        routed(&["10.255.0.0/24", "10.255.0.53/32", "192.0.2.0/24"])
+    );
+    // And now the same again is no change.
+    assert!(matches!(alice.ask(first()), Ok(ResponseBody::Status(_))));
 }
 
 // Security rule: a change costs the client nothing, so changes asked for
