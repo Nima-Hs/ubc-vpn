@@ -4,6 +4,10 @@
 // The production build (`out/`, from `pnpm build`) must not answer. The demo
 // build (`out-demo/`) is the control: it keeps the switch, because this very
 // test suite drives it through that port, so it shows the probe can tell.
+//
+// The packaged app, as installed, is checked the same way when
+// `UBC_VPN_PACKAGED_APP` names its program. The installer workflow does
+// that on a CI runner; an installed app cannot be kept off the screen.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
@@ -47,25 +51,29 @@ async function debuggerAnswers(port: number): Promise<boolean> {
 
 const running: ChildProcess[] = [];
 
-function launch(
-    build: "out" | "out-demo",
-    port: number,
-    env: Record<string, string> = {},
-): ChildProcess {
-    const child = spawn(
-        electronPath as unknown as string,
-        [resolve(build, "main/index.js"), `--remote-debugging-port=${port}`],
-        {
-            stdio: "ignore",
-            // Its own profile, never the installed product's folder.
-            env: {
-                ...process.env,
-                ...HIDDEN,
-                UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
-                ...env,
-            },
+/** The packaged app's program, when this run is to check it. */
+const PACKAGED_APP = process.env.UBC_VPN_PACKAGED_APP;
+
+/** A build in this folder, run by the Electron in node_modules, or a packaged program. */
+type Build = "out" | "out-demo" | { program: string };
+
+function launch(build: Build, port: number, env: Record<string, string> = {}): ChildProcess {
+    const debugging = `--remote-debugging-port=${port}`;
+    const [program, args] =
+        typeof build === "string"
+            ? [electronPath as unknown as string, [resolve(build, "main/index.js"), debugging]]
+            : [build.program, [debugging]];
+    const child = spawn(program, args, {
+        stdio: "ignore",
+        // Its own profile, never the installed product's folder. A
+        // packaged app ignores the variable and uses its own.
+        env: {
+            ...process.env,
+            ...HIDDEN,
+            UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
+            ...env,
         },
-    );
+    });
     running.push(child);
     return child;
 }
@@ -125,4 +133,32 @@ test("an unpackaged build in dev mode can be driven by the tests", async () => {
     const port = await freePort();
     launch("out", port, { UBC_VPN_DEV: "1" });
     await expect.poll(() => debuggerAnswers(port), { timeout: 60_000 }).toBe(true);
+});
+
+test("the packaged app cannot be debugged from outside", async () => {
+    test.skip(
+        PACKAGED_APP === undefined || !process.env.CI,
+        "only on CI, with UBC_VPN_PACKAGED_APP naming the installed program",
+    );
+    test.setTimeout(180_000);
+    const program = PACKAGED_APP as string;
+
+    const controlPort = await freePort();
+    launch("out-demo", controlPort);
+    const started = Date.now();
+    await expect.poll(() => debuggerAnswers(controlPort), { timeout: 60_000 }).toBe(true);
+    const startUp = Date.now() - started;
+
+    // One instance: the app allows only one. The dev switch is set to the one
+    // value that turns dev mode on, which a packaged app must ignore.
+    const port = await freePort();
+    const app = launch({ program }, port, { UBC_VPN_DEV: "1" });
+    const deadline = Date.now() + Math.max(10_000, startUp * 4);
+    let answered = false;
+    while (Date.now() < deadline && !answered) {
+        answered = await debuggerAnswers(port);
+        await new Promise((tick) => setTimeout(tick, 100));
+    }
+    expect(answered).toBe(false);
+    expect(app.exitCode).toBeNull();
 });

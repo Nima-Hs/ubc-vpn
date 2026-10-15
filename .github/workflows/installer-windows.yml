@@ -1,0 +1,106 @@
+name: Installer (Windows)
+
+# Builds the Windows setup program, installs it silently on the runner,
+# checks what landed where, removes it again, and checks nothing is left.
+# The rules come from docs/architecture.md, "What the installers must do".
+#
+# Nothing is signed. The installer is kept as an artifact for a few days, for
+# trying by hand; it is not a release.
+
+on:
+  pull_request:
+    paths:
+      - app/**
+      - packaging/windows/**
+      - .github/workflows/installer-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - packaging/windows/**
+      - .github/workflows/installer-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: app
+    # Naming the shell turns on pipefail, and replaces PowerShell, which
+    # carries on after a failing command.
+    shell: bash
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CHECK: ../packaging/windows/tests/installer.ps1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+
+      # electron-builder downloads Electron, NSIS and its other tools itself,
+      # each checked against a checksum this version of it carries.
+      - name: Build the setup program
+        run: pnpm package:win
+      - name: The app is fused, licensed and has no updater
+        run: pnpm check:package
+
+      - name: The setup program refuses another folder
+        run: pwsh -NoProfile -File "$CHECK" refuse-folder dist/ubc-vpn-setup-*.exe
+      - name: Install
+        run: pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*.exe
+      - name: Every file is installed as built
+        run: pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
+      - name: Only administrators can change the installed app
+        run: pwsh -NoProfile -File "$CHECK" who-can-change
+      - name: The installed app is fused, licensed and has no updater
+        run: node scripts/check-package.mjs "C:/Program Files/UBC VPN"
+
+      # The control for this test is the demo build, run by the Electron in
+      # node_modules, which keeps the debugging switch.
+      - name: Download Electron
+        run: node node_modules/electron/install.js
+      - name: The installed app cannot be debugged from outside
+        env:
+          UBC_VPN_PACKAGED_APP: C:\Program Files\UBC VPN\UBC VPN.exe
+        run: |
+          pnpm build:demo
+          pnpm exec playwright test tests/e2e/remote-debugging.spec.ts -g "packaged app" --reporter=line \
+            | tee "$RUNNER_TEMP/debugging.txt"
+          # The test skips itself when it is not given the program; here it must run.
+          grep -q "1 passed" "$RUNNER_TEMP/debugging.txt"
+
+      # Installing over an existing install is how an update arrives.
+      - name: Install again over it
+        run: |
+          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*.exe
+          pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
+      - name: Uninstall
+        run: pwsh -NoProfile -File "$CHECK" uninstall
+      - name: Nothing is left but the user's data
+        run: pwsh -NoProfile -File "$CHECK" removed
+
+      - name: Keep the setup program
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-windows-x64-setup-unsigned
+          path: app/dist/ubc-vpn-setup-*.exe
+          if-no-files-found: error
+          retention-days: 7
