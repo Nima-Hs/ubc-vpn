@@ -20,7 +20,7 @@ use ubc_vpn_platform::{Connection, Error, Listener, Platform, StateDir, UserId};
 
 use crate::diagnostics::About;
 use crate::hub::{Hub, send};
-use crate::session::{Session, error};
+use crate::session::{Attempt, Session, error};
 use crate::words::counted;
 use crate::{Logs, lock, owner, policy};
 
@@ -372,9 +372,14 @@ impl Shared {
             let Ok(Request { id, body }) = decode(&line) else {
                 return self.unreadable(user);
             };
-            let (answer, keep) = self.answer(user, conn, kind, &mut added, body);
+            let (answer, keep, admitted) = self.answer(user, conn, kind, &mut added, body);
             let outcome = answer.map_or_else(Outcome::Error, Outcome::Ok);
             let sent = send(conn, &ServerMessage::Response(Response { id, outcome }));
+            // A client that went before hearing that its connect was
+            // admitted is watching nothing, and nobody would undo it.
+            if let Some(attempt) = admitted.filter(|_| !sent) {
+                self.session.abandon(attempt);
+            }
             if !(sent && keep) {
                 return;
             }
@@ -383,7 +388,8 @@ impl Shared {
 
     /// Decides one request from the identity the OS reported for the caller,
     /// never from anything the caller sent. Also says whether the connection
-    /// stays open. `added` counts the log lines this connection has added.
+    /// stays open, and which connect it admitted, if any. `added` counts the
+    /// log lines this connection has added.
     fn answer(
         &self,
         user: &UserId,
@@ -391,9 +397,10 @@ impl Shared {
         kind: ClientKind,
         added: &mut usize,
         body: RequestBody,
-    ) -> (Result<ResponseBody, ErrorInfo>, bool) {
+    ) -> (Result<ResponseBody, ErrorInfo>, bool, Option<Attempt>) {
         let owner = self.hub.owner();
         let accepted = |done: Result<(), ErrorInfo>| done.map(|()| ResponseBody::Accepted);
+        let mut admitted = None;
         let answer = match body {
             // Every claim takes the one path that decides who the owner is.
             RequestBody::Claim => self.claim(user),
@@ -403,7 +410,11 @@ impl Shared {
             }
             _ if owner.as_ref() != Some(user) => self.not_owner(),
             RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
-            RequestBody::Connect(params) => accepted(self.session.connect(params)),
+            RequestBody::Connect(params) => {
+                let attempt = self.session.connect(params);
+                admitted = attempt.as_ref().ok().copied();
+                accepted(attempt.map(drop))
+            }
             RequestBody::Disconnect => {
                 let said = match kind {
                     ClientKind::App => "the app",
@@ -424,7 +435,7 @@ impl Shared {
             RequestBody::AddLog(params) => accepted(self.add_log(&params, added)),
         };
         let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
-        (answer, !stranger)
+        (answer, !stranger, admitted)
     }
 
     /// Keeps a line a client hands over, cleaned like any other. A text

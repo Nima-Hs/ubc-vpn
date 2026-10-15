@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use harness::*;
+use ubc_vpn_core::protocol::{Request, encode};
 use ubc_vpn_platform::{Listener, Platform, RawConnection, Result, Transport};
 use ubc_vpn_service::{Service, Timeouts};
 
@@ -92,6 +93,9 @@ struct PeerState {
     holding_a_write: bool,
     write_limits: Vec<Option<Duration>>,
     closed: bool,
+    /// Has gone: what it sent can still be read, as from a socket whose
+    /// writer has closed, but every write to it fails at once.
+    gone: bool,
 }
 
 impl Peer {
@@ -146,6 +150,9 @@ impl RawConnection for Peer {
 
     fn write_all(&self, bytes: &[u8]) -> Result<()> {
         let mut state = self.state();
+        if state.gone {
+            return Err(Error::Closed);
+        }
         if state.takes == Some(0) {
             // Nobody reads: wait as long as the limit allows, or for ever.
             state.holding_a_write = true;
@@ -198,6 +205,45 @@ fn until(what: &str, happened: impl Fn() -> bool) {
 const HELLO: &str = r#"{"protocol_version":3,"client":"app","client_version":"0.1.0"}"#;
 const CLAIM: &str = r#"{"id":1,"body":{"method":"claim"}}"#;
 const STATUS: &str = r#"{"id":2,"body":{"method":"status"}}"#;
+
+// Security rule (#163): a client that asks to connect and goes before it
+// hears the answer is watching nothing, and nobody is left to undo the
+// connect. So when the service cannot give an admitted connect its answer,
+// it undoes that connect itself, and nothing is left connected or applied.
+#[test]
+fn a_connect_whose_client_has_gone_is_undone() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let service = start(&rig, &channel, Timeouts::default());
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+    // Gone before the connect is read: its answer cannot reach anyone.
+    owner.state().gone = true;
+    let connect = encode(&Request {
+        id: 2,
+        body: good(),
+    })
+    .unwrap();
+    owner.send(connect.trim_end());
+
+    let said = |what: &str| service.logs().iter().any(|line| line == what);
+    until("the connect is admitted", || {
+        service
+            .logs()
+            .iter()
+            .any(|line| line.starts_with("connect admitted"))
+    });
+    until("the connect is undone", || said("disconnected"));
+    assert!(!rig.engine.tunnel_is_open());
+    assert!(rig.is_clean());
+    // Anyone who asks next hears it.
+    let next = Peer::sending(&[HELLO, STATUS]);
+    channel.connect(&next);
+    until("the status", || next.lines() == 3);
+    let received = next.state().received.clone();
+    assert!(received.contains(r#""state":"disconnected""#), "{received}");
+}
 
 // Security rule: every write to a client has a time limit, so one that
 // stops reading is closed and cannot hold a thread for ever.
