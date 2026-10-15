@@ -477,11 +477,17 @@ impl Machine {
         }
     }
 
-    fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
-        // A new attempt: whatever it ends in is news, even the same as the
-        // last one's.
+    /// The connect is about to contact the gateway. From here it is a real
+    /// attempt, which costs a login, so whatever it ends in is news, even
+    /// the same as the last one's. A connect that stops before this costs
+    /// nothing, so it does not reset the repeat rule: asking again and
+    /// again for one that fails the same way must not fill the log.
+    pub(crate) fn reaching_the_gateway(&mut self) {
         self.disconnected = false;
         self.logs.forget(STATE);
+    }
+
+    fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
         self.publish(ConnState::Connecting);
         let clean = self.teardown();
         // After the teardown, which lets go of the hold before this one.

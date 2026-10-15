@@ -60,6 +60,14 @@ impl Machine {
             gateway_addr,
         };
         let logs = self.logs.sink(&session.cookie);
+        // A connect cancelled by now goes no further: the engine is not
+        // asked, and the gateway is never contacted. The disconnect that
+        // cancelled it reports how it ended.
+        if cancel.is_cancelled() {
+            let message = "Connecting was cancelled.";
+            return Err((ErrorCode::EngineFailed, message.to_string()));
+        }
+        self.reaching_the_gateway();
         let opened = self.engine.open(&gateway, &session, cancel, ended, logs);
         // The cookie has no further use here and was never written anywhere.
         // The one copy left is in the log sink the engine was given, which

@@ -191,6 +191,7 @@ pub struct Faulty {
     subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
     /// When set, a subscription keeps delivering after its end is dropped.
     lingering: Arc<AtomicBool>,
+    holding: (Mutex<Hold>, Condvar),
 }
 
 impl Faulty {
@@ -200,6 +201,7 @@ impl Faulty {
             panics_at: Mutex::default(),
             subscriptions: Arc::default(),
             lingering: Arc::default(),
+            holding: (Mutex::default(), Condvar::new()),
         }
     }
 
@@ -228,7 +230,42 @@ impl Faulty {
             .is_some_and(|sender| sender.send(event).is_ok())
     }
 
+    /// Makes the next call of `op` wait, once, until [`Faulty::release`].
+    pub fn hold_at(&self, op: Op) {
+        *self.holding.0.lock().unwrap() = Hold {
+            at: Some(op),
+            waiting: false,
+        };
+    }
+
+    /// Waits until a call is being held.
+    pub fn wait_until_held(&self) {
+        let hold = self.holding.0.lock().unwrap();
+        let waited = self
+            .holding
+            .1
+            .wait_timeout_while(hold, WAIT, |hold| !hold.waiting);
+        let (hold, _) = waited.unwrap();
+        assert!(hold.waiting, "nothing reached the held step");
+    }
+
+    /// Lets a held call go on.
+    pub fn release(&self) {
+        *self.holding.0.lock().unwrap() = Hold::default();
+        self.holding.1.notify_all();
+    }
+
     fn reached(&self, op: Op) {
+        {
+            let mut hold = self.holding.0.lock().unwrap();
+            if hold.at == Some(op) {
+                hold.waiting = true;
+                self.holding.1.notify_all();
+                let held = |hold: &mut Hold| hold.waiting;
+                let waited = self.holding.1.wait_timeout_while(hold, HOLD, held);
+                drop(waited.unwrap());
+            }
+        }
         let mut panics_at = self.panics_at.lock().unwrap();
         if *panics_at == Some(op) {
             *panics_at = None;
@@ -237,6 +274,13 @@ impl Faulty {
             panic!("the test makes {op:?} panic");
         }
     }
+}
+
+/// A step of the fake OS that is made to wait, and whether a call waits.
+#[derive(Default)]
+struct Hold {
+    at: Option<Op>,
+    waiting: bool,
 }
 
 impl Routes for Faulty {
