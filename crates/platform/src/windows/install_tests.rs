@@ -17,6 +17,30 @@ use windows_sys::Win32::System::Services::{
 use super::*;
 use crate::Mode;
 
+thread_local! {
+    /// Makes `configure` fail on this thread, as a real failure would.
+    pub(super) static FAIL_CONFIGURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this run may register services and write under ProgramData:
+/// only on CI, and only elevated. Says why not when it may not.
+fn may_change_the_system() -> bool {
+    if std::env::var_os("CI").is_none() {
+        println!("SKIPPED: it changes ProgramData and the services, so it runs on CI only");
+        return false;
+    }
+    if manager(SC_MANAGER_CREATE_SERVICE).is_err() {
+        let required = std::env::var_os("UBC_VPN_REQUIRE_ELEVATED").is_some();
+        assert!(
+            !required,
+            "registering a service needs an elevated process, and this run requires it"
+        );
+        println!("SKIPPED: registering a service needs an elevated process");
+        return false;
+    }
+    true
+}
+
 /// The owner and access list of `path`, as SDDL.
 fn security(path: &Path) -> String {
     let name = wide(&path.to_string_lossy());
@@ -211,19 +235,7 @@ fn quotes_the_path_and_refuses_what_cannot_be() {
 // uninstall that keeps or removes the data.
 #[test]
 fn installs_updates_and_uninstalls() {
-    // It registers a service and writes under ProgramData, which only CI
-    // runners may have changed.
-    if std::env::var_os("CI").is_none() {
-        println!("SKIPPED: it changes ProgramData and the services, so it runs on CI only");
-        return;
-    }
-    if manager(SC_MANAGER_CREATE_SERVICE).is_err() {
-        let required = std::env::var_os("UBC_VPN_REQUIRE_ELEVATED").is_some();
-        assert!(
-            !required,
-            "registering a service needs an elevated process, and this run requires it"
-        );
-        println!("SKIPPED: registering a service needs an elevated process");
+    if !may_change_the_system() {
         return;
     }
     let name = format!("ubc-vpn-test-install-{}", std::process::id());
@@ -249,6 +261,16 @@ fn installs_updates_and_uninstalls() {
     assert_eq!(security(&data.join(POLICY)), POLICY_SDDL);
     assert!(!data.join("policy.json.new").exists());
 
+    // The check at the end of the folder's setup: it passes as made, and a
+    // fresh install refuses anything else in the folder, as something made
+    // in the moment between removing and making it again would be.
+    verify_data_folder(&data, true).unwrap();
+    std::fs::write(data.join("planted.json"), b"{}").unwrap();
+    let why = verify_data_folder(&data, true).unwrap_err().to_string();
+    assert!(why.contains("planted.json"), "{why}");
+    verify_data_folder(&data, false).unwrap();
+    std::fs::remove_file(data.join("planted.json")).unwrap();
+
     // This test program, running only `hosted`, stands in for the service.
     let program = std::env::current_exe().unwrap();
     let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
@@ -273,6 +295,20 @@ fn installs_updates_and_uninstalls() {
     start(&name).unwrap();
     assert_eq!(status(&name), SERVICE_RUNNING);
 
+    // A user-defined control code (128, the first one) is not a stop: the
+    // service turns it down and keeps running.
+    {
+        let manager = manager(SC_MANAGER_CONNECT).unwrap();
+        let service = open_service(&manager, &name).unwrap().expect("registered");
+        let mut answer = SERVICE_STATUS::default();
+        // SAFETY: the handle is open with full access, and the out pointer
+        // is valid.
+        let sent = unsafe { ControlService(service.0, 128, &mut answer) };
+        println!("control 128: {}", if sent == 0 { last_error() } else { 0 });
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(status(&name), SERVICE_RUNNING);
+
     // An update: the state written meanwhile is kept, the folder's access
     // list is set again, and the running service is stopped and registered
     // again.
@@ -294,4 +330,36 @@ fn installs_updates_and_uninstalls() {
     assert!(!data.exists());
     remove_data_folder(&data).unwrap();
     println!("RAN: install");
+}
+
+// A service this run created, and could not then set up, is deleted, so a
+// failed install never leaves a half set-up service behind.
+#[test]
+fn a_service_it_cannot_set_up_is_removed_again() {
+    if !may_change_the_system() {
+        return;
+    }
+    let name = format!("ubc-vpn-test-unconfigured-{}", std::process::id());
+    let _cleanup = Cleanup(name.clone(), PathBuf::from("does-not-exist"));
+    let program = std::env::current_exe().unwrap();
+    let registration = Registration {
+        name: &name,
+        display_name: "UBC VPN test service",
+        description: "A test of UBC VPN's installer. Not made by or affiliated with UBC.",
+        command_line: quoted(&program).unwrap(),
+    };
+    FAIL_CONFIGURE.with(|fail| fail.set(true));
+    let registered = register(&registration);
+    FAIL_CONFIGURE.with(|fail| fail.set(false));
+    assert!(registered.is_err());
+    // Deleting takes effect once no handle is open; it was the only one.
+    let started = Instant::now();
+    while is_registered(&name) {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the service was left registered"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    println!("RAN: install unconfigured");
 }

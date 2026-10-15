@@ -127,7 +127,7 @@ jobs:
       - name: The elevated tests really ran
         shell: bash
         run: |
-          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row" "service manager" dns "dns policy" "dns foreign" "dns effective" "dns owner" events "events late" "events since capture" "program folder" "program file" "program link" "program add" install; do
+          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row" "service manager" dns "dns policy" "dns foreign" "dns effective" "dns owner" events "events late" "events since capture" "program folder" "program file" "program link" "program add" install "install unconfigured"; do
             if ! grep -q "RAN: $test" test.log; then
               echo "The elevated test '$test' did not run."
               exit 1
