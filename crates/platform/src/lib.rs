@@ -460,25 +460,39 @@ pub trait NetworkEvents: Send + Sync {
 /// per connection and drops it at teardown.
 pub struct Subscription {
     events: Receiver<NetworkEvent>,
-    /// Ends the subscription when dropped; dropped after the receiver.
+    ends: SubscriptionEnd,
+}
+
+/// The part of a [`Subscription`] whose drop ends it. Held apart from the
+/// receiver by a caller that reads events on another thread: dropping this
+/// ends the subscription, and the receiver then reports the sender gone.
+pub struct SubscriptionEnd {
     _ends: Box<dyn Send>,
 }
 
 impl Subscription {
     /// A subscription delivering `events`, which `ends` releases when it is
     /// dropped. An implementation makes `ends` a value whose `Drop` unregisters
-    /// and stops whatever produces the events, and returns only when that is
-    /// done.
+    /// and stops whatever produces the events, drops every sender of
+    /// `events`, and returns only when that is done.
     pub fn new(events: Receiver<NetworkEvent>, ends: impl Send + 'static) -> Self {
         Self {
             events,
-            _ends: Box::new(ends),
+            ends: SubscriptionEnd {
+                _ends: Box::new(ends),
+            },
         }
     }
 
     /// Where the events arrive.
     pub fn events(&self) -> &Receiver<NetworkEvent> {
         &self.events
+    }
+
+    /// The receiver, for a thread that reads the events, and the end, for
+    /// whoever decides when the subscription stops.
+    pub fn into_parts(self) -> (Receiver<NetworkEvent>, SubscriptionEnd) {
+        (self.events, self.ends)
     }
 }
 

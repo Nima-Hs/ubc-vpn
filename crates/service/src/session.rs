@@ -101,6 +101,9 @@ pub(crate) struct Machine {
     /// connection now, or 0 when there is none. A subscription with any
     /// other number forwards nothing and ends.
     pub(crate) watching: Arc<AtomicU64>,
+    /// Ends the subscription that watches the network of the connection now.
+    /// Dropped at teardown, which ends it at once.
+    pub(crate) network_watch: Option<ubc_vpn_platform::SubscriptionEnd>,
     /// Counts tunnels, so an ending is matched to the tunnel it came from.
     tunnels: u64,
     /// Counts subscriptions to network events. Every attempt gets a number
@@ -145,6 +148,7 @@ impl Session {
             dns: platform.dns.clone(),
             events: platform.events.clone(),
             watching: Arc::default(),
+            network_watch: None,
             engine,
             gateway,
             logs: logs.clone(),
@@ -509,7 +513,12 @@ impl Machine {
         let number = self.subscriptions;
         self.watching.store(number, Ordering::SeqCst);
         let events = match self.events.subscribe(physical) {
-            Ok(events) => events,
+            Ok(subscription) => {
+                let (events, end) = subscription.into_parts();
+                // Replacing an earlier one ends that one.
+                self.network_watch = Some(end);
+                events
+            }
             Err(ubc_vpn_platform::Error::Unsupported) => {
                 self.logs.warn_about("network events", UNWATCHED);
                 return Ok(());

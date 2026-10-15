@@ -22,7 +22,8 @@ use ubc_vpn_engine::{
 };
 use ubc_vpn_platform::fake::{Fake, Op};
 use ubc_vpn_platform::{
-    Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns, Verified,
+    Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns, Subscription,
+    Verified,
 };
 
 /// What a test has asked the spy to do, and what it has seen.
@@ -284,11 +285,11 @@ impl Dns for Faulty {
 
 impl NetworkEvents for Faulty {
     /// Fails as the fake was told to; otherwise a subscription of its own.
-    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription> {
         self.reached(Op::Subscribe);
         drop(self.fake.subscribe(watching)?);
         let (sender, receiver) = mpsc::channel();
         self.subscriptions.lock().unwrap().push(sender);
-        Ok(receiver)
+        Ok(Subscription::new(receiver, ()))
     }
 }
