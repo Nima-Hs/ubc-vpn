@@ -101,8 +101,7 @@ fn a_change_while_connected_is_applied_and_checked() {
         .whole_log()
         .into_iter()
         .map(|line| line.text.as_str().to_string());
-    let line = "routes changed while connected and checked: 1 subnet route added, \
-                1 subnet route removed, split DNS for 2 domains";
+    let line = ubc_vpn_service::ROUTES_CHANGED;
     assert!(said.into_iter().any(|text| text == line));
 
     // And a disconnect afterwards removes all of it.
@@ -334,4 +333,107 @@ fn only_routes_the_service_added_are_removed() {
         rig.fake.foreign_routes(),
         [("other0".to_string(), net("10.255.9.0/24"))]
     );
+}
+
+/// The service's own lines, as text.
+fn own_lines(peer: &mut Peer) -> Vec<String> {
+    let own = |line: &LogLine| line.source == ubc_vpn_core::protocol::LogSource::Service;
+    let lines = peer.whole_log().into_iter().filter(own);
+    lines.map(|line| line.text.as_str().to_string()).collect()
+}
+
+// A change to the routes the tunnel carries already is no change: it is
+// answered at once with the connection as it is, and nothing is done,
+// logged or reported.
+#[test]
+fn the_same_routes_again_change_nothing() {
+    let rig = rig();
+    let mut alice = connected(&rig);
+    let ResponseBody::Status(state) = alice.ask(RequestBody::Status).unwrap() else {
+        panic!("no status");
+    };
+    let (calls, before) = (rig.fake.calls(), own_lines(&mut alice).len());
+    let same = update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]);
+    assert_eq!(alice.ask(same), Ok(ResponseBody::Status(state)));
+    assert!(alice.is_quiet(), "a state was reported");
+    assert_eq!(rig.fake.calls(), calls, "something was done");
+    assert_eq!(own_lines(&mut alice).len(), before, "something was logged");
+}
+
+// Security rule: a change costs the client nothing, so changes asked for
+// again and again, more than the log holds, must not fill it. The
+// service's first lines are still there, and the change is said once.
+#[test]
+fn changes_again_and_again_do_not_fill_the_log() {
+    let rig = rig();
+    let mut alice = connected(&rig);
+    let one = || update(&["10.255.0.0/24", "198.51.100.0/24"], &["ece.example.test"]);
+    let other = || update(&["10.255.0.0/24", "192.0.2.0/24"], &["cs.example.test"]);
+    for round in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
+        let change = if round % 2 == 0 { one() } else { other() };
+        assert_eq!(alice.ask(change), ACCEPTED, "{round}");
+        let state = alice.state();
+        assert!(
+            matches!(state, ConnState::Connected { .. }),
+            "{round}: {state:?}"
+        );
+    }
+    let lines = own_lines(&mut alice);
+    assert!(lines[0].starts_with("service started"), "{lines:?}");
+    assert!(lines[1].starts_with("policy read"), "{lines:?}");
+    let said = lines
+        .iter()
+        .filter(|line| *line == ubc_vpn_service::ROUTES_CHANGED);
+    assert_eq!(said.count(), 1, "{lines:?}");
+
+    // A new connection's first change is news again. (A lost connection
+    // keeps the session, so the same one connects again.)
+    rig.engine.drop_connection();
+    assert!(matches!(alice.state(), ConnState::Failed { .. }));
+    let again = alice.connect_ends(good());
+    assert!(matches!(again, ConnState::Connected { .. }), "{again:?}");
+    assert_eq!(alice.ask(one()), ACCEPTED);
+    assert!(matches!(alice.state(), ConnState::Connected { .. }));
+    let lines = own_lines(&mut alice);
+    let said = lines
+        .iter()
+        .filter(|line| *line == ubc_vpn_service::ROUTES_CHANGED);
+    assert_eq!(said.count(), 2, "{lines:?}");
+}
+
+// When a change adds DNS domains to a connection that has none, the DNS
+// servers the gateway assigned are judged as at connect. Nothing has been
+// changed yet, so servers that cannot be used refuse the change and the
+// connection is kept.
+#[test]
+fn unusable_dns_servers_refuse_the_change_and_keep_the_connection() {
+    let cases: [(&str, Vec<[u8; 4]>); 3] = [
+        ("none", vec![]),
+        ("the gateway", vec![[192, 0, 2, 1]]),
+        ("loopback", vec![[127, 0, 0, 1]]),
+    ];
+    for (case, servers) in cases {
+        let mut rig = Rig::scripted(policy('A', ""), |script| {
+            script.assigned.dns = servers.iter().map(|addr| (*addr).into()).collect();
+        });
+        rig.start().unwrap();
+        let mut alice = rig.owner();
+        let first = connect(COOKIE, GATEWAY, &["10.255.0.0/24"], &[]);
+        let state = alice.connect_ends(first);
+        assert!(
+            matches!(state, ConnState::Connected { .. }),
+            "{case}: {state:?}"
+        );
+        let (calls, applied) = (rig.fake.calls(), rig.fake.applied());
+        let change = update(&["10.255.0.0/24"], &["ece.example.test"]);
+        assert_eq!(alice.ask(change), Err(ErrorCode::RouteRefused), "{case}");
+        assert_eq!(rig.fake.calls(), calls, "{case}: something was done");
+        assert_eq!(rig.fake.applied(), applied, "{case}: something changed");
+        assert!(alice.is_quiet(), "{case}: a state was reported");
+        assert_eq!(
+            alice.ask(RequestBody::Status),
+            Ok(ResponseBody::Status(state)),
+            "{case}"
+        );
+    }
 }

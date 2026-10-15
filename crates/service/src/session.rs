@@ -23,10 +23,11 @@ use ubc_vpn_core::protocol::{
     is_plausible_gateway_addr,
 };
 use ubc_vpn_core::routes::{Ipv4Net, LocalNetworks, RouteSet, check_against_local};
-use ubc_vpn_core::state::ConnState;
+use ubc_vpn_core::state::{ConnState, TunnelInfo};
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
 use ubc_vpn_platform::{Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Platform, Routes};
 
+use crate::connect::dns_servers;
 use crate::diagnostics::failure;
 use crate::hub::Hub;
 use crate::logs::Held;
@@ -54,10 +55,32 @@ struct Gate {
     phase: Phase,
     /// Stops the connect in progress, if there is one.
     cancel: Cancel,
-    /// While connected: the gateway and the network the connection was set
-    /// up on, against which a change of routes is checked before it is
-    /// admitted.
-    live: Option<(Ipv4Addr, PhysicalNetwork)>,
+    /// While connected: what a change of routes is checked against before
+    /// it is admitted.
+    live: Option<Live>,
+}
+
+/// What came of a change of routes that was not refused.
+pub(crate) enum Admitted {
+    /// The worker is applying it; the outcome comes as a state event.
+    Changing,
+    /// The tunnel carries these routes already: nothing was done.
+    Unchanged(TunnelInfo),
+}
+
+/// What a change of routes is checked against while connected.
+struct Live {
+    /// The gateway the connection reaches.
+    gateway: Ipv4Addr,
+    /// The network the connection was set up on.
+    physical: PhysicalNetwork,
+    /// What the tunnel carries now.
+    tunnel: TunnelInfo,
+    /// The DNS servers the gateway assigned.
+    assigned_dns: Vec<Ipv4Addr>,
+    /// Whether routes to them are in place, as they are once a connection
+    /// has had DNS domains.
+    dns_routed: bool,
 }
 
 /// What the log says when a connect is undone because its client went
@@ -289,7 +312,11 @@ impl Session {
     /// here leaves the tunnel exactly as it was. The same rules hold as for
     /// a connect: the policy's, and none touching the gateway or the
     /// network the connection was set up on.
-    pub(crate) fn update_routes(&self, routes: RouteSet) -> Result<(), ErrorInfo> {
+    ///
+    /// A change to what the tunnel carries already is no change: it is
+    /// answered at once with the connection as it is, and nothing is done
+    /// or logged, so asking for it again and again costs nothing.
+    pub(crate) fn update_routes(&self, routes: RouteSet) -> Result<Admitted, ErrorInfo> {
         let carries = format!(
             "{} and {}",
             counted(routes.subnets.len(), "subnet"),
@@ -306,7 +333,7 @@ impl Session {
         admitted
     }
 
-    fn admit_update(&self, routes: RouteSet, carries: &str) -> Result<(), ErrorInfo> {
+    fn admit_update(&self, routes: RouteSet, carries: &str) -> Result<Admitted, ErrorInfo> {
         let refused = |code, message: String| Err(error(code, message));
         let unchanged = "The connection keeps the routes it has.";
         let allowed = match &self.allowed {
@@ -326,23 +353,47 @@ impl Session {
             }
             Phase::Connecting | Phase::Updating | Phase::Stopping => return Err(busy()),
         }
-        let Some((gateway, physical)) = &gate.live else {
+        let Some(live) = &gate.live else {
             let message = "The connection's network is not known.";
             return refused(ErrorCode::Internal, message.to_string());
         };
+        if routes.subnets == live.tunnel.subnets && routes.dns_domains == live.tunnel.dns_domains {
+            return Ok(Admitted::Unchanged(live.tunnel.clone()));
+        }
         let local = LocalNetworks {
-            own_addresses: physical.own_addresses(),
-            on_link: physical.on_link(),
-            next_hop: physical.next_hop(),
+            own_addresses: live.physical.own_addresses(),
+            on_link: live.physical.on_link(),
+            next_hop: live.physical.next_hop(),
         };
-        if let Err(conflict) = check_against_local(&routes.subnets, *gateway, &local) {
+        if let Err(conflict) = check_against_local(&routes.subnets, live.gateway, &local) {
             let message = format!("Route refused: {conflict}. {unchanged}");
             return refused(ErrorCode::RouteRefused, message);
+        }
+        // Split DNS for a connection that had none needs routes to the
+        // gateway's DNS servers, which are judged as at connect. Nothing
+        // has been changed yet, so servers that cannot be used refuse the
+        // change rather than end the connection.
+        if !routes.dns_domains.is_empty() && !live.dns_routed {
+            let servers = dns_servers(&live.assigned_dns, live.gateway, &live.physical);
+            let usable = servers.and_then(|servers| match servers.is_empty() {
+                true => Err((
+                    ErrorCode::RouteRefused,
+                    "The gateway assigned no DNS server for the DNS domains.".to_string(),
+                )),
+                false => check_against_local(&servers, live.gateway, &local).map_err(|c| {
+                    let why = format!("A DNS server the gateway assigned cannot be used: {c}.");
+                    (ErrorCode::RouteRefused, why)
+                }),
+            });
+            if let Err((_, why)) = usable {
+                return refused(ErrorCode::RouteRefused, format!("{why} {unchanged}"));
+            }
         }
         gate.phase = Phase::Updating;
         let line = format!("route change admitted ({carries})");
         self.logs.about_requests(LogLevel::Info, &line);
         self.send(Command::UpdateRoutes(routes))
+            .map(|()| Admitted::Changing)
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
@@ -562,6 +613,7 @@ impl Machine {
     pub(crate) fn reaching_the_gateway(&mut self) {
         self.disconnected = false;
         self.logs.forget(STATE);
+        self.logs.forget(crate::update::CHANGED);
     }
 
     fn connect(
@@ -612,11 +664,9 @@ impl Machine {
                 };
             }
             // What a change of routes is checked against while connected.
-            gate.live = match (&self.applied.gateway_route, &self.applied.physical) {
-                (Some(gateway), Some(physical)) if result.is_ok() => {
-                    Some((*gateway, physical.clone()))
-                }
-                _ => None,
+            gate.live = match &result {
+                Ok(tunnel) => self.live(tunnel.clone()),
+                Err(_) => None,
             };
             cancelled
         };
@@ -638,6 +688,21 @@ impl Machine {
     /// connection is closed and everything removed, as for a connect that
     /// fails. A tunnel that ended while the change waited has been reported
     /// already, and there is nothing to change.
+    /// What a change of routes to the connection carrying `tunnel` will be
+    /// checked against, or nothing if the connection is not complete.
+    fn live(&self, tunnel: TunnelInfo) -> Option<Live> {
+        let applied = &self.applied;
+        let (gateway, physical) = (applied.gateway_route?, applied.physical.clone()?);
+        let assigned_dns = applied.tunnel.as_ref()?.assigned().dns.clone();
+        Some(Live {
+            gateway,
+            physical,
+            tunnel,
+            assigned_dns,
+            dns_routed: !applied.dns_servers.is_empty(),
+        })
+    }
+
     fn update(&mut self, routes: RouteSet) {
         if self.applied.tunnel.is_none() {
             let mut gate = lock(&self.gate);
@@ -654,6 +719,7 @@ impl Machine {
                     if gate.phase == Phase::Updating {
                         gate.phase = Phase::Connected;
                     }
+                    gate.live = self.live(tunnel.clone());
                 }
                 self.publish(ConnState::Connected { tunnel });
             }

@@ -20,9 +20,10 @@ use ubc_vpn_platform::{Connection, Error, Listener, Platform, StateDir, UserId};
 
 use crate::diagnostics::About;
 use crate::hub::{Hub, send};
-use crate::session::{Attempt, Session, error};
+use crate::session::{Admitted, Attempt, Session, error};
 use crate::words::counted;
 use crate::{Logs, lock, owner, policy};
+use ubc_vpn_core::state::ConnState;
 
 /// The most connections served at once. Each one holds a thread.
 pub const MAX_CONNECTIONS: usize = 32;
@@ -474,7 +475,14 @@ impl Shared {
                 Ok(ResponseBody::Diagnostics(Box::new(report)))
             }
             RequestBody::AddLog(params) => accepted(self.add_log(&params, added)),
-            RequestBody::UpdateRoutes(routes) => accepted(self.session.update_routes(routes)),
+            RequestBody::UpdateRoutes(routes) => match self.session.update_routes(routes) {
+                Ok(Admitted::Changing) => Ok(ResponseBody::Accepted),
+                // Nothing to change: the connection as it is says so.
+                Ok(Admitted::Unchanged(tunnel)) => {
+                    Ok(ResponseBody::Status(ConnState::Connected { tunnel }))
+                }
+                Err(refusal) => Err(refusal),
+            },
         };
         let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
         (answer, !stranger, admitted)

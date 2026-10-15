@@ -16,7 +16,18 @@ use ubc_vpn_platform::{Error, SplitDns};
 use crate::connect::{Failure, dns_servers};
 use crate::session::Machine;
 use crate::verify::{Confirmed, DNS_UNCONFIRMED, Expected, verify, verify_dropped};
-use crate::words::counted;
+
+/// What the lines about a change of routes are about, for the repeat rule.
+/// A connection that reaches the gateway starts it afresh.
+pub(crate) const CHANGED: &str = "a change of routes";
+
+/// What the lines about split DNS that cannot be confirmed after a change
+/// are about, for the repeat rule.
+const UNCONFIRMED: &str = "split DNS after a change of routes";
+
+/// What the log says when a change of routes was applied and checked.
+pub const ROUTES_CHANGED: &str =
+    "routes changed while connected and checked; the status shows what the tunnel carries";
 
 impl Machine {
     /// Applies `chosen` to the live tunnel in place of the routes it has,
@@ -114,18 +125,13 @@ impl Machine {
         let gone = verify_dropped(&*self.routes, interface, gateway, &dropped, remaining);
         gone.map_err(|why| (ErrorCode::VerificationFailed, why))?;
 
-        let split = match chosen.dns_domains.len() {
-            0 => "no split DNS".to_string(),
-            domains => format!("split DNS for {}", counted(domains, "domain")),
-        };
-        let line = format!(
-            "routes changed while connected and checked: {} added, {} removed, {split}",
-            counted(added.len(), "subnet route"),
-            counted(dropped.len(), "subnet route"),
-        );
-        self.logs.at(LogLevel::Info, &line);
+        // Under the repeat rule, in one form whatever the change: a change
+        // costs the client nothing, so changes asked for again and again
+        // must not fill the log. What the tunnel carries is in the status.
+        self.logs.at_about(LogLevel::Info, CHANGED, ROUTES_CHANGED);
         if confirmed == Confirmed::DnsUnobservable {
-            self.logs.warn(DNS_UNCONFIRMED);
+            self.logs
+                .at_about(LogLevel::Warn, UNCONFIRMED, DNS_UNCONFIRMED);
         }
         Ok(TunnelInfo {
             interface: assigned.interface.clone(),

@@ -1,11 +1,12 @@
 //! `settings set-routes` while connected, against the real service on the
 //! fakes. The ranges are made up.
 
-use ubc_vpn_core::protocol::{ErrorCode, decode};
+use ubc_vpn_core::protocol::{ClientKind, ErrorCode, decode};
 use ubc_vpn_core::settings_cli::{LiveRoutes, RoutesReply};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::fake::Op;
 
+use crate::client::{Client, Limits};
 use crate::connect_tests::{CODE, PASSWORD, Scene, Typist};
 use crate::settings::{Command, run};
 
@@ -70,12 +71,27 @@ fn routes_saved_while_connected_are_applied_to_it() {
     );
 }
 
+// Saving the routes the connection carries already changes nothing, and
+// the reply says they are applied.
+#[test]
+fn routes_the_connection_carries_already_are_applied() {
+    let scene = connected();
+    let calls = scene.rig.fake.calls();
+    let same = r#"{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}"#;
+    assert_eq!(save(&scene, same), Some(LiveRoutes::Applied));
+    assert_eq!(scene.rig.fake.calls(), calls, "something was done");
+}
+
 // Not connected, the reply says the routes are for the next connect: before
 // anyone has used the service, and once disconnected.
 #[test]
 fn routes_saved_while_not_connected_are_for_the_next_connect() {
     let scene = Scene::usual();
     assert_eq!(save(&scene, WIDER), Some(LiveRoutes::NextConnect));
+    // Security rule: saving routes makes nobody the owner.
+    let platform = scene.rig.fake.platform(&scene.rig.root);
+    let client = Client::reach(&platform, ClientKind::Cli, Limits::default()).unwrap();
+    assert!(!client.owner_claimed(), "saving routes claimed the service");
     let scene = connected();
     assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
     assert_eq!(save(&scene, WIDER), Some(LiveRoutes::NextConnect));

@@ -31,6 +31,12 @@ pub(crate) fn apply(platform: &Platform, routes: &RouteSet, limits: Limits) -> L
     };
     match client.request(RequestBody::UpdateRoutes(routes.clone())) {
         Ok(ResponseBody::Accepted) => outcome(&mut client, routes),
+        // The connection carries them already: nothing was changed.
+        Ok(ResponseBody::Status(ConnState::Connected { tunnel }))
+            if tunnel.subnets == routes.subnets && tunnel.dns_domains == routes.dns_domains =>
+        {
+            LiveRoutes::Applied
+        }
         Ok(_) => unknown("The service gave an answer of the wrong kind."),
         Err(ClientError::Refused(refusal)) => match refusal.code {
             // Not connected, not this user's, or nobody's yet.
