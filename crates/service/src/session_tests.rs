@@ -99,27 +99,30 @@ fn params() -> ConnectParams {
     }
 }
 
-// Security rule (#163): undoing the connect of a client that went undoes
-// that connect only. A later one, admitted for someone who is watching it,
-// is left alone; the one it was meant for is undone.
+// Security rule (#163): a connect whose client was not told it was admitted
+// is undone before anything is done for it, and only that one: the connects
+// before and after it, whose clients were told, connect.
 #[test]
-fn abandoning_a_connect_undoes_that_connect_only() {
+fn a_connect_whose_client_was_not_told_is_undone_and_only_that_one() {
     let (session, hub) = reconnecting_session();
     let connected = || matches!(hub.state(), ConnState::Connected { .. });
+    // Each is settled as the server settles it.
     let first = session.connect(params()).unwrap();
+    first.settle(true);
     until("connected", connected);
     session.disconnect("the made-up kind").unwrap();
     until("disconnected", || hub.state() == ConnState::Disconnected);
-    let second = session.connect(params()).unwrap();
-    until("connected again", connected);
 
-    session.abandon(first);
-    thread::sleep(Duration::from_millis(200));
-    assert!(connected(), "a later connect was undone: {:?}", hub.state());
-
-    session.abandon(second);
-    until("the abandoned connect undone", || {
-        hub.state() == ConnState::Disconnected
+    let gone = session.connect(params()).unwrap();
+    gone.settle(false);
+    // Taken in again once it is undone, which it is, never connected.
+    let next = (0..5000).find_map(|_| {
+        assert!(!connected(), "a connect nobody was told of connected");
+        thread::sleep(Duration::from_millis(2));
+        session.connect(params()).ok()
     });
+    let next = next.expect("the service never became idle again");
+    next.settle(true);
+    until("the next one connects", connected);
     session.stop();
 }

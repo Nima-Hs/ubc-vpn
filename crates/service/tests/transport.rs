@@ -100,6 +100,9 @@ struct PeerState {
     /// So the service closes the connection only once its requests are
     /// done, and a test can tell when that is.
     gone_for_answers: bool,
+    /// Run before an answer to a peer that has gone fails, as a slow
+    /// machine would take its time: the service's other threads go on.
+    before_failing: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Peer {
@@ -155,6 +158,15 @@ impl RawConnection for Peer {
     fn write_all(&self, bytes: &[u8]) -> Result<()> {
         let mut state = self.state();
         let answer = String::from_utf8_lossy(bytes).starts_with(r#"{"type":"response""#);
+        if let Some(wait) = state
+            .before_failing
+            .clone()
+            .filter(|_| (state.gone || state.gone_for_answers) && answer)
+        {
+            drop(state);
+            wait();
+            return Err(Error::Closed);
+        }
         if state.gone || (state.gone_for_answers && answer) {
             return Err(Error::Closed);
         }
@@ -256,6 +268,54 @@ fn a_connect_whose_client_has_gone_is_undone() {
     assert!(rig.is_clean());
 }
 
+// Security rule: nothing is done at the gateway for a client that went
+// before it could be told its connect was admitted: no session is logged in
+// for nobody. Here the failed answer takes its time, as on a slow machine,
+// which gives the service every chance to contact the gateway first. It
+// must not: the connect waits for its answer to be settled, and one that
+// cannot be given is undone before the gateway is reached.
+#[test]
+fn a_client_that_went_is_never_logged_in_at_the_gateway() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let service = start(&rig, &channel, Timeouts::default());
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+    let peer = Peer::sending(&[HELLO]);
+    channel.connect(&peer);
+    until("the hello and the state", || peer.lines() == 2);
+    // Its answer fails only once the gateway has been contacted, or after
+    // a while. State events still reach it, so nothing else closes it first.
+    let spy = rig.spy.clone();
+    let slow = move || {
+        let until = Instant::now() + Duration::from_millis(500);
+        while spy.opens().is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    {
+        let mut state = peer.state();
+        state.gone_for_answers = true;
+        state.before_failing = Some(Arc::new(slow));
+    }
+    // The owner was told `disconnected` once already, when it claimed.
+    let before = owner.heard("disconnected");
+    let connect = encode(&Request {
+        id: 2,
+        body: good(),
+    })
+    .unwrap();
+    peer.send(connect.trim_end());
+
+    until("the connect is undone", || {
+        owner.heard("disconnected") > before
+    });
+    assert!(rig.spy.opens().is_empty(), "{:#?}", service.logs());
+    assert!(!rig.engine.tunnel_is_open());
+    assert!(rig.is_clean());
+}
+
 // Security rule: asking to connect and going, again and again, costs the
 // client nothing (the gateway is never contacted), so the line about it
 // must not fill the log. It is written the first time, and a repeat is
@@ -300,10 +360,10 @@ fn connecting_and_going_again_and_again_is_said_once() {
 }
 
 // Security rule: connecting and going, more times than the log holds, does
-// not push the service's own first lines out. Each connect is held before
-// the gateway would be contacted until the service has undone it, so none
-// reaches the gateway: the undo line and the state lines it leads to are
-// each said once at most, not once a round.
+// not push the service's own first lines out. None of the connects is
+// worked on, since none of their clients was told: none reaches the gateway,
+// and the undo line and the state lines it leads to are each said once at
+// most, not once a round.
 #[test]
 fn connecting_and_going_does_not_fill_the_log() {
     let rig = Rig::stopped(policy('A', ""));
@@ -315,7 +375,6 @@ fn connecting_and_going_does_not_fill_the_log() {
     let disconnected = || owner.heard("disconnected");
     for round in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
         let before = disconnected();
-        rig.os.hold_at(Op::CapturePhysical);
         let peer = Peer::sending(&[HELLO]);
         channel.connect(&peer);
         until("the hello and the state", || peer.lines() == 2);
@@ -326,11 +385,6 @@ fn connecting_and_going_does_not_fill_the_log() {
         })
         .unwrap();
         peer.send(connect.trim_end());
-        // The service closes the connection once its requests are done:
-        // the connect was admitted, could not be answered, and was undone.
-        until(&format!("round {round} answered"), || peer.state().closed);
-        rig.os.wait_until_held();
-        rig.os.release();
         until(&format!("round {round} undone"), || disconnected() > before);
     }
     assert!(rig.spy.opens().is_empty(), "the gateway was contacted");
