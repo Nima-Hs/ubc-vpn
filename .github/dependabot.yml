@@ -20,6 +20,11 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    ignore:
+      # Node's types must match the Node the app runs on (app/.node-version),
+      # so only patch and minor updates within that major are offered.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: rust-toolchain
     directory: /
