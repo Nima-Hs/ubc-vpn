@@ -52,10 +52,15 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           path: native/windows/cache/gnutls
-          key: native-windows-gnutls-${{ hashFiles('native/windows/common.sh', 'native/windows/gnutls.sh', 'native/windows/patches/gnutls/*.patch', 'native/windows/packages.lock', 'native/windows/tools.lock', 'native/windows/sources.lock') }}
+          key: native-windows-gnutls-${{ hashFiles('native/windows/common.sh', 'native/windows/gnutls.sh', 'native/windows/patches/gnutls/*.patch', 'native/windows/base.lock', 'native/windows/packages.lock', 'native/windows/tools.lock', 'native/windows/sources.lock') }}
+
+      # The build runs in an MSYS2 installed from a dated archive pinned in
+      # base.lock, not in the one GitHub's image comes with.
+      - name: Install the pinned MSYS2 base
+        run: native/windows/base.sh /c/msys2-pinned
 
       - name: Build libopenconnect (MSYS2 UCRT64)
-        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        shell: C:\msys2-pinned\usr\bin\bash.exe -leo pipefail {0}
         env:
           MSYSTEM: UCRT64
           CHERE_INVOKING: "yes"
@@ -65,7 +70,7 @@ jobs:
           native/windows/tests/control.sh
 
       - name: Scan the DLLs for paths and environment variables
-        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        shell: C:\msys2-pinned\usr\bin\bash.exe -leo pipefail {0}
         env:
           MSYSTEM: UCRT64
           CHERE_INVOKING: "yes"
@@ -75,7 +80,7 @@ jobs:
         run: bash native/probe/no-external-browser.sh native/windows/out/bin/libopenconnect-5.dll
 
       - name: Check that PKCS#11 support is absent
-        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
+        shell: C:\msys2-pinned\usr\bin\bash.exe -leo pipefail {0}
         env:
           MSYSTEM: UCRT64
           CHERE_INVOKING: "yes"
