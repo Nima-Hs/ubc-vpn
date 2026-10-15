@@ -19,7 +19,20 @@ import { draw } from "../src/main/icon/raster";
 const build = join(__dirname, "../build");
 const update = process.env.UPDATE_ICONS === "1";
 
-const square = (size: number): Square => ({ size, pixels: draw(appIcon(size), size) });
+/** Each size is drawn once: the largest take a moment. */
+const drawn = new Map<number, Square>();
+function square(size: number): Square {
+    let image = drawn.get(size);
+    if (image === undefined) {
+        image = { size, pixels: draw(appIcon(size), size) };
+        drawn.set(size, image);
+    }
+    return image;
+}
+
+const NAMES = ["icon.ico", "icon.icns", ...PNG_SIZES.map((size) => `icons/${size}x${size}.png`)];
+/** Drawing every size up to 1024 pixels, while other tests run beside it. */
+const SLOW = { timeout: 60_000 };
 
 /** Every file, as it should be. */
 function expected(): Map<string, Buffer> {
@@ -113,15 +126,17 @@ function same(actual: Square, wanted: Square): boolean {
 }
 
 describe("the app icon files", () => {
-    it.runIf(update)("are written afresh", () => {
-        for (const [name, bytes] of expected()) {
+    it.runIf(update)("are written afresh", SLOW, () => {
+        const files = expected();
+        expect([...files.keys()]).toEqual(NAMES);
+        for (const [name, bytes] of files) {
             mkdirSync(join(build, name, ".."), { recursive: true });
             writeFileSync(join(build, name), bytes);
         }
     });
 
-    it.skipIf(update)("are up to date with the mark: run `pnpm icons` if not", () => {
-        for (const name of expected().keys()) {
+    it.skipIf(update)("are up to date with the mark: run `pnpm icons` if not", SLOW, () => {
+        for (const name of NAMES) {
             expect(existsSync(join(build, name)), `build/${name} is missing`).toBe(true);
         }
         const ico = decodeIco(readFileSync(join(build, "icon.ico")));
