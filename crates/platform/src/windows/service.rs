@@ -18,7 +18,10 @@
 //!    Then [`run`] returns the body's result.
 //!
 //! A stop request is reported to Windows as "stopping" at once, and the body
-//! takes as long as its cleanup needs. Accepting the pre-shutdown request
+//! takes as long as its cleanup needs. Until it returns, "stopping" is
+//! reported again every second with a rising checkpoint, so Windows sees
+//! progress and does not take a long cleanup for a hung service. "Stopped"
+//! is reported only after the body has returned. Accepting the pre-shutdown request
 //! makes Windows wait for that cleanup before it shuts down, up to its own
 //! limit.
 
@@ -26,6 +29,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT,
@@ -50,6 +55,9 @@ type Body = Box<dyn FnOnce(&Control, Receiver<()>) -> std::result::Result<(), St
 /// How long Windows is told to allow before it hears from the service again,
 /// while it starts and while it stops.
 const WAIT_HINT_MS: u32 = 30_000;
+
+/// How often "stopping" is reported again while the body cleans up.
+const PROGRESS: Duration = Duration::from_secs(1);
 
 /// The service code's exit code, reported with `ERROR_SERVICE_SPECIFIC_ERROR`
 /// when the body fails. Its reason is in the body's own result.
@@ -139,18 +147,29 @@ impl Control {
 }
 
 /// Reports the service's state. One per service, shared by the body's
-/// thread and the control handler's.
+/// thread, the control handler's and the thread that reports progress
+/// while stopping.
 struct Status {
     handle: SERVICE_STATUS_HANDLE,
+    reported: Mutex<Reported>,
+}
+
+/// What has been reported so far.
+#[derive(Default)]
+struct Reported {
     /// Counts reports of a pending state, as Windows asks, so it can see
     /// progress.
-    checkpoint: Mutex<u32>,
+    checkpoint: u32,
+    /// Once stopping, the service is never reported running again.
+    stopping: bool,
+    /// Once stopped, nothing more is reported.
+    stopped: bool,
 }
 
 // SAFETY: the handle is an opaque value the service manager gives for this
 // process's service, which may be used from any thread. It needs no closing.
 unsafe impl Send for Status {}
-// SAFETY: as above; the checkpoint is behind a mutex.
+// SAFETY: as above; what has been reported is behind a mutex.
 unsafe impl Sync for Status {}
 
 impl Status {
@@ -161,16 +180,21 @@ impl Status {
         exit: u32,
         specific: u32,
     ) -> Result<()> {
-        let mut checkpoint = lock(&self.checkpoint);
+        let mut reported = lock(&self.reported);
+        if reported.stopped || (reported.stopping && state == SERVICE_RUNNING) {
+            return Ok(());
+        }
+        reported.stopping |= state == SERVICE_STOP_PENDING;
+        reported.stopped = state == SERVICE_STOPPED;
         let pending = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING;
-        *checkpoint = if pending { *checkpoint + 1 } else { 0 };
+        reported.checkpoint = if pending { reported.checkpoint + 1 } else { 0 };
         let status = SERVICE_STATUS {
             dwServiceType: SERVICE_WIN32_OWN_PROCESS,
             dwCurrentState: state,
             dwControlsAccepted: accepts,
             dwWin32ExitCode: exit,
             dwServiceSpecificExitCode: specific,
-            dwCheckPoint: *checkpoint,
+            dwCheckPoint: reported.checkpoint,
             dwWaitHint: if pending { WAIT_HINT_MS } else { 0 },
         };
         // SAFETY: the handle came from RegisterServiceCtrlHandlerExW, and the
@@ -205,7 +229,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut PWSTR) {
     }
     let status = Arc::new(Status {
         handle,
-        checkpoint: Mutex::new(0),
+        reported: Mutex::default(),
     });
     let (stop, stop_requests) = mpsc::channel();
     *lock(&HANDLER) = Some(Handler {
@@ -225,6 +249,18 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut PWSTR) {
     // Once this is reported, Windows may end the process at any moment, so
     // it is the last thing done here.
     let _ = control.status.report(SERVICE_STOPPED, 0, exit, specific);
+}
+
+/// Reports "stopping" again every [`PROGRESS`] until "stopped" has been
+/// reported.
+fn report_progress(status: &Status) {
+    loop {
+        thread::sleep(PROGRESS);
+        if lock(&status.reported).stopped {
+            return;
+        }
+        let _ = status.report(SERVICE_STOP_PENDING, 0, NO_ERROR, 0);
+    }
 }
 
 /// The first of `argc` strings in `argv`, or nothing.
@@ -264,6 +300,8 @@ unsafe extern "system" fn handler(
                 let _ = handler.status.report(SERVICE_STOP_PENDING, 0, NO_ERROR, 0);
                 if let Some(stop) = handler.stop.take() {
                     let _ = stop.send(());
+                    let status = handler.status.clone();
+                    thread::spawn(move || report_progress(&status));
                 }
             }
             NO_ERROR

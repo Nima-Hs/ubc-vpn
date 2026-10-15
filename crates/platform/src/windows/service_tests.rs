@@ -27,6 +27,17 @@ fn name(scenario: &str) -> String {
 /// What [`hosted`] does when its service name contains this.
 const FAIL: &str = "-fails-";
 
+/// How long [`hosted`] takes to clean up after a stop request: long enough
+/// for several progress reports.
+const CLEANUP: Duration = Duration::from_secs(3);
+
+/// The file [`hosted`] writes when its cleanup is done, beside this test
+/// program and named after the service.
+fn marker(service: &str) -> std::path::PathBuf {
+    let program = std::env::current_exe().expect("the test program's path");
+    program.with_file_name(format!("{service}.cleaned-up"))
+}
+
 fn skip(what: &str) {
     let required = std::env::var_os("UBC_VPN_REQUIRE_ELEVATED").is_some();
     assert!(!required, "{what}, and this run requires it");
@@ -41,7 +52,8 @@ fn ran(test: &str) {
 // Run by `cargo test`, this is not under the service manager, and `run` must
 // say so at once without calling the body. Run by the service manager, as
 // the test below has it, it is the service: it reports itself running, then
-// either fails at once or waits for the stop request.
+// either fails at once or waits for the stop request, then takes a while to
+// clean up and leaves a marker when it is done.
 #[test]
 fn hosted() {
     let outcome = run(|control, stop| {
@@ -50,7 +62,9 @@ fn hosted() {
             return Err("asked to fail".to_string());
         }
         stop.recv()
-            .map_err(|_| "the stop request never came".to_string())
+            .map_err(|_| "the stop request never came".to_string())?;
+        std::thread::sleep(CLEANUP);
+        std::fs::write(marker(control.name()), b"done").map_err(|e| e.to_string())
     });
     match outcome {
         Err(Error::Failed(why)) => assert!(why.contains("service manager"), "{why}"),
@@ -176,12 +190,44 @@ fn the_service_manager_starts_it_and_stops_it() {
     }
     let manager = Sc(manager);
 
-    let service = register(&manager, &name("stops"));
+    // "Stopped" comes only once the cleanup is done, and until then
+    // "stopping" is reported with a rising checkpoint.
+    let stops = name("stops");
+    let done = marker(&stops);
+    let _ = std::fs::remove_file(&done);
+    let service = register(&manager, &stops);
     start(&service);
     service.wait_for(SERVICE_RUNNING);
     service.control(SERVICE_CONTROL_STOP);
-    let stopped = service.wait_for(SERVICE_STOPPED);
+    let (mut checkpoints, started) = (Vec::new(), Instant::now());
+    let stopped = loop {
+        let status = service.status();
+        match status.dwCurrentState {
+            SERVICE_STOPPED => break status,
+            SERVICE_STOP_PENDING => {
+                assert!(
+                    !done.exists(),
+                    "the cleanup was done before stopping was over"
+                );
+                checkpoints.push(status.dwCheckPoint);
+            }
+            state => panic!("state {state} after the stop request"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "never stopped");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        done.exists(),
+        "reported stopped before the cleanup was done"
+    );
+    let _ = std::fs::remove_file(&done);
     assert_eq!(stopped.dwWin32ExitCode, NO_ERROR);
+    checkpoints.dedup();
+    assert!(
+        checkpoints.len() >= 2,
+        "no progress while stopping: {checkpoints:?}"
+    );
+    assert!(checkpoints.is_sorted(), "{checkpoints:?}");
     drop(service);
 
     let service = register(&manager, &name(&format!("x{FAIL}x")));
