@@ -8,12 +8,13 @@
 # updates Visual Studio, that stop shows the new version and checksum;
 # review them and change them here.
 
-# The edition whose licence terms ship (licenses/microsoft-visual-studio-2026-license.txt).
+# The edition whose licence terms ship (licenses/microsoft-visual-studio-2026-license.txt):
+# Visual Studio Enterprise 2026, 18.10.3 on GitHub's windows-2025-vs2026 image.
 VC_PRODUCT=Microsoft.VisualStudio.Product.Enterprise
 VC_PRODUCT_LINE_VERSION=18
 # The redistributable's version folder, VC\Redist\MSVC\<version>.
-VC_REDIST_VERSION=0.0.0
+VC_REDIST_VERSION=14.51.36231
 VC_CRT_FOLDER=Microsoft.VC145.CRT
 
 # SHA-256 and name of each file, as in VC\Redist\MSVC\<version>\x64\<folder>.
-0000000000000000000000000000000000000000000000000000000000000000  vcruntime140.dll
+d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7  vcruntime140.dll
