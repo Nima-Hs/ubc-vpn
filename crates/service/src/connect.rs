@@ -5,11 +5,11 @@ use std::sync::mpsc;
 
 use std::net::Ipv4Addr;
 use ubc_vpn_core::protocol::{ConnectParams, ErrorCode, LogLevel};
-use ubc_vpn_core::routes::Ipv4Net;
+use ubc_vpn_core::routes::{Ipv4Net, LocalConflict, LocalNetworks, check_against_local};
 use ubc_vpn_core::state::TunnelInfo;
-use ubc_vpn_engine::{Cancel, Session};
+use ubc_vpn_engine::{Assigned, Cancel, Session};
 
-use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns};
+use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns, TUNNEL_MTU};
 
 use crate::session::Machine;
 use crate::verify::{Expected, verify};
@@ -42,6 +42,14 @@ impl Machine {
         let physical = self.routes.capture_physical(gateway_addr);
         let physical = physical.map_err(os("The current network could not be determined"))?;
         self.applied.physical = Some(physical.clone());
+        // Judged against the network the machine is on before the gateway
+        // is contacted, so a refused connect sends no cookie anywhere.
+        let local = LocalNetworks {
+            own_addresses: physical.own_addresses(),
+            on_link: physical.on_link(),
+            next_hop: physical.next_hop(),
+        };
+        check_against_local(&chosen.subnets, gateway_addr, &local).map_err(refused_here)?;
 
         let (ended, events) = mpsc::channel();
         let session = Session {
@@ -69,12 +77,18 @@ impl Machine {
             let message = "The tunnel is not connected to the expected address.";
             return Err((ErrorCode::EngineFailed, message.to_string()));
         }
-        // Split DNS only when the user chose domains. What the gateway
-        // assigned is judged before anything is applied.
+        // What the gateway assigned is judged before anything is applied.
+        check_assigned(&assigned, gateway_addr, &physical)?;
+        // Split DNS only when the user chose domains.
         let servers = match chosen.dns_domains.is_empty() {
             true => Vec::new(),
             false => dns_servers(&assigned.dns, gateway_addr, &physical)?,
         };
+        let unusable = |conflict| {
+            let why = format!("The gateway assigned a DNS server that cannot be used: {conflict}.");
+            (ErrorCode::EngineFailed, why)
+        };
+        check_against_local(&servers, gateway_addr, &local).map_err(unusable)?;
         // SEAM: the tunnel's address, netmask and MTU from `assigned` must be
         // set on the device here. The platform contract has no operation for
         // that yet, and the fake engine's device needs none.
@@ -133,6 +147,50 @@ impl Machine {
             dns_domains: chosen.dns_domains,
         })
     }
+}
+
+/// Why a connect cannot go ahead on the network the machine is on. A gateway
+/// address that is the machine's own is a bad request, as any other address
+/// that cannot be a gateway is; the rest are routes refused.
+fn refused_here(conflict: LocalConflict) -> Failure {
+    match conflict {
+        LocalConflict::GatewayIsOwnAddress(_) => (
+            ErrorCode::BadRequest,
+            format!("The gateway address cannot be used: {conflict}."),
+        ),
+        _ => (
+            ErrorCode::RouteRefused,
+            format!("Route refused: {conflict}."),
+        ),
+    }
+}
+
+/// Checks the tunnel's packet size and this machine's address inside it,
+/// which are set on the device with admin rights. The address must not be
+/// reserved, nor this machine's own, the gateway's or the router's.
+fn check_assigned(
+    assigned: &Assigned,
+    gateway: Ipv4Addr,
+    physical: &PhysicalNetwork,
+) -> Result<(), Failure> {
+    let refuse = |why: String| Err((ErrorCode::EngineFailed, why));
+    if !TUNNEL_MTU.contains(&assigned.mtu) {
+        let mtu = assigned.mtu;
+        return refuse(format!(
+            "The gateway assigned a packet size that cannot be used: {mtu}."
+        ));
+    }
+    let addr = assigned.address;
+    let reserved = Ipv4Net::new(addr, 32).map_or(true, |host| host.is_reserved());
+    let taken = addr == gateway
+        || Some(addr) == physical.next_hop()
+        || physical.own_addresses().contains(&addr);
+    if reserved || taken {
+        return refuse(format!(
+            "The gateway assigned this computer an address that cannot be used: {addr}."
+        ));
+    }
+    Ok(())
 }
 
 /// The most DNS servers a gateway may assign. A real one assigns two or

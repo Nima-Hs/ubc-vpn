@@ -186,8 +186,9 @@ impl Session {
         if let Err(why) = params.routes.check(allowed) {
             return refused(ErrorCode::RouteRefused, format!("Route refused: {why}."));
         }
-        // SEAM: the machine's own interface addresses must be refused here
-        // too. That needs a platform operation that does not exist yet.
+        // The machine's own addresses and the networks it is on are known
+        // only once the worker captures them, so `set_up` refuses those,
+        // still before the gateway is contacted.
         if !is_plausible_gateway_addr(params.gateway_addr) {
             let message = "The gateway address is not a usable address.";
             return refused(ErrorCode::BadRequest, message.to_string());
