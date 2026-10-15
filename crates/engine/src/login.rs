@@ -337,12 +337,26 @@ fn finish(
     })
 }
 
-// The stand-in gateway, for the one unit test that needs a real handle. It
-// is named here and not inside `tests`: a path given inside an inline module
-// is looked up through a folder that does not exist.
+// The stand-in gateway, for the unit tests that need a real handle. It is
+// named here and not inside `tests`: a path given inside an inline module is
+// looked up through a folder that does not exist.
 #[cfg(test)]
 #[path = "../tests/gateway/mod.rs"]
-mod stand_in;
+pub(crate) mod stand_in;
+
+/// The library, for the unit tests that need a real handle. The environment
+/// is prepared and the library loaded once in a process, whichever test asks
+/// first.
+#[cfg(test)]
+pub(crate) fn test_library() -> Library {
+    static LOADED: std::sync::OnceLock<Library> = std::sync::OnceLock::new();
+    *LOADED.get_or_init(|| {
+        let prepared = crate::prepare_environment(crate::Role::Client, None);
+        let libs = Path::new(env!("UBC_VPN_NATIVE_LIBS"));
+        let library = Library::load(libs, &prepared.expect("the environment is clean"));
+        library.expect("the pinned library loads")
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -375,10 +389,7 @@ mod tests {
         let Some(gateway) = stand_in::Gateway::start("accept") else {
             return;
         };
-        let prepared = crate::prepare_environment(crate::Role::Client, None);
-        let libs = Path::new(env!("UBC_VPN_NATIVE_LIBS"));
-        let library = Library::load(libs, &prepared.expect("the environment is clean"));
-        let library = library.expect("the pinned library loads");
+        let library = test_library();
         let local = SocketAddrV4::new(Ipv4Addr::LOCALHOST, gateway.port);
         let logged_in = || {
             let mut callbacks = Callbacks::refusing(Box::new(|_, _, _| {}));

@@ -226,6 +226,7 @@ jobs:
           grep -q '^RAN: engine offers no single sign-on' test.log
           # And the tunnel engine.
           grep -q '^RAN: tunnel refuses a wrong pin' test.log
+          grep -q '^RAN: tunnel asks for no dtls' test.log
           if [ "$RUNNER_OS" = Linux ]; then
             grep -q '^RAN: handle judges a trusted certificate' test.log
             grep -q '^RAN: engine refuses a trusted certificate' test.log
@@ -234,6 +235,8 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             grep -q '^RAN: engine writes no key log' test.log
             grep -q '^RAN: tunnel makes and removes a device' test.log
+            grep -q '^RAN: tunnel logs off only when asked' test.log
+            grep -q '^RAN: tunnel reports a lost gateway' test.log
           else
             grep -q '^RAN: tunnel refuses at the device step' test.log
           fi

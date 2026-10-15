@@ -7,7 +7,7 @@
 //! behind the `libopenconnect` feature. That feature is off by default, so
 //! ordinary builds and tests need no native library. [`OpenConnect`]
 //! implements both capabilities below. So far its tunnels create a device
-//! on Windows only, and do not run the library's main loop while open.
+//! on Windows only.
 //!
 //! There are two capabilities, because they run in two processes:
 //!
