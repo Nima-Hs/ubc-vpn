@@ -25,6 +25,12 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mode = args::parse(std::env::args_os().skip(1))?;
     args::check_environment(mode)?;
+    // A build with dev mode has the fake engine in it and never runs as the
+    // installed service. Said here, before anything else and before the
+    // service manager is joined, as well as where the engine is chosen.
+    if mode == Run::Installed && cfg!(feature = "dev-mode") {
+        return Err("a build with dev mode cannot run as the installed service".to_string());
+    }
     // On Windows the installed service is started by the service manager,
     // and stops when it asks.
     #[cfg(windows)]

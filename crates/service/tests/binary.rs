@@ -92,7 +92,7 @@ fn a_build_with_dev_mode_knows_the_dev_flag() {
 // Security rule: a build with dev mode has the fake engine in it, so it
 // never runs as the installed service, even with the real engine built in.
 // It stops before it touches the system's folders or loads anything.
-#[cfg(all(feature = "dev-mode", feature = "real-engine"))]
+#[cfg(feature = "dev-mode")]
 #[test]
 fn a_build_with_dev_mode_never_runs_as_the_installed_service() {
     let (refused, stderr) = run(&[], None);
@@ -101,8 +101,10 @@ fn a_build_with_dev_mode_never_runs_as_the_installed_service() {
 }
 
 // A build without the real engine has nothing to connect with, and says so
-// instead of starting.
-#[cfg(not(feature = "real-engine"))]
+// instead of starting. On Windows a run from a console stops earlier, because
+// only the service manager starts the installed service; that is tested by
+// on_windows_the_installed_service_needs_the_service_manager.
+#[cfg(all(not(feature = "real-engine"), not(feature = "dev-mode"), not(windows)))]
 #[test]
 fn a_build_without_the_real_engine_does_not_run_as_the_installed_service() {
     let (refused, stderr) = run(&[], None);
@@ -146,8 +148,9 @@ fn refuses_to_start_while_a_loader_variable_is_set() {
 }
 
 // On Windows the installed service runs only under the service manager. Run
-// from a console it stops at once and says so, before it opens anything.
-#[cfg(windows)]
+// from a console it stops at once and says so, before it opens anything. A
+// build with dev mode stops even before that (see the test above).
+#[cfg(all(windows, not(feature = "dev-mode")))]
 #[test]
 fn on_windows_the_installed_service_needs_the_service_manager() {
     let (refused, stderr) = run(&[], None);
