@@ -218,7 +218,7 @@ fn route(text: &str) -> Option<Ipv4Net> {
 /// - The split routes pass the service's route rules. None means
 ///   everything, which is only advice: the service routes what the user
 ///   chose.
-fn assignment(info: &IpInfoCopy, gateway_addr: Ipv4Addr) -> Result<Assigned, TunnelError> {
+pub fn assignment(info: &IpInfoCopy, gateway_addr: Ipv4Addr) -> Result<Assigned, TunnelError> {
     const BAD: TunnelError = TunnelError::Failed;
     if ipv4(info.gateway_addr.as_deref()) != Some(gateway_addr) {
         return Err(BAD);

@@ -175,6 +175,20 @@ jobs:
           sudo update-ca-certificates
           echo "UBC_VPN_TEST_TRUSTED_GATEWAY_DIR=$PWD" >> "$GITHUB_ENV"
 
+      # Some tests drive a real gateway (tests/ocserv.rs): ocserv, installed
+      # at a pinned version from a dated Ubuntu snapshot and started as root
+      # with the stand-in's throwaway key and a made-up account. Linux only,
+      # on GitHub's own runners, which are thrown away after the job.
+      - name: Start ocserv, a real gateway, on this runner
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir ocserv
+          cp gateway/cert.pem gateway/key.pem ocserv/
+          bash "$GITHUB_WORKSPACE/crates/engine/tests/ocserv/start.sh" ocserv
+          echo "UBC_VPN_TEST_OCSERV_DIR=$PWD/ocserv" >> "$GITHUB_ENV"
+          echo "UBC_VPN_TEST_REQUIRE_OCSERV=1" >> "$GITHUB_ENV"
+
       # The tunnel tests make a Wintun device, which needs administrator
       # rights, as GitHub's Windows runners have, and wintun.dll beside the
       # test programs: the library asks for it in the program's own folder.
@@ -232,6 +246,7 @@ jobs:
             grep -q '^RAN: handle judges a trusted certificate' test.log
             grep -q '^RAN: engine refuses a trusted certificate' test.log
             grep -q '^RAN: tunnel refuses a trusted certificate' test.log
+            grep -q '^RAN: ocserv takes a login and a tunnel connection' test.log
           fi
           if [ "$RUNNER_OS" = Windows ]; then
             grep -q '^RAN: engine writes no key log' test.log
@@ -250,6 +265,16 @@ jobs:
 
       # The optimised build is the one that ships, and the one in which a
       # compiler may drop the C shim's wipe of its buffer.
+      # When something failed, what ocserv said: no line that names a
+      # password, and every long token, cookies included, hidden, though all
+      # of them are made up.
+      - name: What ocserv logged
+        if: failure() && env.UBC_VPN_TEST_OCSERV_DIR != ''
+        run: |
+          { sudo cat "$UBC_VPN_TEST_OCSERV_DIR/ocserv.log"; sudo journalctl --no-pager -o cat -t ocserv; } \
+            | grep -viE 'password' | grep -vE 'TLS\[' \
+            | sed -E 's/[A-Za-z0-9+\/=_-]{16,}/[hidden]/g' | grep -v 'setting .* as ' | tail -n 150
+
       - name: The same tests in a release build
         env:
           UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native

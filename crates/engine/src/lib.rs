@@ -342,6 +342,11 @@ pub use gateway::Gateway;
 pub use log::{DEBUG_LINES, LogLevel, LogSink, MIN_HIDDEN_LEN};
 #[cfg(feature = "libopenconnect")]
 pub use login::OpenConnect;
+// For the tests that drive a real gateway: the checks the tunnel engine
+// makes of what a gateway assigned. Only with `fake`, which never ships.
+#[cfg(all(feature = "libopenconnect", feature = "fake"))]
+#[doc(hidden)]
+pub use tunnel::assignment as check_assignment;
 
 type Hooks = (u64, Vec<(u64, Hook)>);
 pub use prompts::{Prompt, Prompts};
