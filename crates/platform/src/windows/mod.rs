@@ -73,7 +73,6 @@ use windows_sys::core::GUID;
 
 use self::pipe::{End, Pipe, Stop};
 use self::security::{Descriptor, Handle, last_error, os_error, wide};
-use crate::unsupported::Native;
 use crate::{Connection, Error, Listener, Mode, Paths, Platform, Result, Transport, UserId, lock};
 
 /// The installed service's pipe. A dev-mode pipe has the user's SID appended,

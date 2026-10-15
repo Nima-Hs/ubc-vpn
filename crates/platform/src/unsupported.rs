@@ -11,6 +11,9 @@ use crate::{
     Subscription, Transport, Verified,
 };
 
+// Windows implements every part now; only this crate's own tests use the
+// stub there.
+#[cfg_attr(all(windows, not(test)), allow(dead_code))]
 pub(crate) struct Native;
 
 impl Routes for Native {
