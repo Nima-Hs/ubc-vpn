@@ -90,8 +90,10 @@ JSON, and diagnostics prints one line of JSON.
 
 diagnostics --host looks the name up as other programs on this computer do,
 and says for each address whether a saved route covers it and, while
-connected, whether it goes through the tunnel. Traffic to an address no
-saved route covers goes over the usual network, not the VPN.
+connected, whether the routes UBC VPN applied carry it through the tunnel.
+Traffic to an address no saved route covers goes over the usual network, not
+the VPN. Its exit status is 0 whatever the coverage; a script should read
+covered from the --json line.
 
 With --json, status prints the connection state as one line of JSON. Each
 settings command prints one line of JSON, and exits with status 1 only when

@@ -227,7 +227,13 @@ fn only_a_plain_host_name_or_an_address_is_looked_up() {
     for host in odd {
         let (status, out, err) = run_with(&rig, &names, &["--host", host]);
         assert_eq!((status, out.as_str()), (USAGE, ""), "{host:?}");
-        assert!(err.contains("not a host name"), "{err}");
+        // What was given is never printed back: it could hold anything.
+        let control = err.trim_end_matches('\n').chars().any(char::is_control);
+        assert!(!control, "a control character on stderr: {err:?}");
+        if host.len() > 1 {
+            assert!(!err.contains(host), "the name given was printed: {err:?}");
+        }
+        assert_eq!(err, "ubc-vpn: That is not a host name or an IP address.\n");
     }
     let long = format!("{}.example", "a".repeat(64));
     assert_eq!(run_with(&rig, &names, &["--host", &long]).0, USAGE);
