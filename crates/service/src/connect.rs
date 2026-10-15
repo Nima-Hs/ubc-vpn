@@ -89,9 +89,15 @@ impl Machine {
             (ErrorCode::EngineFailed, why)
         };
         check_against_local(&servers, gateway_addr, &local).map_err(unusable)?;
-        // SEAM: the tunnel's address, netmask and MTU from `assigned` must be
-        // set on the device here. The platform contract has no operation for
-        // that yet, and the fake engine's device needs none.
+        // The engine created the device and set nothing on it. Its address
+        // is set as a single host: the netmask the gateway assigned is never
+        // used, since an on-link network on the device would route a subnet
+        // the user did not choose into the tunnel. Nothing to undo: the
+        // address goes with the device when the tunnel closes.
+        let configured =
+            self.routes
+                .configure_tunnel(&assigned.interface, assigned.address, assigned.mtu);
+        configured.map_err(os("The tunnel device could not be configured"))?;
 
         self.applied.gateway_route = Some(gateway_addr);
         let routed = self.routes.add_gateway_route(gateway_addr, &physical);
