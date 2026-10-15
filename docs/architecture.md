@@ -274,8 +274,6 @@ Wintun, the Windows tunnel driver, ships as a prebuilt signed binary under its o
 
 The app's bundled fonts are under the SIL Open Font License 1.1, approved in the same place for font files only.
 
-On Windows the service and the command-line client have Microsoft's C runtime linked into them (`+crt-static` in `.cargo/config.toml`), so users need no Visual C++ Redistributable, and `/DEPENDENTLOADFLAG:0x800` can keep their imports to System32. The rules allow the compiler's own runtime in our programs as long as its licence text ships and its source origin is recorded; `packaging/windows/msvc-runtime.txt` names the licence terms and records where the source comes from, and ships with them. The full text of Microsoft's licence terms is not in it yet; adding it is an open point below.
-
 ### What the installers must do
 
 A trial packaged the app with pnpm and `electron-builder` on all three OSes, installed it on CI runners, and looked at what landed where. It works. These are the rules it produced; each was observed on a runner unless it says otherwise.
@@ -314,7 +312,6 @@ A trial packaged the app with pnpm and `electron-builder` on all three OSes, ins
 
 ## Open points
 
-- **The C runtime's licence text.** `packaging/windows/msvc-runtime.txt` points to Microsoft's licence terms for Visual Studio and the Windows SDK. Their full text, as it applies to the toolset of the release build, must be added before the first release.
 - **macOS update prompts.** Expected to need one admin prompt like the others; to confirm when the installer is built.
 - **Windows install folder owner.** On the CI runner the account that ran the installer kept full control of the install folder. On a normal machine with UAC the owner should be the Administrators group; to confirm on a real machine, or set the owner in the installer.
 - **Package and command names.** The trial's package was named after the app's `package.json`; choose the final names before release.

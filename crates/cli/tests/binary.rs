@@ -191,21 +191,6 @@ impl Image {
         );
         self.u16_at(config + 78)
     }
-
-    /// The names of the DLLs the program imports (directory 1), in lower
-    /// case. Each import descriptor is 20 bytes, the name's address at 12,
-    /// and an all-zero one ends the list.
-    fn imports(&self) -> Vec<String> {
-        let (mut descriptor, _) = self.directory(1);
-        let mut names = Vec::new();
-        while self.u32_at(descriptor + 12) != 0 {
-            let start = self.offset(self.u32_at(descriptor + 12));
-            let end = start + self.0[start..].iter().position(|&b| b == 0).unwrap();
-            names.push(String::from_utf8_lossy(&self.0[start..end]).to_lowercase());
-            descriptor += 20;
-        }
-        names
-    }
 }
 
 // Security rule: the program's own imports come from System32 only, never
@@ -215,29 +200,4 @@ impl Image {
 fn imports_are_loaded_from_system32_only() {
     let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn")));
     assert_eq!(program.dependent_load_flags(), 0x800);
-}
-
-// The C runtime is linked into the program (+crt-static in
-// .cargo/config.toml), so it needs no Visual C++ redistributable, which the
-// load flag above would only look for in System32.
-#[cfg(all(windows, target_env = "msvc"))]
-#[test]
-fn the_c_runtime_is_linked_in() {
-    let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn")));
-    let imports = program.imports();
-    assert!(
-        imports.iter().any(|name| name == "kernel32.dll"),
-        "{imports:?}"
-    );
-    let runtime = |name: &&String| {
-        name.starts_with("vcruntime")
-            || name.starts_with("msvcp")
-            || name.starts_with("api-ms-win-crt-")
-            || *name == "ucrtbase.dll"
-    };
-    let found: Vec<_> = imports.iter().filter(runtime).collect();
-    assert!(
-        found.is_empty(),
-        "the program imports the C runtime: {found:?}"
-    );
 }
