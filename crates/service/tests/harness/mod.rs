@@ -127,8 +127,13 @@ impl Rig {
     }
 
     pub fn start(&mut self) -> Result<(), String> {
+        self.start_with(self.state())
+    }
+
+    /// Starts the service on the state folder `state`.
+    pub fn start_with(&mut self, state: StateDir) -> Result<(), String> {
         let platform = self.platform();
-        let service = Service::start(platform, self.state(), self.spy.clone(), self.timeouts);
+        let service = Service::start(platform, state, self.spy.clone(), self.timeouts);
         self.service = Some(service?);
         Ok(())
     }

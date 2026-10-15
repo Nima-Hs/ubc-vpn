@@ -457,3 +457,64 @@ fn the_owner_is_never_written_through_a_link() {
     let owner = std::fs::read_to_string(stored).unwrap();
     assert_eq!(owner, r#"{"owner":"alice"}"#);
 }
+
+/// A checked state folder, as dev mode opens it, at the rig's state folder,
+/// and a way to let everyone change it, as a standard user could have.
+#[cfg(all(windows, feature = "dev-mode"))]
+mod checked {
+    use super::*;
+    use ubc_vpn_platform::Mode;
+
+    pub fn open(rig: &Rig) -> StateDir {
+        let paths = ubc_vpn_platform::Paths {
+            state_dir: rig.state_dir(),
+            ..rig.platform().paths
+        };
+        StateDir::open(Mode::Dev, &paths).expect("a fresh dev-mode state folder")
+    }
+
+    /// Grants Everyone modify on the folder and what it holds.
+    pub fn open_to_everyone(rig: &Rig) {
+        let granted = std::process::Command::new("icacls")
+            .arg(rig.state_dir())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)(M)"])
+            .output()
+            .expect("icacls runs");
+        assert!(granted.status.success(), "{granted:?}");
+    }
+}
+
+// Security rule: the owner is read through the state folder's checks, not
+// around them. A folder anyone may change stops the service, even when it
+// holds a well-formed owner.
+#[cfg(all(windows, feature = "dev-mode"))]
+#[test]
+fn a_state_folder_others_may_change_is_not_read() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    let state = checked::open(&rig);
+    state.write("state.json", br#"{"owner":"alice"}"#).unwrap();
+    rig.start_with(state.clone())
+        .expect("a safe folder is used");
+    rig.stop();
+    checked::open_to_everyone(&rig);
+    let refused = rig.start_with(state).unwrap_err();
+    assert!(refused.contains("not safe to use"), "{refused}");
+    assert!(!refused.contains(".."), "{refused}");
+    assert_eq!(rig.raw("alice").err(), Some(Error::NotFound));
+}
+
+// Security rule: the owner is written through the same checks. A claim made
+// after the folder was opened to others is refused, and nobody owns the
+// service.
+#[cfg(all(windows, feature = "dev-mode"))]
+#[test]
+fn a_state_folder_others_may_change_is_not_written() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    let state = checked::open(&rig);
+    rig.start_with(state).expect("a safe folder is used");
+    checked::open_to_everyone(&rig);
+    let mut alice = rig.peer("alice");
+    assert_eq!(alice.ask(RequestBody::Claim), Err(ErrorCode::Internal));
+    assert_eq!(alice.ask(RequestBody::Status), Err(ErrorCode::NotClaimed));
+    assert!(!rig.state_dir().join("state.json").exists());
+}

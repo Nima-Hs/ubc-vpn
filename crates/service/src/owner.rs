@@ -9,7 +9,7 @@
 //! so a crash leaves the old owner or the new one.
 
 use serde_json::{Value, json};
-use ubc_vpn_platform::{StateDir, UserId};
+use ubc_vpn_platform::{Error, StateDir, UserId};
 
 const FILE: &str = "state.json";
 
@@ -21,7 +21,7 @@ pub(crate) fn load(state: &StateDir) -> Result<Option<UserId>, String> {
     let bytes = match state.read(FILE) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Ok(None),
-        Err(e) => return Err(format!("The state file cannot be read: {e}.")),
+        Err(e) => return Err(sentence("The state file cannot be read", &e)),
     };
     let value: Option<Value> = serde_json::from_slice(&bytes).ok();
     let owner = value.as_ref().and_then(|v| v.get("owner")?.as_str());
@@ -31,9 +31,15 @@ pub(crate) fn load(state: &StateDir) -> Result<Option<UserId>, String> {
     })
 }
 
+/// `what` and why, as one sentence with one full stop: the platform's reason
+/// may already end with one.
+fn sentence(what: &str, why: &Error) -> String {
+    format!("{what}: {}.", why.to_string().trim_end_matches('.'))
+}
+
 /// Writes the owner.
 pub(crate) fn save(state: &StateDir, owner: &UserId) -> Result<(), String> {
     let text = json!({ "owner": owner.to_string() }).to_string();
     let written = state.write(FILE, text.as_bytes());
-    written.map_err(|e| format!("The owner could not be saved: {e}."))
+    written.map_err(|e| sentence("The owner could not be saved", &e))
 }
