@@ -254,6 +254,10 @@
 //!   policy's host name for TLS and HTTP. Never build a URL from client
 //!   input. After connecting, check that the address the tunnel is connected
 //!   to equals the session's and report it in [`Assigned::gateway_addr`].
+//! - The cookie comes from the same unprivileged program. Refuse it with
+//!   [`check_cookie`], before anything is contacted, unless every byte is
+//!   one RFC 6265 allows in a cookie value: it goes into the `Cookie:`
+//!   header, where a `;` adds cookies and a CR or LF adds header lines.
 //! - Hand the cookie to the library with `openconnect_set_cookie`, after
 //!   registering it with [`LogSink::hide`].
 //! - Turn DTLS off with `openconnect_disable_dtls` before connecting, so
@@ -312,7 +316,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ubc_vpn_core::login::LoginErrorCode;
-use ubc_vpn_core::protocol::{ErrorCode, is_plausible_gateway_addr};
+use ubc_vpn_core::protocol::{ErrorCode, is_plausible_cookie, is_plausible_gateway_addr};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::Ipv4Net;
 
@@ -540,6 +544,9 @@ pub enum TunnelError {
     /// The session's gateway address is not one a gateway can have. Nothing
     /// was contacted.
     BadAddress,
+    /// The session's cookie holds a character no cookie can hold. Nothing
+    /// was contacted.
+    BadSession,
     /// Anything else, such as the tunnel device not being created.
     Failed,
 }
@@ -552,6 +559,7 @@ impl fmt::Display for TunnelError {
             Self::GatewayUnreachable => "The gateway could not be reached.",
             Self::Cancelled => "Connecting was cancelled.",
             Self::BadAddress => "The gateway address is not a usable address.",
+            Self::BadSession => "The session is not one a gateway could have issued.",
             Self::Failed => "The tunnel could not be opened.",
         })
     }
@@ -564,7 +572,7 @@ impl From<TunnelError> for ErrorCode {
         match e {
             TunnelError::PinMismatch => Self::PinMismatch,
             TunnelError::LoginNeeded => Self::LoginNeeded,
-            TunnelError::BadAddress => Self::BadRequest,
+            TunnelError::BadAddress | TunnelError::BadSession => Self::BadRequest,
             TunnelError::GatewayUnreachable => Self::GatewayUnreachable,
             // The service cancels its own connect and normally reports
             // "disconnected" instead of an error.
@@ -586,6 +594,22 @@ pub fn check_gateway_addr(addr: Ipv4Addr) -> Result<(), TunnelError> {
         Ok(())
     } else {
         Err(TunnelError::BadAddress)
+    }
+}
+
+/// Checks a session cookie that came from an unprivileged client before
+/// anything connects with it. Every tunnel engine calls this, right after
+/// checking the address.
+///
+/// It applies [`is_plausible_cookie`], the rule shared with the service. The
+/// cookie goes into the `Cookie:` header the privileged service sends, and
+/// only what RFC 6265 allows in a cookie value may go there: a `;` would
+/// add cookies of the client's choosing, and a CR or LF header lines.
+pub fn check_cookie(cookie: &Secret) -> Result<(), TunnelError> {
+    if is_plausible_cookie(cookie) {
+        Ok(())
+    } else {
+        Err(TunnelError::BadSession)
     }
 }
 

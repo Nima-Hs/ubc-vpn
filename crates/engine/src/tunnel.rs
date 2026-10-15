@@ -40,7 +40,7 @@ use crate::ffi::{Callbacks, FormAnswer, Handle, IpInfoCopy, Library, Stopper};
 use crate::login::{HTTPS, deliver, pin_matches};
 use crate::{
     Assigned, Cancel, CloseMode, Gateway, LogSink, OpenConnect, Session, Tunnel, TunnelEngine,
-    TunnelError, TunnelEvent, check_gateway_addr,
+    TunnelError, TunnelEvent, check_cookie, check_gateway_addr,
 };
 
 /// What the library answers when the gateway refuses the cookie.
@@ -274,10 +274,16 @@ fn assignment(info: &IpInfoCopy, gateway_addr: Ipv4Addr) -> Result<Assigned, Tun
 /// name and kept whole. A cookie that already carries the name is left as
 /// it is.
 fn named_cookie(cookie: &Secret) -> Secret {
-    if cookie.expose().starts_with("webvpn=") {
+    const NAME: &str = "webvpn=";
+    if cookie.expose().starts_with(NAME) {
         cookie.clone()
     } else {
-        Secret::new(format!("webvpn={}", cookie.expose()))
+        // Sized up front, so the string is never moved while it is filled
+        // and leaves no unwiped copy of the cookie behind.
+        let mut named = String::with_capacity(NAME.len() + cookie.expose().len());
+        named.push_str(NAME);
+        named.push_str(cookie.expose());
+        Secret::new(named)
     }
 }
 
@@ -541,6 +547,8 @@ impl TunnelEngine for OpenConnect {
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         // The address comes from an unprivileged program: checked first.
         let target = target(gateway, session.gateway_addr)?;
+        // So does the cookie, which goes into a header the service sends.
+        check_cookie(&session.cookie)?;
         if cancel.is_cancelled() {
             return Err(TunnelError::Cancelled);
         }

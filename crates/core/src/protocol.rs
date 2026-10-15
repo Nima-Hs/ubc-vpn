@@ -267,6 +267,26 @@ pub fn is_plausible_gateway_addr(addr: Ipv4Addr) -> bool {
     Ipv4Net::new(addr, 32).is_ok_and(|host| !host.is_reserved())
 }
 
+/// Whether a session cookie can be sent to a gateway as it is: not empty,
+/// and every byte one that RFC 6265 allows in a cookie value
+/// (`cookie-octet`: visible ASCII but for `"`, `,`, `;` and `\`).
+///
+/// The service calls this on [`ConnectParams::cookie`] before it opens any
+/// connection, and every tunnel engine calls it too. The cookie comes from
+/// an unprivileged program and goes into the `Cookie:` header that the
+/// privileged service sends: a `;` would add cookies of the client's
+/// choosing, and a CR or LF would add header lines. A gateway issues
+/// nothing else, base64 padding (`=`) included, which is allowed.
+pub fn is_plausible_cookie(cookie: &Secret) -> bool {
+    let cookie = cookie.expose().as_bytes();
+    !cookie.is_empty() && cookie.iter().all(|byte| is_cookie_octet(*byte))
+}
+
+/// RFC 6265's `cookie-octet`.
+fn is_cookie_octet(byte: u8) -> bool {
+    matches!(byte, 0x21 | 0x23..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
+}
+
 /// Anything the service sends after the handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -860,6 +880,41 @@ mod tests {
             }),
         };
         assert!(matches!(encode(&big_cookie), Err(FrameError::TooLong)));
+    }
+
+    // Security rule: a cookie holds only what RFC 6265 allows in a cookie
+    // value. Each byte that could split the `Cookie:` header, end it, or add
+    // a cookie is refused; what gateways issue, base64 padding included, is
+    // not.
+    #[test]
+    fn a_cookie_holds_only_cookie_octets() {
+        let plausible = |text: &str| is_plausible_cookie(&Secret::new(text));
+        for good in [
+            "Zq7-made-up-0123456789",
+            "bWFkZS11cC1jb29raWU==",
+            "webvpn=bWFkZS11cC1jb29raWU=",
+            "1A2B3C@1234@ABCD@0123456789ABCDEF",
+            "!#$%&'()*+-./:<>?[]^_`{|}~",
+        ] {
+            assert!(plausible(good), "{good:?}");
+        }
+        let base = "made-up-cookie";
+        for bad in [
+            ";", "\r", "\n", " ", "\"", ",", "\\", "é", "\0", "\t", "\u{7f}",
+        ] {
+            for cookie in [
+                format!("{bad}{base}"),
+                format!("{base}{bad}x"),
+                format!("{base}{bad}"),
+            ] {
+                assert!(!plausible(&cookie), "{cookie:?}");
+            }
+        }
+        assert!(!plausible(""));
+        // Every byte outside the set, one at a time.
+        let allowed = (0u8..=127).filter(|byte| plausible(&char::from(*byte).to_string()));
+        let expected = (0x21u8..=0x7e).filter(|byte| !b"\",;\\".contains(byte));
+        assert!(allowed.eq(expected));
     }
 
     // Security rule: neither a request's debug output nor a decode error may

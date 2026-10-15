@@ -31,7 +31,8 @@ use ubc_vpn_core::redact::Secret;
 
 use crate::{
     Assigned, Cancel, CloseMode, Gateway, LogLevel, LogSink, LoginEngine, LoginError, Prompt,
-    Prompts, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent, check_gateway_addr,
+    Prompts, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent, check_cookie,
+    check_gateway_addr,
 };
 
 /// What the pretend gateway does. Every field may be changed before the
@@ -342,6 +343,7 @@ impl TunnelEngine for FakeEngine {
     ) -> Result<Box<dyn Tunnel>, TunnelError> {
         let script = &self.script;
         check_gateway_addr(session.gateway_addr)?;
+        check_cookie(&session.cookie)?;
         logs.hide(&session.cookie);
         if !self.pass_gate(cancel) {
             return Err(TunnelError::Cancelled);

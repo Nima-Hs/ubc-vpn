@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{
-    ConnectParams, ErrorCode, ErrorInfo, LastError, LogLevel, is_plausible_gateway_addr,
+    ConnectParams, ErrorCode, ErrorInfo, LastError, LogLevel, is_plausible_cookie,
+    is_plausible_gateway_addr,
 };
 use ubc_vpn_core::routes::Ipv4Net;
 use ubc_vpn_core::state::ConnState;
@@ -210,6 +211,12 @@ impl Session {
         // still before the gateway is contacted.
         if !is_plausible_gateway_addr(params.gateway_addr) {
             let message = "The gateway address is not a usable address.";
+            return refused(ErrorCode::BadRequest, message.to_string());
+        }
+        // The cookie goes into a header this service sends. The message is
+        // fixed text: it never holds the cookie.
+        if !is_plausible_cookie(&params.cookie) {
+            let message = "The session is not one a gateway could have issued.";
             return refused(ErrorCode::BadRequest, message.to_string());
         }
         let mut gate = lock(&self.gate);
