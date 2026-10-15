@@ -15,7 +15,7 @@ use windows_sys::Win32::Foundation::{ERROR_BAD_IMPERSONATION_LEVEL, ERROR_NO_TOK
 use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-    SE_KERNEL_OBJECT,
+    SE_FILE_OBJECT, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, DuplicateTokenEx, ImpersonateLoggedOnUser,
@@ -744,4 +744,207 @@ fn the_settings_folder_is_named_before_the_roaming_folder_exists() {
         "{said}"
     );
     assert!(nothing_made, "the lookup created something in the profile");
+}
+
+/// A folder for a state-folder test, under `ProgramData` like the real one.
+fn program_data_folder(tag: &str) -> std::path::PathBuf {
+    let base = known_folder(&FOLDERID_ProgramData, true).expect("ProgramData");
+    let dir = base.join(unique(tag));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn state_paths(dir: &std::path::Path) -> Paths {
+    Paths {
+        policy_dir: dir.to_path_buf(),
+        state_dir: dir.to_path_buf(),
+        settings_dir: dir.to_path_buf(),
+        channel_name: String::new(),
+    }
+}
+
+/// The owner and access list of the folder `dir`, as SDDL.
+fn folder_sddl(dir: &std::path::Path) -> String {
+    const READ_CONTROL: u32 = 0x2_0000;
+    const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let folder = open(&dir.to_string_lossy(), READ_CONTROL, BACKUP_SEMANTICS).expect("the folder");
+    let mut descriptor = null_mut();
+    let what = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    // SAFETY: the handle is open with READ_CONTROL and the one out pointer
+    // asked for is valid.
+    let status = unsafe {
+        GetSecurityInfo(
+            folder.0,
+            SE_FILE_OBJECT,
+            what,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(status, 0);
+    let printed = text_of(descriptor);
+    // SAFETY: the API allocated the descriptor for the caller to free.
+    unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+    printed
+}
+
+// Security rule: the service's state folder is made so that nobody but
+// SYSTEM and Administrators can change it, inheriting nothing from above.
+#[test]
+fn a_fresh_state_folder_belongs_to_the_administrators_alone() {
+    if installed().is_none() {
+        return;
+    }
+    let dir = program_data_folder("state-fresh");
+    let state = crate::StateDir::open(Mode::Installed, &state_paths(&dir)).expect("open");
+    // P: inherits nothing from ProgramData. Only SYSTEM and Administrators.
+    let protected = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    assert_eq!(folder_sddl(&dir), protected);
+    let temp = state.temp_dir().expect("the temporary folder");
+    assert_eq!(folder_sddl(&temp), protected, "the temporary folder");
+    state.write("state.json", b"{}").expect("write");
+    // The file takes the folder's access list, not the writer's default.
+    let file = folder_sddl(&dir.join("state.json"));
+    let inherited = file.contains("(A;ID;FA;;;SY)(A;ID;FA;;;BA)");
+    assert!(inherited && file.matches("(A;").count() == 2, "{file}");
+    assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
+    assert_eq!(state.read("missing.json"), Ok(None));
+    std::fs::remove_dir_all(&dir).unwrap();
+    ran("state fresh");
+}
+
+// Security rule: an ordinary user can make the folder under ProgramData
+// before the service does. Such a folder is refused, and left as it is.
+#[test]
+fn a_state_folder_an_ordinary_user_made_first_is_refused() {
+    let Some(stranger) = installed().and(stranger()) else {
+        return;
+    };
+    let dir = program_data_folder("state-squat");
+    let made = stranger.run(|| std::fs::create_dir(&dir));
+    made.expect("the user makes the folder");
+    let opened = crate::StateDir::open(Mode::Installed, &state_paths(&dir));
+    let Err(Error::Failed(why)) = opened else {
+        panic!("a folder an ordinary user owns was accepted: {opened:?}");
+    };
+    assert!(why.contains(&stranger.sid), "{why}");
+    // Not taken over: it is still the user's.
+    let owner = folder_sddl(&dir);
+    assert!(owner.starts_with(&format!("O:{}", stranger.sid)), "{owner}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    ran("state squat");
+}
+
+// The same rules hold in dev mode, for the current user, with no rights.
+#[cfg(feature = "dev-mode")]
+#[test]
+fn a_dev_state_folder_is_made_and_checked_for_the_current_user() {
+    let base = std::env::temp_dir().join(unique("state-dev"));
+    std::fs::create_dir_all(&base).unwrap();
+    let dir = base.join("state");
+    let state = crate::StateDir::open(Mode::Dev, &state_paths(&dir)).expect("open");
+    // Made for this user, and protected: an entry the folder above passes
+    // on later does not reach it.
+    let grant = [&base.to_string_lossy(), "/grant", "*S-1-1-0:(OI)(CI)(RX)"];
+    tool("icacls", &grant);
+    let me = process_user().unwrap();
+    let made = folder_sddl(&dir);
+    // Windows writes some users short, such as LA for the local Administrator
+    // the CI runner uses; spell the owner as Windows does.
+    let spelled = text_of(
+        Descriptor::parse(&format!("O:{me}D:P(A;;FA;;;SY)"))
+            .unwrap()
+            .as_ptr(),
+    );
+    let mine = spelled.split("D:").next().unwrap().to_string() + "D:P";
+    assert!(made.starts_with(&mine), "{made}");
+    assert!(!made.contains(";ID;") && !made.contains("WD)"), "{made}");
+    // Its temporary folder is made the same way, inside it.
+    let temp = state.temp_dir().unwrap();
+    assert_eq!(temp, dir.join("temp"));
+    let temp_made = folder_sddl(&temp);
+    assert!(temp_made.starts_with(&mine), "{temp_made}");
+    state.write("state.json", b"{\"owner\":1}").unwrap();
+    state.write("state.json", b"{}").unwrap();
+    assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
+    for bad in ["", "..", "../x", "a\\b", ".hidden", "a b"] {
+        assert!(state.read(bad).is_err(), "{bad:?}");
+        assert!(state.write(bad, b"").is_err(), "{bad:?}");
+    }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// Runs a system tool for a test, and fails the test if it fails.
+#[cfg(feature = "dev-mode")]
+fn tool(program: &str, args: &[&str]) {
+    let done = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        done.status.success(),
+        "{program} {args:?}: {}",
+        String::from_utf8_lossy(&done.stdout)
+    );
+}
+
+/// Whatever `open` gave, as the failure message.
+#[cfg(feature = "dev-mode")]
+fn refusal<T: std::fmt::Debug>(result: Result<T>) -> String {
+    match result {
+        Err(Error::Failed(why)) => why,
+        other => panic!("not refused: {other:?}"),
+    }
+}
+
+// Security rule: a link in the folder's place could point anywhere. It is
+// refused as a link, not followed.
+#[cfg(feature = "dev-mode")]
+#[test]
+fn a_state_folder_that_is_a_link_is_refused() {
+    // Everything here passes the owner and access checks, the link itself
+    // included, so only being a link can get it refused.
+    let base = std::env::temp_dir().join(unique("state-junction"));
+    crate::StateDir::open(Mode::Dev, &state_paths(&base)).unwrap();
+    let (target, link) = (base.join("target"), base.join("state"));
+    crate::StateDir::open(Mode::Dev, &state_paths(&target)).unwrap();
+    let (link_text, target_text) = (link.to_string_lossy(), target.to_string_lossy());
+    tool("cmd", &["/c", "mklink", "/J", &link_text, &target_text]);
+    let why = refusal(crate::StateDir::open(Mode::Dev, &state_paths(&link)));
+    assert!(why.contains("is a link"), "{why}");
+    std::fs::remove_dir(&link).unwrap();
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+// Security rule: a file inside that someone else may change is not read,
+// and a folder that someone else may change is not written to.
+#[cfg(feature = "dev-mode")]
+#[test]
+fn a_state_file_or_folder_others_may_change_is_refused() {
+    let dir = std::env::temp_dir().join(unique("state-grant"));
+    let state = crate::StateDir::open(Mode::Dev, &state_paths(&dir)).unwrap();
+    state.write("state.json", b"{}").unwrap();
+    let file = dir.join("state.json");
+    let users = "*S-1-5-32-545";
+    tool(
+        "icacls",
+        &[&file.to_string_lossy(), "/grant", &format!("{users}:(W)")],
+    );
+    let why = refusal(state.read("state.json"));
+    assert!(why.contains("S-1-5-32-545 may change it"), "{why}");
+
+    tool("icacls", &[&file.to_string_lossy(), "/remove:g", users]);
+    assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
+    let folder = dir.to_string_lossy();
+    tool(
+        "icacls",
+        &[&folder, "/grant", &format!("{users}:(OI)(CI)(M)")],
+    );
+    let why = refusal(state.write("state.json", b"{\"owner\":2}"));
+    assert!(why.contains("S-1-5-32-545 may change it"), "{why}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"{}", "written all the same");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
