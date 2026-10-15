@@ -103,6 +103,10 @@ struct State {
     on_link: Vec<Ipv4Net>,
     subscribers: Vec<Sender<NetworkEvent>>,
     listeners: HashMap<String, Endpoint>,
+    /// Checks that answer `Unobservable` where they would answer `Yes`.
+    unobservable: HashSet<Op>,
+    /// Destinations whose route check alone answers so.
+    unobservable_routes: HashSet<Ipv4Addr>,
 }
 
 impl Default for State {
@@ -121,6 +125,26 @@ impl Default for State {
             on_link: home.into_iter().collect(),
             subscribers: Vec::new(),
             listeners: HashMap::new(),
+            unobservable: HashSet::new(),
+            unobservable_routes: HashSet::new(),
+        }
+    }
+}
+
+impl State {
+    /// What check `op` answers when what it asks about is in effect.
+    fn confirmed(&self, op: Op) -> Verified {
+        match self.unobservable.contains(&op) {
+            true => Verified::Unobservable,
+            false => Verified::Yes,
+        }
+    }
+
+    /// The same for the route check to `dest`.
+    fn route_confirmed(&self, dest: Ipv4Addr) -> Verified {
+        match self.unobservable_routes.contains(&dest) {
+            true => Verified::Unobservable,
+            false => self.confirmed(Op::VerifyRoute),
         }
     }
 }
@@ -221,6 +245,27 @@ impl Fake {
             Some(error) => state.failures.insert(op, error),
             None => state.failures.remove(&op),
         };
+    }
+
+    /// Makes every later check `op` ([`Op::VerifyRoute`] or
+    /// [`Op::VerifyDns`]) answer [`Verified::Unobservable`] where it would
+    /// answer `Yes`, as Windows does for split DNS; `false` ends that. A
+    /// `No` stays `No`. A real route check never answers it; the fake can,
+    /// so that tests show the service refuses it.
+    pub fn cannot_observe(&self, op: Op, unobservable: bool) {
+        let mut state = self.state();
+        match unobservable {
+            true => state.unobservable.insert(op),
+            false => state.unobservable.remove(&op),
+        };
+    }
+
+    /// The same for the route check to `dest` alone: every later
+    /// [`Routes::uses_interface`] for `dest` that would answer `Yes` answers
+    /// [`Verified::Unobservable`]. Checks for other destinations are not
+    /// changed, so a test can show each one is refused on its own.
+    pub fn cannot_observe_route_to(&self, dest: Ipv4Addr) {
+        self.state().unobservable_routes.insert(dest);
     }
 
     /// Every [`Routes::configure_tunnel`] call so far with its arguments, in
@@ -507,7 +552,7 @@ impl Routes for Fake {
             (None, None) => PHYSICAL_INTERFACE,
         };
         match used == interface {
-            true => Verified::Yes,
+            true => state.route_confirmed(dest),
             false => Verified::No,
         }
     }
@@ -544,11 +589,14 @@ impl Dns for Fake {
     }
 
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
-        let verdict = self.run(Op::VerifyDns, |applied| match &applied.split_dns {
-            Some((_, set)) if set == dns => Verified::Yes,
+        let (state, outcome) = self.start(Op::VerifyDns);
+        if outcome.is_err() {
+            return Verified::Unknown;
+        }
+        match &state.applied.split_dns {
+            Some((_, set)) if set == dns => state.confirmed(Op::VerifyDns),
             _ => Verified::No,
-        });
-        verdict.unwrap_or(Verified::Unknown)
+        }
     }
 }
 
@@ -988,6 +1036,47 @@ mod tests {
         assert_eq!(route, Verified::Unknown);
         assert_eq!(fake.split_dns_matches(&dns), Verified::Unknown);
         assert_ne!(Verified::Unknown, Verified::No);
+    }
+
+    // A check that cannot be observed answers so only where it would have
+    // answered "yes". A setting that differs is still "no", and a check
+    // that could not ask is still "could not tell".
+    #[test]
+    fn cannot_observe_replaces_only_a_yes() {
+        let fake = Fake::new();
+        let dns = SplitDns {
+            resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
+            domains: vec!["ece.example".to_string()],
+        };
+        let other = SplitDns {
+            domains: vec!["other.example".to_string()],
+            ..dns.clone()
+        };
+        fake.set_split_dns(TUNNEL, &dns).unwrap();
+        fake.cannot_observe(Op::VerifyDns, true);
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Unobservable);
+        assert_eq!(fake.split_dns_matches(&other), Verified::No);
+        // Only the check it was asked for.
+        let route = fake.uses_interface(GATEWAY, PHYSICAL_INTERFACE);
+        assert_eq!(route, Verified::Yes);
+        fake.set_failure(Op::VerifyDns, failed());
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Unknown);
+        fake.set_failure(Op::VerifyDns, None);
+        fake.cannot_observe(Op::VerifyDns, false);
+        assert_eq!(fake.split_dns_matches(&dns), Verified::Yes);
+        // One destination alone, and a route "no" stays "no".
+        let elsewhere = Ipv4Addr::new(198, 51, 100, 1);
+        fake.cannot_observe_route_to(GATEWAY);
+        let route = fake.uses_interface(GATEWAY, PHYSICAL_INTERFACE);
+        assert_eq!(route, Verified::Unobservable);
+        let route = fake.uses_interface(elsewhere, PHYSICAL_INTERFACE);
+        assert_eq!(route, Verified::Yes);
+        assert_eq!(fake.uses_interface(GATEWAY, TUNNEL), Verified::No);
+        // Every route.
+        fake.cannot_observe(Op::VerifyRoute, true);
+        let route = fake.uses_interface(elsewhere, PHYSICAL_INTERFACE);
+        assert_eq!(route, Verified::Unobservable);
+        assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::No);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use ubc_vpn_engine::{Assigned, Cancel, Session};
 use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns, TUNNEL_MTU};
 
 use crate::session::Machine;
-use crate::verify::{Expected, verify};
+use crate::verify::{Confirmed, DNS_UNCONFIRMED, Expected, verify};
 use crate::words::counted;
 
 /// Why setup stopped: the code for the client and a sentence for the user,
@@ -126,7 +126,7 @@ impl Machine {
             dns: dns.as_ref(),
         };
         let verified = verify(&*self.routes, &*self.dns, &expected);
-        verified.map_err(|why| (ErrorCode::VerificationFailed, why))?;
+        let confirmed = verified.map_err(|why| (ErrorCode::VerificationFailed, why))?;
         // Counted, not listed: a long list would not fit in one line, and
         // how many is what someone helping the user asks first.
         let dns_servers = routes.len() - chosen.subnets.len();
@@ -140,6 +140,9 @@ impl Machine {
             counted(dns_servers, "DNS server route"),
         );
         self.logs.at(LogLevel::Info, &line);
+        if confirmed == Confirmed::DnsUnobservable {
+            self.logs.warn(DNS_UNCONFIRMED);
+        }
         Ok(TunnelInfo {
             interface: assigned.interface.clone(),
             address: assigned.address.to_string(),

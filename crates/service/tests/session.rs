@@ -5,9 +5,11 @@ mod harness;
 
 use harness::*;
 use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::protocol::LogLevel;
 use ubc_vpn_engine::{CloseMode, Gateway};
 use ubc_vpn_platform::SplitDns;
 use ubc_vpn_platform::fake::PHYSICAL_INTERFACE;
+use ubc_vpn_service::DNS_UNCONFIRMED;
 
 const ACCEPTED: Result<ResponseBody, ErrorCode> = Ok(ResponseBody::Accepted);
 /// What start-up does, and what each connect does before the tunnel exists.
@@ -202,20 +204,57 @@ fn each_refusal_has_its_code_and_leaves_nothing_behind() {
 }
 
 // Security rule: unless every check answers "yes" the connection is torn
-// down completely and reported as failed. "Could not tell" is not "yes".
+// down completely and reported as failed. "Could not tell" is not "yes",
+// and a route that "cannot be observed" is not either.
 #[test]
 fn a_failed_or_unknown_check_tears_everything_down() {
-    for unknown in [Op::VerifyRoute, Op::VerifyDns] {
+    let unknown = |op| (op, Some(Error::Unsupported), false);
+    let cases = [
+        ("route unknown", unknown(Op::VerifyRoute)),
+        ("DNS unknown", unknown(Op::VerifyDns)),
+        ("route unobservable", (Op::VerifyRoute, None, true)),
+    ];
+    for (case, (op, error, unobservable)) in cases {
         let rig = rig();
-        rig.fake.set_failure(unknown, Some(Error::Unsupported));
+        rig.fake.set_failure(op, error);
+        rig.fake.cannot_observe(op, unobservable);
         let state = rig.owner().connect_ends(good());
         assert!(
             failed_with(&state, ErrorCode::VerificationFailed),
-            "{unknown:?}: {state:?}"
+            "{case}: {state:?}"
         );
-        assert!(rig.is_clean(), "{unknown:?} left something behind");
+        assert!(rig.is_clean(), "{case} left something behind");
         assert!(rig.fake.calls().ends_with(&TEARDOWN));
     }
+}
+
+// Windows cannot show whether its resolver took the split DNS rules in.
+// When the rules read back exactly, that is enough to connect, and the log
+// says once that split DNS could not be confirmed.
+#[test]
+fn split_dns_that_cannot_be_observed_connects_and_says_so() {
+    let rig = rig();
+    rig.fake.cannot_observe(Op::VerifyDns, true);
+    let mut alice = rig.owner();
+    let state = connected(&mut alice);
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+    let said = alice.whole_log();
+    let unconfirmed = |line: &&LogLine| line.text.as_str().contains(DNS_UNCONFIRMED);
+    let lines: Vec<_> = said.iter().filter(unconfirmed).collect();
+    assert_eq!(lines.len(), 1, "{said:?}");
+    assert_eq!(lines[0].level, LogLevel::Warn);
+}
+
+// A split DNS check that answers "yes" writes no such line.
+#[test]
+fn split_dns_that_is_confirmed_says_nothing_more() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    let state = connected(&mut alice);
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+    let said = alice.whole_log();
+    let unconfirmed = |line: &LogLine| line.text.as_str().contains(DNS_UNCONFIRMED);
+    assert!(!said.iter().any(unconfirmed), "{said:?}");
 }
 
 // Security rule: teardown runs every step even when earlier steps fail, and

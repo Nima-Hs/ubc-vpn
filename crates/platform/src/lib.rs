@@ -19,8 +19,10 @@
 //! - **The physical network is captured once,** before the tunnel exists, as a
 //!   [`PhysicalNetwork`] the caller holds and passes back. Nothing here looks
 //!   it up again from a routing table that may already contain the tunnel.
-//! - **Checks answer three ways.** A [`Verified`] of anything but `Yes` is a
-//!   failure; `Unknown` is never a "probably fine".
+//! - **Checks fail closed.** A [`Verified`] of anything but `Yes` is a
+//!   failure; `Unknown` is never a "probably fine". The one exception is
+//!   [`Verified::Unobservable`], which only [`Dns::split_dns_matches`] may
+//!   answer and the service accepts for DNS alone.
 //! - **Nothing polls and nothing is async.** Calls block; events are pushed by
 //!   the OS and arrive on a standard channel. Blocking channel calls can be
 //!   ended from another thread or by a timeout.
@@ -146,7 +148,8 @@ impl From<io::Error> for Error {
 }
 
 /// The answer to "is this in effect?". Only `Yes` means yes: the service
-/// treats both other answers as failure.
+/// treats `No` and `Unknown` as failure, and `Unobservable` as failure for
+/// everything but split DNS.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verified {
@@ -156,6 +159,15 @@ pub enum Verified {
     No,
     /// The OS could not be asked, or its answer could not be understood.
     Unknown,
+    /// For [`Dns::split_dns_matches`] only: this product's rules read back
+    /// exactly as set, no rules from group policy exist, and the OS has no
+    /// way to show whether its resolver took them in. Only Windows answers
+    /// this, where another OS would answer `Yes`; Linux and macOS never do
+    /// (see [`Dns::split_dns_matches`]). An implementation that could not
+    /// read its rules back answers `Unknown`; one whose rules differ, or that
+    /// finds rules from group policy, answers `No`. No route check ever
+    /// answers it.
+    Unobservable,
 }
 
 /// The network the machine uses without the tunnel: an interface and the next
@@ -388,10 +400,20 @@ pub trait Dns: Send + Sync {
     /// `dns`: these domains, these resolvers, nothing more. The interface is
     /// not part of the question, so the answer means the same on every OS.
     ///
-    /// The answer is read back from the OS's resolver, not remembered from
-    /// what was set. Where the OS can only show what was written and not
-    /// what its resolver took in, the answer is [`Verified::Unknown`], never
-    /// `Yes`.
+    /// The answer is read back from the OS, not remembered from what was
+    /// set:
+    ///
+    /// - **Linux** reads systemd-resolved's own state for the tunnel's link,
+    ///   and **macOS** the resolver configuration in effect (what
+    ///   `scutil --dns` shows). Both answer `Yes`, `No` or `Unknown`, and
+    ///   never [`Verified::Unobservable`].
+    /// - **Windows** can show only the rules that were written, not which
+    ///   ones its resolver took in. It answers `Unobservable` when the
+    ///   product's rules read back as exactly `dns` and no rules from group
+    ///   policy exist, and never `Yes`.
+    ///
+    /// On every OS, rules from group policy, or rules that differ from
+    /// `dns`, give `No`, and a read that fails gives `Unknown`.
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified;
 }
 
