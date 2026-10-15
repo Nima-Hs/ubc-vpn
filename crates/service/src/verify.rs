@@ -132,6 +132,7 @@ mod tests {
     fn every_check_must_answer_yes_but_dns_may_be_unobservable() {
         let unknown = |op| move |fake: &Fake| fake.set_failure(op, Some(Error::Unsupported));
         let unobservable = |op| move |fake: &Fake| fake.cannot_observe(op, true);
+        let one_route = |dest| move |fake: &Fake| fake.cannot_observe_route_to(dest);
         assert_eq!(check("nothing", |_| {}), Ok(Confirmed::Fully));
         let failures = [
             check("one subnet", |_| {}),
@@ -144,6 +145,12 @@ mod tests {
             check("nothing", unobservable(Op::VerifyRoute)),
             // What could not be observed must still read back as set.
             check("dns", unobservable(Op::VerifyDns)),
+            // Each route check on its own: the first subnet, the second,
+            // the gateway and the resolver.
+            check("nothing", one_route(Ipv4Addr::new(192, 0, 2, 2))),
+            check("nothing", one_route(Ipv4Addr::new(10, 255, 0, 1))),
+            check("nothing", one_route(GATEWAY)),
+            check("nothing", one_route(Ipv4Addr::new(10, 255, 0, 53))),
         ];
         let reasons = failures.map(|failure| failure.unwrap_err());
         assert!(
@@ -161,6 +168,22 @@ mod tests {
         assert!(reasons[6].contains("Split DNS"), "{reasons:?}");
         assert!(reasons[7].contains("is not routed"), "{reasons:?}");
         assert!(reasons[8].contains("Split DNS"), "{reasons:?}");
+        assert!(
+            reasons[9].contains("192.0.2.0/24 is not routed"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[10].contains("10.255.0.0/24 is not routed"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[11].contains("gateway is not reached"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[12].contains("10.255.0.53 is not reached"),
+            "{reasons:?}"
+        );
         // The one exception, said as such so that the caller can log it.
         let dns = check("nothing", unobservable(Op::VerifyDns));
         assert_eq!(dns, Ok(Confirmed::DnsUnobservable));

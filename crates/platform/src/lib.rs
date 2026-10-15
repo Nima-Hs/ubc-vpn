@@ -160,8 +160,9 @@ pub enum Verified {
     Unknown,
     /// For [`Dns::split_dns_matches`] only: this product's rules read back
     /// exactly as set, no rules from group policy exist, and the OS has no
-    /// way to show whether its resolver took them in. Windows answers this
-    /// where another OS would answer `Yes`. An implementation that could not
+    /// way to show whether its resolver took them in. Only Windows answers
+    /// this, where another OS would answer `Yes`; Linux and macOS never do
+    /// (see [`Dns::split_dns_matches`]). An implementation that could not
     /// read its rules back answers `Unknown`; one whose rules differ, or that
     /// finds rules from group policy, answers `No`. No route check ever
     /// answers it.
@@ -399,9 +400,19 @@ pub trait Dns: Send + Sync {
     /// not part of the question, so the answer means the same on every OS.
     ///
     /// The answer is read back from the OS, not remembered from what was
-    /// set. Where the OS can only show what was written and not what its
-    /// resolver took in, the answer is [`Verified::Unobservable`] when what
-    /// was written is exactly `dns`, never `Yes`.
+    /// set:
+    ///
+    /// - **Linux** reads systemd-resolved's own state for the tunnel's link,
+    ///   and **macOS** the resolver configuration in effect (what
+    ///   `scutil --dns` shows). Both answer `Yes`, `No` or `Unknown`, and
+    ///   never [`Verified::Unobservable`].
+    /// - **Windows** can show only the rules that were written, not which
+    ///   ones its resolver took in. It answers `Unobservable` when the
+    ///   product's rules read back as exactly `dns` and no rules from group
+    ///   policy exist, and never `Yes`.
+    ///
+    /// On every OS, rules from group policy, or rules that differ from
+    /// `dns`, give `No`, and a read that fails gives `Unknown`.
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified;
 }
 

@@ -27,6 +27,9 @@ const PAUSE: Duration = Duration::from_millis(50);
 
 /// Checks [`Routes`] against the interface named `tunnel`, which must exist
 /// and must not be the physical one. Leaves no route behind when it passes.
+///
+/// No route check ever answers [`Verified::Unobservable`], on any OS: every
+/// answer here is asserted to be `Yes` or `No`.
 pub fn check_routes(routes: &dyn Routes, tunnel: &str) {
     let gateway = Ipv4Addr::new(192, 0, 2, 1);
     let inside = Ipv4Addr::new(192, 0, 2, 77);
@@ -40,6 +43,7 @@ pub fn check_routes(routes: &dyn Routes, tunnel: &str) {
     let wire = physical.interface();
     assert_ne!(wire, tunnel, "captured the tunnel");
     let before = routes.uses_interface(inside, wire);
+    assert!(matches!(before, Verified::Yes | Verified::No), "{before:?}");
 
     let add_gateway = || routes.add_gateway_route(gateway, &physical);
     let add_tunnel = || routes.add_tunnel_routes(tunnel, &subnets);
