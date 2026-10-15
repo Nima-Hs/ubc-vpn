@@ -224,6 +224,7 @@ jobs:
           grep -q '^RAN: engine refuses a wrong pin' test.log
           grep -q '^RAN: engine refuses single sign-on' test.log
           grep -q '^RAN: engine offers no single sign-on' test.log
+          grep -q '^RAN: engine fetches a host-scan stub and runs nothing' test.log
           # And the tunnel engine.
           grep -q '^RAN: tunnel refuses a wrong pin' test.log
           grep -q '^RAN: tunnel asks for no dtls' test.log
