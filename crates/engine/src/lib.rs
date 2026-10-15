@@ -278,7 +278,9 @@
 //! - Freeing a handle does not remove its tunnel device; only the end of
 //!   `openconnect_mainloop` does. So a device is removed by writing a
 //!   command to the pipe and running the main loop, which reads it, quits
-//!   and shuts the device down. On macOS and Linux the library never closes
+//!   and shuts the device down. On Windows the closed Wintun adapter stays
+//!   visible for some tens of milliseconds more, so wait, for a bounded
+//!   time, until the system no longer has it. On macOS and Linux the library never closes
 //!   a device it opened itself when no script is set, so there the engine
 //!   must open the device and hand it over with `openconnect_setup_tun_fd`.
 //!   Until it does, a tunnel there is refused at the device step.

@@ -355,6 +355,19 @@ mod device {
         unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &mut luid) == 0 }
     }
 
+    // The engine's own question, which a close waits on, gets the system's
+    // answer: an interface every Windows has is there, a made-up one is not.
+    #[test]
+    fn the_engine_asks_the_system_about_interfaces() {
+        use ubc_vpn_engine::ffi::interface_exists;
+        let loopback = "Loopback Pseudo-Interface 1";
+        assert!(exists(loopback));
+        assert_eq!(interface_exists(loopback), Some(true));
+        let made_up = "UBC VPN made-up interface 0123456789";
+        assert!(!exists(made_up));
+        assert_eq!(interface_exists(made_up), Some(false));
+    }
+
     /// Whether this run may make devices. Never on a developer's machine.
     fn allowed() -> bool {
         let allowed = std::env::var_os("UBC_VPN_TEST_DEVICE").is_some();

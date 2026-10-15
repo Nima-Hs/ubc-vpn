@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 use ubc_vpn_core::protocol::is_plausible_gateway_addr;
 use ubc_vpn_core::routes::{Ipv4Net, MIN_PREFIX_LEN, RouteSet};
@@ -298,10 +300,13 @@ impl Job {
         };
         let _ = report.send(Report::Stopper(handle.stopper()));
         let opened = open_on(&handle, &gateway, &session, &notes, &cancel);
-        let ok = opened.is_ok();
+        let device = opened
+            .as_ref()
+            .ok()
+            .map(|assigned| assigned.interface.clone());
         let _ = report.send(Report::Opened(opened));
         drop(report);
-        if ok {
+        if let Some(device) = device {
             // `open` either keeps the tunnel and closes it later, or gives it
             // up at once. If it is gone without a word, keep the session.
             let stop = stops.recv().unwrap_or(Stop::Close(CloseMode::KeepSession));
@@ -311,6 +316,7 @@ impl Job {
             };
             remove_device(&handle, mode);
             drop(handle);
+            wait_until_gone(&device);
             drop(slot);
             if let Stop::Close(_) = stop {
                 let _ = events.send(TunnelEvent::Closed);
@@ -397,6 +403,28 @@ fn remove_device(handle: &Handle<'_>, mode: CloseMode) {
         CloseMode::KeepSession => stopper.detach(),
     };
     handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
+}
+
+/// The longest a closed device is waited for to disappear.
+#[cfg(windows)]
+const DEVICE_GONE_LIMIT: Duration = Duration::from_secs(5);
+
+/// Waits until the system no longer has the device `name`. On Windows a
+/// Wintun adapter the library has closed stays visible for some tens of
+/// milliseconds, and a tunnel is closed only once its device is gone. The
+/// wait is bounded, so a system that never says gone cannot hold a close
+/// for ever.
+#[cfg(windows)]
+fn wait_until_gone(name: &str) {
+    let start = Instant::now();
+    while crate::ffi::interface_exists(name) == Some(true) && start.elapsed() < DEVICE_GONE_LIMIT {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_until_gone(_name: &str) {
+    // Nothing yet: no device is made here (see the module documentation).
 }
 
 /// An open tunnel: what it was assigned, and the thread that owns it.
