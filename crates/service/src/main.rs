@@ -197,25 +197,49 @@ mod setup {
         let _folder = ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())?;
         let command_line = os::quoted(&program)
             .map_err(|_| format!("The service's path cannot be used: {}.", program.display()))?;
-        let data = data_folder()?;
-        os::prepare_data_folder(&data, fresh)
-            .map_err(|e| format!("The data folder could not be prepared: {e}."))?;
-        os::write_policy(&data, &policy)
-            .map_err(|e| format!("The policy could not be written: {e}."))?;
-        // The end of the data folder's setup: checked as the service will
-        // check it, and, after a fresh install, holding the policy alone.
-        // Before the service is registered, so a failure leaves none.
-        os::verify_data_folder(&data, fresh)
-            .map_err(|e| format!("The data folder is not as it was set up: {e}"))?;
-        let registration = Registration {
-            name: SERVICE_NAME,
-            display_name: DISPLAY_NAME,
-            description: DESCRIPTION,
+        let mut steps = Windows {
+            data: data_folder()?,
             command_line,
         };
-        os::register(&registration)
-            .map_err(|e| format!("The service could not be registered: {e}."))?;
-        os::start(SERVICE_NAME).map_err(|e| format!("The service could not be started: {e}."))
+        install::install(&mut steps, &policy, fresh)
+    }
+
+    /// The steps of an install on this computer (see `install::install`).
+    struct Windows {
+        data: PathBuf,
+        command_line: String,
+    }
+
+    impl install::Steps for Windows {
+        fn prepare_data_folder(&mut self, fresh: bool) -> Result<(), String> {
+            os::prepare_data_folder(&self.data, fresh)
+                .map_err(|e| format!("The data folder could not be prepared: {e}."))
+        }
+
+        fn write_policy(&mut self, policy: &[u8]) -> Result<(), String> {
+            os::write_policy(&self.data, policy)
+                .map_err(|e| format!("The policy could not be written: {e}."))
+        }
+
+        fn verify_data_folder(&mut self, fresh: bool) -> Result<(), String> {
+            os::verify_data_folder(&self.data, fresh)
+                .map_err(|e| format!("The data folder is not as it was set up: {e}"))
+        }
+
+        fn register(&mut self) -> Result<(), String> {
+            let registration = Registration {
+                name: SERVICE_NAME,
+                display_name: DISPLAY_NAME,
+                description: DESCRIPTION,
+                command_line: self.command_line.clone(),
+            };
+            os::register(&registration)
+                .map_err(|e| format!("The service could not be registered: {e}."))
+        }
+
+        fn start(&mut self) -> Result<(), String> {
+            os::start(SERVICE_NAME).map_err(|e| format!("The service could not be started: {e}."))
+        }
     }
 
     /// Stops the service, which removes its routes and DNS first, removes

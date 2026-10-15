@@ -153,17 +153,23 @@ A program built with `dev-mode` must never be released or installed: it can be t
 
 ## The Windows installer
 
-The setup program is built with [electron-builder](https://www.electron.build/), pinned in `app/package.json` like the app's other packages. Its settings are in `app/electron-builder.yml`, and our additions to the setup script are in `packaging/windows/installer.nsh`. On Windows, with the app's packages installed as in Setup:
+The setup program is built with [electron-builder](https://www.electron.build/), pinned in `app/package.json` like the app's other packages. Its settings are in `app/electron-builder.yml`, and our additions to the setup script are in `packaging/windows/installer.nsh`. It installs the app, and in `resources\bin` the service, the command-line client, the native libraries, Wintun and the Visual C++ runtime, which it gathers from `app/stage/`. On Windows, with the app's packages installed as in Setup, Rust, and the native library unpacked as in Setup, from the repository root in Git Bash:
 
 ```sh
+packaging/windows/stage.sh <native-folder> <native-run> <sources-archive>   # checks the libraries against their manifest, builds the programs with the real engine, gathers the libraries and the policy
+packaging/windows/stage-redist.sh                                           # adds Wintun, the Visual C++ runtime, their licences and the licence page
 cd app
 pnpm package:win     # builds the app, then dist/ubc-vpn-setup-<version>-x64.exe
-pnpm check:package   # fuses, licence files, and no updater files
+pnpm check:package   # fuses, licence files, the staged files, and no updater files
 ```
+
+`<native-folder>` is the unpacked `libopenconnect-windows-x64` artifact of a Native library run on `main`, and `<native-run>` that run's ID, which is recorded in `SOURCES.txt` and the sources archive. `stage.sh` first checks every library in its `bin` and every source archive in its `source` against the SHA-256 its `manifest.json` records (`packaging/windows/check-native.mjs`), and stops on a mismatch, a missing file or one the manifest does not list: that manifest is what ties each shipped library to its published source. `packaging/windows/tests/check-native.sh` tests the check.
+
+The setup program shows a licence page that must be accepted before anything is written: UBC VPN's licence and the third-party terms, Microsoft's for the Visual C++ runtime among them (`app/stage/license.txt`, written by `stage-redist.sh`). A silent install (`/S`) shows no page; running one counts as accepting it. After the folder is secured it runs `ubc-vpn-service install`, which writes the policy (`packaging/windows/policy.json`) into `%ProgramData%\UBC VPN`, registers the service and starts it. The uninstaller runs `ubc-vpn-service uninstall` first. Wintun and the Visual C++ runtime may only be passed on inside the setup program, so `app/stage` is never committed, and CI never keeps them as an artifact.
 
 Electron is the one the lockfile pins: `pnpm package:win` first runs `node_modules/electron/install.js`, which downloads it and checks it against the SHA-256 sums in the pinned `electron` package's `checksums.json`, and electron-builder packages that copy (`electronDist`). electron-builder downloads its other tools itself the first time: NSIS 3.12 (chosen by `toolsets.nsis` in the settings), 7-Zip and its own helpers, each checked against a SHA-256 that the pinned version of electron-builder carries, so they change only when electron-builder is updated. They are kept in `%LOCALAPPDATA%\electron-builder\Cache`.
 
-Nothing is signed. For now the installer holds only the app: the service, the command-line client and the native libraries are added to it later.
+Nothing is signed.
 
 The service and the command-line client need Microsoft's Visual C++ runtime, `vcruntime140.dll`, which the installer puts beside them. It is not downloaded: it is the copy in the `VC\Redist\MSVC\<version>\x64\Microsoft.VC145.CRT` folder of the Visual Studio that builds them, and `packaging/windows/vcruntime.lock` pins the compiler and runtime versions and its SHA-256 (any edition has the same file). Install Visual Studio, or the Build Tools, with the "Desktop development with C++" workload (the C++ x64/x86 build tools), then, in Git Bash:
 
@@ -173,7 +179,7 @@ packaging/windows/vcruntime.sh <folder>   # copies it into <folder>, or says wha
 
 If it stops because your Visual Studio has another compiler or runtime version, the lock is for the one on GitHub's runner; the build there is the one that ships. When the runner image moves to a new compiler or runtime, the installer workflow (`.github/workflows/installer-windows.yml`, the only one that runs it) stops in the same way and prints the new versions and SHA-256 to review and put in the lock. Microsoft's Visual Studio Community 2026 licence terms, under which the maintainer redistributes the file, and its Distributable List are in `packaging/windows/licenses/`; update them when the Visual Studio version changes.
 
-`.github/workflows/installer-windows.yml` builds it, installs it silently on a GitHub runner, checks what landed where and who can change it, removes it, and checks nothing is left. Those checks are in `packaging/windows/tests/installer.ps1`. They install for the whole machine, so they run only on the runner; do not run them on your own computer.
+`.github/workflows/installer-windows.yml` stages and builds it, installs it silently on a GitHub runner, checks what landed where and who can change it, that the service runs and answers a standard user, installs it again over itself, removes it, and checks nothing is left. Other jobs build setup programs with one step made to fail and check each undoes everything, and the main job checks that declining the licence page, a folder holding another product and `/D=` all leave things as they were. Those checks are in `packaging/windows/tests/installer.ps1`. They install for the whole machine, so they run only on the runner; do not run them on your own computer.
 
 ## Workflow
 

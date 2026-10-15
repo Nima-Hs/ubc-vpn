@@ -46,6 +46,19 @@ const REQUIRED_FILES = [
     "resources/licenses/LICENSE-APACHE",
     "resources/licenses/fonts/geist-mono/LICENSE",
     "resources/licenses/fonts/instrument-sans/LICENSE",
+    // packaging/windows/stage.sh: the programs, what they load, the
+    // licences that go with them, and the policy.
+    "resources/bin/ubc-vpn.exe",
+    "resources/bin/ubc-vpn-service.exe",
+    "resources/bin/libopenconnect-5.dll",
+    "resources/bin/wintun.dll",
+    "resources/bin/vcruntime140.dll",
+    "resources/licenses/SOURCES.txt",
+    "resources/licenses/wintun/LICENSE.txt",
+    "resources/licenses/microsoft/microsoft-vc-runtime-NOTICE.txt",
+    "resources/licenses/microsoft/microsoft-visual-studio-2026-community-license.txt",
+    "resources/licenses/microsoft/microsoft-visual-studio-2026-distributable-code.txt",
+    "resources/policy.json",
 ];
 
 /** What an updater reads, anywhere in the app or the output folder. */
