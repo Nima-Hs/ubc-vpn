@@ -70,7 +70,9 @@ fn the_service_and_the_client_work_together() {
         "{checked}"
     );
     let (status, saved) = home.run(&["settings", "set-routes", "--json"], ROUTES);
-    assert_eq!((status, &saved), (0, &checked));
+    // The same, and that they are for the next connect: there is none now.
+    let later = checked.replace("}}", r#"},"live":{"result":"next_connect"}}"#);
+    assert_eq!((status, &saved), (0, &later));
     let (status, shown) = home.run(&["settings", "get", "--json"], "");
     assert!(status == 0 && shown.contains("ece.example.test"), "{shown}");
     // Settings that can be read are not reset by asking.
@@ -204,6 +206,21 @@ fn the_service_and_the_client_work_together() {
     bridge.until(&state("connected"));
     let new = log.until(opened);
     assert!(!earlier.contains(&new), "the new line is another line");
+    // Routes saved while connected are applied to the connection, over the
+    // real channel; the app hears the connection again with them.
+    let wider = ROUTES.replace(
+        r#"["10.255.0.0/24"]"#,
+        r#"["10.255.0.0/24","198.51.100.0/24"]"#,
+    );
+    let (status, saved) = home.run(&["settings", "set-routes", "--json"], &wider);
+    assert_eq!(status, 0, "{saved}");
+    assert!(saved.contains(r#""live":{"result":"applied"}"#), "{saved}");
+    bridge.until("198.51.100.0/24");
+    let (_, shown) = home.run(&["status"], "");
+    assert!(
+        shown.contains("Subnets: 10.255.0.0/24, 198.51.100.0/24"),
+        "{shown}"
+    );
     drop(running);
     bridge.until(r#"{"type":"service_unavailable"}"#);
     assert_eq!(bridge.end(), (1, Vec::new()));
