@@ -111,3 +111,34 @@ fn a_dropped_subscription_gets_no_more_callbacks() {
     assert_eq!(late, 0, "callbacks for a subscription that had ended");
     ran("events late");
 }
+
+// A change between capturing the network and subscribing to it is reported
+// at once, not taken as the starting point: here the capture is missing the
+// address the watched adapter has.
+#[test]
+fn a_change_since_capture_is_reported_at_once() {
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let wire = "ubc-vpn-since0";
+    let dir = state_dir("since");
+    let _watched = wintun.adapter(wire);
+    let _cleanup = Cleanup(vec![dir.clone()]);
+    let routes = WinRoutes::unchecked(&dir);
+    routes
+        .configure_tunnel(wire, Ipv4Addr::new(198, 18, 2, 10), 1500)
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    // As if captured before the address was there.
+    let physical = PhysicalNetwork {
+        interface: wire.to_string(),
+        next_hop: None,
+        own_addresses: Vec::new(),
+        on_link: Vec::new(),
+    };
+    let events = WinEvents.subscribe(&physical).unwrap();
+    assert_eq!(
+        next(&events, Duration::from_secs(5)),
+        Some(NetworkEvent::PhysicalChanged)
+    );
+    ran("events since capture");
+}

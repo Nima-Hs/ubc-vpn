@@ -1,6 +1,8 @@
 //! Windows: the channel is a named pipe, and the well-known folders come from
-//! the shell's known-folder API. Routes, DNS and network events are not
-//! implemented yet and report that they are unsupported.
+//! the shell's known-folder API. Routes and the tunnel's address go through
+//! the IP Helper API (`routes`), split DNS through name resolution policy
+//! rules (`dns`), and network and sleep events through the IP Helper and
+//! power notifications (`events`); each module says how.
 //!
 //! How the pipe keeps the channel's promises:
 //!
