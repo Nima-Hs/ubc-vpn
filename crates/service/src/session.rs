@@ -265,10 +265,15 @@ impl Session {
         let gate = lock(&self.gate);
         let ours = gate.attempt == attempt.0;
         if ours && matches!(gate.phase, Phase::Connecting | Phase::Connected) {
-            // Outside the budget for requests: it is what came of a connect
-            // that was admitted, and asking again and again must never hide
-            // it. Each one needs an admitted connect, which is in the budget.
-            let _ = self.stop_with(gate, || self.logs.at(LogLevel::Info, ABANDONED));
+            // Under the repeat rule, not the budget for requests: asking again
+            // and again must never hide the first one, and connecting and
+            // going costs the client nothing, so a repeat must not fill the
+            // log either. One copy is kept while it is still in the log.
+            let say = || {
+                self.logs
+                    .at_about(LogLevel::Info, "an undone connect", ABANDONED)
+            };
+            let _ = self.stop_with(gate, say);
         }
     }
 

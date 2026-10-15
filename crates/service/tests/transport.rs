@@ -247,6 +247,48 @@ fn a_connect_whose_client_has_gone_is_undone() {
     assert!(received.contains(r#""state":"disconnected""#), "{received}");
 }
 
+// Security rule: asking to connect and going, again and again, costs the
+// client nothing (the gateway is never contacted), so the line about it
+// must not fill the log. It is written the first time, and a repeat is
+// passed over while that copy is still in the log.
+#[test]
+fn connecting_and_going_again_and_again_is_said_once() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let service = start(&rig, &channel, Timeouts::default());
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+    let undone = || {
+        let lines = service.logs();
+        lines
+            .iter()
+            .filter(|line| *line == ubc_vpn_service::ABANDONED)
+            .count()
+    };
+    let disconnected = || {
+        let lines = service.logs();
+        lines.iter().filter(|line| *line == "disconnected").count()
+    };
+    for round in 0..40 {
+        let before = disconnected();
+        let peer = Peer::sending(&[HELLO]);
+        channel.connect(&peer);
+        // The hello's answer and the state an owner's connection is told: once
+        // both are in, nothing more is written to it until it asks.
+        until("the hello and the state", || peer.lines() == 2);
+        peer.state().gone = true;
+        let connect = encode(&Request {
+            id: 2,
+            body: good(),
+        })
+        .unwrap();
+        peer.send(connect.trim_end());
+        until(&format!("round {round} undone"), || disconnected() > before);
+    }
+    assert_eq!(undone(), 1, "{:#?}", service.logs());
+}
+
 // Security rule: every write to a client has a time limit, so one that
 // stops reading is closed and cannot hold a thread for ever.
 #[test]
