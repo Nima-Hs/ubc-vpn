@@ -25,7 +25,8 @@ use std::ffi::c_void;
 use std::net::Ipv4Addr;
 use std::ptr::null_mut;
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Sender};
 
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -44,7 +45,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::routes::{addr_of, address_table, checked, luid, route_table, row_dest, value};
-use crate::{Error, NetworkEvent, NetworkEvents, PhysicalNetwork, Result};
+use crate::{Error, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Subscription};
 
 /// What a connection relies on about the physical interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +181,7 @@ impl Drop for Registrations {
             // SAFETY: as above, for the power registration.
             unsafe { PowerUnregisterSuspendResumeNotification(self.power as _) };
         }
+        LIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -195,6 +197,8 @@ fn register(shared: Box<Shared>) -> Result<Registrations> {
         power: null_mut(),
         _power_parameters: Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS::default()),
     };
+    // Counted from here: dropping `done` on a failure below uncounts it.
+    LIVE.fetch_add(1, Ordering::SeqCst);
     let mut handle = null_mut();
     // SAFETY: the callback has the documented signature and the context
     // outlives the registration, which `done` cancels first when dropped.
@@ -225,7 +229,7 @@ fn register(shared: Box<Shared>) -> Result<Registrations> {
 pub(crate) struct WinEvents;
 
 impl NetworkEvents for WinEvents {
-    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription> {
         let watched = luid(&watching.interface)?;
         let mut last = snapshot(watched)?;
         let (wake, woken) = mpsc::channel();
@@ -233,8 +237,9 @@ impl NetworkEvents for WinEvents {
             wake: Mutex::new(wake),
         }))?;
         let (events, receiver) = mpsc::channel();
+        // Ends when the registrations are cancelled, which drops the only
+        // sender of `woken`.
         let worker = move || {
-            let _registrations = registrations;
             for wake in woken {
                 let event = match wake {
                     Wake::Power(event) => event,
@@ -253,11 +258,41 @@ impl NetworkEvents for WinEvents {
                 }
             }
         };
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("network events".into())
             .spawn(worker)?;
-        Ok(receiver)
+        let ends = Ending {
+            registrations: Some(registrations),
+            worker: Some(worker),
+        };
+        Ok(Subscription::new(receiver, ends))
     }
+}
+
+/// What dropping a [`Subscription`] ends: first the registrations, which
+/// waits for any callback in progress, then the worker, which has nothing
+/// left to wait for and returns at once.
+struct Ending {
+    registrations: Option<Registrations>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        drop(self.registrations.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// How many subscriptions have registrations with Windows right now.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many subscriptions are registered with Windows now, for tests.
+#[cfg(test)]
+pub(super) fn live() -> usize {
+    LIVE.load(Ordering::SeqCst)
 }
 
 fn send(events: &Sender<NetworkEvent>, event: NetworkEvent) -> std::result::Result<(), ()> {
@@ -281,13 +316,15 @@ mod tests {
         }
     }
 
-    // Registering needs no rights, and a subscription can be ended.
+    // Registering needs no rights, and dropping a subscription cancels its
+    // registrations with Windows at once, with no event to wake it.
     #[test]
-    fn subscribes_unprivileged_and_ends_when_dropped() {
+    fn a_dropped_subscription_is_unregistered_at_once() {
+        // Other tests subscribe too, and the count is the process's.
+        let _turn = super::super::routes_tests::turn();
         let routes = super::super::routes::WinRoutes::unchecked(&std::env::temp_dir());
         let physical =
             crate::Routes::capture_physical(&routes, Ipv4Addr::new(192, 0, 2, 1)).unwrap();
-        let events = WinEvents.subscribe(&physical).unwrap();
-        drop(events);
+        crate::suite::check_subscription_ends(&WinEvents, &physical, &live);
     }
 }

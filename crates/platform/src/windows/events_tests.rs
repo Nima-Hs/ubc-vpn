@@ -4,18 +4,18 @@
 //! routing tests.
 
 use std::net::Ipv4Addr;
-use std::sync::mpsc::Receiver;
+
 use std::time::Duration;
 
 use super::events::WinEvents;
 use super::routes::WinRoutes;
 use super::routes_tests::{Cleanup, Outsider, ran, state_dir, turn, wintun};
 use crate::suite::Foreign;
-use crate::{NetworkEvent, NetworkEvents, PhysicalNetwork, Routes};
+use crate::{NetworkEvent, NetworkEvents, PhysicalNetwork, Routes, Subscription};
 
 /// The next event, if one comes within `wait`.
-fn next(events: &Receiver<NetworkEvent>, wait: Duration) -> Option<NetworkEvent> {
-    events.recv_timeout(wait).ok()
+fn next(events: &Subscription, wait: Duration) -> Option<NetworkEvent> {
+    events.events().recv_timeout(wait).ok()
 }
 
 // The contract: "physical changed" is sent for a change to the watched

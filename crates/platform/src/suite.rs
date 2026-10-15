@@ -15,12 +15,15 @@
 
 use std::net::Ipv4Addr;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 use ubc_vpn_core::routes::Ipv4Net;
 
-use crate::{Connection, Dns, Error, Paths, Result, Routes, SplitDns, Transport, Verified};
+use crate::{
+    Connection, Dns, Error, NetworkEvents, Paths, PhysicalNetwork, Result, Routes, SplitDns,
+    Transport, Verified,
+};
 
 /// Long enough for another thread to get going, short enough for a test.
 const PAUSE: Duration = Duration::from_millis(50);
@@ -268,6 +271,28 @@ pub fn check_route_ownership(
 pub(crate) fn assert_in_effect(verdict: Verified, what: &str) {
     let in_effect = matches!(verdict, Verified::Yes | Verified::Unobservable);
     assert!(in_effect, "{what} is not in effect: {verdict:?}");
+}
+
+/// Checks that dropping a [`Subscription`] ends it at once: before the drop
+/// returns, and without any event to wake it. `live` tells how many
+/// subscriptions the OS still has registered; the harness supplies it.
+pub fn check_subscription_ends(
+    events: &dyn NetworkEvents,
+    watching: &PhysicalNetwork,
+    live: &dyn Fn() -> usize,
+) {
+    let before = live();
+    let subscriptions = [(); 3].map(|()| events.subscribe(watching).expect("subscribe"));
+    assert_eq!(live(), before + 3, "a subscription was not registered");
+    for (dropped, subscription) in subscriptions.into_iter().enumerate() {
+        let started = Instant::now();
+        drop(subscription);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "dropping waited"
+        );
+        assert_eq!(live(), before + 2 - dropped, "dropping left it registered");
+    }
 }
 
 /// Checks [`Dns`] against the interface named `tunnel`, which must exist.

@@ -445,13 +445,47 @@ pub enum NetworkEvent {
 
 /// Notifications pushed by the OS. There is no way to poll.
 pub trait NetworkEvents: Send + Sync {
-    /// Starts delivering events about `watching`. Dropping the receiver ends
-    /// the subscription.
+    /// Starts delivering events about `watching`, until the returned
+    /// [`Subscription`] is dropped.
     ///
     /// [`NetworkEvent::PhysicalChanged`] is sent only for a change to
     /// `watching` itself. It is never sent for a route this product added or
     /// removed, nor for anything that happens to the tunnel interface.
-    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>>;
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription>;
+}
+
+/// The events of one subscription. Dropping it ends the subscription at
+/// once: everything registered with the OS for it is released before the
+/// drop returns, without waiting for another event. The service holds one
+/// per connection and drops it at teardown.
+pub struct Subscription {
+    events: Receiver<NetworkEvent>,
+    /// Ends the subscription when dropped; dropped after the receiver.
+    _ends: Box<dyn Send>,
+}
+
+impl Subscription {
+    /// A subscription delivering `events`, which `ends` releases when it is
+    /// dropped. An implementation makes `ends` a value whose `Drop` unregisters
+    /// and stops whatever produces the events, and returns only when that is
+    /// done.
+    pub fn new(events: Receiver<NetworkEvent>, ends: impl Send + 'static) -> Self {
+        Self {
+            events,
+            _ends: Box::new(ends),
+        }
+    }
+
+    /// Where the events arrive.
+    pub fn events(&self) -> &Receiver<NetworkEvent> {
+        &self.events
+    }
+}
+
+impl fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Subscription")
+    }
 }
 
 /// An OS user, as text in one canonical form: the decimal user ID with no
