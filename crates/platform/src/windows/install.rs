@@ -196,11 +196,23 @@ pub fn register(registration: &Registration) -> Result<()> {
             if changed == 0 {
                 return Err(os_error(last_error()));
             }
-            service
+            (service, false)
         }
-        None => create(&manager, &name, &display, &command)?,
+        None => (create(&manager, &name, &display, &command)?, true),
     };
-    configure(&service, registration.description)
+    let (service, created) = service;
+    if let Err(error) = configure(&service, registration.description) {
+        // A service this run created is not left half set up: it is
+        // deleted, so the next install starts from nothing. One that was
+        // there before keeps its registration, as before this run.
+        if created {
+            // SAFETY: the handle is open with full access, which includes
+            // delete.
+            unsafe { DeleteService(service.0) };
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Creates the service. One that was just removed may still be marked for
@@ -242,6 +254,12 @@ fn create(manager: &Sc, name: &[u16], display: &[u16], command: &[u16]) -> Resul
 
 /// The description, the restarts after a failure and the shutdown time.
 fn configure(service: &Sc, description: &str) -> Result<()> {
+    #[cfg(test)]
+    if tests::FAIL_CONFIGURE.with(std::cell::Cell::get) {
+        return Err(Error::Failed(
+            "configuring failed, as the test asked".to_string(),
+        ));
+    }
     let mut text = wide(description);
     let described = SERVICE_DESCRIPTIONW {
         lpDescription: text.as_mut_ptr(),
@@ -300,6 +318,14 @@ fn configure(service: &Sc, description: &str) -> Result<()> {
 
 /// Starts the service and waits until it runs. One that stops instead is an
 /// error naming its exit code.
+///
+/// What a failed start leaves behind: the service stays registered, set up
+/// and stopped, and the data folder and policy stay as written. Nothing is
+/// undone here, because the setup program that ran `install` undoes the
+/// whole install when it fails (packaging/windows/installer.nsh): its undo
+/// runs `uninstall`, which removes the registration and the data folder.
+/// Until then Windows may try to start it again, as its failure actions
+/// say; `uninstall` stops any such attempt before it deletes the service.
 pub fn start(name: &str) -> Result<()> {
     let manager = manager(SC_MANAGER_CONNECT)?;
     let service = open_service(&manager, name)?.ok_or(Error::NotFound)?;
@@ -431,6 +457,30 @@ pub fn write_policy(dir: &Path, policy: &[u8]) -> Result<()> {
     std::fs::write(&next, policy)?;
     set_security(&next, POLICY_SDDL)?;
     std::fs::rename(&next, &target)?;
+    Ok(())
+}
+
+/// Checks the data folder once it is prepared and the policy written: the
+/// same check of its owner and access list the service makes of its state
+/// folder, and, after a fresh install, that it holds the policy and nothing
+/// else. The folder is removed and made again on a fresh install; whoever
+/// managed to make it in between, or to put something in it, makes this an
+/// error rather than a folder the service would trust.
+pub fn verify_data_folder(dir: &Path, fresh: bool) -> Result<()> {
+    drop(super::state::check_folder(crate::Mode::Installed, dir)?);
+    if fresh {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            found.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        if found != [POLICY] {
+            return Err(Error::Failed(format!(
+                "{} holds {} as well as the policy, so something else made or changed it during the install",
+                dir.display(),
+                found.join(", ")
+            )));
+        }
+    }
     Ok(())
 }
 

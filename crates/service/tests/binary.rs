@@ -405,3 +405,20 @@ fn the_service_starts_with_the_bundled_runtime_beside_it() {
     assert!(refused && !stderr.contains("ubc-vpn-service: "), "{stderr}");
     println!("RAN: bundled runtime");
 }
+
+// Security rule: a build with dev mode never installs or removes the
+// installed service, and says so before it touches anything.
+#[cfg(feature = "dev-mode")]
+#[test]
+fn a_build_with_dev_mode_refuses_install_and_uninstall() {
+    let because = "a build with dev mode cannot install or remove the service";
+    for args in [
+        &["install", "--policy", "policy.json"][..],
+        &["install", "--fresh", "--policy", "policy.json"][..],
+        &["uninstall"][..],
+        &["uninstall", "--keep-data"][..],
+    ] {
+        let (refused, stderr) = run(args, None);
+        assert!(refused && stderr.contains(because), "{args:?}: {stderr}");
+    }
+}

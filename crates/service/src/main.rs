@@ -25,6 +25,11 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mode = match args::command(std::env::args_os().skip(1))? {
         Command::Run(mode) => mode,
+        // A build with dev mode has the fake engine in it and never installs
+        // or removes the installed service, before anything else.
+        Command::Install { .. } | Command::Uninstall { .. } if cfg!(feature = "dev-mode") => {
+            return Err("a build with dev mode cannot install or remove the service".to_string());
+        }
         // Run by the setup program, as an administrator, with the same
         // checks of the environment as the service.
         Command::Install { policy, fresh } => {
@@ -197,6 +202,11 @@ mod setup {
             .map_err(|e| format!("The data folder could not be prepared: {e}."))?;
         os::write_policy(&data, &policy)
             .map_err(|e| format!("The policy could not be written: {e}."))?;
+        // The end of the data folder's setup: checked as the service will
+        // check it, and, after a fresh install, holding the policy alone.
+        // Before the service is registered, so a failure leaves none.
+        os::verify_data_folder(&data, fresh)
+            .map_err(|e| format!("The data folder is not as it was set up: {e}"))?;
         let registration = Registration {
             name: SERVICE_NAME,
             display_name: DISPLAY_NAME,
