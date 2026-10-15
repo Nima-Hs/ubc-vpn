@@ -351,7 +351,12 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
     // claims nothing on the way to failing.
     no_engine(&scene);
     let mut typist = Typist::typing(&[Some(PASSWORD)]);
-    attempt(&scene, &mut typist, "service is not running", NOT_RUNNING);
+    attempt(
+        &scene,
+        &mut typist,
+        "service is installed but not running",
+        NOT_RUNNING,
+    );
 }
 
 // Security rule: a refused login stops at once. Nothing is asked twice and
@@ -408,7 +413,10 @@ fn disconnect_reports_what_happened() {
     gone.service = None;
     let (code, out, err) = gone.rig.run(&["disconnect"]);
     assert_eq!((code, out.as_str()), (NOT_RUNNING, ""));
-    assert!(err.contains("service is not running"), "{err}");
+    assert!(
+        err.contains("service is installed but not running"),
+        "{err}"
+    );
 
     // The function behind the command, for a platform that is missing.
     let nowhere = || Err(Error::Unsupported);

@@ -17,7 +17,7 @@ use ubc_vpn_core::protocol::{
     PROTOCOL_VERSION, Request, RequestBody, ResponseBody, ServerMessage, decode, encode,
     peek_protocol_version,
 };
-use ubc_vpn_platform::{Connection, Error, Transport};
+use ubc_vpn_platform::{Connection, Error, Paths, Platform, Transport};
 
 /// How long, and how much, a client lets the service take.
 #[derive(Debug, Clone, Copy)]
@@ -55,7 +55,11 @@ impl Default for Limits {
 /// Why talking to the service did not work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientError {
-    /// Nothing is listening: the service is not installed or not running.
+    /// Nothing is listening, and UBC VPN is not installed: there is no
+    /// policy, which the installer writes and uninstalling removes.
+    NotInstalled,
+    /// Nothing is listening, though UBC VPN is installed: the service is
+    /// stopped.
     NotRunning,
     /// The service belongs to another user.
     NotOwner,
@@ -88,6 +92,12 @@ impl From<FrameError> for ClientError {
     fn from(error: FrameError) -> Self {
         Self::Lost(error.to_string())
     }
+}
+
+/// Whether UBC VPN is installed: the installer writes the policy, and
+/// uninstalling removes it, along with the service.
+fn installed(paths: &Paths) -> bool {
+    paths.policy_dir.join("policy.json").exists()
 }
 
 /// Reads one line, waiting no later than `deadline`, or for ever without one.
@@ -137,13 +147,31 @@ pub struct Client {
 
 impl Client {
     /// Connects to the service listening on `name` and says hello, with the
-    /// usual limits.
+    /// usual limits. The commands use [`Client::reach`].
+    #[cfg(test)]
     pub fn connect(
         transport: &dyn Transport,
         name: &str,
         kind: ClientKind,
     ) -> Result<Self, ClientError> {
         Self::connect_within(transport, name, kind, Limits::default())
+    }
+
+    /// Connects to the service of `platform`. When nothing is listening it
+    /// tells a UBC VPN that is not installed from a service that is
+    /// stopped, so that the user can be told what to do.
+    pub fn reach(
+        platform: &Platform,
+        kind: ClientKind,
+        limits: Limits,
+    ) -> Result<Self, ClientError> {
+        let paths = &platform.paths;
+        let connected =
+            Self::connect_within(&*platform.transport, &paths.channel_name, kind, limits);
+        connected.map_err(|error| match error {
+            ClientError::NotRunning if !installed(paths) => ClientError::NotInstalled,
+            error => error,
+        })
     }
 
     /// The same, with limits of the caller's choosing.

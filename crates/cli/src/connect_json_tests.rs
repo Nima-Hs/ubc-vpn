@@ -284,7 +284,7 @@ fn every_failure_has_its_code() {
 
     let mut scene = Scene::usual();
     scene.service = None;
-    let said = "service is not running";
+    let said = "service is installed but not running";
     assert_eq!(
         fails(&scene, &[], "service_unavailable", NOT_RUNNING, said),
         0
