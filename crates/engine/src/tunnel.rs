@@ -26,7 +26,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 #[cfg(windows)]
@@ -59,13 +59,15 @@ const ECONNABORTED: c_int = 53;
 #[cfg(all(unix, not(target_os = "macos")))]
 const ECONNABORTED: c_int = 103;
 
-/// How a tunnel ended, from what the main loop returned: `-EINTR` after a
-/// cancel and `-ECONNABORTED` after a detach are the caller's close;
+/// How a tunnel ended, from what the main loop returned and whether the
+/// caller closed it. `-EINTR` after a cancel and `-ECONNABORTED` after a
+/// detach are the caller's close only when the caller did close it; without
+/// a close they are a lost connection, like anything else unexpected.
 /// `-EPERM` (the cookie expired) and `-EPIPE` (the gateway ended the
-/// session) mean logging in again; anything else is a lost connection.
-fn ended(result: c_int) -> TunnelEvent {
+/// session) mean logging in again.
+fn ended(result: c_int, closing: bool) -> TunnelEvent {
     match result.checked_neg() {
-        Some(EINTR | ECONNABORTED) => TunnelEvent::Closed,
+        Some(EINTR | ECONNABORTED) if closing => TunnelEvent::Closed,
         Some(EPERM | EPIPE) => TunnelEvent::LoginNeeded,
         _ => TunnelEvent::ConnectionLost,
     }
@@ -268,6 +270,15 @@ enum Report {
     Opened(Result<Assigned, TunnelError>),
 }
 
+/// What `open` tells the tunnel's thread once the tunnel has opened.
+enum Word {
+    /// The caller has the tunnel: run it.
+    Keep,
+    /// Opening was cancelled as the tunnel opened: remove it, logged off,
+    /// and send no event, as for any opening that did not succeed.
+    Abandon,
+}
+
 /// Everything the tunnel's thread needs, moved to it.
 struct Job {
     library: Library,
@@ -277,17 +288,15 @@ struct Job {
     cancel: Cancel,
     logs: LogSink,
     events: Sender<TunnelEvent>,
-    /// Set when `open` gives up a tunnel that opened as it was cancelled.
-    /// Such a tunnel never opened as far as the caller knows, and sends no
-    /// event.
-    abandoned: Arc<AtomicBool>,
+    /// Set by the first close, before it writes to the command pipe.
+    closing: Arc<AtomicBool>,
     /// Given back after the handle is dropped.
     slot: Slot,
 }
 
 impl Job {
     /// The body of the tunnel's thread.
-    fn run(self, report: Sender<Report>) {
+    fn run(self, report: Sender<Report>, words: Receiver<Word>) {
         let Self {
             library,
             gateway,
@@ -296,7 +305,7 @@ impl Job {
             cancel,
             logs,
             events,
-            abandoned,
+            closing,
             slot,
         } = self;
         // Before the library holds it, so no line of the library's can.
@@ -332,15 +341,21 @@ impl Job {
         let Some(device) = device else {
             return;
         };
-        // The tunnel runs here until it ends. A close or an abandoned open
-        // writes its command to the pipe, and the loop removes the device as
-        // it returns.
+        // Nothing runs until `open` has decided. A cancel that reached the
+        // pipe after the device was made would otherwise end the loop and be
+        // reported as the caller's close, of a tunnel `open` calls cancelled.
+        let keep = matches!(words.recv(), Ok(Word::Keep));
+        if !keep {
+            handle.stopper().cancel();
+        }
+        // The tunnel runs here until it ends. A close writes its command to
+        // the pipe, and the loop removes the device as it returns.
         let result = handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
         drop(handle);
         wait_until_gone(&device);
         drop(slot);
-        if !abandoned.load(Ordering::SeqCst) {
-            let _ = events.send(ended(result));
+        if keep {
+            let _ = events.send(ended(result, closing.load(Ordering::SeqCst)));
         }
     }
 }
@@ -450,8 +465,9 @@ struct OpenTunnel {
     /// Writes to the handle's command pipe while the handle lives, and
     /// does nothing once the tunnel has ended.
     stopper: Stopper,
-    /// Whether a close has decided how the tunnel ends.
-    closing: AtomicBool,
+    /// Whether a close has decided how the tunnel ends. The thread reads it
+    /// too: only then is the loop's end the caller's close.
+    closing: Arc<AtomicBool>,
     /// Joined by whichever close gets it; the others wait on the lock.
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -511,7 +527,8 @@ impl TunnelEngine for OpenConnect {
         }
         let slot = Slot::take().ok_or(TunnelError::Failed)?;
         let (report, reports) = mpsc::channel();
-        let abandoned = Arc::new(AtomicBool::new(false));
+        let (word, words) = mpsc::channel();
+        let closing = Arc::new(AtomicBool::new(false));
         let job = Job {
             library: self.library,
             gateway: gateway.clone(),
@@ -520,12 +537,12 @@ impl TunnelEngine for OpenConnect {
             cancel: cancel.clone(),
             logs,
             events,
-            abandoned: Arc::clone(&abandoned),
+            closing: Arc::clone(&closing),
             slot,
         };
         let thread = std::thread::Builder::new()
             .name("tunnel".to_string())
-            .spawn(move || job.run(report))
+            .spawn(move || job.run(report, words))
             .map_err(|_| TunnelError::Failed)?;
         // A cancel from another thread wakes the library through the
         // handle's command pipe. The hook is armed only while this call
@@ -547,20 +564,17 @@ impl TunnelEngine for OpenConnect {
         drop(armed);
         let failed = match (opened, stopper) {
             (Ok(assigned), Some(stopper)) if !cancel.is_cancelled() => {
+                let _ = word.send(Word::Keep);
                 return Ok(Box::new(OpenTunnel {
                     assigned,
                     stopper,
-                    closing: AtomicBool::new(false),
+                    closing,
                     thread: Mutex::new(Some(thread)),
                 }));
             }
-            (Ok(_), stopper) => {
-                // Opened as it was cancelled: given up, logged off, and no
-                // event, as for any opening that did not succeed.
-                abandoned.store(true, Ordering::SeqCst);
-                if let Some(stopper) = stopper {
-                    stopper.cancel();
-                }
+            (Ok(_), _) => {
+                // Opened as it was cancelled: given up by the thread.
+                let _ = word.send(Word::Abandon);
                 TunnelError::Cancelled
             }
             (Err(error), _) => error,
@@ -827,13 +841,24 @@ mod tests {
     // a refused session, or a lost connection.
     #[test]
     fn the_main_loop_result_decides_the_event() {
-        assert_eq!(ended(-EINTR), TunnelEvent::Closed);
-        assert_eq!(ended(-ECONNABORTED), TunnelEvent::Closed);
-        assert_eq!(ended(-EPERM), TunnelEvent::LoginNeeded);
-        assert_eq!(ended(-EPIPE), TunnelEvent::LoginNeeded);
-        for other in [-5, -110, -104, 0, 1, EINTR, c_int::MIN] {
-            assert_eq!(ended(other), TunnelEvent::ConnectionLost, "{other}");
+        assert_eq!(ended(-EINTR, true), TunnelEvent::Closed);
+        assert_eq!(ended(-ECONNABORTED, true), TunnelEvent::Closed);
+        for closing in [false, true] {
+            assert_eq!(ended(-EPERM, closing), TunnelEvent::LoginNeeded);
+            assert_eq!(ended(-EPIPE, closing), TunnelEvent::LoginNeeded);
         }
+        for other in [-5, -110, -104, 0, 1, EINTR, c_int::MIN] {
+            assert_eq!(ended(other, true), TunnelEvent::ConnectionLost, "{other}");
+        }
+    }
+
+    // A cancel or detach the caller did not ask for, such as one that
+    // reached the command pipe from somewhere else, never looks like the
+    // caller's close: the tunnel ended unasked, which is a lost connection.
+    #[test]
+    fn only_a_close_makes_the_end_a_close() {
+        assert_eq!(ended(-EINTR, false), TunnelEvent::ConnectionLost);
+        assert_eq!(ended(-ECONNABORTED, false), TunnelEvent::ConnectionLost);
     }
 
     // Security rule: a cancel is looked at on the tunnel's own thread right
