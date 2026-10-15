@@ -30,6 +30,9 @@
 mod dns;
 #[cfg(test)]
 mod dns_tests;
+mod events;
+#[cfg(test)]
+mod events_tests;
 pub(crate) mod interrupt;
 mod journal;
 mod pipe;
@@ -95,7 +98,7 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
     Ok(Platform {
         routes: Arc::new(routes::WinRoutes::new(mode, &paths)),
         dns: Arc::new(dns::WinDns),
-        events: Arc::new(Native),
+        events: Arc::new(events::WinEvents),
         paths,
         transport: Arc::new(PipeTransport { mode, me }),
     })
