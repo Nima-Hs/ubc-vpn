@@ -9,7 +9,7 @@
 //! - **Read back** exactly, together with a check that no group-policy table
 //!   and no rule of anyone else's names our domains. Windows offers no
 //!   documented way to see which rules its resolver took in, so a match
-//!   answers [`Verified::Unknown`], as the contract asks; the CI test with a
+//!   answers [`Verified::Unobservable`], as the contract asks; the CI test with a
 //!   DNS server of its own shows the effect.
 //! - **Survives** a crash and a restart of the machine, being in the
 //!   registry; the service's start-up clear removes it.
@@ -27,9 +27,10 @@ use super::security::{os_error, wide};
 use crate::{Dns, Error, Result, SplitDns, Verified};
 
 /// Where the DNS client reads local rules.
-const LOCAL: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+pub(super) const LOCAL: &str =
+    r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
 /// Where group policy puts rules, which replace local ones.
-const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig";
+pub(super) const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig";
 /// This product's rules. Never change them: a later version must find an
 /// earlier one's rules to remove them.
 pub(super) const RULES: [&str; 6] = [
@@ -199,7 +200,13 @@ fn utf16_bytes(units: impl IntoIterator<Item = u16>) -> Vec<u8> {
 }
 
 fn write_rule(id: &str, rule: &Rule) -> Result<()> {
-    let path = wide(&format!(r"{LOCAL}\{id}"));
+    write_rule_at(LOCAL, id, rule)
+}
+
+/// Writes a rule under `base`, which tests also use to play group policy
+/// and other programs.
+pub(super) fn write_rule_at(base: &str, id: &str, rule: &Rule) -> Result<()> {
+    let path = wide(&format!(r"{base}\{id}"));
     let mut key = null_mut();
     // SAFETY: the path is NUL-terminated; the class, security attributes and
     // disposition may be null; the out pointer is valid.
@@ -236,7 +243,12 @@ fn write_rule(id: &str, rule: &Rule) -> Result<()> {
 }
 
 fn read_rule(id: &str) -> Result<Option<Rule>> {
-    let Some(key) = open(&format!(r"{LOCAL}\{id}"), KEY_READ)? else {
+    read_rule_at(LOCAL, id)
+}
+
+/// The rule `id` under `base`, if it is there and says what ours say.
+pub(super) fn read_rule_at(base: &str, id: &str) -> Result<Option<Rule>> {
+    let Some(key) = open(&format!(r"{base}\{id}"), KEY_READ)? else {
         return Ok(None);
     };
     let dword = |name| -> Result<Option<u32>> {
@@ -263,7 +275,12 @@ fn read_rule(id: &str) -> Result<Option<Rule>> {
 }
 
 fn delete_rule(id: &str) -> Result<()> {
-    let path = wide(&format!(r"{LOCAL}\{id}"));
+    delete_rule_at(LOCAL, id)
+}
+
+/// Deletes the rule `id` under `base`, if it is there.
+pub(super) fn delete_rule_at(base: &str, id: &str) -> Result<()> {
+    let path = wide(&format!(r"{base}\{id}"));
     // SAFETY: the path is NUL-terminated.
     match checked(unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, path.as_ptr()) }) {
         Ok(()) | Err(Error::NotFound) => Ok(()),
@@ -345,7 +362,7 @@ impl Dns for WinDns {
             }
             // Written as asked; whether the resolver took it in, Windows
             // does not say.
-            Ok(Verified::Unknown)
+            Ok(Verified::Unobservable)
         };
         check().unwrap_or(Verified::Unknown)
     }

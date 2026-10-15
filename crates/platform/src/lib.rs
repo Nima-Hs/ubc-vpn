@@ -1261,7 +1261,7 @@ mod tests {
     // still say it is unsupported, and its checks must still fail closed.
     #[cfg(windows)]
     #[test]
-    fn windows_implements_the_channel_and_routes_and_nothing_else_yet() {
+    fn windows_implements_the_channel_routes_and_dns_and_nothing_else_yet() {
         let unsupported = Some(Error::Unsupported);
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let physical = PhysicalNetwork {
@@ -1286,8 +1286,9 @@ mod tests {
             assert!(native.routes.capture_physical(gateway).is_ok());
             let routed = native.routes.uses_interface(gateway, "ubc-vpn-no-such0");
             assert_eq!(routed, Verified::No);
-            assert_eq!(native.dns.clear_split_dns().err(), unsupported);
-            assert_eq!(native.dns.split_dns_matches(&dns), Verified::Unknown);
+            // Split DNS is real: nothing of ours is set, and reading that
+            // needs no rights.
+            assert_eq!(native.dns.split_dns_matches(&dns), Verified::No);
             assert_eq!(native.events.subscribe(&physical).err(), unsupported);
             // Nothing listens on this name, and the transport can tell.
             let absent = native.transport.connect("ubc-vpn-test-nobody-listens");

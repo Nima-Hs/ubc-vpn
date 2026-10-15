@@ -262,6 +262,14 @@ pub fn check_route_ownership(
     routes.remove_all().expect("remove all");
 }
 
+/// Passes for split DNS that is in effect as far as the OS shows: `Yes`, or
+/// `Unobservable` where the OS cannot show what its resolver took in. `No`
+/// and `Unknown` fail.
+pub(crate) fn assert_in_effect(verdict: Verified, what: &str) {
+    let in_effect = matches!(verdict, Verified::Yes | Verified::Unobservable);
+    assert!(in_effect, "{what} is not in effect: {verdict:?}");
+}
+
 /// Checks [`Dns`] against the interface named `tunnel`, which must exist.
 /// Leaves no split DNS behind when it passes.
 ///
@@ -288,7 +296,7 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Ve
         resolvers: other_resolvers.resolvers.clone(),
         domains: more_domains.domains.clone(),
     };
-    let (yes, no) = (Verified::Yes, Verified::No);
+    let no = Verified::No;
 
     dns.clear_split_dns().expect("clear when nothing is set");
     assert_eq!(dns.split_dns_matches(&first), no);
@@ -305,7 +313,7 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Ve
         assert_eq!(resolvers_for(chosen), first.resolvers, "{chosen}");
     }
     assert_eq!(others.map(resolvers_for), usual, "another name changed");
-    assert_eq!(dns.split_dns_matches(&first), yes);
+    assert_in_effect(dns.split_dns_matches(&first), "the setting");
     assert_eq!(dns.split_dns_matches(&other_resolvers), no, "resolvers");
     assert_eq!(dns.split_dns_matches(&other_domains), no, "domains");
     assert_eq!(dns.split_dns_matches(&more_domains), no, "more domains");
@@ -314,7 +322,7 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Ve
     // Setting replaces: nothing of the first setting stays in effect.
     dns.set_split_dns(tunnel, &second).expect("set another");
     assert_eq!(dns.split_dns_matches(&first), no, "the old setting stayed");
-    assert_eq!(dns.split_dns_matches(&second), yes);
+    assert_in_effect(dns.split_dns_matches(&second), "the new setting");
 
     dns.clear_split_dns().expect("clear");
     dns.clear_split_dns().expect("clear twice");

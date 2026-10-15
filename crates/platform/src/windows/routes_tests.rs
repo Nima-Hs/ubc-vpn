@@ -19,7 +19,7 @@ use super::wintun::Wintun;
 use crate::suite::{self, Foreign};
 use crate::{Error, Routes, Verified};
 
-fn skip(what: &str) {
+pub(super) fn skip(what: &str) {
     let required = std::env::var_os("UBC_VPN_REQUIRE_ELEVATED").is_some();
     assert!(!required, "{what}, and this run requires it");
     println!("SKIPPED: {what}");
@@ -27,7 +27,7 @@ fn skip(what: &str) {
 
 /// CI searches the log for these lines to prove the tests that can be
 /// skipped ran.
-fn ran(test: &str) {
+pub(super) fn ran(test: &str) {
     println!("RAN: {test}");
 }
 
@@ -35,7 +35,7 @@ fn ran(test: &str) {
 /// machine's one routing table.
 static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn turn() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn turn() -> std::sync::MutexGuard<'static, ()> {
     TURN.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -84,7 +84,7 @@ fn scrub(dirs: &[PathBuf]) {
 
 /// Removes, when dropped, what a test may have left: its routes, and the
 /// crash test's child and adapter.
-struct Cleanup(Vec<PathBuf>);
+pub(super) struct Cleanup(pub(super) Vec<PathBuf>);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -121,7 +121,7 @@ fn watchdog() {
     });
 }
 
-fn wintun() -> Option<Wintun> {
+pub(super) fn wintun() -> Option<Wintun> {
     watchdog();
     let loaded = Wintun::load();
     if loaded.is_none() {
@@ -131,7 +131,7 @@ fn wintun() -> Option<Wintun> {
 }
 
 /// A journal folder of the test's own.
-fn state_dir(tag: &str) -> PathBuf {
+pub(super) fn state_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ubc-vpn-routes-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
@@ -139,7 +139,7 @@ fn state_dir(tag: &str) -> PathBuf {
 
 /// Changes routes and addresses as somebody other than the product: through
 /// the same API, but recorded nowhere.
-struct Outsider;
+pub(super) struct Outsider;
 
 impl Outsider {
     fn row(interface: &str, net: Ipv4Net) -> MIB_IPFORWARD_ROW2 {

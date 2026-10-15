@@ -28,6 +28,8 @@
 //! is open, so closing the listener also closes the connections it accepted.
 
 mod dns;
+#[cfg(test)]
+mod dns_tests;
 pub(crate) mod interrupt;
 mod journal;
 mod pipe;

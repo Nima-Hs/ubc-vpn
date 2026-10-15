@@ -791,6 +791,23 @@ mod tests {
         Some(Error::Failed("injected".to_string()))
     }
 
+    // Security rule: the shared DNS check accepts "in effect, but the OS
+    // cannot show it" in place of a "yes", and nothing weaker.
+    #[test]
+    fn the_dns_check_accepts_yes_or_unobservable_and_nothing_else() {
+        let passes = |verdict| {
+            std::panic::catch_unwind(|| suite::assert_in_effect(verdict, "split DNS")).is_ok()
+        };
+        assert!(passes(Verified::Yes));
+        assert!(passes(Verified::Unobservable));
+        assert!(!passes(Verified::No));
+        assert!(!passes(Verified::Unknown));
+        // An OS that cannot observe its resolver still passes the suite.
+        let fake = Fake::new();
+        fake.cannot_observe(Op::VerifyDns, true);
+        suite::check_dns(&fake, TUNNEL, &|name| fake.resolvers_for(name));
+    }
+
     #[test]
     fn passes_the_shared_suite_and_ends_clean() {
         let fake = Fake::new();
