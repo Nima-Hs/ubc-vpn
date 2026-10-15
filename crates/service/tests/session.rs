@@ -964,6 +964,31 @@ fn a_change_from_an_earlier_connection_leaves_a_later_one_alone() {
     assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
 }
 
+// Security rule: the same, when the earlier attempt never opened a tunnel.
+// It watched the network it was on and failed at the gateway; the user
+// then connected on another network. A change to the first network must
+// not end the connection on the second.
+#[test]
+fn a_change_from_a_failed_attempt_leaves_a_later_connection_alone() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    rig.engine.set_reachable(false);
+    let state = alice.connect_ends(good());
+    assert!(
+        failed_with(&state, ErrorCode::GatewayUnreachable),
+        "{state:?}"
+    );
+    rig.engine.set_reachable(true);
+    connected(&mut alice);
+    assert_eq!(rig.os.subscriptions(), 2);
+    let _ = rig.os.send_to(0, NetworkEvent::PhysicalChanged);
+    assert!(alice.is_quiet(), "the later connection stays up");
+    assert!(rig.engine.tunnel_is_open());
+    assert!(rig.os.send_to(1, NetworkEvent::PhysicalChanged));
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
+}
+
 // Until Windows can report network changes, a system that cannot is not a
 // reason to refuse: the connection goes ahead, and the log says once that
 // changes are not watched. A dead tunnel still ends as a lost connection.

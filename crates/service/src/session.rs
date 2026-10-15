@@ -57,8 +57,8 @@ enum Command {
     /// With the hold that keeps its cookie out of the log.
     Connect(ConnectParams, Cancel, Held),
     Disconnect,
-    /// The OS reported this about the network the tunnel with this number
-    /// was set up on.
+    /// The OS reported this about the network watched by the subscription
+    /// with this number.
     Network(u64, NetworkEvent),
     /// The tunnel with this number ended by itself.
     Ended(u64, TunnelEvent),
@@ -97,11 +97,15 @@ pub(crate) struct Machine {
     /// Whether the last state written to the log was `disconnected`. It is
     /// where the service starts.
     disconnected: bool,
-    /// The number of the tunnel whose network is watched now, or 0. A
-    /// subscription for any other number forwards nothing and ends.
+    /// The number of the subscription that watches the network of the
+    /// connection now, or 0 when there is none. A subscription with any
+    /// other number forwards nothing and ends.
     pub(crate) watching: Arc<AtomicU64>,
     /// Counts tunnels, so an ending is matched to the tunnel it came from.
     tunnels: u64,
+    /// Counts subscriptions to network events. Every attempt gets a number
+    /// of its own, whether or not its tunnel opened.
+    subscriptions: u64,
     hub: Arc<Hub>,
     gate: Arc<Mutex<Gate>>,
     commands: Sender<Command>,
@@ -148,6 +152,7 @@ impl Session {
             hidden: None,
             disconnected: true,
             tunnels: 0,
+            subscriptions: 0,
             hub,
             gate: gate.clone(),
             commands: commands.clone(),
@@ -389,10 +394,13 @@ impl Machine {
                 self.finish_then_open(state, idle);
             }
             // The network the connection was set up and checked on is gone,
-            // so its gateway route may lead nowhere. Only a change to the
-            // network of the tunnel that is open now counts.
-            Command::Network(tunnel, NetworkEvent::PhysicalChanged)
-                if tunnel == self.tunnels && self.applied.tunnel.is_some() =>
+            // so its gateway route may lead nowhere. Only a change seen by
+            // the subscription of the connection that is up now counts:
+            // not one from an earlier attempt, opened or not, whose
+            // forwarder read the number just before a teardown.
+            Command::Network(subscription, NetworkEvent::PhysicalChanged)
+                if subscription == self.watching.load(Ordering::SeqCst)
+                    && self.applied.tunnel.is_some() =>
             {
                 let state = failed(ErrorCode::EngineFailed, NETWORK_CHANGED);
                 let idle = |phase: &mut Phase| {
@@ -488,16 +496,17 @@ const UNWATCHED: &str = "network changes cannot be watched on this system; \
     a connection that stops working ends when the tunnel notices";
 
 impl Machine {
-    /// Starts watching `physical` for the tunnel about to be opened, which
-    /// will have the next number. Events reach the worker as commands; the
-    /// subscription ends at the first event after teardown, or with the
-    /// service. A system that cannot report changes is no reason to refuse;
-    /// any other failure is.
+    /// Starts watching `physical` for the connection being set up, under a
+    /// subscription number no other attempt has. Events reach the worker as
+    /// commands; the subscription ends at the first event after teardown, or
+    /// with the service. A system that cannot report changes is no reason to
+    /// refuse; any other failure is.
     pub(crate) fn watch_network(
         &mut self,
         physical: &PhysicalNetwork,
     ) -> Result<(), (ErrorCode, String)> {
-        let number = self.tunnels + 1;
+        self.subscriptions += 1;
+        let number = self.subscriptions;
         self.watching.store(number, Ordering::SeqCst);
         let events = match self.events.subscribe(physical) {
             Ok(events) => events,
