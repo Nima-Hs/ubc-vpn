@@ -35,6 +35,7 @@ mod dns_tests;
 mod events;
 #[cfg(test)]
 mod events_tests;
+pub mod install;
 pub(crate) mod interrupt;
 mod journal;
 mod pipe;

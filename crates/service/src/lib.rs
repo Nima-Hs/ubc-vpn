@@ -15,6 +15,7 @@ pub mod args;
 mod connect;
 mod diagnostics;
 mod hub;
+pub mod install;
 mod logs;
 mod owner;
 pub mod policy;
