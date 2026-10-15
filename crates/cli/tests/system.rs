@@ -164,8 +164,9 @@ fn the_service_and_the_client_work_together() {
     assert!(places.is_sorted(), "out of order:\n{log}");
     // This service says it runs in dev mode, as it does.
     let started = format!(
-        "service started: version {}, protocol 3, dev mode",
-        env!("CARGO_PKG_VERSION")
+        "service started: version {}, protocol {}, dev mode",
+        env!("CARGO_PKG_VERSION"),
+        ubc_vpn_core::protocol::PROTOCOL_VERSION
     );
     assert!(at(&started) < places[0], "{log}");
     at("login succeeded");
