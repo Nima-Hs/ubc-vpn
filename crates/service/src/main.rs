@@ -31,6 +31,15 @@ fn run() -> Result<(), String> {
     if mode == Run::Installed && cfg!(feature = "dev-mode") {
         return Err("a build with dev mode cannot run as the installed service".to_string());
     }
+    // The installed service runs only from a folder that no one but SYSTEM,
+    // the Administrators and TrustedInstaller could change, held so that
+    // it cannot be swapped while the service runs.
+    #[cfg(windows)]
+    let _folder = match mode {
+        Run::Installed => Some(program_folder()?),
+        #[cfg(feature = "dev-mode")]
+        Run::Dev => None,
+    };
     // On Windows the installed service is started by the service manager,
     // and stops when it asks.
     #[cfg(windows)]
@@ -47,6 +56,16 @@ fn run() -> Result<(), String> {
     let service = start(mode)?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
     Err(service.wait())
+}
+
+/// Checks the folder this program runs from; see `ubc_vpn_platform::program`.
+/// The path is used as Windows gives it, not canonicalised, which would make
+/// it a verbatim path that the engine refuses.
+#[cfg(windows)]
+fn program_folder() -> Result<ubc_vpn_platform::program::ProgramFolder, String> {
+    let program = std::env::current_exe()
+        .map_err(|e| format!("The service cannot tell where it runs from: {e}."))?;
+    ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())
 }
 
 fn start(mode: Run) -> Result<Service, String> {

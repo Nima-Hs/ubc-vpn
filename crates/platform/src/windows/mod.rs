@@ -38,6 +38,7 @@ mod events_tests;
 pub(crate) mod interrupt;
 mod journal;
 mod pipe;
+pub mod program;
 mod routes;
 #[cfg(test)]
 mod routes_tests;
