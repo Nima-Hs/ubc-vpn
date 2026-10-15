@@ -201,6 +201,13 @@ impl Client {
         })
     }
 
+    /// Whether the service had an owner when this client said hello, or has
+    /// one since this client claimed it.
+    #[cfg(test)]
+    pub fn owner_claimed(&self) -> bool {
+        self.owner_claimed
+    }
+
     /// Claims the service if nobody owns it yet, which makes this user the
     /// owner. Every command starts with this.
     pub fn claim_if_unowned(&mut self) -> Result<(), ClientError> {

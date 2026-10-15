@@ -7,7 +7,8 @@
 //! what they are told), `queue` (what waits to be written to one of them),
 //! `server` (the channel), `diagnostics` (what the service says about
 //! itself), `session` (the connection state machine), `connect`, `verify`
-//! and `teardown` (its three steps).
+//! and `teardown` (its three steps), and `update` (a change of routes while
+//! connected).
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -23,12 +24,14 @@ mod queue;
 mod server;
 mod session;
 mod teardown;
+mod update;
 mod verify;
 mod words;
 
 pub use logs::{CAPACITY as LOG_CAPACITY, LINGER, Logs, NOT_LOGGED, REQUEST_LINES};
 pub use server::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS, Service, Timeouts};
 pub use session::ABANDONED;
+pub use update::ROUTES_CHANGED;
 pub use verify::DNS_UNCONFIRMED;
 
 /// Locks a mutex, carrying on after another thread panicked while holding it.

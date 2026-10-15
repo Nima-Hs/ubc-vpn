@@ -202,14 +202,17 @@ pub enum RequestBody {
     ///   that adds DNS domains to a connection that has none when the DNS
     ///   servers the gateway assigned cannot be used. Nothing is changed and
     ///   the connection is kept as it was.
-    /// - **No change:** routes and domains equal to the tunnel's are
+    /// - **No change:** subnets and domains that are, as sets, the ones the
+    ///   tunnel carries (in any order, duplicates counted once) are
     ///   answered at once with `status`, the connection as it is, which
     ///   already carries them; nothing is changed, logged or reported.
     /// - **Failure while applying or verifying:** everything is torn down
     ///   and the state is `failed`. The tunnel never goes on with the old
     ///   routes, nor with a mix of old and new.
     /// - **Timing:** `busy` while connecting, disconnecting or applying
-    ///   another update; `not_connected` when there is no tunnel.
+    ///   another update; `not_connected` when there is no tunnel. These
+    ///   come before the no-change answer: a request that would change
+    ///   nothing is still `busy` while something else is in progress.
     UpdateRoutes(RouteSet),
 }
 

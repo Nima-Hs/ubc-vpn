@@ -131,8 +131,11 @@ impl Machine {
 
         // Only what the user chose, and those DNS servers. The routes the
         // gateway suggests are ignored.
-        let routes = [chosen.subnets.clone(), servers].concat();
+        let routes = [chosen.subnets.clone(), servers.clone()].concat();
         self.applied.routes = routes.clone();
+        self.applied.subnets = chosen.subnets.clone();
+        self.applied.dns_servers = servers;
+        self.applied.dns_domains = chosen.dns_domains.clone();
         let routed = self.routes.add_tunnel_routes(tunnel, &routes);
         routed.map_err(os("The tunnel routes could not be added"))?;
 
@@ -229,7 +232,7 @@ pub(crate) const MAX_DNS_SERVERS: usize = 4;
 /// connect fails if there are too many, or if one could not be a DNS server
 /// behind the tunnel: a reserved address such as loopback, the gateway's own
 /// address, or the router of the physical network.
-fn dns_servers(
+pub(crate) fn dns_servers(
     assigned: &[Ipv4Addr],
     gateway: Ipv4Addr,
     physical: &PhysicalNetwork,

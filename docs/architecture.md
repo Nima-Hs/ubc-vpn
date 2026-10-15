@@ -202,7 +202,13 @@ The settings folder belongs to the CLI. Beside `settings.json` it holds:
 
 On macOS and Linux the CLI creates the folder for the user alone and refuses to use one that the group or others can write to.
 
-The app does not open `settings.json` or `policy.json` itself. It runs `ubc-vpn settings`, which reads the settings, checks routes the user typed, and saves them, so the rules for routes exist once, in `crates/core`, and are the ones the service applies when connecting. The lines exchanged are defined in `crates/core/src/settings_cli.rs`. Saved routes are used by the next connection; a connection that is already up keeps the routes it started with.
+The app does not open `settings.json` or `policy.json` itself. It runs `ubc-vpn settings`, which reads the settings, checks routes the user typed, and saves them, so the rules for routes exist once, in `crates/core`, and are the ones the service applies when connecting. The lines exchanged are defined in `crates/core/src/settings_cli.rs`. Saved routes are used by the next connection. When the VPN is up, `set-routes` also sends the routes it has just saved to the service in an `update_routes` request, and its reply says what came of that.
+- **Checks:** the service checks the change as it checks a connect, against the policy and the network the connection was set up on. When the change adds DNS domains to a connection that has none, it also checks the DNS servers the gateway assigned. A change it refuses leaves the connection as it was.
+- **No change:** a change to the routes the tunnel carries already is answered at once and does nothing. Each change is logged in one line under the repeat rule, so asking for changes again and again cannot fill the log.
+- **Applying:** it adds the new routes, then sets split DNS for the new domains, then removes the dropped routes. It removes only routes it added itself, and keeps the routes to the gateway's DNS servers until the connection ends.
+- **Verifying:** it checks the result, including that each dropped network no longer goes through the tunnel, unless a remaining route still holds it.
+- **Failing closed:** if any step or check fails, the connection is closed and everything it applied is removed.
+- **The bridge:** it refuses `update_routes` from the app, as it refuses `connect`, so a tunnel only ever carries routes from the user's saved settings.
 
 ### Which routes the service accepts
 

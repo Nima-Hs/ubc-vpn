@@ -23,8 +23,10 @@
 //! the one the user typed once a login with it has succeeded, and removes a
 //! saved one that the gateway refused (see [`replace_username`]).
 //!
-//! Saved routes are used by the next connection. A connection that is already
-//! up keeps the routes it started with.
+//! Saved routes are used by the next connection. When the user's VPN is up,
+//! `set-routes` also asks the service to apply them to it, and says in the
+//! reply's `live` field what came of that (see [`LiveRoutes`]). Saving never
+//! fails because of it.
 //!
 //! # The cases
 //!
@@ -58,6 +60,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::policy::Policy;
+use crate::protocol::ErrorCode;
 use crate::routes::{Ipv4Net, MAX_ROUTES, MIN_PREFIX_LEN, RouteSet, is_valid_domain};
 use crate::settings::Settings;
 
@@ -119,11 +122,50 @@ pub enum RoutesReply {
     Ok {
         /// The routes in the form they are stored and sent to the service.
         routes: RouteSet,
+        /// For `set-routes` only: what became of the live connection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        live: Option<LiveRoutes>,
     },
     /// At least one entry is not acceptable. Nothing was saved.
     Invalid {
         /// Every problem found, in the order of the input.
         problems: Vec<RouteProblem>,
+    },
+}
+
+/// What saving routes did to the user's live connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum LiveRoutes {
+    /// The VPN is connected, and now carries the saved routes: they were
+    /// applied and verified.
+    Applied,
+    /// The VPN is not connected, or not this user's to change: the routes
+    /// are used at the next connect.
+    NextConnect,
+    /// The service refused to change the connection. It keeps the routes
+    /// it had; the saved ones are used at the next connect.
+    Refused {
+        /// Why, for the client to act on.
+        code: ErrorCode,
+        /// Why, for the user to read.
+        message: String,
+    },
+    /// Applying them failed, so the connection was closed and everything
+    /// it had applied removed.
+    Failed {
+        /// Why, for the client to act on.
+        code: ErrorCode,
+        /// Why, for the user to read.
+        message: String,
+    },
+    /// What became of the connection is not known: the service did not say
+    /// in time.
+    Unknown {
+        /// Why, for the user to read.
+        message: String,
     },
 }
 
@@ -557,11 +599,33 @@ mod tests {
     fn replies_have_a_stable_wire_format() {
         let ok = RoutesReply::Ok {
             routes: check_input(&input(&["10.19.0.0/16"], &[]), None).unwrap(),
+            live: None,
         };
         assert_eq!(
             encode(&ok).unwrap(),
             "{\"type\":\"ok\",\"routes\":{\"subnets\":[\"10.19.0.0/16\"],\"dns_domains\":[]}}\n"
         );
+        // What saving did to the live connection, when it was saved.
+        let applied = RoutesReply::Ok {
+            routes: check_input(&input(&["10.19.0.0/16"], &[]), None).unwrap(),
+            live: Some(LiveRoutes::Applied),
+        };
+        let text = encode(&applied).unwrap();
+        assert!(
+            text.ends_with(",\"live\":{\"result\":\"applied\"}}\n"),
+            "{text}"
+        );
+        assert_eq!(decode::<RoutesReply>(&text).unwrap(), applied);
+        let refused = LiveRoutes::Refused {
+            code: crate::protocol::ErrorCode::RouteRefused,
+            message: "made up".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&refused).unwrap(),
+            r#"{"result":"refused","code":"route_refused","message":"made up"}"#
+        );
+        let later = serde_json::to_string(&LiveRoutes::NextConnect).unwrap();
+        assert_eq!(later, r#"{"result":"next_connect"}"#);
         let invalid = RoutesReply::Invalid {
             problems: vec![
                 whole(RouteProblemCode::NoSubnets),

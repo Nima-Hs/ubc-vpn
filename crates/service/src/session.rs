@@ -22,11 +22,12 @@ use ubc_vpn_core::protocol::{
     ConnectParams, ErrorCode, ErrorInfo, LastError, LogLevel, is_plausible_cookie,
     is_plausible_gateway_addr,
 };
-use ubc_vpn_core::routes::Ipv4Net;
-use ubc_vpn_core::state::ConnState;
+use ubc_vpn_core::routes::{Ipv4Net, LocalNetworks, RouteSet, check_against_local};
+use ubc_vpn_core::state::{ConnState, TunnelInfo};
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
 use ubc_vpn_platform::{Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Platform, Routes};
 
+use crate::connect::dns_servers;
 use crate::diagnostics::failure;
 use crate::hub::Hub;
 use crate::logs::Held;
@@ -44,6 +45,8 @@ enum Phase {
     Idle,
     Connecting,
     Connected,
+    /// Connected, and changing the tunnel's routes.
+    Updating,
     Stopping,
 }
 
@@ -52,6 +55,32 @@ struct Gate {
     phase: Phase,
     /// Stops the connect in progress, if there is one.
     cancel: Cancel,
+    /// While connected: what a change of routes is checked against before
+    /// it is admitted.
+    live: Option<Live>,
+}
+
+/// What came of a change of routes that was not refused.
+pub(crate) enum Admitted {
+    /// The worker is applying it; the outcome comes as a state event.
+    Changing,
+    /// The tunnel carries these routes already: nothing was done.
+    Unchanged(TunnelInfo),
+}
+
+/// What a change of routes is checked against while connected.
+struct Live {
+    /// The gateway the connection reaches.
+    gateway: Ipv4Addr,
+    /// The network the connection was set up on.
+    physical: PhysicalNetwork,
+    /// What the tunnel carries now.
+    tunnel: TunnelInfo,
+    /// The DNS servers the gateway assigned.
+    assigned_dns: Vec<Ipv4Addr>,
+    /// Whether routes to them are in place, as they are once a connection
+    /// has had DNS domains.
+    dns_routed: bool,
 }
 
 /// What the log says when a connect is undone because its client went
@@ -82,6 +111,9 @@ enum Command {
     /// it whether the client was told it was admitted.
     Connect(ConnectParams, Cancel, Held, Receiver<bool>),
     Disconnect,
+    /// Apply these routes to the live tunnel. Checked before it was
+    /// admitted.
+    UpdateRoutes(RouteSet),
     /// The OS reported this about the network watched by the subscription
     /// with this number.
     Network(u64, NetworkEvent),
@@ -102,8 +134,16 @@ pub(crate) struct Applied {
     pub(crate) tunnel: Option<Box<dyn Tunnel>>,
     pub(crate) gateway_route: Option<Ipv4Addr>,
     /// Everything routed through the tunnel: the chosen subnets and the
-    /// DNS servers.
+    /// DNS servers. A route is in here before it is added, and leaves only
+    /// once it is removed, so teardown removes whatever may be there.
     pub(crate) routes: Vec<Ipv4Net>,
+    /// Of those, the subnets the user chose.
+    pub(crate) subnets: Vec<Ipv4Net>,
+    /// Of those, one host route for each DNS server the gateway assigned.
+    /// A change of routes never removes them.
+    pub(crate) dns_servers: Vec<Ipv4Net>,
+    /// The DNS domains resolved through the tunnel.
+    pub(crate) dns_domains: Vec<String>,
 }
 
 /// The worker's side: the only code that touches the tunnel, routes and DNS.
@@ -166,7 +206,11 @@ impl Session {
             Err(message) => (None, Err(message)),
         };
         let (phase, cancel) = (Phase::Idle, Cancel::new());
-        let gate = Arc::new(Mutex::new(Gate { phase, cancel }));
+        let gate = Arc::new(Mutex::new(Gate {
+            phase,
+            cancel,
+            live: None,
+        }));
         let (commands, inbox) = mpsc::channel();
         let machine = Machine {
             routes: platform.routes.clone(),
@@ -250,6 +294,7 @@ impl Session {
         *gate = Gate {
             phase: Phase::Connecting,
             cancel: Cancel::new(),
+            live: None,
         };
         // Held from here on, before the request is anywhere a line could
         // be written about it.
@@ -259,6 +304,96 @@ impl Session {
         let (settled, answered) = mpsc::channel();
         let command = Command::Connect(params, gate.cancel.clone(), hidden, answered);
         self.send(command).map(|()| Attempt { settled })
+    }
+
+    /// Checks a change of the live tunnel's routes and hands it to the
+    /// worker, which adds the new routes, removes the dropped ones and
+    /// verifies both; the outcome comes as a state event. A change refused
+    /// here leaves the tunnel exactly as it was. The same rules hold as for
+    /// a connect: the policy's, and none touching the gateway or the
+    /// network the connection was set up on.
+    ///
+    /// A change to what the tunnel carries already is no change: it is
+    /// answered at once with the connection as it is, and nothing is done
+    /// or logged, so asking for it again and again costs nothing.
+    pub(crate) fn update_routes(&self, routes: RouteSet) -> Result<Admitted, ErrorInfo> {
+        let carries = format!(
+            "{} and {}",
+            counted(routes.subnets.len(), "subnet"),
+            counted(routes.dns_domains.len(), "DNS domain")
+        );
+        let admitted = self.admit_update(routes, &carries);
+        if let Err(refusal) = &admitted {
+            let line = format!(
+                "route change refused: {}; the connection is as it was",
+                word!(refusal.code)
+            );
+            self.logs.about_requests(LogLevel::Warn, &line);
+        }
+        admitted
+    }
+
+    fn admit_update(&self, routes: RouteSet, carries: &str) -> Result<Admitted, ErrorInfo> {
+        let refused = |code, message: String| Err(error(code, message));
+        let unchanged = "The connection keeps the routes it has.";
+        let allowed = match &self.allowed {
+            Ok(allowed) => allowed.as_deref(),
+            Err(message) => return refused(ErrorCode::PolicyInvalid, message.clone()),
+        };
+        if let Err(why) = routes.check(allowed) {
+            let message = format!("Route refused: {why}. {unchanged}");
+            return refused(ErrorCode::RouteRefused, message);
+        }
+        let mut gate = lock(&self.gate);
+        match gate.phase {
+            Phase::Connected => {}
+            Phase::Idle => {
+                let message = "The VPN is not connected. The routes are used at the next connect.";
+                return refused(ErrorCode::NotConnected, message.to_string());
+            }
+            Phase::Connecting | Phase::Updating | Phase::Stopping => return Err(busy()),
+        }
+        let Some(live) = &gate.live else {
+            let message = "The connection's network is not known.";
+            return refused(ErrorCode::Internal, message.to_string());
+        };
+        if routes.is_carried_by(&live.tunnel.subnets, &live.tunnel.dns_domains) {
+            return Ok(Admitted::Unchanged(live.tunnel.clone()));
+        }
+        let local = LocalNetworks {
+            own_addresses: live.physical.own_addresses(),
+            on_link: live.physical.on_link(),
+            next_hop: live.physical.next_hop(),
+        };
+        if let Err(conflict) = check_against_local(&routes.subnets, live.gateway, &local) {
+            let message = format!("Route refused: {conflict}. {unchanged}");
+            return refused(ErrorCode::RouteRefused, message);
+        }
+        // Split DNS for a connection that had none needs routes to the
+        // gateway's DNS servers, which are judged as at connect. Nothing
+        // has been changed yet, so servers that cannot be used refuse the
+        // change rather than end the connection.
+        if !routes.dns_domains.is_empty() && !live.dns_routed {
+            let servers = dns_servers(&live.assigned_dns, live.gateway, &live.physical);
+            let usable = servers.and_then(|servers| match servers.is_empty() {
+                true => Err((
+                    ErrorCode::RouteRefused,
+                    "The gateway assigned no DNS server for the DNS domains.".to_string(),
+                )),
+                false => check_against_local(&servers, live.gateway, &local).map_err(|c| {
+                    let why = format!("A DNS server the gateway assigned cannot be used: {c}.");
+                    (ErrorCode::RouteRefused, why)
+                }),
+            });
+            if let Err((_, why)) = usable {
+                return refused(ErrorCode::RouteRefused, format!("{why} {unchanged}"));
+            }
+        }
+        gate.phase = Phase::Updating;
+        let line = format!("route change admitted ({carries})");
+        self.logs.about_requests(LogLevel::Info, &line);
+        self.send(Command::UpdateRoutes(routes))
+            .map(|()| Admitted::Changing)
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
@@ -283,7 +418,9 @@ impl Session {
         match gate.phase {
             Phase::Stopping => return Err(busy()),
             Phase::Connecting => gate.cancel.cancel(),
-            Phase::Idle | Phase::Connected => {}
+            // A change of routes in progress finishes first; the
+            // disconnect is queued behind it.
+            Phase::Idle | Phase::Connected | Phase::Updating => {}
         }
         if gate.phase != Phase::Idle {
             say();
@@ -414,6 +551,7 @@ impl Machine {
             Command::Connect(params, cancel, hidden, answered) => {
                 self.connect(params, &cancel, hidden, &answered)
             }
+            Command::UpdateRoutes(routes) => self.update(routes),
             Command::Disconnect => {
                 self.publish(ConnState::Disconnecting);
                 let idle = |phase: &mut Phase| *phase = Phase::Idle;
@@ -438,7 +576,7 @@ impl Machine {
                 };
                 // A disconnect already on its way keeps its own phase.
                 let idle = |phase: &mut Phase| {
-                    if *phase == Phase::Connected {
+                    if matches!(*phase, Phase::Connected | Phase::Updating) {
                         *phase = Phase::Idle;
                     }
                 };
@@ -455,7 +593,7 @@ impl Machine {
             {
                 let state = failed(ErrorCode::EngineFailed, NETWORK_CHANGED);
                 let idle = |phase: &mut Phase| {
-                    if *phase == Phase::Connected {
+                    if matches!(*phase, Phase::Connected | Phase::Updating) {
                         *phase = Phase::Idle;
                     }
                 };
@@ -475,6 +613,7 @@ impl Machine {
     pub(crate) fn reaching_the_gateway(&mut self) {
         self.disconnected = false;
         self.logs.forget(STATE);
+        self.logs.forget(crate::update::CHANGED);
     }
 
     fn connect(
@@ -524,6 +663,11 @@ impl Machine {
                     false => Phase::Idle,
                 };
             }
+            // What a change of routes is checked against while connected.
+            gate.live = match &result {
+                Ok(tunnel) => self.live(tunnel.clone()),
+                Err(_) => None,
+            };
             cancelled
         };
         match result {
@@ -536,6 +680,57 @@ impl Machine {
             Ok(tunnel) => self.publish(ConnState::Connected { tunnel }),
             Err((ErrorCode::LoginNeeded, _)) => self.finish(ConnState::LoginNeeded),
             Err((code, message)) => self.finish(ConnState::Failed { code, message }),
+        }
+    }
+
+    /// Applies a change of routes to the live tunnel. Connected again with
+    /// the new routes when every step and check passed; otherwise the
+    /// connection is closed and everything removed, as for a connect that
+    /// fails. A tunnel that ended while the change waited has been reported
+    /// already, and there is nothing to change.
+    /// What a change of routes to the connection carrying `tunnel` will be
+    /// checked against, or nothing if the connection is not complete.
+    fn live(&self, tunnel: TunnelInfo) -> Option<Live> {
+        let applied = &self.applied;
+        let (gateway, physical) = (applied.gateway_route?, applied.physical.clone()?);
+        let assigned_dns = applied.tunnel.as_ref()?.assigned().dns.clone();
+        Some(Live {
+            gateway,
+            physical,
+            tunnel,
+            assigned_dns,
+            dns_routed: !applied.dns_servers.is_empty(),
+        })
+    }
+
+    fn update(&mut self, routes: RouteSet) {
+        if self.applied.tunnel.is_none() {
+            let mut gate = lock(&self.gate);
+            if gate.phase == Phase::Updating {
+                gate.phase = Phase::Idle;
+            }
+            return;
+        }
+        match self.change_routes(routes) {
+            Ok(tunnel) => {
+                {
+                    // A disconnect that came meanwhile keeps its own phase.
+                    let mut gate = lock(&self.gate);
+                    if gate.phase == Phase::Updating {
+                        gate.phase = Phase::Connected;
+                    }
+                    gate.live = self.live(tunnel.clone());
+                }
+                self.publish(ConnState::Connected { tunnel });
+            }
+            Err((code, message)) => {
+                let idle = |phase: &mut Phase| {
+                    if *phase == Phase::Updating {
+                        *phase = Phase::Idle;
+                    }
+                };
+                self.finish_then_open(ConnState::Failed { code, message }, idle);
+            }
         }
     }
 
