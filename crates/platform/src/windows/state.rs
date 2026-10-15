@@ -213,7 +213,12 @@ pub(crate) struct Held {
 /// it, and holds it open for as long as the result is kept.
 pub(crate) fn check_folder(mode: Mode, dir: &Path) -> Result<Held> {
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
-    let folder = open(dir, READ_CONTROL, share)?.ok_or(Error::NotFound)?;
+    // READ_CONTROL alone gives no data access, and a handle without data
+    // access does not hold a share mode, so the folder could still be
+    // renamed. Listing it is data access.
+    const FILE_LIST_DIRECTORY: u32 = 0x1;
+    let access = READ_CONTROL | FILE_LIST_DIRECTORY;
+    let folder = open(dir, access, share)?.ok_or(Error::NotFound)?;
     check_handle(&folder, dir, &trusted(mode)?)?;
     Ok(Held { _folder: folder })
 }
@@ -331,6 +336,28 @@ mod tests {
         for sddl in refused {
             assert!(verdict(sddl).is_some(), "{sddl}");
         }
+    }
+
+    // Security rule: while the folder is held for a read or a write, it
+    // cannot be renamed and another put in its place.
+    #[cfg(feature = "dev-mode")]
+    #[test]
+    fn a_held_folder_cannot_be_renamed() {
+        let base = std::env::temp_dir().join(format!("ubc-vpn-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dir, moved) = (base.join("state"), base.join("moved"));
+        prepare(Mode::Dev, &dir).unwrap();
+        let held = check_folder(Mode::Dev, &dir).unwrap();
+        let renamed = std::fs::rename(&dir, &moved);
+        const SHARING_VIOLATION: i32 = 32;
+        let refused = renamed
+            .as_ref()
+            .err()
+            .and_then(std::io::Error::raw_os_error);
+        assert_eq!(refused, Some(SHARING_VIOLATION), "{renamed:?}");
+        drop(held);
+        std::fs::rename(&dir, &moved).expect("renamed once let go");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     // In dev mode the folder is the current user's: one owned by another
