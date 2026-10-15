@@ -495,7 +495,7 @@ const LEFT_BEHIND: &str = "Some routes or DNS settings could not be removed.";
 const NETWORK_CHANGED: &str = "The network changed, so the connection was closed. Connect again.";
 
 /// Said once while it stays in the log, when the system cannot report
-/// network changes. Windows cannot yet.
+/// network changes. Windows can; macOS and Linux cannot yet.
 const UNWATCHED: &str = "network changes cannot be watched on this system; \
     a connection that stops working ends when the tunnel notices";
 

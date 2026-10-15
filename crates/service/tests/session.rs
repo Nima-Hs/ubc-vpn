@@ -1017,9 +1017,10 @@ fn a_change_from_a_failed_attempt_leaves_a_later_connection_alone() {
     assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
 }
 
-// Until Windows can report network changes, a system that cannot is not a
-// reason to refuse: the connection goes ahead, and the log says once that
-// changes are not watched. A dead tunnel still ends as a lost connection.
+// A system that cannot report network changes, as macOS and Linux cannot
+// yet, is not a reason to refuse: the connection goes ahead, and the log
+// says once that changes are not watched. A dead tunnel still ends as a
+// lost connection.
 #[test]
 fn a_system_that_cannot_watch_the_network_still_connects_and_says_so() {
     let rig = rig();
