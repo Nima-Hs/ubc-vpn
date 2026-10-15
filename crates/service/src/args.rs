@@ -108,6 +108,22 @@ pub fn environment_role(run: Run) -> Role {
     }
 }
 
+/// The limits for this run. The installed service waits for its channel's
+/// name while another program holds it, so that no local user can keep it
+/// down by taking the name during an update or a restart. Dev mode does not
+/// wait: it runs as the developer, and a second copy started by mistake is
+/// told at once.
+pub fn timeouts(run: Run) -> crate::Timeouts {
+    match run {
+        Run::Installed => crate::Timeouts::default(),
+        #[cfg(feature = "dev-mode")]
+        Run::Dev => crate::Timeouts {
+            claim: std::time::Duration::ZERO,
+            ..crate::Timeouts::default()
+        },
+    }
+}
+
 /// Checks the environment for this run. The service refuses to start while
 /// it is not safe: this crate forbids unsafe code and so cannot remove a
 /// variable itself. The message names a variable only when the name is one
@@ -138,6 +154,16 @@ mod tests {
         assert_eq!(environment_role(Run::Installed), Role::Service);
         #[cfg(feature = "dev-mode")]
         assert_eq!(environment_role(Run::Dev), Role::Client);
+    }
+
+    // Security rule: the installed service waits for its channel's name, for
+    // a minute, while someone else holds it. Dev mode does not wait.
+    #[test]
+    fn the_installed_service_waits_for_its_channel_name() {
+        let waits = timeouts(Run::Installed).claim;
+        assert_eq!(waits, std::time::Duration::from_secs(60));
+        #[cfg(feature = "dev-mode")]
+        assert_eq!(timeouts(Run::Dev).claim, std::time::Duration::ZERO);
     }
 
     fn command_of(args: &[&str]) -> Result<Command, String> {
