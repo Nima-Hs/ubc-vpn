@@ -241,15 +241,19 @@ fn a_connect_whose_client_has_gone_is_undone() {
     until("the connect is undone, and said so", || {
         said(ubc_vpn_service::ABANDONED)
     });
-    until("disconnected", || said("disconnected"));
+    // Anyone who asks hears that it is disconnected. Asked, not read from
+    // the log: the service was disconnected before this connect, which
+    // never reached the gateway, so ending there again is not news there.
+    let disconnected = || {
+        let next = Peer::sending(&[HELLO, STATUS]);
+        channel.connect(&next);
+        until("the status", || next.lines() == 3);
+        let received = next.state().received.clone();
+        received.contains(r#""kind":"status","value":{"state":"disconnected""#)
+    };
+    until("disconnected", disconnected);
     assert!(!rig.engine.tunnel_is_open());
     assert!(rig.is_clean());
-    // Anyone who asks next hears it.
-    let next = Peer::sending(&[HELLO, STATUS]);
-    channel.connect(&next);
-    until("the status", || next.lines() == 3);
-    let received = next.state().received.clone();
-    assert!(received.contains(r#""state":"disconnected""#), "{received}");
 }
 
 // Security rule: asking to connect and going, again and again, costs the
