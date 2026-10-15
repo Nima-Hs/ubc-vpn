@@ -65,7 +65,8 @@ import sys
 import threading
 import time
 
-COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
+# Ends in base64 padding, as ocserv's cookie does: an "=" inside the value.
+COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef=="
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
     "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended", "end", "expire", "drop",

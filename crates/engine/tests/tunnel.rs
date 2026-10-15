@@ -21,17 +21,18 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use gateway::Gateway as StandIn;
+use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::policy::{Pin, Policy};
 use ubc_vpn_core::redact::{REDACTED, Secret};
 use ubc_vpn_engine::ffi::{Callbacks, Handle, Library};
 use ubc_vpn_engine::{
-    Cancel, Gateway, LogLevel, LogSink, OpenConnect, Role, Session, Tunnel, TunnelEngine,
-    TunnelError, TunnelEvent, prepare_environment,
+    Cancel, Gateway, LogLevel, LogSink, LoginEngine, OpenConnect, Prompt, Prompts, Role, Session,
+    Tunnel, TunnelEngine, TunnelError, TunnelEvent, prepare_environment,
 };
 
 const HOST: &str = "vpn.example.test";
 /// The stand-in gateway's session cookie.
-const COOKIE: &str = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef";
+const COOKIE: &str = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef==";
 /// A pin no test certificate has.
 const ANOTHER_PIN: &str = "pin-sha256:fTzrkd+T2QOdSW5oSF7vp4M6JCp1hHMbYY2Q+IX4x5o=";
 
@@ -195,6 +196,39 @@ fn a_certificate_the_system_trusts_still_needs_the_pin() {
     assert_eq!(failed(&opened), TunnelError::PinMismatch);
     assert_eq!(stand_in.requests(), Vec::<String>::new());
     println!("RAN: tunnel refuses a trusted certificate");
+}
+
+// A session as a login returns it opens a tunnel connection. A login returns
+// the value of the gateway's cookie alone, and the stand-in's ends in base64
+// padding, as ocserv's does: an `=` inside the value, which the library
+// splits at unless the engine names the cookie. Where the engine makes no
+// device it stops at the device step, after the connection.
+#[test]
+fn a_session_from_a_login_opens_a_tunnel_connection() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let gateway = gateway(stand_in.port, &pin_of(library, &stand_in));
+    let mut ask = |prompt: &Prompt| {
+        Some(Secret::new(match prompt.kind {
+            PromptKind::Username => "someone",
+            _ => "not-a-real-password",
+        }))
+    };
+    let mut prompts = Prompts::new(&mut ask);
+    let logs = LogSink::none();
+    let session = engine.login(&gateway, &mut prompts, &Cancel::new(), &logs);
+    let session = session.expect("the login succeeds");
+    assert!(
+        session.cookie.expose().ends_with("=="),
+        "not the padded cookie"
+    );
+    let opened = open(engine, &gateway, &session, &Cancel::new());
+    if let Err(error) = &opened.result {
+        assert_eq!(*error, TunnelError::Failed, "the tunnel was refused");
+    }
+    assert_eq!(connects(&stand_in), (1, 1));
 }
 
 // A gateway that refuses the cookie means the user must log in again. The

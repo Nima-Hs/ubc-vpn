@@ -506,7 +506,7 @@ fn hidden_and_ignored_fields_are_told_apart() {
 }
 
 /// The stand-in gateway's session cookie.
-const COOKIE: &str = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef";
+const COOKIE: &str = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef==";
 
 /// How many tunnel requests reached the gateway, and how many of those
 /// carried the cookie.

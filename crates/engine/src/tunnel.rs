@@ -33,6 +33,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ubc_vpn_core::protocol::is_plausible_gateway_addr;
+use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::{Ipv4Net, MIN_PREFIX_LEN, RouteSet};
 
 use crate::ffi::{Callbacks, FormAnswer, Handle, IpInfoCopy, Library, Stopper};
@@ -262,6 +263,24 @@ fn assignment(info: &IpInfoCopy, gateway_addr: Ipv4Addr) -> Result<Assigned, Tun
     })
 }
 
+/// The cookie as the tunnel hands it to the library: `webvpn=` and the value
+/// a login returned.
+///
+/// A login returns the value of the gateway's `webvpn` cookie alone. Given a
+/// cookie, the library splits it at the first `=` into a name and a value
+/// and sends only the one named `webvpn`. A value with an `=` in it, such as
+/// base64 padding, which ocserv's has, would be split inside the value and
+/// the tunnel would send no session at all. Named, it is split after the
+/// name and kept whole. A cookie that already carries the name is left as
+/// it is.
+fn named_cookie(cookie: &Secret) -> Secret {
+    if cookie.expose().starts_with("webvpn=") {
+        cookie.clone()
+    } else {
+        Secret::new(format!("webvpn={}", cookie.expose()))
+    }
+}
+
 /// What the tunnel's thread tells the `open` that started it.
 enum Report {
     /// What stops the handle while it is being opened.
@@ -373,7 +392,7 @@ fn open_on(
     // says.
     let url = CString::new(format!("https://{}", gateway.host()));
     let url = url.map_err(|_| TunnelError::Failed)?;
-    if handle.parse_url(&url) != 0 || !handle.set_cookie(&session.cookie) {
+    if handle.parse_url(&url) != 0 || !handle.set_cookie(&named_cookie(&session.cookie)) {
         return Err(TunnelError::Failed);
     }
     if !handle.disable_dtls() {
@@ -835,6 +854,16 @@ mod tests {
             info.split_includes.clear();
         });
         assert!(apart.is_ok());
+    }
+
+    // A login's cookie reaches the library named, so the library keeps a
+    // value with an `=` in it whole; one already named is not named twice.
+    #[test]
+    fn the_cookie_is_handed_over_named() {
+        let named = |cookie: &str| named_cookie(&Secret::new(cookie)).expose().to_string();
+        assert_eq!(named("FAKE-VALUE-abc=="), "webvpn=FAKE-VALUE-abc==");
+        assert_eq!(named("FAKE@VALUE@123"), "webvpn=FAKE@VALUE@123");
+        assert_eq!(named("webvpn=FAKE-VALUE=="), "webvpn=FAKE-VALUE==");
     }
 
     // The main loop's result is the tunnel's one event: the caller's close,
