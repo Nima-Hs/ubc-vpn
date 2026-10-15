@@ -38,7 +38,8 @@ fn only_a_change_to_the_watched_network_is_reported() {
     let physical = PhysicalNetwork {
         interface: wire.to_string(),
         next_hop: None,
-        own_addresses: Vec::new(),
+        // As captured: the address it was given above.
+        own_addresses: vec![Ipv4Addr::new(198, 18, 0, 10)],
         on_link: Vec::new(),
     };
     let events = WinEvents.subscribe(&physical).unwrap();
