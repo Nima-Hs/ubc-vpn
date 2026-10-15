@@ -38,11 +38,36 @@ deb $snapshot_url jammy-updates main universe
 deb $snapshot_url jammy-security main universe
 EOF
 apt_opts=(-o "Dir::Etc::sourcelist=$sources" -o "Dir::Etc::sourceparts=-")
+# The snapshot service fails now and then for a while: apt retries each
+# download and gives up on a stalled one, an index it cannot fetch is an
+# error rather than a warning, and each network step as a whole is tried up
+# to three times. What may be installed, and from where, is checked the same
+# on every try.
+apt_opts+=(-o "Acquire::Retries=5" -o "Acquire::http::Timeout=30" -o "Acquire::https::Timeout=30"
+    -o "APT::Update::Error-Mode=any")
+retry() {
+    local attempt
+    for attempt in 1 2 3; do
+        if "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo "try $attempt of 3 failed; trying again in $((attempt * 20)) seconds" >&2
+            sleep $((attempt * 20))
+        fi
+    done
+    fail "the snapshot could not be reached after 3 tries: $*"
+}
 export DEBIAN_FRONTEND=noninteractive
-sudo apt-get "${apt_opts[@]}" update
-uris=$(sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends --print-uris \
-    "ocserv=$OCSERV_VERSION" | grep -o "^'[^']*'" | tr -d "'" || true)
-[ -n "$uris" ] || fail "apt listed no packages to download"
+# Fetches the package lists and sets `uris` to what apt would download. An
+# empty list means the lists were not all fetched: that is tried again too.
+list_downloads() {
+    sudo apt-get "${apt_opts[@]}" update || return 1
+    uris=$(sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends --print-uris \
+        "ocserv=$OCSERV_VERSION" | grep -o "^'[^']*'" | tr -d "'" || true)
+    [ -n "$uris" ]
+}
+retry list_downloads
 echo "Packages to download:"
 echo "$uris"
 stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
@@ -53,7 +78,7 @@ stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
 [ ! -e /usr/sbin/policy-rc.d ] || fail "/usr/sbin/policy-rc.d is already there"
 printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
 sudo chmod 755 /usr/sbin/policy-rc.d
-sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends "ocserv=$OCSERV_VERSION"
+retry sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends "ocserv=$OCSERV_VERSION"
 sudo rm /usr/sbin/policy-rc.d
 sudo systemctl disable ocserv.service
 if systemctl is-active --quiet ocserv.service; then fail "the packaged ocserv service runs"; fi

@@ -34,13 +34,38 @@ work=$(mktemp -d)
 
 fail() { echo "error: $*" >&2; exit 1; }
 
+# The archive and its snapshot service fail now and then for a while: apt
+# retries each download and gives up on a stalled one, an index it cannot
+# fetch is an error rather than a warning, and each network step as a whole
+# is tried up to three times. What may be installed, and from where, is
+# checked the same on every try.
+cat > /etc/apt/apt.conf.d/80-retries <<'EOF'
+Acquire::Retries "5";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+APT::Update::Error-Mode "any";
+EOF
+retry() {
+    local attempt
+    for attempt in 1 2 3; do
+        if "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo "try $attempt of 3 failed; trying again in $((attempt * 20)) seconds" >&2
+            sleep $((attempt * 20))
+        fi
+    done
+    fail "the package archive could not be reached after 3 tries: $*"
+}
+
 # ca-certificates is the one thing taken from the live archive: the snapshot
 # service is https only and the base image cannot verify its certificate
 # without it.
 export DEBIAN_FRONTEND=noninteractive
 installed_before=$(dpkg-query -W -f '${Package} ${Version}\n' | sort)
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates
+retry apt-get update
+retry apt-get install -y --no-install-recommends ca-certificates
 mapfile -t live_packages < <(comm -13 <(echo "$installed_before") \
     <(dpkg-query -W -f '${Package} ${Version}\n' | sort))
 
@@ -52,15 +77,20 @@ deb $snapshot_url jammy-updates main
 deb $snapshot_url jammy-security main
 EOF
 rm -rf /var/lib/apt/lists/*
-apt-get update
-uris=$(apt-get install -y --no-install-recommends --print-uris $BUILD_PACKAGES \
-    | grep -o "^'[^']*'" | tr -d "'" || true)
-[ -n "$uris" ] || fail "apt listed no packages to download"
+# Fetches the package lists and sets `uris` to what apt would download. An
+# empty list means the lists were not all fetched: that is tried again too.
+list_downloads() {
+    apt-get update || return 1
+    uris=$(apt-get install -y --no-install-recommends --print-uris $BUILD_PACKAGES \
+        | grep -o "^'[^']*'" | tr -d "'" || true)
+    [ -n "$uris" ]
+}
+retry list_downloads
 echo "Packages to download:"
 echo "$uris"
 stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
 [ -z "$stray" ] || fail "these packages are not from the snapshot: $stray"
-apt-get install -y --no-install-recommends $BUILD_PACKAGES
+retry apt-get install -y --no-install-recommends $BUILD_PACKAGES
 
 mkdir -p "$out/lib/pkgconfig" "$out/include" "$out/source/patches/openconnect" \
     "$out/licenses/openconnect" "$out/licenses/json-parser" "$out/licenses/libxml2"
