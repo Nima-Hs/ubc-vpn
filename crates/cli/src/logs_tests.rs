@@ -174,7 +174,8 @@ fn diagnostics_says_what_the_service_is_and_how_it_stands() {
     let (status, out, err) = scene.rig.run(&["diagnostics"]);
     assert_eq!((status, err.as_str()), (0, ""));
     let lines: Vec<&str> = out.lines().collect();
-    let service = format!("Service: {VERSION} (protocol 3), running for 0 h 0 min");
+    let protocol = ubc_vpn_core::protocol::PROTOCOL_VERSION;
+    let service = format!("Service: {VERSION} (protocol {protocol}), running for 0 h 0 min");
     let system = format!(
         "System: {} on {}",
         std::env::consts::OS,

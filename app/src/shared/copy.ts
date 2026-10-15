@@ -111,6 +111,11 @@ const FAILURES: Record<ErrorCode, Failure> = {
         body: "A file the VPN service needs is missing or damaged. Install UBC VPN again to restore it.",
         retry: false,
     },
+    not_connected: {
+        title: "Not connected",
+        body: "The VPN is not connected, so no routes were changed. Your routes are saved and are used when you connect. Try connecting now.",
+        retry: true,
+    },
     internal: {
         title: "Service error",
         body: "Something went wrong inside the VPN service. Try again. If it keeps happening, restart your computer.",

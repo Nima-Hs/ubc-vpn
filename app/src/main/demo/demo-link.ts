@@ -30,7 +30,7 @@ const CROWDED_TUNNEL: TunnelInfo = {
 const FAILURES: Record<ErrorCode, string> = {
     not_owner: "only the owner may do this",
     not_claimed: "the service has no owner yet",
-    protocol_mismatch: "the app speaks protocol 2 and the service speaks protocol 3",
+    protocol_mismatch: "the app speaks protocol 3 and the service speaks protocol 4",
     bad_request: "unknown method",
     route_refused: "198.51.100.0/4 is wider than /8",
     pin_mismatch: "the gateway's key matches no pin in the policy",
@@ -39,6 +39,7 @@ const FAILURES: Record<ErrorCode, string> = {
     engine_failed: "the tunnel device could not be created",
     verification_failed: "the route to 203.0.113.0/24 could not be confirmed",
     busy: "another connect or disconnect is in progress",
+    not_connected: "there is no tunnel whose routes could be changed",
     policy_invalid: "policy.json could not be read",
     internal:
         "an unexpectedly long message from the service that goes on for a while, to show how the interface holds text it did not write and cannot shorten",

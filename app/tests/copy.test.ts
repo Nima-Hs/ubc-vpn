@@ -23,6 +23,7 @@ const CODES: ErrorCode[] = [
     "engine_failed",
     "verification_failed",
     "busy",
+    "not_connected",
     "policy_invalid",
     "internal",
 ];

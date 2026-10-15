@@ -111,7 +111,10 @@ pub enum BridgeLine {
 /// so the bridge answers it with a `bad_request` error and sends nothing to
 /// the service. An `add_log` is refused the same way: lines are added by
 /// the command-line client's own login and by nobody else, so the app
-/// cannot write into the log it shows the user.
+/// cannot write into the log it shows the user. An `update_routes` is
+/// refused too: the routes a tunnel carries come from the user's saved
+/// settings, sent by the command-line client that saved them, and never
+/// from the app directly.
 ///
 /// Every request is listed, with no catch-all, so a request added later does
 /// not compile until someone decides whether the app may send it.
@@ -119,7 +122,7 @@ pub fn bridge_allows(request: &RequestBody) -> bool {
     match request {
         RequestBody::Claim | RequestBody::Status | RequestBody::Disconnect => true,
         RequestBody::Logs(_) | RequestBody::WatchLogs(_) | RequestBody::Diagnostics => true,
-        RequestBody::Connect(_) | RequestBody::AddLog(_) => false,
+        RequestBody::Connect(_) | RequestBody::AddLog(_) | RequestBody::UpdateRoutes(_) => false,
     }
 }
 
@@ -190,6 +193,10 @@ mod tests {
             text: "made up".to_string(),
         });
         assert!(!bridge_allows(&add_log));
+        // Nor change the live routes: they come from the saved settings,
+        // sent by the command-line client that saved them.
+        let update = RequestBody::UpdateRoutes(RouteSet::default());
+        assert!(!bridge_allows(&update));
         for allowed in [
             RequestBody::Claim,
             RequestBody::Status,

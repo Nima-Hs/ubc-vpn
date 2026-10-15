@@ -3,4 +3,4 @@
 /**
  * The kinds of failure a client can act on.
  */
-export type ErrorCode = "not_owner" | "not_claimed" | "protocol_mismatch" | "bad_request" | "route_refused" | "pin_mismatch" | "login_needed" | "gateway_unreachable" | "engine_failed" | "verification_failed" | "busy" | "policy_invalid" | "internal";
+export type ErrorCode = "not_owner" | "not_claimed" | "protocol_mismatch" | "bad_request" | "route_refused" | "pin_mismatch" | "login_needed" | "gateway_unreachable" | "engine_failed" | "verification_failed" | "busy" | "not_connected" | "policy_invalid" | "internal";

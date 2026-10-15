@@ -98,7 +98,7 @@ use crate::state::ConnState;
 
 /// Bumped whenever the wire format changes in a way an older peer could not
 /// understand. A client and a service with different versions refuse to talk.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The longest line either side accepts, newline included. The service drops a
 /// connection that sends more.
@@ -189,6 +189,12 @@ pub enum RequestBody {
     /// Add a line to the service's log. Only the command-line client's own
     /// login sends this; the bridge refuses it from the app.
     AddLog(AddLogParams),
+    /// Apply these routes to the live tunnel in place of the ones it has:
+    /// add the new, remove the dropped, and verify both. Refused with
+    /// `not_connected` when there is no tunnel. Only the command-line
+    /// client sends this, with the routes it has just saved in the user's
+    /// settings; the bridge refuses it from the app.
+    UpdateRoutes(RouteSet),
 }
 
 /// Where to read the log from.
@@ -679,6 +685,8 @@ pub enum ErrorCode {
     VerificationFailed,
     /// Another connect or disconnect is still in progress.
     Busy,
+    /// The request needs a connected tunnel, and there is none.
+    NotConnected,
     /// The service's policy file is missing or unusable.
     PolicyInvalid,
     /// Something unexpected went wrong inside the service.
@@ -822,7 +830,7 @@ mod tests {
     fn request_wire_format_is_stable() {
         // If the snapshot below has to change, so does this number: an older
         // peer could no longer read the message.
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
         let line = encode(&connect()).unwrap();
         assert_eq!(
             line,
@@ -891,6 +899,53 @@ mod tests {
         for line in beside_method {
             assert!(decode::<Request>(line).is_err(), "{line} must be refused");
         }
+    }
+
+    // Version 4: the routes of a live tunnel can be changed, and a request
+    // that needs a tunnel is refused with its own code when there is none.
+    #[test]
+    fn update_routes_has_a_stable_wire_format() {
+        let update = Request {
+            id: 9,
+            body: RequestBody::UpdateRoutes(RouteSet {
+                subnets: vec!["10.255.0.0/16".parse().unwrap()],
+                dns_domains: vec!["ece.example.test".to_string()],
+            }),
+        };
+        let line = encode(&update).unwrap();
+        assert_eq!(
+            line,
+            concat!(
+                r#"{"id":9,"body":{"method":"update_routes","params":"#,
+                r#"{"subnets":["10.255.0.0/16"],"dns_domains":["ece.example.test"]}}}"#,
+                "\n"
+            )
+        );
+        assert_eq!(decode::<Request>(&line).unwrap(), update);
+        // As strict as a connect's routes: nothing may be smuggled in.
+        let smuggled = r#"{"id":9,"body":{"method":"update_routes","params":{"subnets":[],"gateway":"evil.example"}}}"#;
+        assert!(decode::<Request>(smuggled).is_err());
+
+        let refused = Outcome::Error(ErrorInfo {
+            code: ErrorCode::NotConnected,
+            message: "made up".to_string(),
+        });
+        let json = serde_json::to_string(&refused).unwrap();
+        assert!(json.contains(r#""code":"not_connected""#), "{json}");
+    }
+
+    // A peer that speaks version 3 knows nothing of `update_routes`. It is
+    // told to update in the handshake.
+    #[test]
+    fn a_version_3_peer_is_told_to_update() {
+        let older = r#"{"protocol_version":3,"client":"app","client_version":"0.1.0"}"#;
+        assert_eq!(peek_protocol_version(older), Ok(3));
+        let reply = HelloReply {
+            protocol_version: 3,
+            service_version: "0.1.0".to_string(),
+            owner_claimed: true,
+        };
+        assert!(!reply.is_compatible());
     }
 
     #[test]

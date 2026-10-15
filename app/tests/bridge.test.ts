@@ -447,6 +447,29 @@ describe("when the bridge ends", () => {
         expect(isServerMessage({ type: "event", data: { kind: "comet_sighted" } })).toBe(true);
     });
 
+    // Protocol 4 adds `not_connected`. Every code of the contract is taken;
+    // one it does not know is a fault, which drops the bridge and shows
+    // the general "could not make sense of the service" state (see "drops a
+    // bridge that sends an unknown error code" below), never a crash.
+    it("takes every error code of the contract, not_connected included, and only those", () => {
+        const refusal = (code: unknown) => ({
+            type: "response",
+            data: { id: 1, outcome: { status: "error", value: { code, message: "made up" } } },
+        });
+        const failed = (code: unknown) => ({
+            type: "event",
+            data: { kind: "state_changed", value: { state: "failed", code, message: "made up" } },
+        });
+        for (const code of ["not_connected", "busy", "route_refused", "internal"]) {
+            expect(isServerMessage(refusal(code)), code).toBe(true);
+            expect(isServerMessage(failed(code)), code).toBe(true);
+        }
+        for (const code of ["gremlins", "constructor", "__proto__", "", 7, null, undefined]) {
+            expect(isServerMessage(refusal(code)), String(code)).toBe(false);
+            expect(isServerMessage(failed(code)), String(code)).toBe(false);
+        }
+    });
+
     it("ignores an event of a kind it does not know, and carries on as before", async () => {
         // A newer service may say things this app has no use for.
         const unknown = (value: unknown) =>
