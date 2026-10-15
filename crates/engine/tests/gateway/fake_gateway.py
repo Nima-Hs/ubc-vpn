@@ -26,8 +26,8 @@ Scenarios, by what the gateway does after showing the login form:
             on another port (8443)
   csdstub   offers a host-scan program whose stub is on the gateway's own
             host, so that a client fetches it before refusing to run it.
-            Unpatched libopenconnect 9.21 crashes on it on macOS and Linux,
-            when the login address has no path; no test uses it yet
+            Unpatched libopenconnect 9.21 crashes on it on macOS and Linux
+            when the login address has no path; the pinned builds carry the fix
   sso       shows a single sign-on form for an external browser, whose
             login page is on the other listener
 
