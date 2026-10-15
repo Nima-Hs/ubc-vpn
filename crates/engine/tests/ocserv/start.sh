@@ -47,10 +47,17 @@ echo "Packages to download:"
 echo "$uris"
 stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
 [ -z "$stray" ] || fail "these packages are not from the snapshot: $stray"
+# The package would start its own service, with its own settings, on every
+# address at port 443. A policy-rc.d that refuses every start keeps it from
+# ever running; it is removed once the package is in.
+[ ! -e /usr/sbin/policy-rc.d ] || fail "/usr/sbin/policy-rc.d is already there"
+printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+sudo chmod 755 /usr/sbin/policy-rc.d
 sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends "ocserv=$OCSERV_VERSION"
-# The package starts its own service with its own settings. Not that one.
-sudo systemctl disable --now ocserv.service
-systemctl is-active --quiet ocserv.service && fail "the packaged ocserv service still runs"
+sudo rm /usr/sbin/policy-rc.d
+sudo systemctl disable ocserv.service
+if systemctl is-active --quiet ocserv.service; then fail "the packaged ocserv service runs"; fi
+if ss -Hltn 'sport = :443' | grep -q .; then fail "something listens on port 443"; fi
 installed=$(dpkg-query -W -f '${Version}' ocserv)
 [ "$installed" = "$OCSERV_VERSION" ] || fail "ocserv $installed is installed, not $OCSERV_VERSION"
 echo "ocserv $installed from $snapshot_url"
