@@ -266,10 +266,11 @@ fn connecting_and_going_again_and_again_is_said_once() {
             .filter(|line| *line == ubc_vpn_service::ABANDONED)
             .count()
     };
-    let disconnected = || {
-        let lines = service.logs();
-        lines.iter().filter(|line| *line == "disconnected").count()
-    };
+    // Counted from what the owner's first connection is told, not from the
+    // log: the log line comes before the clients are told, and a round may
+    // begin only once the last one's end has been sent to everyone, or a
+    // late state event would be the new connection's second line.
+    let disconnected = || owner.heard("disconnected");
     for round in 0..40 {
         let before = disconnected();
         let peer = Peer::sending(&[HELLO]);
