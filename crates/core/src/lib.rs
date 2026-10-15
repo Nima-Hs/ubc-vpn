@@ -4,6 +4,7 @@
 //! app agree on. It contains no OS-specific code and no unsafe code.
 
 pub mod bridge;
+pub mod coverage;
 pub mod login;
 pub mod policy;
 pub mod protocol;

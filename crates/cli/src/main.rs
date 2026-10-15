@@ -22,6 +22,9 @@ mod connect_json;
 mod connect_json_tests;
 #[cfg(test)]
 mod connect_tests;
+mod hosts;
+#[cfg(test)]
+mod hosts_tests;
 mod interrupt;
 #[cfg(test)]
 mod interrupt_tests;
@@ -55,6 +58,7 @@ Commands:
   status [--json]   Show whether the VPN is connected
   logs [--json] [--follow]  Show what the service has logged
   diagnostics [--json]      Show the service's version, state and last failure
+  diagnostics --host <name> [--json]  Show whether the VPN carries a host's traffic
   bridge            Carry messages between the app and the service
   settings get --json            Print the settings and the route limits
   settings check-routes --json   Check the routes given on standard input
@@ -83,6 +87,11 @@ anyone the owner. The log holds no password, code or session cookie. With
 --follow, logs goes on printing lines as the service writes them, until it
 is interrupted. With --json, logs prints each line of the log as one line of
 JSON, and diagnostics prints one line of JSON.
+
+diagnostics --host looks the name up as other programs on this computer do,
+and says for each address whether a saved route covers it and, while
+connected, whether it goes through the tunnel. Traffic to an address no
+saved route covers goes over the usual network, not the VPN.
 
 With --json, status prints the connection state as one line of JSON. Each
 settings command prints one line of JSON, and exits with status 1 only when
@@ -362,6 +371,12 @@ fn run(
         }
         ["diagnostics"] => return logs::diagnostics(false, platform, out, err),
         ["diagnostics", "--json"] => return logs::diagnostics(true, platform, out, err),
+        ["diagnostics", options @ ..] => {
+            return match hosts::Args::parse(options) {
+                Some(args) => hosts::check(&args, platform, &hosts::system, out, err),
+                None => say(err, HELP, USAGE),
+            };
+        }
         ["logs", options @ ..] => {
             return match logs::Options::parse(options) {
                 Some(options) => logs::logs(options, platform, out, err),
