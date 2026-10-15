@@ -468,7 +468,7 @@ fn with_dns_servers(servers: &[[u8; 4]]) -> (Rig, ConnState) {
 #[test]
 fn a_dns_server_that_cannot_be_one_fails_the_connect() {
     let good_one = [10, 255, 0, 53];
-    let refused: [&[[u8; 4]]; 7] = [
+    let refused: [&[[u8; 4]]; 9] = [
         &[good_one, [127, 0, 0, 53]],
         &[good_one, [0, 0, 0, 0]],
         &[good_one, [169, 254, 1, 1]],
@@ -477,6 +477,10 @@ fn a_dns_server_that_cannot_be_one_fails_the_connect() {
         &[good_one, GATEWAY],
         // The router of the physical network.
         &[good_one, [192, 168, 0, 1]],
+        // A neighbour on the network the machine is on, and the machine
+        // itself: a route to either would take it into the tunnel.
+        &[good_one, [192, 168, 0, 53]],
+        &[good_one, [192, 168, 0, 10]],
         // One more than a gateway may assign.
         &[
             [10, 0, 0, 1],
@@ -720,5 +724,113 @@ fn whoever_hears_the_end_may_ask_again_at_once() {
         assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED, "{round}");
         assert_eq!(alice.state(), ConnState::Disconnecting);
         assert_eq!(alice.state(), ConnState::Disconnected);
+    }
+}
+
+/// Connects with `subnets` on a fake whose machine has the addresses `own`
+/// on the networks `on_link`, and returns the rig and how the connect ended.
+fn on_local(own: &[[u8; 4]], on_link: &[&str], subnets: &[&str]) -> (Rig, ConnState) {
+    let rig = rig();
+    let own: Vec<_> = own.iter().map(|addr| (*addr).into()).collect();
+    let on_link: Vec<_> = on_link.iter().map(|net| net.parse().unwrap()).collect();
+    rig.fake.set_local(&own, &on_link);
+    let request = connect(COOKIE, GATEWAY, subnets, &["ece.example.test"]);
+    let state = rig.owner().connect_ends(request);
+    (rig, state)
+}
+
+// Security rule: a route that would take a network the machine is on into
+// the tunnel, or the gateway itself, or the router the gateway is reached
+// through, is refused. It is refused before the gateway is contacted, so
+// the cookie is never sent, and nothing is applied.
+#[test]
+fn a_route_into_a_local_network_is_refused_before_the_gateway_is_contacted() {
+    let home = ["192.168.0.0/24"];
+    let refused: [(&[&str], &[&str]); 4] = [
+        // The home network itself, and a part of it.
+        (&home, &["10.255.0.0/24", "192.168.0.0/24"]),
+        (&home, &["192.168.0.128/25"]),
+        // The router, when no network the machine is on holds it.
+        (&[], &["192.168.0.0/16"]),
+        // The gateway's own address.
+        (&home, &["192.0.2.1/32"]),
+    ];
+    for (on_link, subnets) in refused {
+        let (rig, state) = on_local(&[[192, 168, 0, 10]], on_link, subnets);
+        let why = format!("{subnets:?} on {on_link:?}: {state:?}");
+        assert!(failed_with(&state, ErrorCode::RouteRefused), "{why}");
+        assert!(
+            rig.spy.opens().is_empty(),
+            "the gateway was contacted: {why}"
+        );
+        assert!(rig.is_clean(), "{why}");
+    }
+}
+
+// The same rule lets through a route wider than the network the machine is
+// on: that network stays the more specific route, router and all.
+#[test]
+fn a_route_wider_than_the_local_network_connects() {
+    let subnets = ["10.255.0.0/24", "192.168.0.0/16"];
+    let (_rig, state) = on_local(&[[192, 168, 0, 10]], &["192.168.0.0/24"], &subnets);
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+}
+
+// Security rule: a gateway address that is one of this machine's own is
+// refused before anything is contacted. Such an address could point the
+// privileged service at a program on this machine.
+#[test]
+fn a_gateway_at_this_machines_own_address_is_refused() {
+    let own = [[192, 168, 0, 10], GATEWAY];
+    let (rig, state) = on_local(&own, &["192.168.0.0/24"], &["10.255.0.0/24"]);
+    assert!(failed_with(&state, ErrorCode::BadRequest), "{state:?}");
+    assert!(rig.spy.opens().is_empty(), "the gateway was contacted");
+    assert!(rig.is_clean());
+}
+
+// Security rule: what the gateway assigned is applied with this machine's
+// admin rights, so it is checked first. A packet size the device cannot
+// take, or an address that is this machine's own, the gateway's, the
+// router's or a reserved one, fails the connect before any route is added.
+#[test]
+fn an_assignment_that_cannot_be_used_fails_the_connect() {
+    type Edit = fn(&mut Script);
+    let refused: [(&str, Edit); 9] = [
+        ("packet size too small", |s| s.assigned.mtu = 575),
+        ("packet size too large", |s| s.assigned.mtu = 1501),
+        ("no packet size", |s| s.assigned.mtu = 0),
+        ("own address", |s| {
+            s.assigned.address = [192, 168, 0, 10].into()
+        }),
+        ("gateway", |s| s.assigned.address = GATEWAY.into()),
+        ("router", |s| s.assigned.address = [192, 168, 0, 1].into()),
+        ("loopback", |s| s.assigned.address = [127, 0, 0, 1].into()),
+        ("this network", |s| s.assigned.address = [0, 0, 0, 0].into()),
+        ("link-local", |s| {
+            s.assigned.address = [169, 254, 0, 9].into()
+        }),
+    ];
+    for (case, edit) in refused {
+        let mut rig = Rig::scripted(policy('A', ""), edit);
+        rig.start().unwrap();
+        let state = rig.owner().connect_ends(good());
+        assert!(
+            failed_with(&state, ErrorCode::EngineFailed),
+            "{case}: {state:?}"
+        );
+        assert!(rig.is_clean(), "{case}");
+        let calls = rig.fake.calls();
+        let routed = [Op::AddGatewayRoute, Op::AddTunnelRoutes];
+        assert!(!calls.iter().any(|op| routed.contains(op)), "{case}");
+    }
+    // The edges of the range are fine.
+    for mtu in [576, 1500] {
+        let mut rig = Rig::scripted(policy('A', ""), |s| s.assigned.mtu = mtu);
+        rig.start().unwrap();
+        let state = rig.owner().connect_ends(good());
+        assert!(
+            matches!(state, ConnState::Connected { .. }),
+            "{mtu}: {state:?}"
+        );
     }
 }
