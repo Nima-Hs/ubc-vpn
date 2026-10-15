@@ -343,6 +343,21 @@ fn crash_child() {
     }
 }
 
+/// Removes the network device named `name` with the system's own tools.
+fn remove_device(name: &str) {
+    let script = format!(
+        "$id = (Get-NetAdapter -Name '{name}' -IncludeHidden).PnPDeviceID; pnputil /remove-device $id"
+    );
+    let done = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .expect("powershell");
+    println!(
+        "REMOVED {name}: {}",
+        String::from_utf8_lossy(&done.stdout).trim()
+    );
+}
+
 /// Whether the system's table has a route to `dest` through `interface`.
 fn has_route(dest: &str, interface: &str) -> bool {
     let routes = WinRoutes::unchecked(&state_dir("look"));
@@ -430,13 +445,23 @@ fn a_killed_service_leaves_what_start_up_removes() {
 
     // An adapter whose process died is an orphan, which Wintun removes when
     // the next adapter is created. Show that, so none is left on the runner.
+    // It does so in the background, so give it a moment; if it has not by
+    // then, remove the device the way an administrator would, so the runner
+    // is left clean either way.
     step("removing the orphaned adapter");
     drop(wintun.adapter("ubc-vpn-sweep0"));
-    let orphan = luid(tunnel).is_ok();
+    let gone = || luid(tunnel).is_err();
+    let started = std::time::Instant::now();
+    while !gone() && started.elapsed() < std::time::Duration::from_secs(15) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     println!(
         "ADAPTER after the next create: {}",
-        if orphan { "still there" } else { "removed" }
+        if gone() { "removed" } else { "still there" }
     );
-    assert!(!orphan, "the killed process's adapter was not removed");
+    if !gone() {
+        remove_device(tunnel);
+    }
+    assert!(gone(), "the killed process's adapter is still there");
     ran("crash");
 }
