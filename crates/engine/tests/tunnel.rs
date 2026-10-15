@@ -364,12 +364,29 @@ mod device {
         allowed
     }
 
-    /// Opens a tunnel against `stand_in`, which must work.
-    fn opened(engine: &OpenConnect, library: Library, stand_in: &StandIn) -> Opened {
-        let gateway = gateway(stand_in.port, &pin_of(library, stand_in));
+    /// For a failure message: how long an interface that should be gone
+    /// stays.
+    fn lingers(name: &str) -> String {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            if !exists(name) {
+                return format!("gone {:?} later", start.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        "still there 15 s later".to_string()
+    }
+
+    /// The stand-in's gateway, with its pin read before any tunnel exists.
+    fn local(library: Library, stand_in: &StandIn) -> Gateway {
+        gateway(stand_in.port, &pin_of(library, stand_in))
+    }
+
+    /// Opens a tunnel to `gateway`, which must work.
+    fn opened(engine: &OpenConnect, gateway: &Gateway) -> Opened {
         let opened = open(
             engine,
-            &gateway,
+            gateway,
             &session(Ipv4Addr::LOCALHOST),
             &Cancel::new(),
         );
@@ -388,25 +405,23 @@ mod device {
         assert!(exists(&name), "no interface {name:?}");
         assert!(opened.events.try_recv().is_err(), "an event while open");
         match how {
-            Some(how) => {
-                tunnel.close(how);
-                assert!(!exists(&name), "{name:?} is left after {how:?}");
-                // Only the first close does anything.
-                tunnel.close(CloseMode::LogOff);
-                drop(tunnel);
-            }
-            None => {
-                drop(tunnel);
-                assert!(!exists(&name), "{name:?} is left after a drop");
-            }
+            Some(how) => tunnel.close(how),
+            None => drop(tunnel),
         }
+        let gone = !exists(&name);
+        let lines = opened.lines.lock().unwrap().join("\n");
+        assert!(
+            gone,
+            "{name:?} is left after {how:?}, {}\n{lines}",
+            lingers(&name)
+        );
         assert_eq!(opened.events.try_recv(), Ok(TunnelEvent::Closed));
         assert!(opened.events.try_recv().is_err(), "more than one event");
     }
 
     // The whole path: the pin, the cookie, the connection, the checked
     // assignment and a device. Closed with "log off", the device is gone
-    // when `close` returns.
+    // when `close` returns, and a second close does nothing more.
     #[test]
     fn a_tunnel_opens_with_a_device_and_closing_removes_it() {
         if !allowed() {
@@ -416,8 +431,9 @@ mod device {
         let Some(stand_in) = StandIn::start("accept") else {
             return;
         };
-        let opened = opened(engine, library, &stand_in);
-        let assigned = opened.result.as_ref().expect("open").assigned().clone();
+        let opened = opened(engine, &local(library, &stand_in));
+        let tunnel = opened.result.as_ref().expect("open");
+        let assigned = tunnel.assigned().clone();
         assert_eq!(assigned.address, Ipv4Addr::new(10, 11, 12, 13));
         assert_eq!(assigned.netmask, Ipv4Addr::new(255, 255, 255, 0));
         assert_eq!(assigned.gateway_addr, Ipv4Addr::LOCALHOST);
@@ -426,7 +442,20 @@ mod device {
         assert_eq!(assigned.split_includes.len(), 2);
         assert!(!assigned.interface.is_empty());
         assert_eq!(connects(&stand_in), (1, 1));
-        end(opened, Some(CloseMode::LogOff));
+        let events = &opened.events;
+        let name = assigned.interface.clone();
+        assert!(exists(&name));
+        tunnel.close(CloseMode::LogOff);
+        let lines = opened.lines.lock().unwrap().join("\n");
+        let gone = !exists(&name);
+        assert!(
+            gone,
+            "{name:?} is left after closing, {}\n{lines}",
+            lingers(&name)
+        );
+        tunnel.close(CloseMode::KeepSession);
+        assert_eq!(events.try_recv(), Ok(TunnelEvent::Closed));
+        assert!(events.try_recv().is_err(), "more than one event");
         println!("RAN: tunnel makes and removes a device");
     }
 
@@ -440,11 +469,9 @@ mod device {
         let Some(stand_in) = StandIn::start("accept") else {
             return;
         };
-        end(
-            opened(engine, library, &stand_in),
-            Some(CloseMode::KeepSession),
-        );
-        end(opened(engine, library, &stand_in), None);
+        let gateway = local(library, &stand_in);
+        end(opened(engine, &gateway), Some(CloseMode::KeepSession));
+        end(opened(engine, &gateway), None);
         assert_eq!(connects(&stand_in), (2, 2));
     }
 
@@ -460,8 +487,8 @@ mod device {
         let Some(stand_in) = StandIn::start("accept") else {
             return;
         };
-        let first = opened(engine, library, &stand_in);
-        let gateway = gateway(stand_in.port, &pin_of(library, &stand_in));
+        let gateway = local(library, &stand_in);
+        let first = opened(engine, &gateway);
         let second = open(
             engine,
             &gateway,
@@ -471,6 +498,6 @@ mod device {
         assert_eq!(failed(&second), TunnelError::Failed);
         assert_eq!(connects(&stand_in), (1, 1));
         end(first, Some(CloseMode::LogOff));
-        end(opened(engine, library, &stand_in), Some(CloseMode::LogOff));
+        end(opened(engine, &gateway), Some(CloseMode::LogOff));
     }
 }
