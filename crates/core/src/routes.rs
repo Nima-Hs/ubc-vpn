@@ -388,6 +388,17 @@ mod tests {
         let mut other = set(&["10.255.0.0/24", "192.0.2.0/24"]);
         other.dns_domains = vec!["cs.example.test".to_string()];
         assert!(!other.is_carried_by(&carried, &domains));
+        // The same subnets with a domain fewer, or one more, are a change
+        // too: dropping a domain is as much the user's choice as adding one.
+        let fewer = set(&["10.255.0.0/24", "192.0.2.0/24"]);
+        assert!(!fewer.is_carried_by(&carried, &domains));
+        let mut more_domains = set(&["10.255.0.0/24", "192.0.2.0/24"]);
+        more_domains.dns_domains = vec![domains[0].clone(), "cs.example.test".to_string()];
+        assert!(!more_domains.is_carried_by(&carried, &domains));
+        // And the same for subnets: one fewer is a change.
+        let mut fewer_subnets = set(&["10.255.0.0/24"]);
+        fewer_subnets.dns_domains = domains.to_vec();
+        assert!(!fewer_subnets.is_carried_by(&carried, &domains));
     }
 
     #[test]
