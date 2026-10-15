@@ -12,7 +12,6 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::System::Services::{
     QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW, QueryServiceObjectSecurity,
-    SERVICE_START_PENDING,
 };
 
 use super::*;

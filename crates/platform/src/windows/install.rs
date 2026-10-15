@@ -27,8 +27,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_CANNOT_ACCEPT_CTRL, ERROR_SERVICE_DOES_NOT_EXIST,
-    ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE,
+    ERROR_INVALID_SERVICE_CONTROL, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_CANNOT_ACCEPT_CTRL,
+    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE,
 };
 use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
 use windows_sys::Win32::Security::{
@@ -43,8 +43,8 @@ use windows_sys::Win32::System::Services::{
     SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
     SERVICE_CONFIG_PRESHUTDOWN_INFO, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW,
     SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_FAILURE_ACTIONSW,
-    SERVICE_PRESHUTDOWN_INFO, SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STOPPED,
-    SERVICE_WIN32_OWN_PROCESS, StartServiceW,
+    SERVICE_PRESHUTDOWN_INFO, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS,
+    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, StartServiceW,
 };
 
 use super::security::{Descriptor, last_error, os_error, wide};
@@ -154,7 +154,7 @@ fn wait_for(service: &Sc, wanted: u32) -> Result<SERVICE_STATUS> {
 /// running is fine.
 ///
 /// While it is still starting or already stopping, it takes no requests,
-/// so the request is made again until it does or has stopped, for up to
+/// so the request is made again until it takes it or has stopped, for up to
 /// [`STATE_WAIT`]. A service that is starting may take a while: it waits
 /// for its channel's name when another program holds it.
 fn stop(service: &Sc) -> Result<()> {
@@ -168,10 +168,19 @@ fn stop(service: &Sc) -> Result<()> {
         }
         match last_error() {
             ERROR_SERVICE_NOT_ACTIVE => return Ok(()),
-            ERROR_SERVICE_CANNOT_ACCEPT_CTRL if started.elapsed() < STATE_WAIT => {
+            // A service that is starting accepts no requests yet, which
+            // Windows reports as either of these.
+            code @ (ERROR_SERVICE_CANNOT_ACCEPT_CTRL | ERROR_INVALID_SERVICE_CONTROL) => {
+                match state_of(service)?.dwCurrentState {
+                    SERVICE_STOPPED => return Ok(()),
+                    SERVICE_START_PENDING | SERVICE_STOP_PENDING => {}
+                    _ => return Err(os_error(code)),
+                }
+                if started.elapsed() > STATE_WAIT {
+                    return Err(Error::TimedOut);
+                }
                 thread::sleep(Duration::from_millis(200));
             }
-            ERROR_SERVICE_CANNOT_ACCEPT_CTRL => return Err(Error::TimedOut),
             code => return Err(os_error(code)),
         }
     }
