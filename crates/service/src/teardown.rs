@@ -38,6 +38,8 @@ impl Machine {
     /// clean: the two catch-all steps, which need no memory of what was
     /// applied, both succeeded.
     pub(crate) fn teardown(&mut self) -> bool {
+        // Whatever watches the network for this connection stops.
+        self.watching.store(0, std::sync::atomic::Ordering::SeqCst);
         let mut applied = std::mem::take(&mut self.applied);
         let had_some = applied.tunnel.is_some()
             || applied.gateway_route.is_some()

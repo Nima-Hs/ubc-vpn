@@ -18,7 +18,7 @@ use std::time::Duration;
 pub use ubc_vpn_core::protocol::{ErrorCode, RequestBody, ResponseBody};
 pub use ubc_vpn_core::state::ConnState;
 pub use ubc_vpn_platform::fake::{Fake, Op};
-pub use ubc_vpn_platform::{Connection, Error, StateDir, UserId};
+pub use ubc_vpn_platform::{Connection, Error, NetworkEvent, StateDir, UserId};
 
 pub use spy::{Faulty, Spy};
 use ubc_vpn_core::VERSION;
@@ -154,6 +154,7 @@ impl Rig {
         ubc_vpn_platform::Platform {
             routes: self.os.clone(),
             dns: self.os.clone(),
+            events: self.os.clone(),
             ..self.fake.platform(&self.root)
         }
     }
