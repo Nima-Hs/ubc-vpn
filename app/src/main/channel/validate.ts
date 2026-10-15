@@ -36,6 +36,7 @@ const ERROR_CODES: Record<ErrorCode, true> = {
     engine_failed: true,
     verification_failed: true,
     busy: true,
+    not_connected: true,
     policy_invalid: true,
     internal: true,
 };

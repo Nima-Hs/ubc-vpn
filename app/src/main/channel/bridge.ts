@@ -26,10 +26,12 @@ import { isBridgeLine } from "./validate";
 /**
  * What the app may ask the service through the bridge: a list, as the
  * bridge's own is, so that a method added to the protocol is not allowed
- * just by existing. Two are left out on purpose. `connect` carries the
+ * just by existing. Three are left out on purpose. `connect` carries the
  * session cookie, which the app must never hold; connecting goes through
  * `ubc-vpn connect --json`. `add_log` is for that client to hand over a
  * login's lines; the app has nothing to add to the service's log.
+ * `update_routes` will be sent by `ubc-vpn settings set-routes` with the routes
+ * it has just saved, so a live tunnel only ever carries saved routes.
  */
 export const APP_METHODS = [
     "claim",

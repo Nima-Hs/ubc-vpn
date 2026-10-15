@@ -598,8 +598,9 @@ fn an_ordinary_session_is_in_the_log() {
     assert_eq!(alice.state(), ConnState::Disconnected);
 
     let started = format!(
-        "service started: version {}, protocol 3, installed",
-        ubc_vpn_core::VERSION
+        "service started: version {}, protocol {}, installed",
+        ubc_vpn_core::VERSION,
+        ubc_vpn_core::protocol::PROTOCOL_VERSION
     );
     let expected = [
         started.as_str(),

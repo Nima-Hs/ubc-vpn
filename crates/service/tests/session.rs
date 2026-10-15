@@ -684,6 +684,27 @@ fn a_connect_while_connected_is_busy() {
     assert_eq!(alice.ask(good()), ACCEPTED);
 }
 
+// Until this service can change a live tunnel's routes it says so, and the
+// connection is kept exactly as it was.
+#[test]
+fn a_change_of_routes_is_refused_and_the_connection_kept() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    let state = connected(&mut alice);
+    let (calls, applied) = (rig.fake.calls(), rig.fake.applied());
+    let change = RequestBody::UpdateRoutes(ubc_vpn_core::routes::RouteSet {
+        subnets: vec!["198.51.100.0/24".parse().unwrap()],
+        dns_domains: Vec::new(),
+    });
+    assert_eq!(alice.ask(change), Err(ErrorCode::BadRequest));
+    assert!(alice.is_quiet(), "a state was reported");
+    assert_eq!((rig.fake.calls(), rig.fake.applied()), (calls, applied));
+    assert_eq!(
+        alice.ask(RequestBody::Status),
+        Ok(ResponseBody::Status(state))
+    );
+}
+
 // While a disconnect is in progress nothing else is taken.
 #[test]
 fn requests_during_a_disconnect_are_busy() {
