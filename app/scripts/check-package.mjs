@@ -67,6 +67,13 @@ async function check(appFolder, outputFolder) {
             problems.push(`missing: ${file}`);
         }
     }
+    // Electron's own default app and version file, left by a copy of
+    // Electron's folder; scripts/after-pack.cjs removes them.
+    for (const leftover of ["resources/default_app.asar", "version"]) {
+        if (existsSync(join(appFolder, leftover))) {
+            problems.push(`left over from Electron: ${leftover}`);
+        }
+    }
     if (existsSync(join(appFolder, "resources", "app"))) {
         problems.push("the app's code is in resources/app, outside the archive");
     }

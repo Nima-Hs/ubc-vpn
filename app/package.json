@@ -24,7 +24,7 @@
     "test:e2e": "pnpm build && pnpm build:demo && playwright test",
     "test:system": "pnpm build && playwright test -c playwright.system.config.ts",
     "check:licenses": "node scripts/check-licenses.mjs",
-    "package:win": "pnpm build && pnpm check:build && electron-builder --win --publish never",
+    "package:win": "node node_modules/electron/install.js && pnpm build && pnpm check:build && electron-builder --win --publish never",
     "check:package": "node scripts/check-package.mjs dist/win-unpacked dist"
   },
   "dependencies": {

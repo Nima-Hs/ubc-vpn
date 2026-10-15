@@ -147,7 +147,7 @@ pnpm package:win     # builds the app, then dist/ubc-vpn-setup-<version>-x64.exe
 pnpm check:package   # fuses, licence files, and no updater files
 ```
 
-electron-builder downloads what it needs the first time: Electron, NSIS 3.12 (chosen by `toolsets.nsis` in the settings), 7-Zip and its own helpers. Each download is checked against a SHA-256 that the pinned version of electron-builder carries, so they change only when electron-builder is updated. They are kept in `%LOCALAPPDATA%\electron-builder\Cache` and `%LOCALAPPDATA%\electron\Cache`.
+Electron is the one the lockfile pins: `pnpm package:win` first runs `node_modules/electron/install.js`, which downloads it and checks it against the SHA-256 sums in the pinned `electron` package's `checksums.json`, and electron-builder packages that copy (`electronDist`). electron-builder downloads its other tools itself the first time: NSIS 3.12 (chosen by `toolsets.nsis` in the settings), 7-Zip and its own helpers, each checked against a SHA-256 that the pinned version of electron-builder carries, so they change only when electron-builder is updated. They are kept in `%LOCALAPPDATA%\electron-builder\Cache`.
 
 Nothing is signed. For now the installer holds only the app: the service, the command-line client and the native libraries are added to it later.
 

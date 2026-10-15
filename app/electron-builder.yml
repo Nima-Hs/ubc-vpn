@@ -10,6 +10,14 @@ directories:
   output: dist
   buildResources: build
 
+# Package the Electron that the lockfile pins, as `node_modules/electron`
+# downloads it: install.js checks it against the SHA-256 sums in that
+# package's checksums.json. Without this, electron-builder downloads Electron
+# again and checks it only against SHASUMS256.txt from the same release.
+electronDist: node_modules/electron/dist
+# Removes what that copy brings along that is not part of the app.
+afterPack: scripts/after-pack.cjs
+
 # The main process, the preload and the interface are each one bundled file
 # (electron-vite), so nothing from node_modules is needed at run time.
 files:

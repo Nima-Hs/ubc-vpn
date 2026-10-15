@@ -47,30 +47,45 @@ function Run-Setup([string]$setup, [string[]]$arguments) {
 $Trusted = @(
     'S-1-5-18',                                                       # SYSTEM
     'S-1-5-32-544',                                                   # Administrators
-    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', # TrustedInstaller
-    'S-1-3-0'                                                         # CREATOR OWNER (applies to what admins create)
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'  # TrustedInstaller
+)
+
+# The install folder's access list, exactly: the installer sets it, protected
+# and by SID, and everything inside inherits it.
+$Expected = @(
+    'S-1-5-18|FullControl',
+    'S-1-5-32-544|FullControl',
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464|FullControl',
+    'S-1-5-32-545|ReadAndExecute, Synchronize'
 )
 
 # Every right that lets someone change, replace or take over a file or folder.
 $ChangeRights = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, DeleteSubdirectoriesAndFiles, WriteAttributes, Delete, ChangePermissions, TakeOwnership'
-# GENERIC_ALL and GENERIC_WRITE, as they appear on inherit-only entries.
+# GENERIC_ALL and GENERIC_WRITE.
 $GenericChange = 0x10000000 -bor 0x40000000
+# On a folder above the install folder, the rights that could swap what is
+# in it: delete it, delete what is inside, change its access list or owner,
+# or all of them. Adding something new to C: does not change any path.
+$ReplaceRights = [Security.AccessControl.FileSystemRights]'DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership'
+$GenericReplace = 0x10000000
 
 function Sid([Security.Principal.IdentityReference]$who) {
     $who.Translate([Security.Principal.SecurityIdentifier]).Value
 }
 
 # Who other than the trusted accounts may change this path: its owner, and
-# every allow entry that grants a right to change it.
-function Changers([string]$item) {
+# every allow entry that grants one of `$rights` or `$generic` on it. An
+# inherit-only entry is not a right on the path itself and is not counted.
+function Changers([string]$item, [int64]$rights, [int64]$generic) {
     $acl = Get-Acl -LiteralPath $item
     $owner = Sid $acl.GetOwner([Security.Principal.NTAccount])
     $found = @()
     if ($Trusted -notcontains $owner) { $found += "owner $($acl.Owner)" }
     foreach ($entry in $acl.Access) {
         if ($entry.AccessControlType -ne 'Allow') { continue }
-        $rights = [int64]$entry.FileSystemRights
-        if ((($rights -band [int64]$ChangeRights) -eq 0) -and (($rights -band $GenericChange) -eq 0)) { continue }
+        if ($entry.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+        $granted = [int64]$entry.FileSystemRights
+        if ((($granted -band $rights) -eq 0) -and (($granted -band $generic) -eq 0)) { continue }
         if ($Trusted -contains (Sid $entry.IdentityReference)) { continue }
         $found += "$($entry.IdentityReference.Value) ($($entry.FileSystemRights))"
     }
@@ -118,6 +133,8 @@ switch ($Command) {
                 $extra += $relative
             }
         }
+        # Only the updater uses it, so the installer removes it.
+        if (-not $built.Remove('resourceselevate.exe')) { Fail 'the build has no resourceselevate.exe, so this check is out of date' }
         if ($built.Count -ne 0) { Fail "not installed: $($built.Keys -join ', ')" }
         if (($extra.Count -ne 1) -or ($extra[0] -ne "Uninstall $ProductName.exe")) { Fail "unexpected files: $($extra -join ', ')" }
         if (-not (Test-Path -LiteralPath $StartMenuShortcut)) { Fail "no shortcut at $StartMenuShortcut" }
@@ -125,17 +142,39 @@ switch ($Command) {
     }
     'who-can-change' {
         # The folder, everything in it, and every folder above it.
-        $items = @(Get-Item -LiteralPath $InstallFolder) + @(Get-ChildItem -LiteralPath $InstallFolder -Recurse -Force)
+        $inside = @(Get-Item -LiteralPath $InstallFolder) + @(Get-ChildItem -LiteralPath $InstallFolder -Recurse -Force)
+        $aboveAll = @()
         $above = Split-Path -Parent $InstallFolder
         while ($above) {
-            $items += Get-Item -LiteralPath $above -Force
+            $aboveAll += Get-Item -LiteralPath $above -Force
             $above = Split-Path -Parent $above
         }
         $bad = @()
-        foreach ($item in $items) {
-            $changers = @(Changers $item.FullName)
+        foreach ($item in $inside) {
+            $changers = @(Changers $item.FullName ([int64]$ChangeRights) $GenericChange)
+            if ($changers.Count -ne 0) { $bad += "$($item.FullName): $($changers -join '; ')" }
+            # Owned by Administrators, not by the account that installed.
+            $owner = Sid (Get-Acl -LiteralPath $item.FullName).GetOwner([Security.Principal.NTAccount])
+            if ($owner -ne 'S-1-5-32-544') { $bad += "$($item.FullName): owned by $owner, not Administrators" }
+        }
+        foreach ($item in $aboveAll) {
+            $changers = @(Changers $item.FullName ([int64]$ReplaceRights) $GenericReplace)
             if ($changers.Count -ne 0) { $bad += "$($item.FullName): $($changers -join '; ')" }
         }
+        # The folder's own access list: protected, and exactly the expected
+        # entries, none of them inherit-only and none for CREATOR OWNER.
+        $acl = Get-Acl -LiteralPath $InstallFolder
+        if (-not $acl.AreAccessRulesProtected) { $bad += "$InstallFolder inherits from the folder above" }
+        $entries = @($acl.Access | ForEach-Object {
+                if ($_.AccessControlType -ne 'Allow' -or $_.IsInherited -or $_.PropagationFlags -ne 'None' -or $_.InheritanceFlags -ne 'ContainerInherit, ObjectInherit') {
+                    "unexpected: $($_.IdentityReference.Value) $($_.AccessControlType) $($_.FileSystemRights) $($_.InheritanceFlags) $($_.PropagationFlags) inherited=$($_.IsInherited)"
+                } else {
+                    "$(Sid $_.IdentityReference)|$($_.FileSystemRights)"
+                }
+            } | Sort-Object)
+        $wanted = @($Expected | Sort-Object)
+        if (($entries -join ';') -ne ($wanted -join ';')) { $bad += "$InstallFolder access list: $($entries -join '; ')" }
+        $items = $inside + $aboveAll
         if ($bad.Count -ne 0) {
             & icacls.exe $InstallFolder
             Fail "others may change:`n$($bad -join "`n")"
