@@ -92,9 +92,9 @@ win:
   signExts: ["!.dll"]
 
 nsis:
-  # The setup program and the uninstaller show the app icon too.
-  installerIcon: build/icon.ico
-  uninstallerIcon: build/icon.ico
+  # The setup program and the uninstaller take win.icon by default, and
+  # "Apps & features" shows the program's own. Setting uninstallerIcon would
+  # install a copy of the icon beside the program, a file nothing else needs.
   # Not one-click: the assisted setup program, for its licence page, which
   # the user must accept before anything is written (stage/license.txt,
   # made by packaging/windows/stage.sh). With the two settings below it has
