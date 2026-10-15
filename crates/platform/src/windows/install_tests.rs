@@ -12,6 +12,7 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::System::Services::{
     QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW, QueryServiceObjectSecurity,
+    SERVICE_START_PENDING,
 };
 
 use super::*;
@@ -330,6 +331,53 @@ fn installs_updates_and_uninstalls() {
     assert!(!data.exists());
     remove_data_folder(&data).unwrap();
     println!("RAN: install");
+}
+
+// A service that is still starting takes no stop request. Removing it then
+// waits until it does, and stops and removes it, instead of failing before
+// it is removed.
+#[test]
+fn a_service_still_starting_is_stopped_and_removed() {
+    if !may_change_the_system() {
+        return;
+    }
+    // The hosted service takes a few seconds to start when its name says
+    // "-slow-start-" (see `service_tests.rs`).
+    let name = format!("ubc-vpn-test-slow-start-{}", std::process::id());
+    let _cleanup = Cleanup(name.clone(), PathBuf::from("does-not-exist"));
+    let program = std::env::current_exe().unwrap();
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let hosted = module.replace("install::tests", "service::tests::hosted");
+    let registration = Registration {
+        name: &name,
+        display_name: "UBC VPN test service",
+        description: "A test of UBC VPN's installer. Not made by or affiliated with UBC.",
+        command_line: format!(
+            "{} {hosted} --exact --nocapture --test-threads=1",
+            quoted(&program).unwrap()
+        ),
+    };
+    register(&registration).unwrap();
+    {
+        let manager = manager(SC_MANAGER_CONNECT).unwrap();
+        let service = open_service(&manager, &name).unwrap().expect("registered");
+        // SAFETY: the handle is open with full access, and no arguments are
+        // passed.
+        let ok = unsafe { StartServiceW(service.0, 0, null()) };
+        assert_ne!(ok, 0, "starting the service: {}", last_error());
+    }
+    assert_eq!(status(&name), SERVICE_START_PENDING);
+    unregister(&name).unwrap();
+    // Deleting takes effect once it has stopped and no handle is open.
+    let started = Instant::now();
+    while is_registered(&name) {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the service was left registered"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    println!("RAN: install while starting");
 }
 
 // A service this run created, and could not then set up, is deleted, so a

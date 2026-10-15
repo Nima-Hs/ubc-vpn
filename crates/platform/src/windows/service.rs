@@ -9,7 +9,10 @@
 //! 1. It hands the calling thread to the service manager. A program that was
 //!    not started by the service manager gets an error at once.
 //! 2. On the service manager's thread, it reports "starting" and calls the
-//!    body with a [`Control`] and a receiver of stop requests.
+//!    body with a [`Control`] and a receiver of stop requests. Until the body
+//!    reports the service running, "starting" is reported again every second
+//!    with a rising checkpoint, so Windows does not take a slow start, such
+//!    as waiting for the channel's name, for a hung service.
 //! 3. The body starts the service, calls [`Control::running`], and waits for
 //!    a request on the receiver. A request comes when someone stops the
 //!    service and when Windows shuts down; it is sent once.
@@ -56,7 +59,8 @@ type Body = Box<dyn FnOnce(&Control, Receiver<()>) -> std::result::Result<(), St
 /// while it starts and while it stops.
 const WAIT_HINT_MS: u32 = 30_000;
 
-/// How often "stopping" is reported again while the body cleans up.
+/// How often "starting" or "stopping" is reported again while the body
+/// starts the service or cleans up.
 const PROGRESS: Duration = Duration::from_secs(1);
 
 /// The service code's exit code, reported with `ERROR_SERVICE_SPECIFIC_ERROR`
@@ -147,8 +151,8 @@ impl Control {
 }
 
 /// Reports the service's state. One per service, shared by the body's
-/// thread, the control handler's and the thread that reports progress
-/// while stopping.
+/// thread, the control handler's and the threads that report progress
+/// while starting and stopping.
 struct Status {
     handle: SERVICE_STATUS_HANDLE,
     reported: Mutex<Reported>,
@@ -157,6 +161,8 @@ struct Status {
 /// What has been reported so far.
 #[derive(Default)]
 struct Reported {
+    /// The state last reported, or 0 before the first report.
+    state: SERVICE_STATUS_CURRENT_STATE,
     /// Counts reports of a pending state, as Windows asks, so it can see
     /// progress.
     checkpoint: u32,
@@ -180,10 +186,34 @@ impl Status {
         exit: u32,
         specific: u32,
     ) -> Result<()> {
+        self.report_to(&mut lock(&self.reported), state, accepts, exit, specific)
+    }
+
+    /// Reports `pending` again, with the next checkpoint, if it is still the
+    /// state last reported. Says whether it was.
+    fn again(&self, pending: SERVICE_STATUS_CURRENT_STATE) -> bool {
+        // Checked and reported under one lock, so this never follows a
+        // report of another state.
         let mut reported = lock(&self.reported);
+        if reported.state != pending {
+            return false;
+        }
+        let _ = self.report_to(&mut reported, pending, 0, NO_ERROR, 0);
+        true
+    }
+
+    fn report_to(
+        &self,
+        reported: &mut Reported,
+        state: SERVICE_STATUS_CURRENT_STATE,
+        accepts: u32,
+        exit: u32,
+        specific: u32,
+    ) -> Result<()> {
         if reported.stopped || (reported.stopping && state == SERVICE_RUNNING) {
             return Ok(());
         }
+        reported.state = state;
         reported.stopping |= state == SERVICE_STOP_PENDING;
         reported.stopped = state == SERVICE_STOPPED;
         let pending = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING;
@@ -237,6 +267,8 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut PWSTR) {
         stop: Some(stop),
     });
     let _ = status.report(SERVICE_START_PENDING, 0, NO_ERROR, 0);
+    let starting = status.clone();
+    thread::spawn(move || report_progress(&starting, SERVICE_START_PENDING));
     let control = Control { status, name };
     let outcome = catch_unwind(AssertUnwindSafe(|| body(&control, stop_requests)))
         .unwrap_or_else(|_| Err("the service panicked".to_string()));
@@ -251,15 +283,14 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut PWSTR) {
     let _ = control.status.report(SERVICE_STOPPED, 0, exit, specific);
 }
 
-/// Reports "stopping" again every [`PROGRESS`] until "stopped" has been
+/// Reports `pending` again every [`PROGRESS`] until another state has been
 /// reported.
-fn report_progress(status: &Status) {
+fn report_progress(status: &Status, pending: SERVICE_STATUS_CURRENT_STATE) {
     loop {
         thread::sleep(PROGRESS);
-        if lock(&status.reported).stopped {
+        if !status.again(pending) {
             return;
         }
-        let _ = status.report(SERVICE_STOP_PENDING, 0, NO_ERROR, 0);
     }
 }
 
@@ -301,7 +332,7 @@ unsafe extern "system" fn handler(
                 if let Some(stop) = handler.stop.take() {
                     let _ = stop.send(());
                     let status = handler.status.clone();
-                    thread::spawn(move || report_progress(&status));
+                    thread::spawn(move || report_progress(&status, SERVICE_STOP_PENDING));
                 }
             }
             NO_ERROR

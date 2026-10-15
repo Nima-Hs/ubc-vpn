@@ -27,8 +27,13 @@ fn name(scenario: &str) -> String {
 /// What [`hosted`] does when its service name contains this.
 const FAIL: &str = "-fails-";
 
-/// How long [`hosted`] takes to clean up after a stop request: long enough
-/// for several progress reports.
+/// What makes [`hosted`] take [`SLOW_START`] before it reports itself
+/// running. `install_tests.rs` names a service with it too.
+const SLOW: &str = "-slow-start-";
+
+/// How long [`hosted`] takes to start when asked to be slow, and to clean
+/// up after a stop request: long enough for several progress reports.
+const SLOW_START: Duration = Duration::from_secs(3);
 const CLEANUP: Duration = Duration::from_secs(3);
 
 /// The file [`hosted`] writes when its cleanup is done, beside this test
@@ -51,12 +56,16 @@ fn ran(test: &str) {
 
 // Run by `cargo test`, this is not under the service manager, and `run` must
 // say so at once without calling the body. Run by the service manager, as
-// the test below has it, it is the service: it reports itself running, then
-// either fails at once or waits for the stop request, then takes a while to
-// clean up and leaves a marker when it is done.
+// the tests below have it, it is the service: it reports itself running, at
+// once or after a while, then either fails at once or waits for the stop
+// request, then takes a while to clean up and leaves a marker when it is
+// done.
 #[test]
 fn hosted() {
     let outcome = run(|control, stop| {
+        if control.name().contains(SLOW) {
+            std::thread::sleep(SLOW_START);
+        }
         control.running().map_err(|e| e.to_string())?;
         if control.name().contains(FAIL) {
             return Err("asked to fail".to_string());
@@ -239,4 +248,44 @@ fn the_service_manager_starts_it_and_stops_it() {
     drop(service);
 
     ran("service manager");
+}
+
+// A body that takes a while to report itself running is reported starting
+// meanwhile, again and again with a rising checkpoint, so Windows does not
+// take it for a hung service.
+#[test]
+fn a_slow_start_is_reported_as_progress() {
+    // SAFETY: null names mean this computer's active database.
+    let manager = unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CREATE_SERVICE) };
+    if manager.is_null() {
+        skip("registering a service needs an elevated process");
+        return;
+    }
+    let manager = Sc(manager);
+    let slow = name(&format!("x{SLOW}x"));
+    let service = register(&manager, &slow);
+    start(&service);
+    let (mut checkpoints, started) = (Vec::new(), Instant::now());
+    loop {
+        let status = service.status();
+        match status.dwCurrentState {
+            SERVICE_RUNNING => break,
+            SERVICE_START_PENDING => checkpoints.push(status.dwCheckPoint),
+            state => panic!("state {state} while starting"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "never ran");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    checkpoints.dedup();
+    assert!(
+        checkpoints.len() >= 2,
+        "no progress while starting: {checkpoints:?}"
+    );
+    assert!(checkpoints.is_sorted(), "{checkpoints:?}");
+    service.control(SERVICE_CONTROL_STOP);
+    service.wait_for(SERVICE_STOPPED);
+    let _ = std::fs::remove_file(marker(&slow));
+    drop(service);
+
+    ran("service manager slow start");
 }
