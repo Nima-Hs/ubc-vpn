@@ -50,7 +50,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn.example.test" -
 UBC_VPN_TEST_PYTHON=<python> UBC_VPN_TEST_GATEWAY_DIR=<folder> cargo test -p ubc-vpn-engine --test fake_gateway
 ```
 
-Some engine tests drive a real gateway, ocserv, which only the engine workflow starts: on a Linux runner, `crates/engine/tests/ocserv/start.sh` installs the exact ocserv version it names from the dated Ubuntu snapshot it names, and starts it as root with a made-up account. The script replaces the machine's package sources and runs a root service, so never run it on a machine you keep. Without `UBC_VPN_TEST_OCSERV_DIR` those tests are skipped and say so. ocserv is only used for testing and is never shipped.
+Some engine tests drive a real gateway, ocserv, which only the engine workflow starts: on a Linux runner, `crates/engine/tests/ocserv/start.sh` installs it with `native/linux/test-packages.sh`, which holds the exact version and the dated Ubuntu snapshot it comes from, and starts it as root with a made-up account. The script replaces the machine's package sources and runs a root service, so never run it on a machine you keep. Without `UBC_VPN_TEST_OCSERV_DIR` those tests are skipped and say so. ocserv is only used for testing and is never shipped.
 
 The tunnel tests that create a real tunnel device run only with `UBC_VPN_TEST_DEVICE` set, which only the engine workflow sets: on a Windows runner, as administrator, with the Wintun pinned in `native/windows/wintun.pin` beside the test programs. Do not set it on your own machine; without it those tests are skipped and say so.
 
