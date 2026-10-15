@@ -263,14 +263,24 @@ fn an_interrupt_leaves_the_terminal_and_the_service_as_they_should_be() {
     assert!(took < Duration::from_millis(2500), "it waited {took:?}");
     session.ended_by_the_interrupt();
     drop(paused);
-    // The price of not waiting, which the user chose: the service was never
-    // told, and connects. `disconnect` undoes it, as the help says.
-    within("the connect that was not undone", || {
-        home.run(&["status"], "")
-            .1
-            .starts_with("Connected")
-            .then_some(())
+    // The program was gone before the service woke, so it never told the
+    // service to disconnect. The service admits the connect, finds it
+    // cannot answer the one who asked, and undoes the connect itself
+    // (#163): it is not left connected with nobody watching.
+    bridge.until(&state("connecting"));
+    within(
+        "the service to undo the connect of a client that went",
+        || {
+            let (_, logged) = home.run(&["logs"], "");
+            logged
+                .contains("went before hearing the answer")
+                .then_some(())
+        },
+    );
+    within("the service to be disconnected after that", || {
+        (home.run(&["status"], "") == disconnected).then_some(())
     });
+    // `disconnect` still answers as the help says, with nothing to undo.
     assert_eq!(home.run(&["disconnect"], ""), disconnected);
 
     let (status, _) = bridge.end();
