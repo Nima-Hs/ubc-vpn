@@ -176,6 +176,17 @@ fn each_refusal_has_its_code_and_leaves_nothing_behind() {
             connect(COOKIE, [127, 0, 0, 1], &subnets, &[]),
             ErrorCode::BadRequest,
         ),
+        // A cookie no gateway could issue: it would add a cookie, or a
+        // header line, to what the service sends.
+        (
+            connect("Zq7-made-up;extra=1", GATEWAY, &subnets, &[]),
+            ErrorCode::BadRequest,
+        ),
+        (
+            connect("Zq7-made-up\r\nX-Extra: 1", GATEWAY, &subnets, &[]),
+            ErrorCode::BadRequest,
+        ),
+        (connect("", GATEWAY, &subnets, &[]), ErrorCode::BadRequest),
     ];
     for (body, code) in refused {
         assert_eq!(alice.ask(body), Err(code));

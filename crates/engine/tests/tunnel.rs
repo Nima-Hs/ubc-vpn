@@ -155,6 +155,28 @@ fn an_address_other_than_the_endpoints_contacts_nothing() {
     assert_eq!(stand_in.requests(), Vec::<String>::new());
 }
 
+// Security rule: a cookie with a byte no cookie can hold is refused before
+// anything is contacted. It would go into the `Cookie:` header: a `;` adds
+// cookies of the client's choosing, a CR or LF adds header lines. A cookie
+// with base64 padding, as gateways issue, still opens (the tests below).
+#[test]
+fn a_cookie_no_gateway_could_issue_contacts_nothing() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let gateway = gateway(stand_in.port, &pin_of(library, &stand_in));
+    for bad in [";", "\r", "\n", " ", "\"", ",", "\\", "é"] {
+        let session = Session {
+            cookie: Secret::new(format!("{COOKIE}{bad}extra=1")),
+            gateway_addr: Ipv4Addr::LOCALHOST,
+        };
+        let opened = open(engine, &gateway, &session, &Cancel::new());
+        assert_eq!(failed(&opened), TunnelError::BadSession, "{bad:?}");
+    }
+    assert_eq!(stand_in.requests(), Vec::<String>::new());
+}
+
 // Security rule: the cookie goes only to a gateway whose key matches a pin.
 // Here none does, so the gateway receives nothing at all.
 #[test]

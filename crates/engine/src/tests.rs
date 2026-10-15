@@ -20,7 +20,7 @@ use crate::fake::{FakeEngine, Script};
 use crate::{
     Cancel, CloseMode, DEBUG_LINES, Gateway, LogLevel, LogSink, LoginEngine, LoginError,
     MIN_HIDDEN_LEN, Prompt, Prompts, Session, Tunnel, TunnelEngine, TunnelError, TunnelEvent,
-    check_gateway_addr,
+    check_cookie, check_gateway_addr,
 };
 
 const USER: &str = "alice";
@@ -471,6 +471,34 @@ fn a_tunnel_refuses_an_address_no_gateway_can_have() {
     assert_eq!(result.err(), Some(TunnelError::BadAddress));
 }
 
+// Security rule: a session's cookie holds only what a cookie can hold. It
+// goes into a header the privileged service sends, so a `;`, a line break or
+// any other byte RFC 6265 does not allow is refused before anything is
+// contacted, and the error says nothing of the cookie.
+#[test]
+fn a_cookie_no_gateway_could_issue_is_refused() {
+    let engine = self::engine();
+    for bad in [";", "\r", "\n", " ", "\"", ",", "\\", "é"] {
+        let cookie = format!("{COOKIE}{bad}x=1");
+        let odd = Session {
+            cookie: Secret::new(cookie.clone()),
+            ..self::session(&engine)
+        };
+        assert_eq!(check_cookie(&odd.cookie), Err(TunnelError::BadSession));
+        let (result, _events) = open(&engine, &[pin('A')], &odd);
+        let error = result.err();
+        assert_eq!(error, Some(TunnelError::BadSession), "{bad:?}");
+        let said = format!("{error:?} {}", TunnelError::BadSession);
+        assert!(!said.contains(&cookie) && !said.contains(COOKIE), "{said}");
+    }
+    let padded = Secret::new(format!("{COOKIE}=="));
+    assert_eq!(check_cookie(&padded), Ok(()));
+    assert_eq!(
+        ErrorCode::from(TunnelError::BadSession),
+        ErrorCode::BadRequest
+    );
+}
+
 #[test]
 fn a_cancel_set_before_open_stops_it_at_once() {
     let engine = engine();
@@ -781,6 +809,7 @@ fn errors_events_and_debug_output_hold_no_secret() {
         TunnelError::GatewayUnreachable,
         TunnelError::Cancelled,
         TunnelError::BadAddress,
+        TunnelError::BadSession,
         TunnelError::Failed,
     ] {
         text += &format!("{e} {e:?}");
