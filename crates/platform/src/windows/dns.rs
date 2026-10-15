@@ -16,14 +16,18 @@
 
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, HANDLE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_REGISTRY_KEY};
+use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, REG_DWORD, REG_MULTI_SZ,
     REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW,
     RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 
-use super::security::{os_error, wide};
+use super::security::{Descriptor, os_error, sid_text, wide};
 use crate::{Dns, Error, Result, SplitDns, Verified};
 
 /// Where the DNS client reads local rules.
@@ -199,16 +203,29 @@ fn utf16_bytes(units: impl IntoIterator<Item = u16>) -> Vec<u8> {
     units.into_iter().flat_map(u16::to_le_bytes).collect()
 }
 
+/// Writes one of our rules into a key made afresh, owned by Administrators:
+/// a key somebody else made first, and so owns, is deleted, not reused.
 fn write_rule(id: &str, rule: &Rule) -> Result<()> {
-    write_rule_at(LOCAL, id, rule)
+    delete_rule(id)?;
+    write_rule_at(LOCAL, id, rule, Some("O:BA"))
 }
 
 /// Writes a rule under `base`, which tests also use to play group policy
-/// and other programs.
-pub(super) fn write_rule_at(base: &str, id: &str, rule: &Rule) -> Result<()> {
+/// and other programs. `owner`, as SDDL, sets the owner of a key it makes.
+pub(super) fn write_rule_at(base: &str, id: &str, rule: &Rule, owner: Option<&str>) -> Result<()> {
     let path = wide(&format!(r"{base}\{id}"));
+    let descriptor = owner.map(Descriptor::parse).transpose()?;
+    let attributes = descriptor.as_ref().map(|descriptor| SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr(),
+        bInheritHandle: 0,
+    });
+    let attributes = attributes
+        .as_ref()
+        .map_or(null(), |attributes| attributes as *const _);
     let mut key = null_mut();
-    // SAFETY: the path is NUL-terminated; the class, security attributes and
+    // SAFETY: the path is NUL-terminated; the security attributes, with the
+    // descriptor they point to, outlive the call or are null; the class and
     // disposition may be null; the out pointer is valid.
     let code = unsafe {
         RegCreateKeyExW(
@@ -218,7 +235,7 @@ pub(super) fn write_rule_at(base: &str, id: &str, rule: &Rule) -> Result<()> {
             null_mut(),
             REG_OPTION_NON_VOLATILE,
             KEY_ALL_ACCESS,
-            null_mut(),
+            attributes,
             &mut key,
             null_mut(),
         )
@@ -296,6 +313,52 @@ fn policy_rules_exist() -> Result<bool> {
     }
 }
 
+/// SYSTEM and Administrators: the only owners our keys may have.
+const TRUSTED: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
+
+/// Whether a rule for `name` would take lookups away from our resolvers
+/// for any of `domains`. The DNS client uses the most specific rule, so a
+/// rule for one of our domains, or for any name under one, does. A name
+/// that is not plain ASCII is counted as taking ours: this check does not
+/// convert it to the ASCII form the resolver compares.
+pub(super) fn takes_ours(name: &str, domains: &[String]) -> bool {
+    if !name.is_ascii() {
+        return true;
+    }
+    let name = name.trim_matches('.').to_ascii_lowercase();
+    domains.iter().any(|domain| {
+        let domain = domain.trim_matches('.').to_ascii_lowercase();
+        name == domain || name.ends_with(&format!(".{domain}"))
+    })
+}
+
+/// The SID that owns `key`.
+fn owner(key: &Key) -> Result<String> {
+    let (mut owner, mut descriptor) = (null_mut(), null_mut());
+    // SAFETY: the key is open with READ_CONTROL (part of KEY_READ); the two
+    // out pointers asked for are valid and the others may be null.
+    let status = unsafe {
+        GetSecurityInfo(
+            key.0 as HANDLE,
+            SE_REGISTRY_KEY,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(os_error(status));
+    }
+    let sid = sid_text(owner);
+    // SAFETY: the API allocated the descriptor for the caller to free; the
+    // owner pointed into it and is not used after this.
+    unsafe { LocalFree(descriptor) };
+    sid
+}
+
 pub(crate) struct WinDns;
 
 impl Dns for WinDns {
@@ -339,8 +402,21 @@ impl Dns for WinDns {
             if found != wanted || policy_rules_exist()? {
                 return Ok(Verified::No);
             }
-            // Nobody else's rule may name one of our domains.
-            let ours: Vec<&String> = expected.iter().flat_map(|rule| &rule.names).collect();
+            // Each of our rules must be owned by SYSTEM or Administrators:
+            // a member of Network Configuration Operators could have made
+            // the key first, and could change it.
+            for id in &RULES[..expected.len()] {
+                let key = open(&format!(r"{LOCAL}\{id}"), KEY_READ)?;
+                if !key
+                    .as_ref()
+                    .map(owner)
+                    .transpose()?
+                    .is_some_and(|sid| TRUSTED.contains(&sid.as_str()))
+                {
+                    return Ok(Verified::No);
+                }
+            }
+            // Nobody else's rule may take any of our names.
             let all = open(LOCAL, KEY_READ)?
                 .map(|key| subkeys(&key))
                 .transpose()?;
@@ -353,10 +429,7 @@ impl Dns for WinDns {
                     Some((_, data)) => strings(&data),
                     None => continue,
                 };
-                if names
-                    .iter()
-                    .any(|name| ours.contains(&&name.to_ascii_lowercase()))
-                {
+                if names.iter().any(|name| takes_ours(name, &dns.domains)) {
                     return Ok(Verified::No);
                 }
             }
@@ -420,7 +493,34 @@ mod tests {
     fn the_rule_identifiers_never_change() {
         assert_eq!(RULES[0], "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B01}");
         let mut unique = RULES.to_vec();
+        unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), RULES.len());
+    }
+
+    // Security rule: the DNS client uses the most specific rule, so another
+    // rule for our domain, however written, or for a name under it, takes
+    // names from our resolvers. One above or beside it does not.
+    #[test]
+    fn a_rule_for_our_domain_or_below_it_takes_ours() {
+        let ours = ["suite.example".to_string()];
+        for taken in [
+            ".suite.example",
+            "suite.example",
+            "SUITE.Example.",
+            ".host.suite.example",
+            "a.b.suite.example",
+            ".bücher.suite.example",
+        ] {
+            assert!(takes_ours(taken, &ours), "{taken}");
+        }
+        for apart in [
+            ".example",
+            "notsuite.example",
+            ".suite.example.org",
+            "xsuite.example",
+        ] {
+            assert!(!takes_ours(apart, &ours), "{apart}");
+        }
     }
 }

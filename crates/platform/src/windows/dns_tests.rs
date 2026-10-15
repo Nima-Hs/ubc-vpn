@@ -178,7 +178,7 @@ fn refuses_split_dns_while_group_policy_rules_exist() {
         names: vec![".policy.example".to_string()],
         servers: "192.0.2.99".to_string(),
     };
-    write_rule_at(POLICY, FOREIGN, &theirs).unwrap();
+    write_rule_at(POLICY, FOREIGN, &theirs, None).unwrap();
     assert_eq!(WinDns.set_split_dns("", &chosen()), Err(Error::Unsupported));
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
     delete_rule_at(POLICY, FOREIGN).unwrap();
@@ -240,15 +240,56 @@ fn another_rule_for_our_domain_is_not_in_effect() {
     let _rules = DnsCleanup;
     WinDns.set_split_dns("", &chosen()).unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
-    let theirs = Rule {
-        names: vec![".suite.example".to_string()],
+    let rule = |name: &str| Rule {
+        names: vec![name.to_string()],
         servers: "192.0.2.99".to_string(),
     };
-    write_rule_at(LOCAL, FOREIGN, &theirs).unwrap();
-    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
+    // The same domain, written either way, and any name under it: the most
+    // specific rule wins, so each takes names from our resolvers.
+    for taken in [
+        ".suite.example",
+        "suite.example",
+        ".host.suite.example",
+        ".SUITE.example.",
+    ] {
+        write_rule_at(LOCAL, FOREIGN, &rule(taken), None).unwrap();
+        assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No, "{taken}");
+    }
+    // A rule above ours, or beside it, takes nothing.
+    for apart in [".example", ".notsuite.example"] {
+        write_rule_at(LOCAL, FOREIGN, &rule(apart), None).unwrap();
+        assert_eq!(
+            WinDns.split_dns_matches(&chosen()),
+            Verified::Unobservable,
+            "{apart}"
+        );
+    }
+    let theirs = rule(".host.suite.example");
+    write_rule_at(LOCAL, FOREIGN, &theirs, None).unwrap();
     // Clearing ours leaves theirs alone.
     WinDns.clear_split_dns().unwrap();
     let still = super::dns::read_rule_at(LOCAL, FOREIGN).unwrap();
     assert_eq!(still.map(|rule| rule.names), Some(theirs.names));
     ran("dns foreign");
+}
+
+// Security rule: a member of Network Configuration Operators, who is not an
+// administrator, can make one of our rule keys before we do, and would own
+// it. Such a key is not taken as ours, and setting replaces it with one
+// Administrators own.
+#[test]
+fn a_rule_key_another_user_made_first_is_not_ours() {
+    let _turn = turn();
+    let Some(_wintun) = wintun() else { return };
+    let Some(stranger) = super::tests::stranger() else {
+        return;
+    };
+    let _rules = DnsCleanup;
+    let ours = super::dns::rules(&chosen()).unwrap();
+    let made = stranger.run(|| write_rule_at(LOCAL, super::dns::RULES[0], &ours[0], None));
+    made.expect("a member of Network Configuration Operators makes our key");
+    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
+    WinDns.set_split_dns("", &chosen()).unwrap();
+    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
+    ran("dns owner");
 }
