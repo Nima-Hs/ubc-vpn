@@ -14,10 +14,11 @@
 //! open the device itself and hand it over with `openconnect_setup_tun_fd`;
 //! until that is written, opening refuses at the device step.
 //!
-//! Until the main loop runs for the life of the tunnel, the thread waits for
-//! the tunnel to be closed, then writes the matching command to the command
-//! pipe and runs the main loop once: the loop reads the command at once,
-//! quits and removes the device.
+//! Once the tunnel is open, the thread runs the library's main loop until
+//! the tunnel ends: closed through a command on the command pipe, refused by
+//! the gateway, or lost. The loop removes the device as it ends; the thread
+//! then frees the handle, waits for the device to be gone, and sends the
+//! tunnel's one event.
 
 use std::cell::Cell;
 use std::ffi::{CString, c_int};
@@ -25,8 +26,8 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
@@ -41,9 +42,34 @@ use crate::{
     TunnelError, TunnelEvent, check_gateway_addr,
 };
 
-/// What the library answers when the gateway refuses the cookie: `-EPERM`.
-/// `EPERM` is 1 on all three systems.
-const REFUSED: c_int = -1;
+/// What the library answers when the gateway refuses the cookie.
+const REFUSED: c_int = -EPERM;
+
+/// The errno values the main loop's result is read by. `EINTR` (4), `EPERM`
+/// (1) and `EPIPE` (32) are the same on all three systems; `ECONNABORTED`
+/// is not, and on Windows it is the MinGW C runtime's, which the library is
+/// built against.
+const EINTR: c_int = 4;
+const EPERM: c_int = 1;
+const EPIPE: c_int = 32;
+#[cfg(windows)]
+const ECONNABORTED: c_int = 106;
+#[cfg(target_os = "macos")]
+const ECONNABORTED: c_int = 53;
+#[cfg(all(unix, not(target_os = "macos")))]
+const ECONNABORTED: c_int = 103;
+
+/// How a tunnel ended, from what the main loop returned: `-EINTR` after a
+/// cancel and `-ECONNABORTED` after a detach are the caller's close;
+/// `-EPERM` (the cookie expired) and `-EPIPE` (the gateway ended the
+/// session) mean logging in again; anything else is a lost connection.
+fn ended(result: c_int) -> TunnelEvent {
+    match result.checked_neg() {
+        Some(EINTR | ECONNABORTED) => TunnelEvent::Closed,
+        Some(EPERM | EPIPE) => TunnelEvent::LoginNeeded,
+        _ => TunnelEvent::ConnectionLost,
+    }
+}
 
 /// The packet sizes a tunnel may have. 576 is the least every IPv4 host
 /// must take; more than 1500 does not fit an Ethernet frame.
@@ -181,8 +207,9 @@ fn route(text: &str) -> Option<Ipv4Net> {
 /// the device exists.
 ///
 /// - The address and netmask make one IPv4 network, no wider than the
-///   widest route ([`MIN_PREFIX_LEN`]), that touches no reserved range; the
-///   address is not the gateway's.
+///   widest route ([`MIN_PREFIX_LEN`]), that touches no reserved range and
+///   does not contain the gateway's address, which must stay reachable
+///   outside the tunnel.
 /// - The MTU is in [`MTU`].
 /// - Each DNS server is an IPv4 address outside the reserved ranges.
 /// - The split routes pass the service's route rules. None means
@@ -199,7 +226,7 @@ fn assignment(info: &IpInfoCopy, gateway_addr: Ipv4Addr) -> Result<Assigned, Tun
     let len = len.ok_or(BAD)?;
     let network = Ipv4Addr::from(u32::from(address) & u32::from(netmask));
     let network = Ipv4Net::new(network, len).map_err(|_| BAD)?;
-    if network.is_reserved() || address == gateway_addr {
+    if network.is_reserved() || network.contains_addr(gateway_addr) {
         return Err(BAD);
     }
     if !MTU.contains(&info.mtu) {
@@ -241,15 +268,6 @@ enum Report {
     Opened(Result<Assigned, TunnelError>),
 }
 
-/// What the tunnel's thread is told to do with an open tunnel.
-enum Stop {
-    /// Close it and send [`TunnelEvent::Closed`].
-    Close(CloseMode),
-    /// Remove it without an event: opening was cancelled at the last moment,
-    /// and a tunnel that failed to open sends nothing.
-    Abandon,
-}
-
 /// Everything the tunnel's thread needs, moved to it.
 struct Job {
     library: Library,
@@ -259,13 +277,17 @@ struct Job {
     cancel: Cancel,
     logs: LogSink,
     events: Sender<TunnelEvent>,
+    /// Set when `open` gives up a tunnel that opened as it was cancelled.
+    /// Such a tunnel never opened as far as the caller knows, and sends no
+    /// event.
+    abandoned: Arc<AtomicBool>,
     /// Given back after the handle is dropped.
     slot: Slot,
 }
 
 impl Job {
     /// The body of the tunnel's thread.
-    fn run(self, report: Sender<Report>, stops: Receiver<Stop>) {
+    fn run(self, report: Sender<Report>) {
         let Self {
             library,
             gateway,
@@ -274,6 +296,7 @@ impl Job {
             cancel,
             logs,
             events,
+            abandoned,
             slot,
         } = self;
         // Before the library holds it, so no line of the library's can.
@@ -306,21 +329,18 @@ impl Job {
             .map(|assigned| assigned.interface.clone());
         let _ = report.send(Report::Opened(opened));
         drop(report);
-        if let Some(device) = device {
-            // `open` either keeps the tunnel and closes it later, or gives it
-            // up at once. If it is gone without a word, keep the session.
-            let stop = stops.recv().unwrap_or(Stop::Close(CloseMode::KeepSession));
-            let mode = match stop {
-                Stop::Close(mode) => mode,
-                Stop::Abandon => CloseMode::LogOff,
-            };
-            remove_device(&handle, mode);
-            drop(handle);
-            wait_until_gone(&device);
-            drop(slot);
-            if let Stop::Close(_) = stop {
-                let _ = events.send(TunnelEvent::Closed);
-            }
+        let Some(device) = device else {
+            return;
+        };
+        // The tunnel runs here until it ends. A close or an abandoned open
+        // writes its command to the pipe, and the loop removes the device as
+        // it returns.
+        let result = handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
+        drop(handle);
+        wait_until_gone(&device);
+        drop(slot);
+        if !abandoned.load(Ordering::SeqCst) {
+            let _ = events.send(ended(result));
         }
     }
 }
@@ -343,6 +363,11 @@ fn open_on(
     }
     if !handle.disable_dtls() {
         return Err(TunnelError::Failed);
+    }
+    // On this thread too, right before anything is contacted: a cancel is
+    // not left to the library's reading of the command pipe alone.
+    if cancel.is_cancelled() {
+        return Err(TunnelError::Cancelled);
     }
     let result = handle.make_cstp_connection();
     conclude(&Connected {
@@ -377,7 +402,10 @@ fn device(
             Ok(assigned)
         }
         _ => {
-            remove_device(handle, CloseMode::LogOff);
+            // Removed as a close removes it: the loop reads the cancel at
+            // once, quits and shuts the device down.
+            handle.stopper().cancel();
+            handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
             Err(TunnelError::Failed)
         }
     }
@@ -392,17 +420,6 @@ fn device(
     _cancel: &Cancel,
 ) -> Result<Assigned, TunnelError> {
     Err(TunnelError::Failed)
-}
-
-/// Removes the device: writes the command for `mode` and runs the main loop,
-/// which reads it at once, quits and shuts the device down.
-fn remove_device(handle: &Handle<'_>, mode: CloseMode) {
-    let stopper = handle.stopper();
-    match mode {
-        CloseMode::LogOff => stopper.cancel(),
-        CloseMode::KeepSession => stopper.detach(),
-    };
-    handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
 }
 
 /// The longest a closed device is waited for to disappear.
@@ -430,8 +447,11 @@ fn wait_until_gone(_name: &str) {
 /// An open tunnel: what it was assigned, and the thread that owns it.
 struct OpenTunnel {
     assigned: Assigned,
-    /// Taken by the first close, which decides how.
-    stop: Mutex<Option<Sender<Stop>>>,
+    /// Writes to the handle's command pipe while the handle lives, and
+    /// does nothing once the tunnel has ended.
+    stopper: Stopper,
+    /// Whether a close has decided how the tunnel ends.
+    closing: AtomicBool,
     /// Joined by whichever close gets it; the others wait on the lock.
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -441,10 +461,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl OpenTunnel {
-    fn stop(&self, stop: Stop) {
-        if let Some(sender) = lock(&self.stop).take() {
-            let _ = sender.send(stop);
-        }
+    /// Waits for the tunnel's thread to end: by then the device is gone and
+    /// the one event has been sent.
+    fn join(&self) {
         let mut thread = lock(&self.thread);
         if let Some(thread) = thread.take() {
             let _ = thread.join();
@@ -458,7 +477,15 @@ impl Tunnel for OpenTunnel {
     }
 
     fn close(&self, how: CloseMode) {
-        self.stop(Stop::Close(how));
+        // The first close decides. On a tunnel that has already ended the
+        // handle is gone, and the stopper writes nothing.
+        if !self.closing.swap(true, Ordering::SeqCst) {
+            match how {
+                CloseMode::LogOff => self.stopper.cancel(),
+                CloseMode::KeepSession => self.stopper.detach(),
+            };
+        }
+        self.join();
     }
 }
 
@@ -484,7 +511,7 @@ impl TunnelEngine for OpenConnect {
         }
         let slot = Slot::take().ok_or(TunnelError::Failed)?;
         let (report, reports) = mpsc::channel();
-        let (stop, stops) = mpsc::channel();
+        let abandoned = Arc::new(AtomicBool::new(false));
         let job = Job {
             library: self.library,
             gateway: gateway.clone(),
@@ -493,42 +520,53 @@ impl TunnelEngine for OpenConnect {
             cancel: cancel.clone(),
             logs,
             events,
+            abandoned: Arc::clone(&abandoned),
             slot,
         };
         let thread = std::thread::Builder::new()
             .name("tunnel".to_string())
-            .spawn(move || job.run(report, stops))
+            .spawn(move || job.run(report))
             .map_err(|_| TunnelError::Failed)?;
         // A cancel from another thread wakes the library through the
         // handle's command pipe. The hook is armed only while this call
         // lasts; a cancel that comes later reaches nothing.
-        let mut armed = None;
+        let (mut armed, mut stopper) = (None, None);
         let opened = loop {
             match reports.recv() {
-                Ok(Report::Stopper(stopper)) => {
+                Ok(Report::Stopper(stops)) => {
+                    let wakes = stops.clone();
                     armed = Some(cancel.on_cancel(move || {
-                        stopper.cancel();
+                        wakes.cancel();
                     }));
+                    stopper = Some(stops);
                 }
                 Ok(Report::Opened(opened)) => break opened,
                 Err(_) => break Err(TunnelError::Failed),
             }
         };
         drop(armed);
-        let failed = match opened {
-            Ok(assigned) if !cancel.is_cancelled() => {
+        let failed = match (opened, stopper) {
+            (Ok(assigned), Some(stopper)) if !cancel.is_cancelled() => {
                 return Ok(Box::new(OpenTunnel {
                     assigned,
-                    stop: Mutex::new(Some(stop)),
+                    stopper,
+                    closing: AtomicBool::new(false),
                     thread: Mutex::new(Some(thread)),
                 }));
             }
-            Ok(_) => TunnelError::Cancelled,
-            Err(error) => error,
+            (Ok(_), stopper) => {
+                // Opened as it was cancelled: given up, logged off, and no
+                // event, as for any opening that did not succeed.
+                abandoned.store(true, Ordering::SeqCst);
+                if let Some(stopper) = stopper {
+                    stopper.cancel();
+                }
+                TunnelError::Cancelled
+            }
+            (Err(error), _) => error,
         };
         // Nothing is left behind: the thread removes a device it made and
         // ends, and the handle and its slot are gone before this returns.
-        let _ = stop.send(Stop::Abandon);
         let _ = thread.join();
         Err(failed)
     }
@@ -751,6 +789,84 @@ mod tests {
         assert!(widest.is_ok());
         let host = changed(|info| info.netmask = Some("255.255.255.255".to_string()));
         assert!(host.is_ok());
+    }
+
+    // Security rule: the gateway stays reachable outside the tunnel. A
+    // network that holds its address, not only one whose address is it,
+    // would take the route to the gateway into the tunnel.
+    #[test]
+    fn a_network_that_holds_the_gateway_is_refused() {
+        for (address, netmask) in [
+            ("192.0.2.5", "255.255.255.0"),
+            ("192.0.2.2", "255.255.255.252"),
+            ("192.0.0.1", "255.255.0.0"),
+            ("192.200.1.1", "255.0.0.0"),
+        ] {
+            let assigned = changed(|info| {
+                info.address = Some(address.to_string());
+                info.netmask = Some(netmask.to_string());
+                info.split_includes.clear();
+            });
+            assert_eq!(assigned, Err(TunnelError::Failed), "{address}/{netmask}");
+        }
+        // Next to it, but not around it.
+        let beside = changed(|info| {
+            info.address = Some("192.0.2.200".to_string());
+            info.netmask = Some("255.255.255.128".to_string());
+            info.split_includes.clear();
+        });
+        assert!(beside.is_ok());
+        let apart = changed(|info| {
+            info.address = Some("192.0.3.5".to_string());
+            info.split_includes.clear();
+        });
+        assert!(apart.is_ok());
+    }
+
+    // The main loop's result is the tunnel's one event: the caller's close,
+    // a refused session, or a lost connection.
+    #[test]
+    fn the_main_loop_result_decides_the_event() {
+        assert_eq!(ended(-EINTR), TunnelEvent::Closed);
+        assert_eq!(ended(-ECONNABORTED), TunnelEvent::Closed);
+        assert_eq!(ended(-EPERM), TunnelEvent::LoginNeeded);
+        assert_eq!(ended(-EPIPE), TunnelEvent::LoginNeeded);
+        for other in [-5, -110, -104, 0, 1, EINTR, c_int::MIN] {
+            assert_eq!(ended(other), TunnelEvent::ConnectionLost, "{other}");
+        }
+    }
+
+    // Security rule: a cancel is looked at on the tunnel's own thread right
+    // before the connection is made, not left to the library reading the
+    // command pipe. Here nothing is written to the pipe, as when the cancel
+    // comes after `open` looked and before its hook was armed: the gateway
+    // is still not contacted.
+    #[test]
+    fn a_cancel_is_seen_on_the_tunnel_thread_before_connecting() {
+        let Some(stand_in) = crate::login::stand_in::Gateway::start("accept") else {
+            return;
+        };
+        let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, stand_in.port);
+        let mut callbacks = Callbacks::refusing(Box::new(|_, _, _| {}));
+        callbacks.certificate = Box::new(|_| true);
+        callbacks.resolve = Box::new(move |_, _| Some(endpoint));
+        let library = crate::login::test_library();
+        let handle = Handle::new(library, callbacks).expect("the library makes a handle");
+        let session = Session {
+            cookie: ubc_vpn_core::redact::Secret::new("webvpn=FAKE-COOKIE-0123456789"),
+            gateway_addr: Ipv4Addr::LOCALHOST,
+        };
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let opened = open_on(
+            &handle,
+            &local(stand_in.port),
+            &session,
+            &Notes::default(),
+            &cancel,
+        );
+        assert_eq!(opened, Err(TunnelError::Cancelled));
+        assert_eq!(stand_in.requests(), Vec::<String>::new());
     }
 
     #[test]

@@ -312,6 +312,40 @@ fn the_cookie_never_reaches_the_log() {
     );
 }
 
+// The tunnel uses its TLS connection only. The gateway offers DTLS on a UDP
+// port of its own, and the tunnel neither asks for DTLS in its CONNECT nor
+// sends anything to that port. Where a device can be made, the tunnel runs
+// for two seconds first; elsewhere it stops at the device step, after the
+// CONNECT.
+#[test]
+fn a_tunnel_asks_for_no_dtls_and_tries_none() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    let gateway = gateway(stand_in.port, &pin_of(library, &stand_in));
+    let opened = open(
+        engine,
+        &gateway,
+        &session(Ipv4Addr::LOCALHOST),
+        &Cancel::new(),
+    );
+    if let Ok(tunnel) = &opened.result {
+        std::thread::sleep(Duration::from_secs(2));
+        tunnel.close(ubc_vpn_engine::CloseMode::KeepSession);
+    }
+    assert_eq!(connects(&stand_in), (1, 1));
+    let requests = stand_in.requests();
+    let connect = requests.iter().find(|line| line.contains("CONNECT"));
+    let connect = connect.expect("a CONNECT");
+    assert!(connect.contains(r#""dtls": false"#), "{connect}");
+    let udp = requests
+        .iter()
+        .filter(|line| line.contains(r#""listener": "udp""#));
+    assert_eq!(udp.count(), 0, "{requests:?}");
+    println!("RAN: tunnel asks for no dtls");
+}
+
 // Until the engine opens the device itself on macOS and Linux, a tunnel
 // that got that far is refused there, and no device is made. Everything
 // before it ran: the cookie went to the gateway.
@@ -432,9 +466,29 @@ mod device {
         assert!(opened.events.try_recv().is_err(), "more than one event");
     }
 
+    /// How many disconnect packets the client sent the gateway.
+    fn disconnects(stand_in: &StandIn) -> usize {
+        let requests = stand_in.requests();
+        let sent = |line: &&String| line.contains(r#""method": "CSTP""#);
+        requests.iter().filter(sent).count()
+    }
+
+    /// Waits up to `limit` for the gateway's log to say `what`.
+    fn logged(stand_in: &StandIn, limit: Duration, what: impl Fn(&StandIn) -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < limit {
+            if what(stand_in) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        what(stand_in)
+    }
+
     // The whole path: the pin, the cookie, the connection, the checked
-    // assignment and a device. Closed with "log off", the device is gone
-    // when `close` returns, and a second close does nothing more.
+    // assignment and a device, then the main loop until it is closed. Closed
+    // with "log off", the device is gone when `close` returns, and a second
+    // close does nothing more.
     #[test]
     fn a_tunnel_opens_with_a_device_and_closing_removes_it() {
         if !allowed() {
@@ -455,7 +509,10 @@ mod device {
         assert_eq!(assigned.split_includes.len(), 2);
         assert!(!assigned.interface.is_empty());
         assert_eq!(connects(&stand_in), (1, 1));
+        // The tunnel runs by itself, and nothing ends it.
+        std::thread::sleep(Duration::from_secs(2));
         let events = &opened.events;
+        assert!(events.try_recv().is_err(), "an event while open");
         let name = assigned.interface.clone();
         assert!(exists(&name));
         tunnel.close(CloseMode::LogOff);
@@ -472,9 +529,11 @@ mod device {
         println!("RAN: tunnel makes and removes a device");
     }
 
-    // Keeping the session and dropping the tunnel remove the device too.
+    // Logging off tells the gateway, with a disconnect packet; keeping the
+    // session, and dropping the tunnel, which keeps it too, send none, so
+    // the cookie stays good for the next tunnel.
     #[test]
-    fn keeping_the_session_or_dropping_the_tunnel_removes_the_device() {
+    fn logging_off_sends_a_disconnect_and_keeping_the_session_none() {
         if !allowed() {
             return;
         }
@@ -485,7 +544,78 @@ mod device {
         let gateway = local(library, &stand_in);
         end(opened(engine, &gateway), Some(CloseMode::KeepSession));
         end(opened(engine, &gateway), None);
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(disconnects(&stand_in), 0, "{:?}", stand_in.requests());
+        end(opened(engine, &gateway), Some(CloseMode::LogOff));
+        let one = |stand_in: &StandIn| disconnects(stand_in) == 1;
+        let sent = logged(&stand_in, Duration::from_secs(5), one);
+        assert!(sent, "{:?}", stand_in.requests());
+        assert_eq!(connects(&stand_in), (3, 3));
+        println!("RAN: tunnel logs off only when asked");
+    }
+
+    // Security rule: a session the gateway ends is "log in again", sent once
+    // from the tunnel's thread after its device is gone. A close afterwards
+    // sends nothing.
+    #[test]
+    fn a_session_the_gateway_ends_is_login_needed() {
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("end") else {
+            return;
+        };
+        let opened = opened(engine, &local(library, &stand_in));
+        let tunnel = opened.result.as_ref().expect("open");
+        let name = tunnel.assigned().interface.clone();
+        let event = opened.events.recv_timeout(Duration::from_secs(20));
+        assert_eq!(event, Ok(TunnelEvent::LoginNeeded));
+        assert!(!exists(&name), "{name:?} is left");
+        tunnel.close(CloseMode::LogOff);
+        assert!(opened.events.try_recv().is_err(), "more than one event");
+    }
+
+    // Security rule: a session that expires while the tunnel reconnects is
+    // "log in again"; the engine does not try anything else.
+    #[test]
+    fn a_cookie_refused_on_reconnecting_is_login_needed() {
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("expire") else {
+            return;
+        };
+        let opened = opened(engine, &local(library, &stand_in));
+        let event = opened.events.recv_timeout(Duration::from_secs(60));
+        assert_eq!(event, Ok(TunnelEvent::LoginNeeded));
         assert_eq!(connects(&stand_in), (2, 2));
+        drop(opened);
+    }
+
+    // A gateway that is gone is a lost connection, reported once the
+    // library's reconnects have run out, which the engine bounds at about
+    // thirty seconds.
+    #[test]
+    fn a_gateway_that_is_gone_is_connection_lost_within_the_reconnect_timeout() {
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("drop") else {
+            return;
+        };
+        let opened = opened(engine, &local(library, &stand_in));
+        let tunnel = opened.result.as_ref().expect("open");
+        let name = tunnel.assigned().interface.clone();
+        let start = std::time::Instant::now();
+        let event = opened.events.recv_timeout(Duration::from_secs(120));
+        let waited = start.elapsed();
+        assert_eq!(event, Ok(TunnelEvent::ConnectionLost));
+        assert!(waited < Duration::from_secs(75), "{waited:?}");
+        assert!(!exists(&name), "{name:?} is left");
+        println!("RAN: tunnel reports a lost gateway after {waited:?}");
     }
 
     // Security rule: one tunnel handle in the process at a time. While one

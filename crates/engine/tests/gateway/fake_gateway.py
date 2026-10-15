@@ -38,11 +38,18 @@ The two redirect scenarios redirect to places a client must not go, each wrong i
 only. In a test the client's resolver decides where those names lead.
 
 A tunnel: in every scenario, a CONNECT that carries the session cookie gets
-the addresses below (TUNNEL) and the connection is then held open, without
-passing any traffic, until the client closes it. A CONNECT without that
-cookie is refused with 401, as a gateway refuses a session that has ended.
-In the scenario "ended" every CONNECT is refused so, and in "hang" none is
-answered.
+the addresses below (TUNNEL) and an offer of DTLS on a UDP port of the
+gateway's own, and the connection is then held open until the client closes
+it. What the client sends on it is read as CSTP packets, and a disconnect
+packet is logged. The log says whether a CONNECT carried the cookie and
+whether it offered DTLS, never the cookie; each datagram that reaches the
+UDP port is logged too. A CONNECT without the cookie is refused with 401, as
+a gateway refuses a session that has ended. In the scenario "ended" every
+CONNECT is refused so, and in "hang" none is answered. Three scenarios end
+the first tunnel a second after it opens:
+  end       sends a disconnect packet, as a gateway that ends the session
+  expire    closes the connection, and refuses every later CONNECT with 401
+  drop      closes the connection, and every later connection at once
 
 It stops when its standard input closes, which is when the test that started
 it ends, however that test ends. Started by hand with no input, it stops at
@@ -52,6 +59,7 @@ once: give it a terminal, or a pipe that stays open.
 import http.server
 import json
 import os
+import socket
 import ssl
 import sys
 import threading
@@ -60,8 +68,32 @@ import time
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef"
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
-    "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended",
+    "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended", "end", "expire", "drop",
 )
+# The CSTP packet types the gateway reads or sends.
+CSTP_DISCONNECT = 5
+
+
+def cstp(kind, payload):
+    """One CSTP packet: the magic, the payload's length, the type, a zero."""
+    return b"STF\x01" + len(payload).to_bytes(2, "big") + bytes((kind, 0)) + payload
+
+
+def dtls_offer(port):
+    """What a gateway that offers DTLS adds to its answer to a CONNECT."""
+    return (
+        ("X-DTLS-Session-ID", "0123456789abcdef" * 4),
+        ("X-DTLS-Port", str(port)),
+        ("X-DTLS-Keepalive", "20"),
+        ("X-DTLS-DPD", "30"),
+        ("X-DTLS-Rekey-Method", "none"),
+        ("X-DTLS12-CipherSuite", "ECDHE-RSA-AES256-GCM-SHA384"),
+    )
+
+
+def log_line(entry):
+    with Gateway.log_lock, open(Gateway.log_path, "a", encoding="utf-8") as log:
+        log.write(json.dumps(entry) + "\n")
 # What a tunnel is given. Made-up, private addresses only.
 TUNNEL = (
     ("X-CSTP-Version", "1"),
@@ -151,8 +183,17 @@ class Gateway(http.server.BaseHTTPRequestHandler):
     log_path = ""
     log_lock = threading.Lock()
     context = None
+    udp_port = 0
+    # How many tunnels have been given addresses, under its lock.
+    tunnels = 0
+    tunnel_lock = threading.Lock()
 
     def setup(self):
+        if self.scenario == "drop" and self.later():
+            # The gateway has gone: every connection after the first tunnel
+            # is closed before the handshake.
+            self.request.close()
+            raise ConnectionAbortedError("the gateway is gone")
         # The TLS handshake happens here, on this connection's own thread,
         # and not where connections are accepted: a client that connects and
         # then says nothing holds up only itself, and only for ten seconds.
@@ -164,15 +205,19 @@ class Gateway(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def record(self, body):
+    def record(self, body, method=None, **extra):
         entry = {
             "listener": self.listener,
-            "method": self.command,
+            "method": method or self.command,
             "path": self.path,
             "body": body.decode("utf-8", "replace"),
         }
-        with self.log_lock, open(self.log_path, "a", encoding="utf-8") as log:
-            log.write(json.dumps(entry) + "\n")
+        entry.update(extra)
+        log_line(entry)
+
+    def later(self):
+        with self.tunnel_lock:
+            return Gateway.tunnels > 0
 
     def reply(self, body, cookie=None, status=200, location=None):
         self.send_response(status)
@@ -245,29 +290,81 @@ class Gateway(http.server.BaseHTTPRequestHandler):
     def do_CONNECT(self):
         cookies = self.headers.get_all("Cookie") or []
         has_cookie = any(COOKIE in cookie for cookie in cookies)
+        dtls = any(name.lower().startswith("x-dtls") for name in self.headers.keys())
         # Logged as whether the cookie came, not the cookie itself.
-        self.record(b"cookie" if has_cookie else b"no cookie")
+        self.record(b"cookie" if has_cookie else b"no cookie", dtls=dtls)
         if self.scenario == "hang":
             time.sleep(3600)
-        if self.listener != "main" or not has_cookie or self.scenario == "ended":
+        later = self.later()
+        refused = self.scenario == "ended" or (self.scenario == "expire" and later)
+        if self.listener != "main" or not has_cookie or refused:
             self.send_response(401, "Unauthorized")
             self.send_header("Content-Length", "0")
             self.end_headers()
             self.close_connection = True
             return
+        with self.tunnel_lock:
+            Gateway.tunnels += 1
         self.send_response(200, "CONNECTED")
-        for name, value in TUNNEL:
+        for name, value in TUNNEL + dtls_offer(self.udp_port):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.flush()
-        # Hold the tunnel open and drop what the client sends, until it
-        # closes the connection.
-        try:
-            while self.rfile.read1(4096):
-                pass
-        except OSError:
-            pass
+        ending = self.scenario in ("end", "expire", "drop") and not later
+        self.serve_tunnel(ending)
         self.close_connection = True
+
+    def serve_tunnel(self, ending):
+        """Reads the client's CSTP packets until it closes the connection,
+        and ends the tunnel after a second if `ending`. Passes no traffic."""
+        started, pending = time.monotonic(), b""
+        self.request.settimeout(0.2)
+        while True:
+            if ending and time.monotonic() - started >= 1:
+                ending = False
+                if self.scenario == "end":
+                    self.wfile.write(cstp(CSTP_DISCONNECT, b"\xb0FAKE-GATEWAY-ENDS-SESSION"))
+                    self.wfile.flush()
+                else:
+                    self.request.shutdown(socket.SHUT_RDWR)
+                    return
+            try:
+                chunk = self.request.recv(4096)
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            if not chunk:
+                return
+            pending = self.packets(pending + chunk)
+
+    def packets(self, pending):
+        """Logs each disconnect packet in `pending`, and returns what is left
+        of a packet that has not all arrived."""
+        while len(pending) >= 8:
+            if pending[:4] != b"STF\x01":
+                return b""
+            end = 8 + int.from_bytes(pending[4:6], "big")
+            if len(pending) < end:
+                break
+            if pending[6] == CSTP_DISCONNECT:
+                self.record(b"disconnect", method="CSTP")
+            pending = pending[end:]
+        return pending
+
+
+def listen_udp():
+    """The port DTLS is offered on. Whatever arrives there is logged."""
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+
+    def receive():
+        while True:
+            udp.recvfrom(65536)
+            log_line({"listener": "udp", "method": "DATAGRAM", "path": "", "body": ""})
+
+    threading.Thread(target=receive, daemon=True).start()
+    return udp.getsockname()[1]
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -293,6 +390,7 @@ def main(cert, key, scenario, log_path):
     open(log_path, "w", encoding="utf-8").close()
     servers = [listen("main", context), listen("other", context)]
     Gateway.other_port = servers[1].server_address[1]
+    Gateway.udp_port = listen_udp()
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     print("PORTS %d %d" % tuple(s.server_address[1] for s in servers), flush=True)
