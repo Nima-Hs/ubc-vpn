@@ -137,6 +137,22 @@ The other drives the app's window as well; `app/README.md` has its command (`pnp
 
 A program built with `dev-mode` must never be released or installed: it can be told to trust a pretend gateway and to apply no routes. A release builds each program by itself with `-p` and without the feature, and CI fails if the service or the client would be built with any feature that has `dev`, `fake` or `debug` in its name (`.github/workflows/ci.yml`).
 
+## The Windows installer
+
+The setup program is built with [electron-builder](https://www.electron.build/), pinned in `app/package.json` like the app's other packages. Its settings are in `app/electron-builder.yml`, and our additions to the setup script are in `packaging/windows/installer.nsh`. On Windows, with the app's packages installed as in Setup:
+
+```sh
+cd app
+pnpm package:win     # builds the app, then dist/ubc-vpn-setup-<version>-x64.exe
+pnpm check:package   # fuses, licence files, and no updater files
+```
+
+electron-builder downloads what it needs the first time: Electron, NSIS 3.12 (chosen by `toolsets.nsis` in the settings), 7-Zip and its own helpers. Each download is checked against a SHA-256 that the pinned version of electron-builder carries, so they change only when electron-builder is updated. They are kept in `%LOCALAPPDATA%\electron-builder\Cache` and `%LOCALAPPDATA%\electron\Cache`.
+
+Nothing is signed. For now the installer holds only the app: the service, the command-line client and the native libraries are added to it later.
+
+`.github/workflows/installer-windows.yml` builds it, installs it silently on a GitHub runner, checks what landed where and who can change it, removes it, and checks nothing is left. Those checks are in `packaging/windows/tests/installer.ps1`. They install for the whole machine, so they run only on the runner; do not run them on your own computer.
+
 ## Workflow
 
 Branch from `main`, commit using Conventional Commits, and open a pull request whose title follows the same format. The full conventions are in [workflow](.claude/rules/workflow.md), [dependencies](.claude/rules/dependencies.md) and [security](.claude/rules/security.md).

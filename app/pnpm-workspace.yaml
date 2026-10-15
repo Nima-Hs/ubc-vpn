@@ -6,5 +6,8 @@ packages:
 # Electron needs none: it fetches its binary, and checks it against the
 # checksums in its package, the first time it is run.
 allowBuilds:
+  # Pulled in by electron-builder for its Squirrel target, which is not used.
+  # Its install script only picks a 7-Zip binary for that target.
+  electron-winstaller: false
   # Checks that its platform binary is in place. A build tool, not shipped.
   esbuild: true

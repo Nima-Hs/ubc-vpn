@@ -1,0 +1,82 @@
+# How the app is packaged: `pnpm package:win` builds the Windows setup program
+# into dist/. The rules it follows are in docs/architecture.md, "What the
+# installers must do". macOS and Linux are added later.
+
+appId: io.github.nima-hs.ubc-vpn
+productName: UBC VPN
+copyright: Copyright (c) 2026 Nima Hashemi. Not made by or affiliated with UBC.
+
+directories:
+  output: dist
+  buildResources: build
+
+# The main process, the preload and the interface are each one bundled file
+# (electron-vite), so nothing from node_modules is needed at run time.
+files:
+  - out/**
+  - package.json
+  - "!node_modules"
+asar: true
+# No native Node modules, so there is nothing to rebuild.
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
+# No updater: no publish target, so no app-update.yml and no latest*.yml.
+publish: null
+
+# Checked against the built program by scripts/check-package.mjs.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
+  grantFileProtocolExtraPrivileges: false
+  loadBrowserProcessSpecificV8Snapshot: false
+
+# Licence texts, as separate files beside the app, outside the archive.
+# electron-builder adds Electron's own (LICENSE.electron.txt and
+# LICENSES.chromium.html) to the install folder by itself. The fonts' files
+# are not picked up by anything, so they are named here.
+extraResources:
+  - from: ../LICENSE-MIT
+    to: licenses/LICENSE-MIT
+  - from: ../LICENSE-APACHE
+    to: licenses/LICENSE-APACHE
+  - from: node_modules/@fontsource-variable/geist-mono/LICENSE
+    to: licenses/fonts/geist-mono/LICENSE
+  - from: node_modules/@fontsource-variable/instrument-sans/LICENSE
+    to: licenses/fonts/instrument-sans/LICENSE
+
+# The toolsets electron-builder downloads, each checked against a SHA-256 that
+# this version of electron-builder carries. nsis 1.2.1 is NSIS 3.12; the
+# default would be 3.0.4.1, from 2019, older than the fix for the elevated
+# uninstaller's temporary folder (CVE-2023-37378, fixed in 3.09).
+toolsets:
+  nsis: "1.2.1"
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # Nothing is signed for v0.1.0. If signing is added, DLLs stay out of it,
+  # so that wintun.dll keeps WireGuard's signature. electron-builder signs no
+  # DLL by default; "!.dll" keeps it that way if a default changes.
+  signExts: ["!.dll"]
+
+nsis:
+  oneClick: true
+  perMachine: true
+  # The folder is always Program Files\UBC VPN: the setup program refuses
+  # /D=, in packaging/windows/installer.nsh.
+  allowToChangeInstallationDirectory: false
+  runAfterFinish: false
+  createDesktopShortcut: false
+  # The user's settings and the app's profile stay after an uninstall.
+  deleteAppDataOnUninstall: false
+  # No .blockmap: that is only for an updater.
+  differentialPackage: false
+  include: ../packaging/windows/installer.nsh
+  artifactName: ubc-vpn-setup-${version}-${arch}.${ext}
