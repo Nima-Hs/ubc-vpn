@@ -3,8 +3,8 @@ import { isAbsolute, join, resolve } from "node:path";
 /**
  * Where the command-line client sits inside an installed app.
  *
- * PROVISIONAL. The installers do not exist yet; the packaging work settles
- * where the binary really goes, and this is the one place to change.
+ * The Windows setup program puts it in resources\bin, beside the service and
+ * the libraries both load (app/electron-builder.yml).
  */
 const BUNDLED_CLI = ["bin", "ubc-vpn"] as const;
 

@@ -8,6 +8,7 @@
       "!out-demo",
       "!test-results",
       "!dist",
+      "!stage",
       "!pnpm-lock.yaml"
     ]
   },

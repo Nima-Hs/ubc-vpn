@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Builds and gathers our part of what the Windows setup program installs
+# beside the app, for electron-builder to pick up (app/electron-builder.yml).
+# Run from Git Bash on Windows, from the repository root:
+#
+#   packaging/windows/stage.sh <native-folder> <native-run> <sources-archive>
+#
+# <native-folder> is an unpacked libopenconnect-windows-x64 artifact from a
+# Native library run on main; the workflow fetching it checks its commit is
+# on main (see CONTRIBUTING.md). <native-run> is that run's ID, recorded in
+# SOURCES.txt and the sources archive so a release says which run it shipped. <sources-archive> is where the exact source
+# of the bundled LGPL libraries is written, as a .tar.gz, for publishing
+# beside the setup program.
+#
+# It writes app/stage/:
+#   bin/          ubc-vpn.exe and ubc-vpn-service.exe, built in release mode
+#                 with the real engine, and the libraries from the artifact
+#   licenses/     their licence texts (native/), and SOURCES.txt
+#   policy.json   the policy the service installs (packaging/windows)
+#
+# Then packaging/windows/stage-redist.sh adds what is not ours to pass on by
+# itself: Wintun and Microsoft's Visual C++ runtime, with their licences,
+# and the licence page. Those two may only be distributed inside our setup
+# program, so they are never kept as a CI artifact; this part may be.
+#
+# It stops at anything unexpected: an artifact not marked shippable, a
+# library or source archive that differs from the artifact's manifest.json
+# or is not listed in it (check-native.mjs), or a set of libraries other
+# than native/windows/dlls.txt.
+set -euo pipefail
+
+if [ $# -ne 3 ]; then
+  echo "usage: $0 <native-folder> <native-run> <sources-archive>" >&2
+  exit 2
+fi
+native=$(cd "$1" && pwd)
+run=$2
+sources=$3
+[[ $run =~ ^[0-9]+$ ]] || {
+  echo "the native run ID must be a number: $run" >&2
+  exit 2
+}
+root=$(cd "$(dirname "$0")/../.." && pwd)
+stage="$root/app/stage"
+
+# The artifact: marked shippable by its own workflow's last job, and with
+# exactly the libraries native/windows/dlls.txt lists.
+shippable=$(node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>console.log(JSON.parse(s).shippable === true))' < "$native/manifest.json")
+[ "$shippable" = true ] || {
+  echo "$native is not marked shippable" >&2
+  exit 1
+}
+# Each library and source archive is the one its manifest records: the
+# manifest is what ties a shipped library to the source published for it.
+node "$root/packaging/windows/check-native.mjs" "$native"
+expected=$(sed -n 's/^\([A-Za-z0-9_.-]*\.dll\) .*/\1/p' "$root/native/windows/dlls.txt" | sort)
+found=$(cd "$native/bin" && ls -- *.dll | sort)
+if [ "$expected" != "$found" ]; then
+  echo "the artifact's libraries differ from native/windows/dlls.txt:" >&2
+  diff <(echo "$expected") <(echo "$found") >&2 || true
+  exit 1
+fi
+
+rm -rf "$stage"
+mkdir -p "$stage/bin" "$stage/licenses/native"
+
+# The two programs, each built by itself and with the real engine only: a
+# release must never contain dev mode or the fakes (see ci.yml).
+for package in ubc-vpn-service ubc-vpn-cli; do
+  UBC_VPN_NATIVE_DIR="$native" cargo build --locked --release -p "$package" --features real-engine
+done
+cp "$root/target/release/ubc-vpn-service.exe" "$root/target/release/ubc-vpn.exe" "$stage/bin/"
+
+cp "$native"/bin/*.dll "$stage/bin/"
+cp -R "$native/licenses/." "$stage/licenses/native/"
+
+cp "$root/packaging/windows/policy.json" "$stage/policy.json"
+
+# Where the LGPL libraries' source is: published beside the setup program.
+version=$(cd "$root" && node -p "require('./app/package.json').version")
+cat > "$stage/licenses/SOURCES.txt" <<EOF
+The exact source of the LGPL libraries installed with UBC VPN $version
+(libopenconnect-5.dll, libgnutls-30.dll, libnettle-9.dll, libhogweed-7.dll,
+libgmp-10.dll, libiconv-2.dll), with our patches and the build recipe, is
+published with each release of UBC VPN, beside its setup program, as
+
+  ubc-vpn-$version-windows-x64-sources.tar.gz
+
+at https://github.com/Nima-Hs/ubc-vpn/releases. It is built in the same
+run as the setup program. Their licence texts are in native/ in this folder.
+
+The libraries come from run $run of the Native library (Windows) workflow:
+https://github.com/Nima-Hs/ubc-vpn/actions/runs/$run
+EOF
+mkdir -p "$(dirname "$sources")"
+echo "Run $run of the Native library (Windows) workflow: https://github.com/Nima-Hs/ubc-vpn/actions/runs/$run" >"$native/native-run.txt"
+# --force-local: a Windows path such as D:... is a file, not a remote host.
+tar --force-local -czf "$sources" -C "$native" source licenses manifest.json build-packages.txt native-run.txt
+
+echo "Staged in $stage:"
+(cd "$stage" && find . -type f | sort)

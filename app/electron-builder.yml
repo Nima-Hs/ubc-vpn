@@ -66,6 +66,18 @@ toolsets:
   nsis: "1.2.1"
 
 win:
+  # What packaging/windows/stage.sh gathers: the service and the
+  # command-line client with the libraries, Wintun and the Visual C++ runtime
+  # they load, all in one folder (resources\bin), their licence texts, and
+  # the policy the service installs. Copied as they are; check-package and
+  # the installer workflow compare them with the stage byte for byte.
+  extraResources:
+    - from: stage/bin
+      to: bin
+    - from: stage/licenses
+      to: licenses
+    - from: stage/policy.json
+      to: policy.json
   target:
     - target: nsis
       arch: [x64]
@@ -75,8 +87,16 @@ win:
   signExts: ["!.dll"]
 
 nsis:
-  oneClick: true
+  # Not one-click: the assisted setup program, for its licence page, which
+  # the user must accept before anything is written (stage/license.txt,
+  # made by packaging/windows/stage.sh). With the two settings below it has
+  # no install-mode page and no folder page, and asks for administrator
+  # rights once, at start, as the one-click one did. A silent install (/S)
+  # shows no page; running one counts as accepting the licence. Updates skip
+  # the page, as it was accepted on the first install.
+  oneClick: false
   perMachine: true
+  license: stage/license.txt
   # The folder is always Program Files\UBC VPN: the setup program refuses
   # /D=, in packaging/windows/installer.nsh.
   allowToChangeInstallationDirectory: false

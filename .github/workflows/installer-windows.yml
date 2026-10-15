@@ -1,19 +1,22 @@
 name: Installer (Windows)
 
-# Builds the Windows setup program, installs it silently on the runner,
-# checks what landed where, removes it again, and checks nothing is left.
-# The rules come from docs/architecture.md, "What the installers must do".
+# Builds the Windows setup program with the service, the command-line
+# client and everything they load, installs it silently on a runner, checks
+# what landed where and that the service answers, installs it again over
+# itself, removes it, and checks nothing is left. The rules come from
+# docs/architecture.md, "What the installers must do".
 #
-# Nothing is signed. The installer is kept as an artifact for a few days, for
-# trying by hand; it is not a release.
+# Nothing is signed. The setup program and the source of its LGPL libraries
+# are kept as artifacts for a few days, for trying by hand; they are not a
+# release.
 
 on:
   pull_request:
     paths:
       - app/**
       - packaging/windows/**
-      - crates/service/**
-      - crates/cli/**
+      - crates/**
+      - native/windows/**
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/installer-windows.yml
@@ -22,15 +25,18 @@ on:
     paths:
       - app/**
       - packaging/windows/**
-      - crates/service/**
-      - crates/cli/**
+      - crates/**
+      - native/windows/**
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/installer-windows.yml
   workflow_dispatch:
 
+# `actions: read` is for finding the native library's run on main and
+# downloading its artifact, and for passing the stage between jobs.
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: installer-windows-${{ github.ref }}
@@ -44,7 +50,95 @@ defaults:
     shell: bash
 
 jobs:
+  # Our part of what the setup program installs: the service and the client,
+  # built with the real engine, the libraries from main's native build, their
+  # licences and the policy (packaging/windows/stage.sh). Wintun and the
+  # Visual C++ runtime are not in it: they may only be passed on inside the
+  # setup program, so the jobs below add them themselves.
+  stage:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # stage.sh checks every library and source archive against the
+      # artifact's manifest; this shows the check refuses changed, extra
+      # and missing files.
+      - name: Test the native artifact check
+        working-directory: .
+        run: packaging/windows/tests/check-native.sh
+
+      # Only a run started by a push to main counts, and the commit the
+      # library was built from must be on main (native/windows/README.md).
+      - name: Fetch the native library built on main
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow native-windows.yml --branch main \
+            --event push --status success --limit 1 --json databaseId,headSha \
+            --jq '.[0] | "\(.databaseId) \(.headSha)"')
+          read -r id sha <<<"$run"
+          [[ $id =~ ^[0-9]+$ ]]
+          echo "Run $id of native-windows.yml, at commit $sha"
+          echo "NATIVE_RUN=$id" >>"$GITHUB_ENV"
+          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name libopenconnect-windows-x64 --dir native
+          commit=$(jq -r '.recipe.commit // empty' native/manifest.json)
+          [[ $commit =~ ^[0-9a-f]{40}$ ]]
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
+          echo "The library was built from $commit; main is $status of it."
+          [ "$status" = ahead ] || [ "$status" = identical ]
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        working-directory: .
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        working-directory: .
+        timeout-minutes: 4
+        run: rustup toolchain install
+      - name: Stage the programs and libraries
+        working-directory: .
+        run: |
+          version=$(node -p "require('./app/package.json').version")
+          packaging/windows/stage.sh "$RUNNER_TEMP/native" "$NATIVE_RUN" "$RUNNER_TEMP/sources/ubc-vpn-$version-windows-x64-sources.tar.gz"
+
+      # The Visual C++ runtime the setup program bundles beside the programs:
+      # the pinned file from this runner's Visual Studio (vcruntime.sh stops
+      # if the image has moved), and the service starts with it beside it
+      # and loads that copy. Only in this workflow, so an image update stops
+      # packaging and nothing else.
+      - name: The bundled Visual C++ runtime
+        working-directory: .
+        run: |
+          packaging/windows/vcruntime.sh "$RUNNER_TEMP/vcruntime"
+          UBC_VPN_TEST_VCRUNTIME_DIR="$RUNNER_TEMP/vcruntime" cargo test --locked -p ubc-vpn-service --test binary the_service_starts_with_the_bundled_runtime_beside_it -- --nocapture | tee "$RUNNER_TEMP/vcruntime.log"
+          grep -q "RAN: bundled runtime" "$RUNNER_TEMP/vcruntime.log"
+
+      # For the jobs below only; nothing in it is ours to hold back.
+      - name: Pass the stage on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-stage
+          path: app/stage
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep the source of the LGPL libraries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-windows-x64-sources
+          path: ${{ runner.temp }}/sources/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
   installer:
+    needs: stage
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -62,43 +156,45 @@ jobs:
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-
-      # The Visual C++ runtime the installer bundles beside the service and
-      # the client: the pinned file from this runner's Visual Studio
-      # (packaging/windows/vcruntime.sh stops if the image has moved), and the
-      # service starts with it beside it and loads that copy. Only here, so
-      # an image update stops packaging and nothing else.
-      - run: rustup toolchain install
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-stage
+          path: app/stage
+      - name: Add Wintun, the Visual C++ runtime and the licence page
         working-directory: .
-      - name: The bundled Visual C++ runtime
-        working-directory: .
-        run: |
-          packaging/windows/vcruntime.sh "$RUNNER_TEMP/vcruntime"
-          UBC_VPN_TEST_VCRUNTIME_DIR="$RUNNER_TEMP/vcruntime" cargo test --locked -p ubc-vpn-service --test binary the_service_starts_with_the_bundled_runtime_beside_it -- --nocapture | tee "$RUNNER_TEMP/vcruntime.log"
-          grep -q "RAN: bundled runtime" "$RUNNER_TEMP/vcruntime.log"
+        run: packaging/windows/stage-redist.sh
 
-      # electron-builder downloads Electron, NSIS and its other tools itself,
-      # each checked against a checksum this version of it carries.
+      # electron-builder downloads NSIS and its other tools itself, each
+      # checked against a checksum this version of it carries.
       - name: Build the setup program
         run: pnpm package:win
       - name: The app is fused, licensed and has no updater
         run: pnpm check:package
 
       - name: The setup program refuses another folder
-        run: pwsh -NoProfile -File "$CHECK" refuse-folder dist/ubc-vpn-setup-*.exe
+        run: pwsh -NoProfile -File "$CHECK" refuse-folder dist/ubc-vpn-setup-*-x64.exe
+      - name: The setup program refuses a folder that holds another product
+        run: pwsh -NoProfile -File "$CHECK" foreign-folder dist/ubc-vpn-setup-*-x64.exe
+      - name: Declining the licence page leaves nothing behind
+        run: pwsh -NoProfile -File "$CHECK" decline dist/ubc-vpn-setup-*-x64.exe
       - name: Install
-        run: pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*.exe
-      - name: Every file is installed as built
-        run: pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
+        run: pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
+      - name: Every file is installed as built and staged
+        run: |
+          pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
+          pwsh -NoProfile -File "$CHECK" as-staged stage
       - name: Only administrators can change the installed app
         run: pwsh -NoProfile -File "$CHECK" who-can-change
       - name: The installed app is fused, licensed and has no updater
         run: node scripts/check-package.mjs "C:/Program Files/UBC VPN"
+      - name: The service is installed, running and answers a standard user
+        run: |
+          pwsh -NoProfile -File "$CHECK" service
+          pwsh -NoProfile -File "$CHECK" status-as-user
+          pwsh -NoProfile -File "$CHECK" remember-state "$RUNNER_TEMP/state.sha256"
 
       # The control for this test is the demo build, run by the Electron in
       # node_modules, which keeps the debugging switch.
-      - name: Download Electron
-        run: node node_modules/electron/install.js
       - name: The installed app cannot be debugged from outside
         env:
           UBC_VPN_PACKAGED_APP: C:\Program Files\UBC VPN\UBC VPN.exe
@@ -109,12 +205,16 @@ jobs:
           # The test skips itself when it is not given the program; here it must run.
           grep -q "1 passed" "$RUNNER_TEMP/debugging.txt"
 
-      # Installing over an existing install is how an update arrives.
+      # Installing over an existing install is how an update arrives: the
+      # old service is stopped and removed with its data kept, and the new
+      # one registered; the owner in state.json survives.
       - name: Install again over it
         run: |
-          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*.exe
+          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
           pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
           pwsh -NoProfile -File "$CHECK" who-can-change
+          pwsh -NoProfile -File "$CHECK" service
+          pwsh -NoProfile -File "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
       - name: Uninstall
         run: pwsh -NoProfile -File "$CHECK" uninstall
       - name: Nothing is left but the user's data
@@ -124,25 +224,36 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ubc-vpn-windows-x64-setup-unsigned
-          path: app/dist/ubc-vpn-setup-*.exe
+          path: app/dist/ubc-vpn-setup-*-x64.exe
           if-no-files-found: error
           retention-days: 7
 
-  # The setup program built with one folder step made to fail
-  # (packaging/windows/tests/fail-step.nsh), one step per leg, in parallel
-  # with the job above. Each must stop with its own exit code (3) and leave
-  # nothing behind, so a failure never leaves an install owned by whoever ran
-  # it. These builds have the test switch and only exist on this runner:
-  # nothing from here is uploaded, and the setup program the job above builds
-  # and keeps never has it.
+  # The setup program built with one step made to fail
+  # (packaging/windows/tests/fail-step.nsh), one step per leg, beside the
+  # job above. Each must stop with that step's exit code (3 for the folder
+  # steps, 4 for the service and the step after it, once the service is
+  # registered and running) and leave nothing behind: no files, no service,
+  # no data folder, no registry entries. The update leg fails the same way
+  # over an installed copy that has an owner: the data folder, and the owner
+  # in it, must stay. These builds have the test switch
+  # and only exist on their runner: nothing from here is uploaded, and the
+  # setup program the job above builds and keeps never has it.
   failing-setup:
-    name: failing setup (${{ matrix.step }})
+    name: failing setup (${{ matrix.step }}${{ matrix.update && ', update' || '' }})
+    needs: stage
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        step: [owner, reset, "access list", contents]
+        include:
+          - { step: owner, code: 3 }
+          - { step: reset, code: 3 }
+          - { step: "access list", code: 3 }
+          - { step: contents, code: 3 }
+          - { step: service, code: 4 }
+          - { step: "after service", code: 4 }
+          - { step: "after service", code: 4, update: true }
     env:
       CHECK: ../packaging/windows/tests/installer.ps1
     steps:
@@ -158,6 +269,23 @@ jobs:
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-stage
+          path: app/stage
+      - name: Add Wintun, the Visual C++ runtime and the licence page
+        working-directory: .
+        run: packaging/windows/stage-redist.sh
+      # The update leg's starting point: the ordinary setup program
+      # installed, with an owner in state.json.
+      - name: Install the ordinary setup program first
+        if: matrix.update
+        run: |
+          pnpm package:win
+          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
+          pwsh -NoProfile -File "$CHECK" service
+          pwsh -NoProfile -File "$CHECK" status-as-user
+          pwsh -NoProfile -File "$CHECK" remember-state "$RUNNER_TEMP/state.sha256"
       - name: Build the setup program with the step made to fail
         env:
           UBC_VPN_TEST_FAIL_STEP: ${{ matrix.step }}
@@ -166,4 +294,10 @@ jobs:
           pnpm build
           pnpm exec electron-builder --win --publish never -c.nsis.include=../packaging/windows/tests/fail-step.nsh -c.directories.output=dist/fail
       - name: It stops with its own exit code and leaves nothing behind
-        run: pwsh -NoProfile -File "$CHECK" install-fails dist/fail/ubc-vpn-setup-*.exe
+        if: ${{ !matrix.update }}
+        run: pwsh -NoProfile -File "$CHECK" install-fails dist/fail/ubc-vpn-setup-*-x64.exe ${{ matrix.code }}
+      - name: It stops with its own exit code, leaves nothing behind but keeps the owner
+        if: matrix.update
+        run: |
+          pwsh -NoProfile -File "$CHECK" update-fails dist/fail/ubc-vpn-setup-*-x64.exe ${{ matrix.code }}
+          pwsh -NoProfile -File "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
