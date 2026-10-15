@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use ubc_vpn_engine::TunnelEngine;
 use ubc_vpn_platform::{Platform, StateDir};
+use ubc_vpn_service::Service;
 use ubc_vpn_service::args::{self, Command, Run};
-use ubc_vpn_service::{Service, Timeouts};
 
 type Parts = (Platform, StateDir, Arc<dyn TunnelEngine>);
 
@@ -88,7 +88,7 @@ fn program_folder() -> Result<ubc_vpn_platform::program::ProgramFolder, String> 
 fn start(mode: Run) -> Result<Service, String> {
     let (platform, state, engine) = parts(mode)?;
     let dev_mode = mode != Run::Installed;
-    Service::start_in(platform, state, engine, Timeouts::default(), dev_mode)
+    Service::start_in(platform, state, engine, args::timeouts(mode), dev_mode)
 }
 
 fn parts(mode: Run) -> Result<Parts, String> {

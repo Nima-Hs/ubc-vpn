@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::protocol::{
@@ -53,6 +53,11 @@ pub struct Timeouts {
     /// closed. Events are written by a thread of the connection's own, so a
     /// client that stops reading delays nobody but itself.
     pub write: Duration,
+    /// How long the service waits at start for its channel's name while
+    /// another program holds it. Any local user can create the name while
+    /// it is free, as during an update or a restart; past this the service
+    /// gives up.
+    pub claim: Duration,
 }
 
 impl Default for Timeouts {
@@ -60,6 +65,41 @@ impl Default for Timeouts {
         Self {
             stranger: Duration::from_secs(5),
             write: Duration::from_secs(5),
+            claim: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Claims the channel's name for the service's own listener. While another
+/// program holds the name, which any local user can create while it is
+/// free, it tries again with a growing pause, for `limit` at most, and says
+/// once that the name was held. It only ever creates a channel of its own:
+/// creating one is exclusive, so it never uses or connects to another.
+fn claim(platform: &Platform, limit: Duration, logs: &Logs) -> Result<Box<dyn Listener>, String> {
+    let name = &platform.paths.channel_name;
+    let until = Instant::now() + limit;
+    let mut pause = Duration::from_millis(50);
+    let mut said = false;
+    loop {
+        match platform.transport.listen(name) {
+            Ok(listener) => return Ok(listener),
+            Err(Error::AlreadyExists) if Instant::now() < until => {
+                if !said {
+                    let line = "the channel's name is held by another program; waiting for it";
+                    logs.warn(line);
+                    said = true;
+                }
+                thread::sleep(pause.min(until.saturating_duration_since(Instant::now())));
+                pause = (pause * 2).min(Duration::from_secs(1));
+            }
+            Err(Error::AlreadyExists) => {
+                return Err(
+                    "The channel's name is held by another program, which kept it \
+                     too long. Restart the computer, then start the service again."
+                        .to_string(),
+                );
+            }
+            Err(e) => return Err(format!("The channel could not be opened: {e}.")),
         }
     }
 }
@@ -174,8 +214,7 @@ impl Service {
             logs.error(&format!("start-up cleanup failed: {error}"));
         }
         let owner = owner::load(&state)?;
-        let listener = platform.transport.listen(&platform.paths.channel_name);
-        let listener = listener.map_err(|e| format!("The channel could not be opened: {e}."))?;
+        let listener = claim(&platform, timeouts.claim, &logs)?;
         if let Some(owner) = &owner {
             let narrowed = listener.restrict_to(owner);
             narrowed.map_err(|e| format!("The channel could not be kept to the owner: {e}."))?;
