@@ -2,6 +2,7 @@
 //! that records and can be made to misbehave, and an OS that can panic.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -188,6 +189,8 @@ pub struct Faulty {
     panics_at: Mutex<Option<Op>>,
     /// Each subscription's sender, or `None` once its stopping end is dropped.
     subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
+    /// When set, a subscription keeps delivering after its end is dropped.
+    lingering: Arc<AtomicBool>,
 }
 
 impl Faulty {
@@ -196,11 +199,19 @@ impl Faulty {
             fake,
             panics_at: Mutex::default(),
             subscriptions: Arc::default(),
+            lingering: Arc::default(),
         }
     }
 
     pub fn panic_at(&self, op: Op) {
         *self.panics_at.lock().unwrap() = Some(op);
+    }
+
+    /// Makes a subscription whose end is dropped keep delivering, as one
+    /// does on a real system for events already queued when it ended. For
+    /// tests of what the service does with such a late event.
+    pub fn keep_delivering_after_stop(&self) {
+        self.lingering.store(true, Ordering::SeqCst);
     }
 
     /// How many subscriptions were made, in order.
@@ -292,10 +303,14 @@ impl Dns for Faulty {
 struct Stop {
     subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
     n: usize,
+    lingering: Arc<AtomicBool>,
 }
 
 impl Drop for Stop {
     fn drop(&mut self) {
+        if self.lingering.load(Ordering::SeqCst) {
+            return;
+        }
         if let Ok(mut subscriptions) = self.subscriptions.lock() {
             subscriptions[self.n] = None;
         }
@@ -313,6 +328,7 @@ impl NetworkEvents for Faulty {
         let stop = Stop {
             subscriptions: self.subscriptions.clone(),
             n: subscriptions.len() - 1,
+            lingering: self.lingering.clone(),
         };
         Ok(Subscription::new(receiver, stop))
     }

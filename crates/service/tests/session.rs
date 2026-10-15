@@ -964,6 +964,8 @@ fn sleep_and_wake_leave_the_connection_alone() {
 fn a_change_from_an_earlier_connection_leaves_a_later_one_alone() {
     let rig = rig();
     rig.spy.keep_sessions();
+    // An event already queued when the connection ended still arrives.
+    rig.os.keep_delivering_after_stop();
     let mut alice = rig.owner();
     connected(&mut alice);
     assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
@@ -971,8 +973,12 @@ fn a_change_from_an_earlier_connection_leaves_a_later_one_alone() {
     assert_eq!(alice.state(), ConnState::Disconnected);
     connected(&mut alice);
     assert_eq!(rig.os.subscriptions(), 2);
-    // The first subscription may already be gone, which is as good.
-    let _ = rig.os.send_to(0, NetworkEvent::PhysicalChanged);
+    // The first subscription's late event reaches the service, which
+    // ignores it, and its forwarder stops.
+    assert!(rig.os.send_to(0, NetworkEvent::PhysicalChanged));
+    soon("the old forwarder stops", || {
+        !rig.os.send_to(0, NetworkEvent::Sleeping)
+    });
     assert!(alice.is_quiet(), "the second connection stays up");
     assert!(rig.engine.tunnel_is_open());
     // Its own subscription still ends it.
@@ -988,6 +994,8 @@ fn a_change_from_an_earlier_connection_leaves_a_later_one_alone() {
 #[test]
 fn a_change_from_a_failed_attempt_leaves_a_later_connection_alone() {
     let rig = rig();
+    // An event already queued when the attempt ended still arrives.
+    rig.os.keep_delivering_after_stop();
     let mut alice = rig.owner();
     rig.engine.set_reachable(false);
     let state = alice.connect_ends(good());
@@ -998,7 +1006,10 @@ fn a_change_from_a_failed_attempt_leaves_a_later_connection_alone() {
     rig.engine.set_reachable(true);
     connected(&mut alice);
     assert_eq!(rig.os.subscriptions(), 2);
-    let _ = rig.os.send_to(0, NetworkEvent::PhysicalChanged);
+    assert!(rig.os.send_to(0, NetworkEvent::PhysicalChanged));
+    soon("the old forwarder stops", || {
+        !rig.os.send_to(0, NetworkEvent::Sleeping)
+    });
     assert!(alice.is_quiet(), "the later connection stays up");
     assert!(rig.engine.tunnel_is_open());
     assert!(rig.os.send_to(1, NetworkEvent::PhysicalChanged));
