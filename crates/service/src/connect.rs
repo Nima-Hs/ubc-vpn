@@ -4,10 +4,10 @@
 use std::sync::mpsc;
 
 use std::net::Ipv4Addr;
-use ubc_vpn_core::protocol::{ConnectParams, ErrorCode, LogLevel};
+use ubc_vpn_core::protocol::{CERTIFICATE_CHANGED, ConnectParams, ErrorCode, LogLevel};
 use ubc_vpn_core::routes::{Ipv4Net, LocalConflict, LocalNetworks, check_against_local};
 use ubc_vpn_core::state::TunnelInfo;
-use ubc_vpn_engine::{Assigned, Cancel, Session};
+use ubc_vpn_engine::{Assigned, Cancel, Session, TunnelError};
 
 use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns, TUNNEL_MTU};
 
@@ -73,7 +73,13 @@ impl Machine {
         // The one copy left is in the log sink the engine was given, which
         // needs it to keep it out of the log for as long as the tunnel runs.
         drop(session);
-        let tunnel = opened.map_err(|e| (ErrorCode::from(e), e.to_string()))?;
+        // A key the policy does not pin almost always means the gateway's
+        // certificate was replaced: the user is told to update.
+        let why = |e: TunnelError| match e {
+            TunnelError::PinMismatch => (ErrorCode::PinMismatch, CERTIFICATE_CHANGED.to_string()),
+            e => (ErrorCode::from(e), e.to_string()),
+        };
+        let tunnel = opened.map_err(why)?;
         let assigned = tunnel.assigned().clone();
         // Recorded before anything else can fail, so teardown closes it.
         self.applied.tunnel = Some(tunnel);

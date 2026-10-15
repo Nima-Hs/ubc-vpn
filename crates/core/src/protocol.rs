@@ -639,6 +639,15 @@ pub struct ErrorInfo {
     pub message: String,
 }
 
+/// What the user is told when the gateway presents a key that matches none
+/// of the pins, at login or when the tunnel opens. Nothing was sent to it.
+/// The usual cause is that the gateway's certificate was replaced (UBC's
+/// current one expires on 2027-04-22), and the fix is a release of UBC VPN
+/// whose policy pins the new key. It holds none of the words that make the
+/// log hide the rest of a line.
+pub const CERTIFICATE_CHANGED: &str = "The VPN server's certificate has changed, so UBC VPN \
+    did not send it anything. Update UBC VPN to the latest version, then connect again.";
+
 /// The kinds of failure a client can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -770,6 +779,18 @@ pub fn peek_protocol_version(line: &str) -> Result<u32, FrameError> {
 mod tests {
     use super::*;
     use crate::routes::Ipv4Net;
+
+    // When the gateway's certificate is replaced, every connect fails until
+    // the user updates. The sentence says so, and reaches the log whole.
+    #[test]
+    fn a_changed_certificate_tells_the_user_to_update() {
+        assert!(CERTIFICATE_CHANGED.contains("certificate has changed"));
+        assert!(CERTIFICATE_CHANGED.contains("Update UBC VPN"));
+        assert_eq!(
+            crate::redact::redact_line(CERTIFICATE_CHANGED),
+            CERTIFICATE_CHANGED
+        );
+    }
 
     fn connect() -> Request {
         Request {

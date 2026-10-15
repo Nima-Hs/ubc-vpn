@@ -145,6 +145,10 @@ fn the_gateway_comes_only_from_the_policy() {
     other.start().unwrap();
     let state = other.owner().connect_ends(good());
     assert!(failed_with(&state, ErrorCode::PinMismatch), "{state:?}");
+    let ConnState::Failed { message, .. } = &state else {
+        unreachable!()
+    };
+    assert_eq!(message, ubc_vpn_core::protocol::CERTIFICATE_CHANGED);
     assert!(other.is_clean());
 }
 
