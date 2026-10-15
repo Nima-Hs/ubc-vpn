@@ -14,7 +14,9 @@ use ubc_vpn_platform::fake::Op;
 use ubc_vpn_service::Service;
 
 use crate::client::Limits;
-use crate::connect::{Ask, BUSY, CANCELLED, Ended, LOGIN_REFUSED, connect, disconnect};
+use crate::connect::{
+    Ask, BUSY, CANCELLED, CHECK_USERNAME, Ended, LOGIN_REFUSED, connect, disconnect,
+};
 use crate::interrupt::Progress;
 use crate::tests::Rig;
 use crate::{FAILED, NOT_RUNNING};
@@ -594,10 +596,10 @@ fn the_logins_lines_follow_the_connect_request() {
     let (code, _, err) = scene.connect(&mut typist);
     service.join().unwrap();
     assert_eq!(code, LOGIN_REFUSED, "{err}");
-    // Two answers and the cookie, each in a line of its own, then how the
-    // login ended.
+    // Two lines of progress, two answers and the cookie, each in a line of
+    // its own, then how the login ended.
     let order = [
-        "status", "connect", "add_log", "add_log", "add_log", "add_log",
+        "status", "connect", "add_log", "add_log", "add_log", "add_log", "add_log", "add_log",
     ];
     assert_eq!(*asked.lock().unwrap(), order);
 }
@@ -798,7 +800,8 @@ fn a_username_that_could_mislead_is_used_but_not_kept() {
 }
 
 // Why a login failed is in the service's log afterwards, where the app can
-// show it: the same line as was printed.
+// show it: the same line as was printed, with the progress before it, which
+// was not printed.
 #[test]
 fn what_a_failed_login_wrote_is_handed_to_the_service() {
     let scene = Scene::usual();
@@ -811,7 +814,39 @@ fn what_a_failed_login_wrote_is_handed_to_the_service() {
     );
     let logs = scene.service.as_ref().unwrap().login_lines();
     let outcome = "login failed: gateway_unreachable";
-    assert_eq!(logs, ["Failed to connect to the gateway", outcome]);
+    let progress = "Connecting to vpn.example.test";
+    assert_eq!(
+        logs,
+        [progress, "Failed to connect to the gateway", outcome]
+    );
+    assert!(!err.contains(progress), "{err}");
+}
+
+// A gateway that asks for the username again before any password refused
+// the username: the user is told to check its form, with the form UBC's
+// gateway expects, and the saved username, which was the one refused, is
+// forgotten. All names are made up.
+#[test]
+fn a_refused_username_is_to_be_checked_and_is_forgotten() {
+    let mut scene = Scene::usual();
+    let mut script = Script::new(pin());
+    script.form.truncate(1);
+    script.form[0].1 = Secret::new("alice.ece@app");
+    scene.gateway = FakeEngine::new(script);
+    let (code, _, err) = scene.connect(&mut Typist::default());
+    assert_eq!(code, LOGIN_REFUSED, "{err}");
+    assert!(err.contains(CHECK_USERNAME), "{err}");
+    assert!(CHECK_USERNAME.contains("CWL.dept@method"));
+    assert!(
+        saved(&scene).get("username").is_none(),
+        "{}",
+        settings_text(&scene)
+    );
+    let logs = scene.service.as_ref().unwrap().login_lines();
+    assert_eq!(
+        logs.last().map(String::as_str),
+        Some("login failed: refused by the gateway, check the name's form")
+    );
 }
 
 // How a login ended is in the log whether or not the library printed
@@ -825,9 +860,16 @@ fn every_finished_login_says_how_it_ended() {
     let mut wrong = Typist::typing(&[Some("wrong-password-0000"), Some(CODE), Some(PASSWORD)]);
     assert_eq!(scene.connect(&mut wrong).0, LOGIN_REFUSED);
     let logs = scene.service.as_ref().unwrap().login_lines();
+    let progress = "Connecting to vpn.example.test";
     assert_eq!(
         logs,
-        ["login succeeded", "login failed: refused by the gateway"]
+        [
+            progress,
+            "Login succeeded",
+            "login succeeded",
+            progress,
+            "login failed: refused by the gateway"
+        ]
     );
 }
 
@@ -874,10 +916,11 @@ fn only_the_last_lines_are_handed_over_and_none_is_cut() {
     let mut client =
         crate::client::Client::connect_within(transport, name, ClientKind::Cli, brief()).unwrap();
     client.claim_if_unowned().unwrap();
-    let mut said: Vec<String> = (0..MAX_ADDED_LOG_LINES + 3)
-        .map(|n| format!("line {n}"))
+    let error = ubc_vpn_core::protocol::LogLevel::Error;
+    let mut said: Vec<_> = (0..MAX_ADDED_LOG_LINES + 3)
+        .map(|n| (error, format!("line {n}")))
         .collect();
-    said.extend(["  ".to_string(), "x".repeat(600)]);
+    said.extend([(error, "  ".to_string()), (error, "x".repeat(600))]);
     let outcome = (
         ubc_vpn_core::protocol::LogLevel::Info,
         "made-up outcome".to_string(),

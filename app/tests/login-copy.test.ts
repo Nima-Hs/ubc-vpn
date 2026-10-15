@@ -15,6 +15,7 @@ import { createDemoLogin, DEMO_LOGIN_SCENARIOS } from "../src/main/demo/demo-log
 const KINDS: PromptKind[] = ["username", "password", "code", "text"];
 const CODES: LoginErrorCode[] = [
     "wrong_password",
+    "check_username",
     "pin_mismatch",
     "cancelled",
     "gateway_unreachable",
@@ -187,7 +188,7 @@ describe("the demo login", () => {
         }
         expect(
             DEMO_LOGIN_SCENARIOS.filter((name) => name.startsWith("login-failed-")),
-        ).toHaveLength(8);
+        ).toHaveLength(9);
         for (const name of ["disconnected", "__proto__", "constructor"]) {
             login.setScenario(name);
             expect(seen.at(-1)).toEqual({ phase: "idle" });

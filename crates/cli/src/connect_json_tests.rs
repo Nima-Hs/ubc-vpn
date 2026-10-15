@@ -308,6 +308,15 @@ fn every_failure_has_its_code() {
     let asked = fails(&scene, wrong, "wrong_password", LOGIN_REFUSED, "rejected");
     assert_eq!(asked, 2, "nothing is asked twice");
 
+    // A username refused before any password: check its form.
+    let mut scene = Scene::usual();
+    let mut script = Script::new(pin());
+    script.form.truncate(1);
+    script.form[0].1 = Secret::new("alice.ece@app");
+    scene.gateway = FakeEngine::new(script);
+    let said = "CWL.dept@method";
+    assert_eq!(fails(&scene, &[], "check_username", LOGIN_REFUSED, said), 0);
+
     let scene = Scene::usual();
     scene.gateway.set_reachable(false);
     let said = "could not be reached";

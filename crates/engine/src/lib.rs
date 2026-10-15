@@ -226,7 +226,13 @@
 //! - Treat a form shown again with its error set as a rejection: ask again
 //!   through [`Prompts::ask`], which stops the login, and never answer from
 //!   memory. Fill each field from one `ask` call and keep no copy of the
-//!   answer.
+//!   answer. When that stops the login, pass the gateway's own words on the
+//!   form to [`LogSink::log`] as an error: they say what was wrong.
+//! - During a login, pass the library's error lines on as progress, not as
+//!   errors: many do not end the login (an empty reply to its first probe is
+//!   one), and the login's result says what failed. An empty reply to the
+//!   answers, or the username asked again before any password, is
+//!   [`LoginError::CheckUsername`].
 //! - Answer each field of a form once. Setting a field again leaves the
 //!   library's earlier copy of the answer in memory.
 //! - When the library refuses to fill a field, end the login with
@@ -455,6 +461,10 @@ pub enum LoginError {
     /// shows the form again and does not say which answer was wrong. Use
     /// [`Prompts::asked`] to tell whether a code was involved.
     WrongPassword,
+    /// The gateway did not take the login in a way that points at the
+    /// username: it sent an empty reply to the answers, or asked for the
+    /// username again before any password. Nothing was sent twice.
+    CheckUsername,
     /// The gateway's key matched none of the pins. Nothing was sent to it.
     PinMismatch,
     /// The caller cancelled.
@@ -469,6 +479,9 @@ impl fmt::Display for LoginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::WrongPassword => "The gateway rejected the username, password or code.",
+            Self::CheckUsername => {
+                "The gateway did not take the login. Check that the username is in the form it expects."
+            }
             Self::PinMismatch => {
                 "The gateway's certificate is not the expected one. Nothing was sent to it."
             }
@@ -485,6 +498,7 @@ impl From<LoginError> for LoginErrorCode {
     fn from(e: LoginError) -> Self {
         match e {
             LoginError::WrongPassword => Self::WrongPassword,
+            LoginError::CheckUsername => Self::CheckUsername,
             LoginError::PinMismatch => Self::PinMismatch,
             LoginError::Cancelled => Self::Cancelled,
             LoginError::GatewayUnreachable => Self::GatewayUnreachable,

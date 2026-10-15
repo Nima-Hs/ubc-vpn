@@ -305,6 +305,14 @@ const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
         body: "UBC did not accept the username, the password or the code, and does not say which. Check them, then try again.",
         retry: true,
     },
+    // UBC's gateway reads the way to confirm from the username, so one in
+    // another form is refused before any password is judged. The example is
+    // made up.
+    check_username: {
+        title: "Check your username",
+        body: "UBC did not take the login. Check your username: it is your CWL username, your department and the way to confirm, as CWL.dept@method, for example user.ece@app.",
+        retry: true,
+    },
     pin_mismatch: FAILURES.pin_mismatch,
     cancelled: {
         title: "Login cancelled",
