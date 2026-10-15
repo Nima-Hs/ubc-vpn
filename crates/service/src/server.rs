@@ -474,12 +474,7 @@ impl Shared {
                 Ok(ResponseBody::Diagnostics(Box::new(report)))
             }
             RequestBody::AddLog(params) => accepted(self.add_log(&params, added)),
-            // Part of protocol 4; the service learns to apply it next.
-            RequestBody::UpdateRoutes(_) => Err(error(
-                ErrorCode::BadRequest,
-                "This service cannot change the routes of a live connection yet. \
-                 Disconnect and connect again to use the saved routes.",
-            )),
+            RequestBody::UpdateRoutes(routes) => accepted(self.session.update_routes(routes)),
         };
         let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
         (answer, !stranger, admitted)

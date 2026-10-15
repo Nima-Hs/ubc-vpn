@@ -78,6 +78,10 @@ fn a_non_owner_is_refused_and_disconnected() {
             level: LogLevel::Info,
             text: "made up".to_string(),
         }),
+        RequestBody::UpdateRoutes(ubc_vpn_core::routes::RouteSet {
+            subnets: vec!["10.255.0.0/24".parse().unwrap()],
+            dns_domains: Vec::new(),
+        }),
     ];
     for (n, body) in requests.into_iter().enumerate() {
         let mut stranger = rig.peer(&format!("stranger-{n}"));

@@ -28,6 +28,9 @@ mod hosts_tests;
 mod interrupt;
 #[cfg(test)]
 mod interrupt_tests;
+mod live;
+#[cfg(test)]
+mod live_tests;
 mod logs;
 mod settings;
 mod settings_lock;
@@ -69,8 +72,11 @@ Commands:
 
 The first user to run connect, disconnect or status becomes the owner of the
 service, and from then on only that user can control UBC VPN on this computer.
-The bridge claims nothing itself; it leaves that to the app. The settings
-commands do not talk to the service at all.
+The bridge claims nothing itself; it leaves that to the app. Of the settings
+commands only set-routes talks to the service, and it claims nothing: when
+the VPN is connected it asks the service to apply the routes it has just
+saved, and its reply says whether they were applied, refused, or are used
+at the next connect. A connection that cannot take them is closed.
 
 connect asks for the password and the one-time code in the terminal. They are
 never taken from an argument, a variable or a file. Ctrl-C stops a

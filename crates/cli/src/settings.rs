@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Map, Value};
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode, encode};
+use ubc_vpn_core::routes::RouteSet;
 use ubc_vpn_core::settings::Settings;
 use ubc_vpn_core::settings_cli::{
     ResetReply, RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView,
@@ -22,6 +23,7 @@ use ubc_vpn_core::settings_cli::{
 };
 use ubc_vpn_platform::{Paths, Platform};
 
+use crate::live;
 use crate::settings_lock::change;
 
 const SETTINGS: &str = "settings.json";
@@ -76,8 +78,25 @@ pub fn run(
 ) -> u8 {
     // A system this program cannot place its files on has no settings to
     // read and nowhere to save them.
-    let paths = platform().ok().map(|platform| platform.paths);
-    let answered = answer(command, paths.as_ref(), input);
+    let platform = platform().ok();
+    let paths = platform.as_ref().map(|platform| &platform.paths);
+    let answered = answer(command, paths, input).map(|(line, saved)| {
+        // Routes just saved go to the live connection too, once the lock
+        // on the settings is let go: the service may take a moment.
+        match (saved, &platform) {
+            (Some(routes), Some(platform)) => {
+                let live = live::apply(platform, &routes, crate::client::Limits::default());
+                let reply = RoutesReply::Ok {
+                    routes,
+                    live: Some(live),
+                };
+                // The routes fit in a line before; a reply that would not
+                // with what the service said is given without it.
+                encode(&reply).unwrap_or(line)
+            }
+            _ => line,
+        }
+    });
     let failed = answered.is_err();
     let about_files = [
         Err(SettingsFailureCode::Unreadable),
@@ -124,7 +143,7 @@ fn answer(
     command: Command,
     paths: Option<&Paths>,
     input: &mut dyn BufRead,
-) -> Result<String, SettingsFailureCode> {
+) -> Result<(String, Option<RouteSet>), SettingsFailureCode> {
     let policy = paths.and_then(|paths| policy(&paths.policy_dir));
     let settings_dir = paths.map(|paths| paths.settings_dir.as_path());
     let unencodable = |_| SettingsFailureCode::Unreadable;
@@ -134,18 +153,23 @@ fn answer(
             Some(text) => understood(&text)?,
             None => Settings::default(),
         };
-        return encode(&SettingsView::new(settings, policy.as_ref())).map_err(unencodable);
+        let line = encode(&SettingsView::new(settings, policy.as_ref())).map_err(unencodable)?;
+        return Ok((line, None));
     }
     if let Command::Reset { force } = command {
         let dir = settings_dir.ok_or(SettingsFailureCode::Unwritable)?;
-        return encode(&reset(dir, policy.as_ref(), force)?).map_err(unencodable);
+        let line = encode(&reset(dir, policy.as_ref(), force)?).map_err(unencodable)?;
+        return Ok((line, None));
     }
     let typed = typed(input)?;
     // Without a readable policy everything but the allow-list is checked.
     let allowed = policy.as_ref().and_then(|p| p.allowed_routes.as_deref());
     let routes = match check_input(&typed, allowed) {
         Ok(routes) => routes,
-        Err(problems) => return encode(&RoutesReply::Invalid { problems }).map_err(unencodable),
+        Err(problems) => {
+            let line = encode(&RoutesReply::Invalid { problems }).map_err(unencodable)?;
+            return Ok((line, None));
+        }
     };
     // The reply repeats the routes and so is a little longer than the input,
     // and what `get` prints is longer again. Routes whose reply, or whose
@@ -160,6 +184,7 @@ fn answer(
     let too_long = |_| SettingsFailureCode::BadInput;
     let line = encode(&RoutesReply::Ok {
         routes: routes.clone(),
+        live: None,
     })
     .map_err(too_long)?;
     let mut settings = Settings::default();
@@ -187,7 +212,8 @@ fn answer(
         let text = replace_routes(current.as_deref(), &routes)?;
         save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)?;
     }
-    Ok(line)
+    let saved = (command == Command::SetRoutes).then_some(routes);
+    Ok((line, saved))
 }
 
 /// Saves `username` in the settings in `dir`, or removes the saved one when

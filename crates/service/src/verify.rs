@@ -81,6 +81,31 @@ pub(crate) fn verify(
     }
 }
 
+/// Checks that the subnets a change of routes dropped no longer go through
+/// the tunnel. One that a route still in `remaining` covers is meant to,
+/// and is not asked about. Anything but "no" is a failure: a dropped
+/// network the tunnel still carries is not what the user chose.
+pub(crate) fn verify_dropped(
+    routes: &dyn Routes,
+    tunnel: &str,
+    gateway: Ipv4Addr,
+    dropped: &[Ipv4Net],
+    remaining: &[Ipv4Net],
+) -> Result<(), String> {
+    for subnet in dropped {
+        let Some(inside) = probe(subnet, gateway) else {
+            continue;
+        };
+        if remaining.iter().any(|kept| kept.contains_addr(inside)) {
+            continue;
+        }
+        if routes.uses_interface(inside, tunnel) != Verified::No {
+            return Err(format!("{subnet} still goes through the tunnel."));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use ubc_vpn_platform::fake::{Fake, Op};

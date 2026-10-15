@@ -7,7 +7,8 @@
 //! what they are told), `queue` (what waits to be written to one of them),
 //! `server` (the channel), `diagnostics` (what the service says about
 //! itself), `session` (the connection state machine), `connect`, `verify`
-//! and `teardown` (its three steps).
+//! and `teardown` (its three steps), and `update` (a change of routes while
+//! connected).
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -23,6 +24,7 @@ mod queue;
 mod server;
 mod session;
 mod teardown;
+mod update;
 mod verify;
 mod words;
 

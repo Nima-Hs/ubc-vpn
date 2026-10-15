@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode};
 use ubc_vpn_core::settings_cli::{
-    ResetReply, RouteProblemCode, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView,
+    LiveRoutes, ResetReply, RouteProblemCode, RoutesReply, SettingsFailure, SettingsFailureCode,
+    SettingsView,
 };
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Fake;
@@ -145,12 +146,20 @@ fn with_no_settings_file_get_gives_defaults_and_set_creates_it() {
     assert_eq!((view.min_prefix_len, view.max_routes), (8, 256));
 
     let saved = machine.routes(Command::SetRoutes, GOOD);
-    let RoutesReply::Ok { routes } = saved else {
+    let RoutesReply::Ok { routes, live } = saved else {
         panic!("{saved:?}");
     };
     assert_eq!(machine.view().settings.routes, routes);
     assert_eq!(routes.dns_domains, ["ece.example.test"]);
     assert!(!machine.root.join("settings/settings.json.tmp").exists());
+    // No service here, so no connection: the routes are for the next one.
+    assert_eq!(live, Some(LiveRoutes::NextConnect));
+    // Checking says nothing about a connection.
+    let checked = machine.routes(Command::CheckRoutes, GOOD);
+    assert!(
+        matches!(checked, RoutesReply::Ok { live: None, .. }),
+        "{checked:?}"
+    );
 }
 
 // Saving routes changes the routes and nothing else in the file, including
@@ -738,6 +747,9 @@ fn routes_too_long_to_report_are_refused_before_anything_is_saved() {
         machine.write_settings(before);
         let typed = routes_filling(size);
         let (status, line) = machine.run(Command::SetRoutes, &typed);
+        // A save also says what it did to the connection, when that fits
+        // in the line; there is none here.
+        let line = line.replace(r#","live":{"result":"next_connect"}"#, "");
         let (check_status, check_line) = machine.run(Command::CheckRoutes, &typed);
         assert_eq!(
             (check_status, &check_line),
