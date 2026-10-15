@@ -189,6 +189,48 @@ fn refuses_split_dns_while_group_policy_rules_exist() {
     ran("dns policy");
 }
 
+/// Whether `Get-DnsClientNrptPolicy -Effective` lists `namespace`.
+fn effective_lists(namespace: &str) -> bool {
+    let script = "Get-DnsClientNrptPolicy -Effective | ForEach-Object { $_.Namespace }";
+    let done = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .expect("powershell");
+    String::from_utf8_lossy(&done.stdout)
+        .lines()
+        .any(|line| line.trim() == namespace)
+}
+
+/// How long until `effective_lists(namespace)` is `wanted`, up to a limit.
+fn until_effective(namespace: &str, wanted: bool) -> Option<Duration> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        if effective_lists(namespace) == wanted {
+            return Some(started.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    None
+}
+
+// A record, not a rule: whether Windows' "effective" rule table follows our
+// keys, and how fast. It decides whether reading that table could one day
+// replace the Unobservable answer.
+#[test]
+fn records_whether_the_effective_rule_table_follows_our_keys() {
+    let _turn = turn();
+    let Some(_wintun) = wintun() else { return };
+    let _rules = DnsCleanup;
+    let namespace = ".suite.example";
+    let before = effective_lists(namespace);
+    WinDns.set_split_dns("", &chosen()).unwrap();
+    let appeared = until_effective(namespace, true);
+    WinDns.clear_split_dns().unwrap();
+    let removed = until_effective(namespace, false);
+    println!("NRPT-EFFECTIVE before={before} appeared={appeared:?} removed={removed:?}");
+    ran("dns effective");
+}
+
 // Security rule: another program's rule for one of our domains could send
 // its names elsewhere, so the setting is not reported in effect.
 #[test]
