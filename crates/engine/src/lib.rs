@@ -5,9 +5,9 @@
 //! the `fake` Cargo feature, is a scripted engine for tests and for the
 //! service's dev mode. The real engine, a binding to `libopenconnect`, lives
 //! behind the `libopenconnect` feature. That feature is off by default, so
-//! ordinary builds and tests need no native library. So far it holds the
-//! code that loads the library; the two capabilities below are not
-//! implemented on it yet.
+//! ordinary builds and tests need no native library. [`OpenConnect`]
+//! implements both capabilities below. So far its tunnels create a device
+//! on Windows only, and do not run the library's main loop while open.
 //!
 //! There are two capabilities, because they run in two processes:
 //!
@@ -275,6 +275,13 @@
 //!   cookie expired) and `-EPIPE` (the gateway ended the session) are
 //!   [`TunnelEvent::LoginNeeded`]; any other negative result is
 //!   [`TunnelEvent::ConnectionLost`].
+//! - Freeing a handle does not remove its tunnel device; only the end of
+//!   `openconnect_mainloop` does. So a device is removed by writing a
+//!   command to the pipe and running the main loop, which reads it, quits
+//!   and shuts the device down. On macOS and Linux the library never closes
+//!   a device it opened itself when no script is set, so there the engine
+//!   must open the device and hand it over with `openconnect_setup_tun_fd`.
+//!   Until it does, a tunnel there is refused at the device step.
 //! - Bound the library's own silent reconnects with a short reconnect
 //!   timeout in the main loop, so a dead tunnel is reported and not hidden.
 //! - Never retry after a pin mismatch or a refused session, and never try to
@@ -323,6 +330,8 @@ mod login;
 mod prompts;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "libopenconnect")]
+mod tunnel;
 
 pub use environment::{DANGEROUS_VARIABLES, EnvironmentError, Role, check_environment};
 #[cfg(feature = "libopenconnect")]
