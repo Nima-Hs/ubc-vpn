@@ -15,7 +15,7 @@
 
 use std::net::Ipv4Addr;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 use ubc_vpn_core::routes::Ipv4Net;
@@ -285,12 +285,15 @@ pub fn check_subscription_ends(
     let subscriptions = [(); 3].map(|()| events.subscribe(watching).expect("subscribe"));
     assert_eq!(live(), before + 3, "a subscription was not registered");
     for (dropped, subscription) in subscriptions.into_iter().enumerate() {
-        let started = Instant::now();
-        drop(subscription);
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "dropping waited"
-        );
+        // On a thread of its own, so a drop that hangs fails the check
+        // instead of stalling it.
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(subscription);
+            let _ = done.send(());
+        });
+        let ended = finished.recv_timeout(Duration::from_secs(2));
+        assert!(ended.is_ok(), "dropping a subscription did not return");
         assert_eq!(live(), before + 2 - dropped, "dropping left it registered");
     }
 }

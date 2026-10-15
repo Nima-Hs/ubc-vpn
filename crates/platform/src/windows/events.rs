@@ -5,11 +5,14 @@
 //! notification API, which needs no window and no service handler. A
 //! callback only wakes a worker thread. The worker looks at the watched
 //! interface again and sends `PhysicalChanged` only when something about it
-//! that the connection relies on differs from when the subscription began:
+//! that the connection relies on differs from what it was:
 //!
 //! - the interface is gone, or no longer up;
 //! - its IPv4 addresses changed;
 //! - the router of its default route changed.
+//!
+//! The first look is compared with the captured [`PhysicalNetwork`], so a
+//! change between capture and subscribe is reported too.
 //!
 //! Routes this product adds are never among these: the gateway's host route
 //! is not a default route, and tunnel routes are on the tunnel. So no event
@@ -18,15 +21,18 @@
 //! Sleep and wake are best effort. On machines with modern standby Windows
 //! may not announce every sleep.
 //!
-//! Dropping the receiver ends the subscription: the worker notices at its
-//! next attempt to send, then cancels the notifications.
+//! A callback gets only a number, never a pointer: it looks the subscription
+//! up in a table, so a callback that arrives late finds nothing and touches
+//! no freed memory. Dropping the [`Subscription`] cancels the registrations,
+//! then removes the subscription from the table, then joins the worker.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::net::Ipv4Addr;
 use std::ptr::null_mut;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -89,6 +95,22 @@ pub(super) fn snapshot(luid: u64) -> Result<Snapshot> {
     })
 }
 
+/// Whether the interface as it is now no longer matches what was captured:
+/// down, an address the capture did not have, or a router that is not the
+/// captured next hop. (The capture lists the addresses of every interface,
+/// so an address that has gone from this one is noticed only from the
+/// subscription's own first look onwards.)
+pub(super) fn differs_from_capture(now: &Snapshot, captured: &PhysicalNetwork) -> bool {
+    let new_address = now
+        .addresses
+        .iter()
+        .any(|addr| !captured.own_addresses.contains(addr));
+    let router_moved = captured
+        .next_hop
+        .is_some_and(|hop| !now.routers.contains(&hop));
+    !now.up || new_address || router_moved
+}
+
 /// What a notification tells the worker.
 enum Wake {
     /// Something about the network may have changed.
@@ -96,19 +118,29 @@ enum Wake {
     Power(NetworkEvent),
 }
 
-/// What the callbacks share with the worker. Boxed, so its address stays
-/// put for as long as Windows may call back with it.
-struct Shared {
-    wake: Mutex<Sender<Wake>>,
+/// Every live subscription's way to wake its worker, by number. A callback
+/// is given the number as its context.
+static SUBSCRIBERS: Mutex<Option<HashMap<usize, Sender<Wake>>>> = Mutex::new(None);
+static NEXT: AtomicUsize = AtomicUsize::new(1);
+/// Callbacks that arrived for a subscription that had already ended. Each
+/// one would have been a call into freed memory had the context been a
+/// pointer; any at all means a registration outlived its subscription.
+static LATE: AtomicUsize = AtomicUsize::new(0);
+
+fn subscribers() -> MutexGuard<'static, Option<HashMap<usize, Sender<Wake>>>> {
+    SUBSCRIBERS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-impl Shared {
-    fn send(&self, wake: Wake) {
-        let sender = self
-            .wake
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = sender.send(wake);
+/// Wakes the subscription numbered `context`, or counts a late callback.
+fn wake(context: *const c_void, wake: Wake) {
+    let id = context as usize;
+    match subscribers().as_ref().and_then(|all| all.get(&id)) {
+        Some(sender) => {
+            let _ = sender.send(wake);
+        }
+        None => {
+            LATE.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -117,9 +149,7 @@ unsafe extern "system" fn on_interface(
     _: *const MIB_IPINTERFACE_ROW,
     _: i32,
 ) {
-    // SAFETY: the context is the `Shared` the subscription keeps alive until
-    // every registration is cancelled.
-    unsafe { &*context.cast::<Shared>() }.send(Wake::Network);
+    wake(context, Wake::Network);
 }
 
 unsafe extern "system" fn on_address(
@@ -127,13 +157,11 @@ unsafe extern "system" fn on_address(
     _: *const MIB_UNICASTIPADDRESS_ROW,
     _: i32,
 ) {
-    // SAFETY: as above.
-    unsafe { &*context.cast::<Shared>() }.send(Wake::Network);
+    wake(context, Wake::Network);
 }
 
 unsafe extern "system" fn on_route(context: *const c_void, _: *const MIB_IPFORWARD_ROW2, _: i32) {
-    // SAFETY: as above.
-    unsafe { &*context.cast::<Shared>() }.send(Wake::Network);
+    wake(context, Wake::Network);
 }
 
 /// The event a power broadcast stands for, if any.
@@ -149,21 +177,18 @@ pub(super) fn power_event(kind: u32) -> Option<NetworkEvent> {
 
 unsafe extern "system" fn on_power(context: *const c_void, kind: u32, _: *const c_void) -> u32 {
     if let Some(event) = power_event(kind) {
-        // SAFETY: as above.
-        unsafe { &*context.cast::<Shared>() }.send(Wake::Power(event));
+        wake(context, Wake::Power(event));
     }
     0
 }
 
-/// The registrations of one subscription. Dropping it cancels them, which
-/// waits for callbacks in progress, and only then frees what they use.
+/// The registrations of one subscription. Dropping it cancels them.
 struct Registrations {
-    /// What the callbacks point at. Dropped after the registrations are
-    /// cancelled, which `drop` does first.
-    _shared: Box<Shared>,
     network: Vec<HANDLE>,
     power: *mut c_void,
-    /// Must live as long as the power registration, which holds its address.
+    /// Kept until after the power registration is cancelled. It holds only
+    /// the callback and the number, never a pointer to anything that is
+    /// freed, so a callback still running after that is harmless.
     _power_parameters: Box<DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS>,
 }
 
@@ -185,23 +210,22 @@ impl Drop for Registrations {
     }
 }
 
-fn register(shared: Box<Shared>) -> Result<Registrations> {
-    let context: *const c_void = (&raw const *shared).cast();
-    let mut parameters = Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
-        Callback: Some(on_power),
-        Context: context.cast_mut(),
-    });
+fn register(id: usize) -> Result<Registrations> {
+    // The number, carried where a pointer would go; never dereferenced.
+    let context = id as *const c_void;
     let mut done = Registrations {
-        _shared: shared,
         network: Vec::new(),
         power: null_mut(),
-        _power_parameters: Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS::default()),
+        _power_parameters: Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+            Callback: Some(on_power),
+            Context: context.cast_mut(),
+        }),
     };
     // Counted from here: dropping `done` on a failure below uncounts it.
     LIVE.fetch_add(1, Ordering::SeqCst);
     let mut handle = null_mut();
-    // SAFETY: the callback has the documented signature and the context
-    // outlives the registration, which `done` cancels first when dropped.
+    // SAFETY: the callback has the documented signature, and its context is
+    // a number, valid for ever.
     checked(unsafe {
         NotifyIpInterfaceChange(AF_INET, Some(on_interface), context, false, &mut handle)
     })?;
@@ -215,14 +239,13 @@ fn register(shared: Box<Shared>) -> Result<Registrations> {
     checked(unsafe { NotifyRouteChange2(AF_INET, Some(on_route), context, false, &mut handle) })?;
     done.network.push(handle);
     let mut power = null_mut();
-    let recipient: HANDLE = (&raw mut *parameters).cast();
+    let recipient: HANDLE = (&raw mut *done._power_parameters).cast();
     // SAFETY: the parameters hold a callback with the documented signature
-    // and a context that outlive the registration.
+    // and a number as context; they live as long as the registration.
     checked(unsafe {
         PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, recipient, &mut power)
     })?;
     done.power = power;
-    done._power_parameters = parameters;
     Ok(done)
 }
 
@@ -232,17 +255,29 @@ impl NetworkEvents for WinEvents {
     fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription> {
         let watched = luid(&watching.interface)?;
         let mut last = snapshot(watched)?;
-        let (wake, woken) = mpsc::channel();
-        let registrations = register(Box::new(Shared {
-            wake: Mutex::new(wake),
-        }))?;
+        let changed_since_capture = differs_from_capture(&last, watching);
+        let id = NEXT.fetch_add(1, Ordering::SeqCst);
+        let (waker, woken) = mpsc::channel();
+        if changed_since_capture {
+            let _ = waker.send(Wake::Network);
+        }
+        subscribers().get_or_insert_default().insert(id, waker);
+        // Dropped on a failure below, which removes the entry again.
+        let mut ending = Ending {
+            id,
+            registrations: None,
+            worker: None,
+        };
+        ending.registrations = Some(register(id)?);
         let (events, receiver) = mpsc::channel();
-        // Ends when the registrations are cancelled, which drops the only
-        // sender of `woken`.
+        let mut first = changed_since_capture;
+        // Ends when the subscription is removed from the table, which drops
+        // the only sender of `woken`.
         let worker = move || {
             for wake in woken {
                 let event = match wake {
                     Wake::Power(event) => event,
+                    Wake::Network if std::mem::take(&mut first) => NetworkEvent::PhysicalChanged,
                     Wake::Network => match snapshot(watched) {
                         Ok(now) if now == last => continue,
                         Ok(now) => {
@@ -253,26 +288,25 @@ impl NetworkEvents for WinEvents {
                         Err(_) => NetworkEvent::PhysicalChanged,
                     },
                 };
-                if send(&events, event).is_err() {
+                if events.send(event).is_err() {
                     break;
                 }
             }
         };
-        let worker = std::thread::Builder::new()
-            .name("network events".into())
-            .spawn(worker)?;
-        let ends = Ending {
-            registrations: Some(registrations),
-            worker: Some(worker),
-        };
-        Ok(Subscription::new(receiver, ends))
+        ending.worker = Some(
+            std::thread::Builder::new()
+                .name("network events".into())
+                .spawn(worker)?,
+        );
+        Ok(Subscription::new(receiver, ending))
     }
 }
 
-/// What dropping a [`Subscription`] ends: first the registrations, which
-/// waits for any callback in progress, then the worker, which has nothing
-/// left to wait for and returns at once.
+/// What dropping a [`Subscription`] ends, in this order: the registrations,
+/// so no new callback starts; the subscription's entry in the table, which
+/// ends the worker's wait; then the worker itself.
 struct Ending {
+    id: usize,
     registrations: Option<Registrations>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -280,6 +314,9 @@ struct Ending {
 impl Drop for Ending {
     fn drop(&mut self) {
         drop(self.registrations.take());
+        if let Some(all) = subscribers().as_mut() {
+            all.remove(&self.id);
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -295,8 +332,10 @@ pub(super) fn live() -> usize {
     LIVE.load(Ordering::SeqCst)
 }
 
-fn send(events: &Sender<NetworkEvent>, event: NetworkEvent) -> std::result::Result<(), ()> {
-    events.send(event).map_err(drop)
+/// How many callbacks arrived after their subscription ended, for tests.
+#[cfg(test)]
+pub(super) fn late_callbacks() -> usize {
+    LATE.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -313,6 +352,39 @@ mod tests {
         // Resumed by a user, power status, battery: nothing.
         for other in [7, 10, 0x8013] {
             assert_eq!(power_event(other), None, "{other}");
+        }
+    }
+
+    // A change between capturing the network and subscribing to it is
+    // reported, not taken as the starting point.
+    #[test]
+    fn a_change_since_capture_is_noticed() {
+        let captured = PhysicalNetwork {
+            interface: "wire".to_string(),
+            next_hop: Some(Ipv4Addr::new(192, 168, 0, 1)),
+            own_addresses: vec![Ipv4Addr::new(192, 168, 0, 10)],
+            on_link: Vec::new(),
+        };
+        let same = Snapshot {
+            up: true,
+            addresses: vec![Ipv4Addr::new(192, 168, 0, 10)],
+            routers: vec![Ipv4Addr::new(192, 168, 0, 1)],
+        };
+        assert!(!differs_from_capture(&same, &captured));
+        let down = Snapshot {
+            up: false,
+            ..same.clone()
+        };
+        let moved = Snapshot {
+            addresses: vec![Ipv4Addr::new(10, 0, 0, 5)],
+            ..same.clone()
+        };
+        let new_router = Snapshot {
+            routers: vec![Ipv4Addr::new(192, 168, 0, 254)],
+            ..same.clone()
+        };
+        for changed in [down, moved, new_router] {
+            assert!(differs_from_capture(&changed, &captured), "{changed:?}");
         }
     }
 
