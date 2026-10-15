@@ -284,3 +284,33 @@ fn a_link_in_the_path_is_refused() {
     assert!(why.contains("is a link"), "{why}");
     println!("RAN: program link");
 }
+
+// Security rule: the service's own folder is held to every right that
+// changes it, not only to those that could swap it. One that Users may add
+// files to is refused, though no folder above it is open.
+#[test]
+fn a_folder_users_may_add_to_is_refused() {
+    let Some(folder) = safe_folder("open-add") else {
+        return;
+    };
+    let before = check(&folder.join("program.exe")).map(drop);
+    // Add a file (WD) on the folder itself, passed on to nothing.
+    let granted = std::process::Command::new("icacls")
+        .arg(&folder)
+        .args(["/grant", "*S-1-5-32-545:(WD)", "/Q"])
+        .status()
+        .unwrap();
+    let after = check(&folder.join("program.exe")).map(drop);
+    std::fs::remove_dir_all(&folder).unwrap();
+    assert!(granted.success());
+    before.expect("the folder before Users could add to it");
+    let Err(Error::Failed(why)) = after else {
+        panic!("a folder Users may add files to passed");
+    };
+    let named = folder.to_string_lossy();
+    assert!(
+        why.contains(&*named) && why.contains("S-1-5-32-545"),
+        "{why}"
+    );
+    println!("RAN: program add");
+}

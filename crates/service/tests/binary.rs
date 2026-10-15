@@ -211,8 +211,9 @@ fn safe_copy(tag: &str) -> Option<std::path::PathBuf> {
     let secured = secured && reset.success();
     if !secured {
         let _ = std::fs::remove_dir_all(&folder);
-        println!("SKIPPED: a folder only administrators may change needs an elevated process");
-        return None;
+        // Only CI gets here, and its runners are elevated: a test that
+        // passed without running would prove nothing.
+        panic!("a folder only administrators may change could not be made; is this run elevated?");
     }
     Some(program)
 }
