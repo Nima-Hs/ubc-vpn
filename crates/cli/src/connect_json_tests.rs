@@ -481,7 +481,7 @@ fn a_cancel_before_the_service_is_contacted_claims_nothing() {
         let (cancel, mut typist) = (Cancel::new(), Typist::typing(&[Some(PASSWORD)]));
         cancel.cancel();
         let mut err = Vec::new();
-        let nobody = || true;
+        let nobody = crate::interrupt::Unwatched;
         let limits = brief();
         let ended = start(
             &platform,

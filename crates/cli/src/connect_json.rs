@@ -37,6 +37,7 @@ use ubc_vpn_platform::Platform;
 
 use crate::client::Limits;
 use crate::connect::{Ask, Engines, MAX_LABEL, MAX_MESSAGE, start, worded};
+use crate::interrupt::Unwatched;
 
 /// How many answers may wait to be used. A prompt gets one answer, so more
 /// than a few waiting means the app is not following the conversation.
@@ -79,7 +80,11 @@ pub fn connect(
     // A panic on the way, in an engine for one, still ends in a last line.
     // The app stops a connect through its own channel, so nobody here needs
     // to know when the request goes.
-    let run = || start(platform, engines, &mut app, &cancel, limits, &|| true, err);
+    let run = || {
+        start(
+            platform, engines, &mut app, &cancel, limits, &Unwatched, err,
+        )
+    };
     let Ok(ended) = catch_unwind(AssertUnwindSafe(run)) else {
         let (code, message) = (LoginErrorCode::Internal, PANICKED.to_string());
         let _ = write_line(out, &CliMessage::Error { code, message });

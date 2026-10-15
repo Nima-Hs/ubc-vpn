@@ -137,6 +137,47 @@ impl Progress {
     }
 }
 
+/// What a connect tells, and asks, whoever may stop it, at the steps where
+/// that matters.
+pub trait Steps {
+    /// The connect request is about to go. It goes only if this says so.
+    fn sending(&self) -> bool;
+    /// The service has answered the connect request.
+    fn answered(&self);
+    /// Whether the user has stopped the command.
+    fn stopped(&self) -> bool;
+}
+
+impl Steps for Progress {
+    fn sending(&self) -> bool {
+        Progress::sending(self)
+    }
+
+    fn answered(&self) {
+        self.settled();
+    }
+
+    fn stopped(&self) -> bool {
+        *self.stage() == Stage::Stopping
+    }
+}
+
+/// For a connect nobody can stop from here, such as `connect --json`,
+/// which the app stops through its own channel.
+pub struct Unwatched;
+
+impl Steps for Unwatched {
+    fn sending(&self) -> bool {
+        true
+    }
+
+    fn answered(&self) {}
+
+    fn stopped(&self) -> bool {
+        false
+    }
+}
+
 /// How long an undo waits for the service to answer the connect request
 /// before it sends the disconnect all the same. Past it the service may not
 /// have the request yet, so the disconnect could find nothing to stop; that

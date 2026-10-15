@@ -157,6 +157,99 @@ fn a_connect_settles_its_request_however_it_ends() {
     }
 }
 
+/// Steps that note what had already happened when the answer came, and
+/// can have a stop come at that moment.
+struct Watching<'a> {
+    progress: Progress,
+    scene: &'a Scene,
+    stop_at_answer: bool,
+    /// When the answer came: whether the username was saved yet, and
+    /// whether the login's lines had been handed to the service yet.
+    seen: Mutex<Option<(bool, bool)>>,
+}
+
+impl crate::interrupt::Steps for Watching<'_> {
+    fn sending(&self) -> bool {
+        self.progress.sending()
+    }
+
+    fn answered(&self) {
+        let file = self.scene.rig.root.join("settings/settings.json");
+        let saved = std::fs::read_to_string(file).unwrap().contains("alice");
+        let service = self.scene.service.as_ref().unwrap();
+        let handed = service.logs().iter().any(|line| line == "login succeeded");
+        *self.seen.lock().unwrap() = Some((saved, handed));
+        if self.stop_at_answer {
+            assert!(self.progress.stop(), "the request had gone");
+        }
+        self.progress.answered();
+    }
+
+    fn stopped(&self) -> bool {
+        self.progress.stopped()
+    }
+}
+
+/// Starts a connect on a machine with no saved username, typing one, with
+/// `steps` told at each step. Returns whether the connect was accepted and
+/// whether the username was saved by the end.
+fn start_typing_the_username(scene: &Scene, steps: &Watching) -> (bool, bool) {
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let engines = |_: &Policy| Ok(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
+    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
+    let accepted = start(
+        &platform,
+        &engines,
+        &mut typist,
+        &cancel,
+        limits,
+        steps,
+        &mut err,
+    );
+    let file = scene.rig.root.join("settings/settings.json");
+    let saved = std::fs::read_to_string(file).unwrap().contains("alice");
+    (accepted.is_ok(), saved)
+}
+
+fn without_a_username() -> Scene {
+    Scene::new(Some(&format!("{{{ROUTES}}}")), "")
+}
+
+// The request counts as answered the moment its answer comes: before the
+// login's lines are handed to the service and before the username is
+// saved, which can wait seconds for the settings lock. An undo waiting for
+// the answer goes then, and not after all of that.
+#[test]
+fn the_request_is_settled_as_soon_as_it_is_answered() {
+    let scene = without_a_username();
+    let steps = Watching {
+        progress: Progress::default(),
+        scene: &scene,
+        stop_at_answer: false,
+        seen: Mutex::new(None),
+    };
+    assert_eq!(start_typing_the_username(&scene, &steps), (true, true));
+    let seen = steps.seen.lock().unwrap().expect("the answer came");
+    assert_eq!(seen, (false, false), "(saved, handed over) at the answer");
+}
+
+// An interrupted connect saves nothing: the user stopped the command, it is
+// being undone, and the settings stay as they were before it.
+#[test]
+fn a_stopped_connect_does_not_save_the_username() {
+    let scene = without_a_username();
+    let steps = Watching {
+        progress: Progress::default(),
+        scene: &scene,
+        stop_at_answer: true,
+        seen: Mutex::new(None),
+    };
+    let (accepted, saved) = start_typing_the_username(&scene, &steps);
+    assert!(accepted, "the service took the request");
+    assert!(!saved, "the username was saved after the stop");
+}
+
 // A service that never answers does not keep the user waiting for ever:
 // past the limit the disconnect goes all the same, as the best that can be
 // done, and a second stop still ends the program at once meanwhile.
@@ -167,11 +260,12 @@ fn the_undo_does_not_wait_for_an_answer_for_ever() {
     progress.sending();
     let first = Instant::now();
     handler.requests.send(Stop::Interrupt).unwrap();
-    let patience = crate::interrupt::SETTLE + Duration::from_secs(5);
-    let did = handler
-        .did
-        .recv_timeout(patience)
-        .expect("the handler acted");
+    // Fixed, and not worked out from SETTLE, so that an undo with no limit,
+    // or a limit made far too long, fails here within seconds instead of
+    // hanging: the three seconds of SETTLE and two to spare.
+    let patience = Duration::from_secs(5);
+    let did = handler.did.recv_timeout(patience);
+    let did = did.expect("the undo did not run within the limit and two seconds more");
     assert_eq!(did, Did::Undo);
     assert!(
         first.elapsed() >= crate::interrupt::SETTLE,
@@ -262,7 +356,6 @@ fn the_request_is_marked_as_sent_before_it_leaves() {
         let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
         let engines = |_: &Policy| Ok(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
         let (progress, mut typist) = (Progress::default(), Typist::typing(typed));
-        let sending = || progress.sending();
         let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
         let accepted = start(
             &platform,
@@ -270,7 +363,7 @@ fn the_request_is_marked_as_sent_before_it_leaves() {
             &mut typist,
             &cancel,
             limits,
-            &sending,
+            &progress,
             &mut err,
         );
         (accepted.is_ok(), progress.stop())
