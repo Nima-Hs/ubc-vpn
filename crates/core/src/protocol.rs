@@ -643,10 +643,14 @@ pub struct ErrorInfo {
 /// of the pins, at login or when the tunnel opens. Nothing was sent to it.
 /// The usual cause is that the gateway's certificate was replaced (UBC's
 /// current one expires on 2027-04-22), and the fix is a release of UBC VPN
-/// whose policy pins the new key. It holds none of the words that make the
-/// log hide the rest of a line.
+/// whose policy pins the new key. The other usual cause is a network that
+/// intercepts connections, such as a hotel's sign-in page, and the fix is
+/// another network. It never offers a way past the pin. It is fixed text,
+/// and holds none of the words that make the log hide the rest of a line.
 pub const CERTIFICATE_CHANGED: &str = "The VPN server's certificate has changed, so UBC VPN \
-    did not send it anything. Update UBC VPN to the latest version, then connect again.";
+    did not send it anything. Update UBC VPN to the latest version, then connect again. If \
+    UBC VPN is already up to date, the network you are on may be intercepting the \
+    connection: try another network.";
 
 /// The kinds of failure a client can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,6 +790,14 @@ mod tests {
     fn a_changed_certificate_tells_the_user_to_update() {
         assert!(CERTIFICATE_CHANGED.contains("certificate has changed"));
         assert!(CERTIFICATE_CHANGED.contains("Update UBC VPN"));
+        // The other usual cause: a network that intercepts connections.
+        assert!(CERTIFICATE_CHANGED.contains("already up to date"));
+        assert!(CERTIFICATE_CHANGED.contains("try another network"));
+        // Security rule: it never offers a way past the pin.
+        let lower = CERTIFICATE_CHANGED.to_lowercase();
+        for offer in ["accept", "trust", "anyway", "continue", "ignore", "proceed"] {
+            assert!(!lower.contains(offer), "{offer}");
+        }
         assert_eq!(
             crate::redact::redact_line(CERTIFICATE_CHANGED),
             CERTIFICATE_CHANGED
