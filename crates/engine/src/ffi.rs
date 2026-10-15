@@ -403,6 +403,15 @@ pub fn is_pinned(version: &str) -> bool {
     version == PINNED || version.strip_suffix("-unknown") == Some(PINNED)
 }
 
+/// Whether the system has a network interface with this name. Windows only:
+/// a Wintun adapter the library has closed stays visible for a moment
+/// afterwards, and a tunnel is not closed until its device is gone. `None`
+/// if the system could not be asked.
+#[cfg(windows)]
+pub fn interface_exists(name: &str) -> Option<bool> {
+    os::interface_exists(name)
+}
+
 #[cfg(windows)]
 mod os {
     use std::ffi::{CStr, OsStr, c_char, c_int, c_void};
@@ -427,6 +436,45 @@ mod os {
 
     fn wide(text: &OsStr) -> Vec<u16> {
         text.encode_wide().chain([0]).collect()
+    }
+
+    /// Whether the system has a network interface with this name, as
+    /// `ConvertInterfaceAliasToLuid` finds it. `None` if that could not be
+    /// asked. The function comes from System32's `iphlpapi.dll`, asked for
+    /// by name with only System32 searched, as the library's own copy is.
+    pub(super) fn interface_exists(name: &str) -> Option<bool> {
+        let module = wide(OsStr::new("iphlpapi.dll"));
+        // SAFETY: `module` is NUL-terminated UTF-16 and outlives the call;
+        // the second argument is reserved. Only System32 is searched.
+        let module = unsafe {
+            LoadLibraryExW(
+                module.as_ptr(),
+                ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        };
+        if module.is_null() {
+            return None;
+        }
+        // SAFETY: `module` is a loaded module, and the name is a
+        // NUL-terminated string.
+        let convert = unsafe { GetProcAddress(module, c"ConvertInterfaceAliasToLuid".as_ptr()) };
+        if convert.is_null() {
+            return None;
+        }
+        // SAFETY: `convert` is iphlpapi's
+        // `NETIO_STATUS ConvertInterfaceAliasToLuid(const WCHAR *, NET_LUID *)`,
+        // where `NET_LUID` is 64 bits.
+        let convert = unsafe {
+            std::mem::transmute::<*mut c_void, unsafe extern "system" fn(*const u16, *mut u64) -> u32>(
+                convert,
+            )
+        };
+        let alias = wide(OsStr::new(name));
+        let mut luid = 0;
+        // SAFETY: `alias` is NUL-terminated UTF-16 that outlives the call,
+        // and `luid` is valid to write to.
+        Some(unsafe { convert(alias.as_ptr(), &mut luid) } == 0)
     }
 
     /// An absolute path on a drive letter: not a share, not a `\\?\` form.

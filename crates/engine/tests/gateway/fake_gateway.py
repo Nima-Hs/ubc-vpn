@@ -14,7 +14,7 @@ Scenarios, by what the gateway does after showing the login form:
   reject    shows the form again with an error, every time
   code      asks for a one-time code on a second form, then accepts
   group     shows a form with a choice of group
-  hang      never answers the login, for cancelling
+  hang      never answers the login or a tunnel request, for cancelling
   redirect  answers the first request with a redirect to the other port
   action    shows a form whose action is a URL on the other port
   csd       offers a host-scan program to download and run
@@ -41,7 +41,8 @@ A tunnel: in every scenario, a CONNECT that carries the session cookie gets
 the addresses below (TUNNEL) and the connection is then held open, without
 passing any traffic, until the client closes it. A CONNECT without that
 cookie is refused with 401, as a gateway refuses a session that has ended.
-In the scenario "ended" every CONNECT is refused so.
+In the scenario "ended" every CONNECT is refused so, and in "hang" none is
+answered.
 
 It stops when its standard input closes, which is when the test that started
 it ends, however that test ends. Started by hand with no input, it stops at
@@ -246,6 +247,8 @@ class Gateway(http.server.BaseHTTPRequestHandler):
         has_cookie = any(COOKIE in cookie for cookie in cookies)
         # Logged as whether the cookie came, not the cookie itself.
         self.record(b"cookie" if has_cookie else b"no cookie")
+        if self.scenario == "hang":
+            time.sleep(3600)
         if self.listener != "main" or not has_cookie or self.scenario == "ended":
             self.send_response(401, "Unauthorized")
             self.send_header("Content-Length", "0")

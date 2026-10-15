@@ -169,6 +169,32 @@ jobs:
           sudo update-ca-certificates
           echo "UBC_VPN_TEST_TRUSTED_GATEWAY_DIR=$PWD" >> "$GITHUB_ENV"
 
+      # The tunnel tests make a Wintun device, which needs administrator
+      # rights, as GitHub's Windows runners have, and wintun.dll beside the
+      # test programs: the library asks for it in the program's own folder.
+      # It is the build pinned in native/windows/wintun.pin, checked against
+      # the pinned checksum, for the tests only: never committed or uploaded.
+      # Only on GitHub's own runners, which are thrown away after the job.
+      - name: Put Wintun beside the test programs
+        if: runner.os == 'Windows' && runner.environment == 'github-hosted'
+        working-directory: ${{ runner.temp }}
+        run: |
+          mapfile -t pin < "$GITHUB_WORKSPACE/native/windows/wintun.pin"
+          [ "${#pin[@]}" -eq 2 ]
+          [[ ${pin[0]} =~ ^WINTUN_URL=(https://www\.wintun\.net/builds/[A-Za-z0-9._-]+\.zip)$ ]]
+          url=${BASH_REMATCH[1]}
+          [[ ${pin[1]} =~ ^WINTUN_SHA256=([0-9a-f]{64})$ ]]
+          sha=${BASH_REMATCH[1]}
+          mkdir wintun-download && cd wintun-download
+          curl -fsSLo wintun.zip "$url"
+          echo "$sha *wintun.zip" | sha256sum -c -
+          unzip -q wintun.zip
+          for profile in debug release; do
+            mkdir -p "$GITHUB_WORKSPACE/target/$profile/deps"
+            cp wintun/bin/amd64/wintun.dll "$GITHUB_WORKSPACE/target/$profile/deps/"
+          done
+          echo "UBC_VPN_TEST_DEVICE=1" >> "$GITHUB_ENV"
+
       # The tests start themselves again with planted copies in the working
       # directory and the loader's search path. On macOS and Linux they build
       # a stand-in library with the runner's C compiler.
@@ -192,12 +218,18 @@ jobs:
           grep -q '^RAN: engine refuses a wrong pin' test.log
           grep -q '^RAN: engine refuses single sign-on' test.log
           grep -q '^RAN: engine offers no single sign-on' test.log
+          # And the tunnel engine.
+          grep -q '^RAN: tunnel refuses a wrong pin' test.log
           if [ "$RUNNER_OS" = Linux ]; then
             grep -q '^RAN: handle judges a trusted certificate' test.log
             grep -q '^RAN: engine refuses a trusted certificate' test.log
+            grep -q '^RAN: tunnel refuses a trusted certificate' test.log
           fi
           if [ "$RUNNER_OS" = Windows ]; then
             grep -q '^RAN: engine writes no key log' test.log
+            grep -q '^RAN: tunnel makes and removes a device' test.log
+          else
+            grep -q '^RAN: tunnel refuses at the device step' test.log
           fi
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
@@ -215,3 +247,14 @@ jobs:
           UBC_VPN_TEST_GATEWAY_DIR: ${{ runner.temp }}/gateway
           UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests --release
+
+      # Every tunnel test removes its device on every path. Whatever the
+      # tests reported, show that no Wintun adapter is left on the runner.
+      - name: No tunnel device is left
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $left = @(Get-NetAdapter -IncludeHidden | Where-Object InterfaceDescription -like 'Wintun*')
+          $left | Format-Table -AutoSize Name, InterfaceDescription, Status
+          if ($left.Count -ne 0) { exit 1 }
+          'No Wintun adapter is left.'

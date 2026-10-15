@@ -24,8 +24,9 @@ use crate::{
     Cancel, Gateway, LogLevel, LogSink, LoginEngine, LoginError, Prompt, Prompts, Session,
 };
 
-/// The only port a login connects to, unless the gateway is a test's.
-const HTTPS: u16 = 443;
+/// The only port a login or a tunnel connects to, unless the gateway is a
+/// test's.
+pub(crate) const HTTPS: u16 = 443;
 
 /// What the library reports as the hash of a certificate it could not hash:
 /// thirty-two zero bytes, in the form of a pin. It is never a gateway's.
@@ -42,7 +43,7 @@ const HASH_OF_NOTHING: &str = "pin-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 /// let _ = ubc_vpn_engine::OpenConnect::library;
 /// ```
 pub struct OpenConnect {
-    library: Library,
+    pub(crate) library: Library,
 }
 
 impl OpenConnect {
@@ -82,7 +83,7 @@ struct Notes {
 
 /// Whether `hash`, as the library reports a certificate, is a full pin that
 /// the gateway accepts. The hash of nothing never is, whatever the policy.
-fn pin_matches(gateway: &Gateway, hash: &str) -> bool {
+pub(crate) fn pin_matches(gateway: &Gateway, hash: &str) -> bool {
     hash != HASH_OF_NOTHING
         && Pin::try_from(hash.to_string()).is_ok_and(|pin| gateway.accepts(&pin))
 }
@@ -90,7 +91,7 @@ fn pin_matches(gateway: &Gateway, hash: &str) -> bool {
 /// Passes one of the library's lines to the sink, with the level it has
 /// there. A line that was cut, or that failed to format, is dropped whole:
 /// part of a secret in it would match nothing the sink was told to hide.
-fn deliver(logs: &LogSink, level: c_int, line: &CStr, state: LineState) {
+pub(crate) fn deliver(logs: &LogSink, level: c_int, line: &CStr, state: LineState) {
     if state != LineState::Whole {
         return;
     }

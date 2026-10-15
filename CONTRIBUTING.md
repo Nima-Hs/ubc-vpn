@@ -40,6 +40,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn.example.test" -
 UBC_VPN_TEST_PYTHON=<python> UBC_VPN_TEST_GATEWAY_DIR=<folder> cargo test -p ubc-vpn-engine --test fake_gateway
 ```
 
+The tunnel tests that create a real tunnel device run only with `UBC_VPN_TEST_DEVICE` set, which only the engine workflow sets: on a Windows runner, as administrator, with the Wintun pinned in `native/windows/wintun.pin` beside the test programs. Do not set it on your own machine; without it those tests are skipped and say so.
+
 ## Development mode
 
 Development mode runs the real service, the real command-line client and the app together as yourself, with no admin rights. Routing, DNS and the gateway are pretend: nothing on your network changes and nothing is sent to UBC. It is the only way to run the three together today, because the real VPN engine is not connected yet.
