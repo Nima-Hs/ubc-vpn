@@ -101,8 +101,10 @@ fn a_build_with_dev_mode_never_runs_as_the_installed_service() {
 }
 
 // A build without the real engine has nothing to connect with, and says so
-// instead of starting.
-#[cfg(not(feature = "real-engine"))]
+// instead of starting. On Windows a run from a console stops earlier, because
+// only the service manager starts the installed service; that is tested by
+// on_windows_the_installed_service_needs_the_service_manager.
+#[cfg(all(not(feature = "real-engine"), not(windows)))]
 #[test]
 fn a_build_without_the_real_engine_does_not_run_as_the_installed_service() {
     let (refused, stderr) = run(&[], None);
