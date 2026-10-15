@@ -5,11 +5,10 @@ import {
     loginAnnouncement,
     loginHasScreen,
 } from "@shared/copy";
-import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
 import { useEffect, useRef } from "react";
+import { TunnelDetails } from "@/components/tunnel-details";
 import { TunnelDiagram } from "@/components/tunnel-diagram";
 import { Button } from "@/components/ui/button";
-import { List, ListRow } from "@/components/ui/list-row";
 import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
@@ -21,37 +20,6 @@ const run: Record<ActionKind, () => Promise<void>> = {
     disconnect: () => api.disconnect(),
     retry: () => api.retry(),
 };
-
-function Entries({ items }: { items: readonly string[] }) {
-    if (items.length === 0) {
-        return "None";
-    }
-    return (
-        <ul className="grid grid-cols-2 gap-x-4 gap-y-1">
-            {items.map((item) => (
-                <li key={item}>{item}</li>
-            ))}
-        </ul>
-    );
-}
-
-function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
-    return (
-        <Panel scrollLabel="Connection details">
-            <List>
-                <ListRow label="Your VPN address" data>
-                    {tunnel.address}
-                </ListRow>
-                <ListRow label="Subnets through the VPN" stacked data>
-                    <Entries items={tunnel.subnets} />
-                </ListRow>
-                <ListRow label="Domains looked up through the VPN" stacked data>
-                    <Entries items={tunnel.dns_domains} />
-                </ListRow>
-            </List>
-        </Panel>
-    );
-}
 
 /** The app's first screen: where the connection stands, and one thing to do about it. */
 export function ConnectionView() {

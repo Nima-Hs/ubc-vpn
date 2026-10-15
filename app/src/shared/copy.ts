@@ -43,6 +43,37 @@ export function count(n: number, one: string, other: string): string {
     return `${n} ${plural.select(n) === "one" ? one : other}`;
 }
 
+/** The words of the connection details, shown while connected. */
+export const DETAILS = {
+    label: "Connection details",
+    address: "Your VPN address",
+    subnets: "Subnets through the VPN",
+    domains: "Domains looked up through the VPN",
+    none: "None",
+    subnetCount: (n: number) => count(n, "subnet", "subnets"),
+    domainCount: (n: number) => count(n, "domain", "domains"),
+    showEach: (n: number) => `Show all ${n} saved subnets`,
+    showCombined: "Show combined ranges",
+} as const;
+
+/**
+ * The note under a range shown in place of the subnets it was saved as:
+ * "Saved as 16 subnets, leaving out 10.20.255.254".
+ */
+export function describeLeftOut(
+    parts: number,
+    leftOut: readonly string[],
+    addresses: number,
+): string {
+    const saved = `Saved as ${count(parts, "subnet", "subnets")}`;
+    if (addresses === 0) {
+        return saved;
+    }
+    return addresses === 1
+        ? `${saved}, leaving out ${leftOut[0]}`
+        : `${saved}, leaving out ${count(addresses, "address", "addresses")}`;
+}
+
 interface Failure {
     title: string;
     body: string;

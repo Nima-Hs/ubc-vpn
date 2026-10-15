@@ -20,7 +20,8 @@ const marks = {
  * why.
  *
  * Content taller than the panel scrolls inside it. `scrollLabel` names that
- * region for screen readers, and is needed wherever the content can grow.
+ * region for screen readers and lets the keyboard reach it, and is needed
+ * wherever the content can grow.
  */
 export function Panel({
     tone = "default",
@@ -43,7 +44,13 @@ export function Panel({
         >
             <div
                 className="scroll-region"
-                {...(scrollLabel !== undefined && { role: "group", "aria-label": scrollLabel })}
+                // Focusable, so the keyboard can scroll it. The browser does
+                // that by itself only while nothing inside can take focus.
+                {...(scrollLabel !== undefined && {
+                    role: "group",
+                    "aria-label": scrollLabel,
+                    tabIndex: 0,
+                })}
             >
                 {tone === "default" ? (
                     children
