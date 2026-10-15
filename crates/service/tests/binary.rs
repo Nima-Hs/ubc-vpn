@@ -89,6 +89,26 @@ fn a_build_with_dev_mode_knows_the_dev_flag() {
     );
 }
 
+// Security rule: a build with dev mode has the fake engine in it, so it
+// never runs as the installed service, even with the real engine built in.
+// It stops before it touches the system's folders or loads anything.
+#[cfg(all(feature = "dev-mode", feature = "real-engine"))]
+#[test]
+fn a_build_with_dev_mode_never_runs_as_the_installed_service() {
+    let (refused, stderr) = run(&[], None);
+    let because = "a build with dev mode cannot run as the installed service";
+    assert!(refused && stderr.contains(because), "{stderr}");
+}
+
+// A build without the real engine has nothing to connect with, and says so
+// instead of starting.
+#[cfg(not(feature = "real-engine"))]
+#[test]
+fn a_build_without_the_real_engine_does_not_run_as_the_installed_service() {
+    let (refused, stderr) = run(&[], None);
+    assert!(refused && stderr.contains("no VPN engine"), "{stderr}");
+}
+
 // Security rule: the service does not start while a variable is set that
 // makes a TLS library write out session keys or weaken its settings.
 #[test]

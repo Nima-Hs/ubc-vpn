@@ -64,7 +64,10 @@ fn connect_from(dir: &Path) -> String {
 fn the_library_is_loaded_only_from_beside_the_program() {
     let alone = installed("alone", false);
     let line = connect_from(&alone);
-    assert!(line.contains("The VPN library could not be loaded."), "{line}");
+    assert!(
+        line.contains("The VPN library could not be loaded."),
+        "{line}"
+    );
 
     // With the library beside it, loading succeeds, and the connect goes on
     // until something else stops it: here this machine's missing policy or
