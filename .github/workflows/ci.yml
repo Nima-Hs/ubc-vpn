@@ -31,6 +31,16 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: rm -rf app/src/shared/protocol
       - run: cargo test --locked --workspace
+      # The Visual C++ runtime the installer bundles beside the service and
+      # the client: the pinned file from this runner's Visual Studio, and the
+      # service starts with it beside it and loads that copy.
+      - name: The bundled Visual C++ runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          packaging/windows/vcruntime.sh "$RUNNER_TEMP/vcruntime"
+          UBC_VPN_TEST_VCRUNTIME_DIR="$RUNNER_TEMP/vcruntime" cargo test --locked -p ubc-vpn-service --test binary the_service_starts_with_the_bundled_runtime_beside_it -- --nocapture | tee "$RUNNER_TEMP/vcruntime.log"
+          grep -q "RAN: bundled runtime" "$RUNNER_TEMP/vcruntime.log"
       # Some rules only exist in release builds, such as dropping the VPN
       # library's debug output, so their tests must run in release mode too.
       - name: Release-mode tests

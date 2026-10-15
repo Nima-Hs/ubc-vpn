@@ -1,0 +1,33 @@
+Microsoft Visual C++ runtime in UBC VPN
+=======================================
+
+What it covers: vcruntime140.dll, installed beside ubc-vpn-service.exe and
+ubc-vpn.exe. It is Microsoft's file, copied unmodified from the VC\redist
+folder of the Visual Studio that built the programs. Its version and SHA-256
+are pinned in packaging/windows/vcruntime.lock in the source repository.
+It is not open source and is not under UBC VPN's licence.
+
+Microsoft lets licensed Visual Studio users distribute it with their
+programs under the "Distributable Code" section of the Visual Studio
+licence terms, for the files on the Distributable List. Both are in this
+folder, as Microsoft publishes them:
+
+- microsoft-visual-studio-2026-license.txt
+  Microsoft Software License Terms, Microsoft Visual Studio Enterprise 2026,
+  Visual Studio Professional 2026, and Trial Edition (last updated
+  October 1, 2025), the edition on the build machine.
+  Page: https://visualstudio.microsoft.com/license-terms/vs2026-ga-pro-enterprise/
+  Document: https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual_Studio_2026-License-Enterprise_Professional_ENU.docx
+  SHA-256 of the document: dd2ab92a7c2bb90dd509e16572707a34b13bc0bc09b9199d115f25594ac39053
+  The text is the document's own, paragraph by paragraph; only the
+  formatting is lost.
+
+- microsoft-visual-studio-2026-distributable-code.txt
+  Distributable Code for Visual Studio 2026 (the Distributable List, or
+  REDIST.TXT, the licence terms refer to), dated 2025-11-11.
+  Page: https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution
+  (also https://aka.ms/vs/18/redistribution). Its section "Visual C++
+  Runtime Files" allows the files in VC\redist. The text is the page's
+  article; only the formatting and the page's own controls are left out.
+
+Both were retrieved on 2026-10-15.

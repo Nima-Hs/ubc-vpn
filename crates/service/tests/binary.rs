@@ -303,6 +303,21 @@ impl Image {
         panic!("address {rva:#x} is in no section");
     }
 
+    /// The names of the DLLs the program imports (directory 1), in lower
+    /// case. Each import descriptor is 20 bytes, the name's address at 12,
+    /// and an all-zero one ends the list.
+    fn imports(&self) -> Vec<String> {
+        let (mut descriptor, _) = self.directory(1);
+        let mut names = Vec::new();
+        while self.u32_at(descriptor + 12) != 0 {
+            let start = self.offset(self.u32_at(descriptor + 12));
+            let end = start + self.0[start..].iter().position(|&b| b == 0).unwrap();
+            names.push(String::from_utf8_lossy(&self.0[start..end]).to_lowercase());
+            descriptor += 20;
+        }
+        names
+    }
+
     /// `DependentLoadFlags` from the load configuration (directory 10): where
     /// Windows looks for the DLLs the program imports. It sits at offset 78
     /// of IMAGE_LOAD_CONFIG_DIRECTORY64, whose first field is its size.
@@ -316,11 +331,77 @@ impl Image {
     }
 }
 
-// Security rule: the program's own imports come from System32 only, never
-// from its folder, the working folder or PATH (build.rs).
+// Security rule: the program's own imports come from its own folder and
+// System32 only, never the working folder or PATH (build.rs). Exactly that:
+// System32 alone would miss the bundled runtime, and any other place is one
+// the install does not control.
 #[cfg(all(windows, target_env = "msvc"))]
 #[test]
-fn imports_are_loaded_from_system32_only() {
+fn imports_are_loaded_from_its_folder_and_system32_only() {
     let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn-service")));
-    assert_eq!(program.dependent_load_flags(), 0x800);
+    assert_eq!(program.dependent_load_flags(), 0xA00);
+}
+
+// The Visual C++ runtime the program imports is exactly what the installer
+// bundles (packaging/windows/vcruntime.lock): vcruntime140.dll and nothing
+// else, such as vcruntime140_1.dll or msvcp140.dll. The Universal C Runtime
+// is part of Windows and is not bundled.
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn the_runtime_it_imports_is_the_bundled_one() {
+    let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn-service")));
+    let bundled = ["vcruntime140.dll"];
+    let runtime: Vec<String> = program
+        .imports()
+        .into_iter()
+        .filter(|name| {
+            ["vcruntime", "msvcp", "concrt", "vccorlib"]
+                .iter()
+                .any(|p| name.starts_with(p))
+        })
+        .collect();
+    assert_eq!(
+        runtime, bundled,
+        "update packaging/windows/vcruntime.lock to match"
+    );
+}
+
+// The service starts with the bundled Visual C++ runtime beside it, and the
+// runtime it loads is the one beside it: with a file that is not a DLL in
+// its place, the program cannot even start. CI stages the pinned runtime
+// (packaging/windows/vcruntime.sh) and names the folder in
+// UBC_VPN_TEST_VCRUNTIME_DIR; CI's log must show this test ran.
+#[cfg(all(windows, not(feature = "dev-mode")))]
+#[test]
+fn the_service_starts_with_the_bundled_runtime_beside_it() {
+    let Some(staged) = std::env::var_os("UBC_VPN_TEST_VCRUNTIME_DIR") else {
+        println!("SKIPPED: UBC_VPN_TEST_VCRUNTIME_DIR does not name the staged runtime");
+        return;
+    };
+    let runtime = std::path::Path::new(&staged).join("vcruntime140.dll");
+    let folder = |name: &str| {
+        let folder = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join("ubc-vpn-service.exe");
+        std::fs::copy(env!("CARGO_BIN_EXE_ubc-vpn-service"), &program).unwrap();
+        program
+    };
+
+    // With the bundled runtime: the program runs, and says why it stops (its
+    // folder is not the install folder).
+    let bundled = folder("bundled-runtime");
+    std::fs::copy(&runtime, bundled.with_file_name("vcruntime140.dll")).unwrap();
+    let (refused, stderr) = run_program(&bundled, &[], None);
+    let _ = std::fs::remove_dir_all(bundled.parent().unwrap());
+    assert!(refused && stderr.contains("ubc-vpn-service: "), "{stderr}");
+
+    // With something else in its place: Windows loads that, fails, and the
+    // program never runs.
+    let broken = folder("broken-runtime");
+    std::fs::write(broken.with_file_name("vcruntime140.dll"), b"not a library").unwrap();
+    let (refused, stderr) = run_program(&broken, &[], None);
+    let _ = std::fs::remove_dir_all(broken.parent().unwrap());
+    assert!(refused && !stderr.contains("ubc-vpn-service: "), "{stderr}");
+    println!("RAN: bundled runtime");
 }

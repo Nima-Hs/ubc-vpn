@@ -47,6 +47,11 @@ Our own code is `MIT OR Apache-2.0`. The app is redistributed to users, so every
   - It is distributed only inside our installer, next to the programs that use it, never as a file or release asset by itself.
   - It is not modified in any way: not patched, not re-signed, and nothing is extracted from it. Never build it ourselves.
   - Its version and checksum are pinned, and its licence text ships with it.
+- Approved exception: the Microsoft Visual C++ runtime (`vcruntime140.dll`) is bundled as Microsoft's prebuilt file, taken from the `VC\redist` folder of the Visual Studio that builds the programs, which Microsoft's Distributable List allows licensed users to redistribute. It is not open source.
+  - It is unmodified: never patched, re-signed or rebuilt.
+  - It is distributed only inside our installer, beside the service and the command-line client that load it, never as a file or release asset by itself.
+  - Its file name, version and SHA-256, and the Visual Studio edition, are pinned in `packaging/windows/vcruntime.lock`; `packaging/windows/vcruntime.sh` stops the build if anything differs.
+  - Microsoft's licence terms for that edition and the Distributable List ship with it, verbatim (`packaging/windows/licenses/`).
 - For every bundled LGPL library, each release must ship its license text and the exact source it was built from, including our patches.
 
 ## Updates
