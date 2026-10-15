@@ -57,10 +57,20 @@
 !define UBC_VPN_ACL_INSTALLER "*S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 !define UBC_VPN_ACL_USERS "*S-1-5-32-545"
 
-# Removes what this install has put in place so far: the app's folder, the
-# Start menu and desktop shortcuts, and the uninstall and install entries.
+# Removes what this install has put in place so far: the service, the app's
+# folder, the Start menu and desktop shortcuts, and the uninstall and
+# install entries.
+!define UBC_VPN_SERVICE_PROGRAM "$INSTDIR\resources\bin\ubc-vpn-service.exe"
 !macro ubcVpnUndoInstall
   SetOutPath $TEMP
+  # First the service, if it is there: `uninstall` stops it, which removes
+  # its routes and DNS, waits until it has stopped, and deletes it and its
+  # data folder. Only then is its folder removed. Its result is not checked:
+  # the rest of the undo goes ahead either way.
+  ${if} ${FileExists} "${UBC_VPN_SERVICE_PROGRAM}"
+    nsExec::ExecToLog '"${UBC_VPN_SERVICE_PROGRAM}" uninstall'
+    Pop $1
+  ${endif}
   RMDir /r "$INSTDIR"
   Delete "$newStartMenuLink"
   Delete "$newDesktopLink"

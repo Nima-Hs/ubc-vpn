@@ -11,7 +11,7 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::System::Services::{
-    QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW,
+    QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW, QueryServiceObjectSecurity,
 };
 
 use super::*;
@@ -105,6 +105,72 @@ fn config(name: &str) -> (String, u32, String, u32) {
     (command, start, account, shutdown.dwPreshutdownTimeout)
 }
 
+/// The rights the service's own access list gives anyone who is not
+/// SYSTEM, an administrator or the service itself, beyond asking about it:
+/// querying its status and settings, enumerating, interrogating, sending a
+/// user-defined control, and reading the access list. The list is left as
+/// Windows makes it, so this should be empty: ordinary users can neither
+/// start nor stop the service, nor change it.
+fn ordinary_rights(name: &str) -> Vec<String> {
+    let manager = manager(SC_MANAGER_CONNECT).unwrap();
+    let service = open_service(&manager, name).unwrap().expect("registered");
+    let mut buffer = vec![0u64; 1024];
+    let mut needed = 0;
+    // SAFETY: the buffer is 8 KiB and aligned, and the out pointer is valid.
+    let ok = unsafe {
+        QueryServiceObjectSecurity(
+            service.0,
+            DACL_SECURITY_INFORMATION,
+            buffer.as_mut_ptr().cast(),
+            8192,
+            &mut needed,
+        )
+    };
+    assert_ne!(ok, 0, "reading the service's access list: {}", last_error());
+    let mut text = null_mut();
+    // SAFETY: the buffer holds a valid descriptor; the out pointer is valid
+    // and the length may be null.
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            buffer.as_mut_ptr().cast(),
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            null_mut(),
+        )
+    };
+    assert_ne!(ok, 0);
+    // SAFETY: the text is NUL-terminated and the caller's to free.
+    let sddl = unsafe {
+        let len = (0..).find(|at| *text.add(*at) == 0).unwrap_or(0);
+        let sddl = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+        LocalFree(text.cast());
+        sddl
+    };
+    println!("service access list: {sddl}");
+    let trusted = ["SY", "BA", "S-1-5-18", "S-1-5-32-544"];
+    let harmless = ["CC", "LC", "SW", "LO", "CR", "RC"];
+    let mut found = Vec::new();
+    for entry in sddl.split('(').skip(1) {
+        let fields: Vec<&str> = entry.trim_end_matches(')').split(';').collect();
+        let (kind, rights, sid) = (fields[0], fields[2], fields[5]);
+        // Entries for the service's own SID, if any, are its own business.
+        if kind != "A" || trusted.contains(&sid) || sid.starts_with("S-1-5-80-") {
+            continue;
+        }
+        let pairs = rights
+            .as_bytes()
+            .chunks(2)
+            .map(|p| String::from_utf8_lossy(p).into_owned());
+        found.extend(
+            pairs
+                .filter(|right| !harmless.contains(&right.as_str()))
+                .map(|right| format!("{sid}: {right}")),
+        );
+    }
+    found
+}
+
 fn is_registered(name: &str) -> bool {
     let manager = manager(SC_MANAGER_CONNECT).unwrap();
     open_service(&manager, name).unwrap().is_some()
@@ -145,6 +211,12 @@ fn quotes_the_path_and_refuses_what_cannot_be() {
 // uninstall that keeps or removes the data.
 #[test]
 fn installs_updates_and_uninstalls() {
+    // It registers a service and writes under ProgramData, which only CI
+    // runners may have changed.
+    if std::env::var_os("CI").is_none() {
+        println!("SKIPPED: it changes ProgramData and the services, so it runs on CI only");
+        return;
+    }
     if manager(SC_MANAGER_CREATE_SERVICE).is_err() {
         let required = std::env::var_os("UBC_VPN_REQUIRE_ELEVATED").is_some();
         assert!(
@@ -197,6 +269,7 @@ fn installs_updates_and_uninstalls() {
     assert_eq!(start_type, SERVICE_AUTO_START);
     assert_eq!(account, "LocalSystem");
     assert_eq!(preshutdown, PRESHUTDOWN_TIMEOUT_MS);
+    assert_eq!(ordinary_rights(&name), Vec::<String>::new());
     start(&name).unwrap();
     assert_eq!(status(&name), SERVICE_RUNNING);
 
