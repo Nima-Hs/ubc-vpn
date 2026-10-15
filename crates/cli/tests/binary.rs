@@ -180,6 +180,21 @@ impl Image {
         panic!("address {rva:#x} is in no section");
     }
 
+    /// The names of the DLLs the program imports (directory 1), in lower
+    /// case. Each import descriptor is 20 bytes, the name's address at 12,
+    /// and an all-zero one ends the list.
+    fn imports(&self) -> Vec<String> {
+        let (mut descriptor, _) = self.directory(1);
+        let mut names = Vec::new();
+        while self.u32_at(descriptor + 12) != 0 {
+            let start = self.offset(self.u32_at(descriptor + 12));
+            let end = start + self.0[start..].iter().position(|&b| b == 0).unwrap();
+            names.push(String::from_utf8_lossy(&self.0[start..end]).to_lowercase());
+            descriptor += 20;
+        }
+        names
+    }
+
     /// `DependentLoadFlags` from the load configuration (directory 10): where
     /// Windows looks for the DLLs the program imports. It sits at offset 78
     /// of IMAGE_LOAD_CONFIG_DIRECTORY64, whose first field is its size.
@@ -193,11 +208,37 @@ impl Image {
     }
 }
 
-// Security rule: the program's own imports come from System32 only, never
-// from its folder, the working folder or PATH (build.rs).
+// Security rule: the program's own imports come from its own folder and
+// System32 only, never the working folder or PATH (build.rs). Exactly that:
+// System32 alone would miss the bundled runtime, and any other place is one
+// the install does not control.
 #[cfg(all(windows, target_env = "msvc"))]
 #[test]
-fn imports_are_loaded_from_system32_only() {
+fn imports_are_loaded_from_its_folder_and_system32_only() {
     let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn")));
-    assert_eq!(program.dependent_load_flags(), 0x800);
+    assert_eq!(program.dependent_load_flags(), 0xA00);
+}
+
+// The Visual C++ runtime the program imports is exactly what the installer
+// bundles (packaging/windows/vcruntime.lock): vcruntime140.dll and nothing
+// else, such as vcruntime140_1.dll or msvcp140.dll. The Universal C Runtime
+// is part of Windows and is not bundled.
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn the_runtime_it_imports_is_the_bundled_one() {
+    let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn")));
+    let bundled = ["vcruntime140.dll"];
+    let runtime: Vec<String> = program
+        .imports()
+        .into_iter()
+        .filter(|name| {
+            ["vcruntime", "msvcp", "concrt", "vccorlib"]
+                .iter()
+                .any(|p| name.starts_with(p))
+        })
+        .collect();
+    assert_eq!(
+        runtime, bundled,
+        "update packaging/windows/vcruntime.lock to match"
+    );
 }

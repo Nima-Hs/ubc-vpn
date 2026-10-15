@@ -47,6 +47,12 @@ Our own code is `MIT OR Apache-2.0`. The app is redistributed to users, so every
   - It is distributed only inside our installer, next to the programs that use it, never as a file or release asset by itself.
   - It is not modified in any way: not patched, not re-signed, and nothing is extracted from it. Never build it ourselves.
   - Its version and checksum are pinned, and its licence text ships with it.
+- Approved exception: the Microsoft Visual C++ runtime (`vcruntime140.dll`) is bundled as Microsoft's prebuilt file, taken from the `VC\redist` folder of the Visual Studio that builds the programs, which Microsoft's Distributable List allows licensed users to redistribute. It is not open source. It is redistributed under the maintainer's own Visual Studio Community 2026 / Build Tools licence (an individual developer of an open-source project), whatever edition the build machine has.
+  - It is unmodified: never patched, re-signed or rebuilt.
+  - It is distributed only inside our installer, beside the service and the command-line client that load it, never as a file or release asset by itself.
+  - Its file name, version and SHA-256, and the compiler version it goes with, are pinned in `packaging/windows/vcruntime.lock`; `packaging/windows/vcruntime.sh` stops the build if anything differs, or if the compiler is newer than the runtime.
+  - Microsoft's Community licence terms and the Distributable List ship with it, verbatim (`packaging/windows/licenses/`).
+  - The licence's distribution requirements apply. End users must agree to terms that protect the file at least as much as Microsoft's: the setup program's licence page, which shows our licence and the third-party notices including Microsoft's terms, is how we meet that, and a silent install (`/S`) counts as acceptance by whoever runs it. We indemnify, defend and hold Microsoft harmless as that section says.
 - For every bundled LGPL library, each release must ship its license text and the exact source it was built from, including our patches.
 
 ## Updates

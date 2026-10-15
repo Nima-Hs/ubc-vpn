@@ -165,6 +165,14 @@ Electron is the one the lockfile pins: `pnpm package:win` first runs `node_modul
 
 Nothing is signed. For now the installer holds only the app: the service, the command-line client and the native libraries are added to it later.
 
+The service and the command-line client need Microsoft's Visual C++ runtime, `vcruntime140.dll`, which the installer puts beside them. It is not downloaded: it is the copy in the `VC\Redist\MSVC\<version>\x64\Microsoft.VC145.CRT` folder of the Visual Studio that builds them, and `packaging/windows/vcruntime.lock` pins the compiler and runtime versions and its SHA-256 (any edition has the same file). Install Visual Studio, or the Build Tools, with the "Desktop development with C++" workload (the C++ x64/x86 build tools), then, in Git Bash:
+
+```sh
+packaging/windows/vcruntime.sh <folder>   # copies it into <folder>, or says what differs
+```
+
+If it stops because your Visual Studio has another compiler or runtime version, the lock is for the one on GitHub's runner; the build there is the one that ships. When the runner image moves to a new compiler or runtime, the installer workflow (`.github/workflows/installer-windows.yml`, the only one that runs it) stops in the same way and prints the new versions and SHA-256 to review and put in the lock. Microsoft's Visual Studio Community 2026 licence terms, under which the maintainer redistributes the file, and its Distributable List are in `packaging/windows/licenses/`; update them when the Visual Studio version changes.
+
 `.github/workflows/installer-windows.yml` builds it, installs it silently on a GitHub runner, checks what landed where and who can change it, removes it, and checks nothing is left. Those checks are in `packaging/windows/tests/installer.ps1`. They install for the whole machine, so they run only on the runner; do not run them on your own computer.
 
 ## Workflow
