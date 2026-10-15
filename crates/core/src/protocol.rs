@@ -190,10 +190,26 @@ pub enum RequestBody {
     /// login sends this; the bridge refuses it from the app.
     AddLog(AddLogParams),
     /// Apply these routes to the live tunnel in place of the ones it has:
-    /// add the new, remove the dropped, and verify both. Refused with
-    /// `not_connected` when there is no tunnel. Only the command-line
-    /// client sends this, with the routes it has just saved in the user's
-    /// settings; the bridge refuses it from the app.
+    /// add the new, remove the dropped, and verify both. Only the
+    /// command-line client sends this, with the routes it has just saved in
+    /// the user's settings; the bridge refuses it from the app.
+    ///
+    /// - **Success:** the answer is `accepted`, and the outcome comes as the
+    ///   usual state event: `connected` with the new [`TunnelInfo`](crate::state::TunnelInfo).
+    /// - **Refusal:** the same checks as `connect`, [`RouteSet::check`] with
+    ///   the policy's allow-list and then the local-network rule against the
+    ///   network captured at connect, give `route_refused`; so does a change
+    ///   that adds DNS domains to a connection that has none when the DNS
+    ///   servers the gateway assigned cannot be used. Nothing is changed and
+    ///   the connection is kept as it was.
+    /// - **No change:** routes and domains equal to the tunnel's are
+    ///   answered at once with `status`, the connection as it is, which
+    ///   already carries them; nothing is changed, logged or reported.
+    /// - **Failure while applying or verifying:** everything is torn down
+    ///   and the state is `failed`. The tunnel never goes on with the old
+    ///   routes, nor with a mix of old and new.
+    /// - **Timing:** `busy` while connecting, disconnecting or applying
+    ///   another update; `not_connected` when there is no tunnel.
     UpdateRoutes(RouteSet),
 }
 
