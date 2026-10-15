@@ -284,7 +284,9 @@ pub fn check_subscription_ends(
     let before = live();
     let subscriptions = [(); 3].map(|()| events.subscribe(watching).expect("subscribe"));
     assert_eq!(live(), before + 3, "a subscription was not registered");
-    for (dropped, subscription) in subscriptions.into_iter().enumerate() {
+    let mut left = subscriptions.into_iter();
+    for dropped in 0..3 {
+        let subscription = left.next().expect("three subscriptions");
         // On a thread of its own, so a drop that hangs fails the check
         // instead of stalling it.
         let (done, finished) = std::sync::mpsc::channel();
@@ -292,9 +294,19 @@ pub fn check_subscription_ends(
             drop(subscription);
             let _ = done.send(());
         });
-        let ended = finished.recv_timeout(Duration::from_secs(2));
-        assert!(ended.is_ok(), "dropping a subscription did not return");
-        assert_eq!(live(), before + 2 - dropped, "dropping left it registered");
+        let ended = finished.recv_timeout(Duration::from_secs(2)).is_ok();
+        let registered = live();
+        if !ended || registered != before + 2 - dropped {
+            // Dropping these while the check unwinds could hang it as well,
+            // so they are left as they are.
+            left.by_ref().for_each(std::mem::forget);
+        }
+        assert!(ended, "dropping a subscription did not return");
+        assert_eq!(
+            registered,
+            before + 2 - dropped,
+            "dropping left it registered"
+        );
     }
 }
 

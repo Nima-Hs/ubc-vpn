@@ -1125,6 +1125,44 @@ mod tests {
         assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::No);
     }
 
+    // A subscription whose drop never returns fails the suite's check, and
+    // the check does not hang on the ones it had not dropped yet.
+    #[test]
+    fn a_subscription_that_never_ends_fails_the_check_without_hanging_it() {
+        /// Ends never: dropping it waits for ever.
+        struct Stuck;
+        impl Drop for Stuck {
+            fn drop(&mut self) {
+                loop {
+                    std::thread::park();
+                }
+            }
+        }
+        struct Hanging(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl NetworkEvents for Hanging {
+            fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Subscription> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let (_sender, receiver) = mpsc::channel();
+                Ok(Subscription::new(receiver, Stuck))
+            }
+        }
+        let fake = Fake::new();
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hanging = Hanging(count.clone());
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let check = std::panic::AssertUnwindSafe(|| {
+                suite::check_subscription_ends(&hanging, &physical, &|| {
+                    count.load(Ordering::SeqCst)
+                });
+            });
+            let _ = done.send(std::panic::catch_unwind(check).is_err());
+        });
+        let failed = finished.recv_timeout(Duration::from_secs(20));
+        assert_eq!(failed, Ok(true), "the check hung or passed");
+    }
+
     // A dropped subscription is gone at once, and the suite notices one that
     // lingers until the next event.
     #[test]
