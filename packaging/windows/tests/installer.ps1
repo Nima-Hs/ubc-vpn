@@ -214,7 +214,8 @@ switch ($Command) {
     'install-fails' {
         if (Test-Path -LiteralPath $InstallFolder) { Fail "$InstallFolder exists before the test" }
         $code = Run-Setup $Path @('/S')
-        if ($code -eq 0) { Fail 'the setup program reported success' }
+        # 3: the folder could not be secured and the install was undone (installer.nsh).
+        if ($code -ne 3) { Fail "exit code $code, not 3" }
         Assert-NotInstalled
         Write-Output "failed with exit code $code and left nothing behind"
     }

@@ -68,7 +68,14 @@
   DeleteRegKey SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}"
 !macroend
 
+# The exit code of a setup program that could not secure its folder.
+!define UBC_VPN_EXIT_NOT_SECURED 3
+
 # Runs one step, and on failure undoes the install and stops with an error.
+#
+# No step uses icacls /C: with it, icacls carries on past a file it cannot
+# change and still exits 0, so a partly secured folder would count as done.
+# Without it, icacls stops at the first such file with a non-zero code.
 #
 # A setup program built to test that (packaging/windows/tests/fail-step.nsh)
 # defines UBC_VPN_TEST_FAIL_STEP as a step's label, and that step then
@@ -87,9 +94,10 @@
   !endif
   ${if} $0 != 0
     !insertmacro ubcVpnUndoInstall
-    MessageBox MB_OK|MB_ICONSTOP "UBC VPN could not secure its folder (${LABEL}, $0). Nothing was installed; run the setup program again." /SD IDOK
-    SetErrorLevel 2
-    Abort
+    MessageBox MB_OK|MB_ICONSTOP "UBC VPN could not secure its folder (${LABEL}, $0). The install was undone, and UBC VPN is not installed; run the setup program again." /SD IDOK
+    # Its own exit code, apart from /D= (2), so a test can tell this path ran.
+    SetErrorLevel ${UBC_VPN_EXIT_NOT_SECURED}
+    Quit
   ${endif}
 !macroend
 
@@ -97,10 +105,10 @@
   # Only the updater uses it, and there is none.
   Delete "$INSTDIR\resources\elevate.exe"
 
-  !insertmacro ubcVpnRun "owner" '"$SYSDIR\icacls.exe" "$INSTDIR" /setowner ${UBC_VPN_ACL_ADMINS} /T /C /Q'
+  !insertmacro ubcVpnRun "owner" '"$SYSDIR\icacls.exe" "$INSTDIR" /setowner ${UBC_VPN_ACL_ADMINS} /T /Q'
   # Drops any entry set on the folder itself, so the next step leaves only
   # the four below.
   !insertmacro ubcVpnRun "reset" '"$SYSDIR\icacls.exe" "$INSTDIR" /reset /Q'
   !insertmacro ubcVpnRun "access list" '"$SYSDIR\icacls.exe" "$INSTDIR" /inheritance:r /grant:r ${UBC_VPN_ACL_SYSTEM}:(OI)(CI)F ${UBC_VPN_ACL_ADMINS}:(OI)(CI)F ${UBC_VPN_ACL_INSTALLER}:(OI)(CI)F ${UBC_VPN_ACL_USERS}:(OI)(CI)RX /Q'
-  !insertmacro ubcVpnRun "contents" '"$SYSDIR\icacls.exe" "$INSTDIR\*" /reset /T /C /Q'
+  !insertmacro ubcVpnRun "contents" '"$SYSDIR\icacls.exe" "$INSTDIR\*" /reset /T /Q'
 !macroend
