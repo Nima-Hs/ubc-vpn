@@ -65,6 +65,9 @@ fn new_folder_sddl(mode: Mode) -> Result<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Entry {
     pub(super) kind: u8,
+    /// The entry's flags; `INHERIT_ONLY` among them means it applies only
+    /// to what is created inside, not to the folder itself.
+    pub(super) flags: u8,
     pub(super) mask: u32,
     pub(super) sid: String,
 }
@@ -91,7 +94,7 @@ pub(super) fn judge(owner: &str, dacl: Option<&[Entry]>, trusted: &[String]) -> 
 }
 
 /// The access entries of `acl`.
-fn entries(acl: *const ACL) -> Result<Vec<Entry>> {
+pub(super) fn entries(acl: *const ACL) -> Result<Vec<Entry>> {
     // SAFETY: `acl` points to a valid access list owned by a descriptor the
     // caller keeps alive.
     let count = unsafe { (*acl).AceCount };
@@ -116,6 +119,7 @@ fn entries(acl: *const ACL) -> Result<Vec<Entry>> {
         };
         found.push(Entry {
             kind: header.AceType,
+            flags: header.AceFlags,
             mask,
             sid,
         });
@@ -177,7 +181,7 @@ fn check_handle(handle: &Handle, what: &Path, trusted: &[String]) -> Result<()> 
 }
 
 /// Opens `path`, a folder or a file, without following a link.
-fn open(path: &Path, access: u32, share: u32) -> Result<Option<Handle>> {
+pub(super) fn open(path: &Path, access: u32, share: u32) -> Result<Option<Handle>> {
     let name = wide(&path.to_string_lossy());
     let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
     // SAFETY: `name` is NUL-terminated and outlives the call; the optional

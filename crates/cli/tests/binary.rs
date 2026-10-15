@@ -121,3 +121,48 @@ fn a_profile_with_no_roaming_folder_has_default_settings() {
     );
     assert!(after.contains("10.19.0.0/16"), "{after}");
 }
+
+/// The `DependentLoadFlags` of a 64-bit Windows program: the field of its
+/// load configuration that says where Windows looks for the DLLs it imports.
+#[cfg(all(windows, target_env = "msvc"))]
+fn dependent_load_flags(program: &std::path::Path) -> u16 {
+    let image = std::fs::read(program).unwrap();
+    let u16_at = |at: usize| u16::from_le_bytes([image[at], image[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+    let pe = u32_at(0x3c) as usize;
+    assert_eq!(&image[pe..pe + 4], b"PE\0\0", "not a Windows program");
+    let coff = pe + 4;
+    let sections = usize::from(u16_at(coff + 2));
+    let optional = coff + 20;
+    assert_eq!(u16_at(optional), 0x20b, "not a 64-bit program");
+    // Data directory 10 is the load configuration; a 64-bit program's
+    // directories start 112 bytes into its optional header.
+    let directory = optional + 112 + 10 * 8;
+    let (rva, size) = (u32_at(directory), u32_at(directory + 4));
+    assert!(size > 0, "the program has no load configuration");
+    let table = optional + usize::from(u16_at(coff + 16));
+    for section in (0..sections).map(|n| table + n * 40) {
+        let (length, address, offset) = (
+            u32_at(section + 8),
+            u32_at(section + 12),
+            u32_at(section + 20),
+        );
+        if (address..address + length).contains(&rva) {
+            let config = (rva - address + offset) as usize;
+            // The field is at offset 78 of IMAGE_LOAD_CONFIG_DIRECTORY64,
+            // whose own first field is its size.
+            assert!(u32_at(config) >= 80, "the load configuration is too short");
+            return u16_at(config + 78);
+        }
+    }
+    panic!("the load configuration is in no section");
+}
+
+// Security rule: the program's own imports come from System32 only, never
+// from its folder, the working folder or PATH (build.rs).
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn imports_are_loaded_from_system32_only() {
+    let program = std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn"));
+    assert_eq!(dependent_load_flags(program), 0x800);
+}

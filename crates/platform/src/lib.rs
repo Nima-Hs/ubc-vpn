@@ -72,6 +72,10 @@ mod os;
 #[cfg(windows)]
 pub use os::service;
 
+/// The installed service's check of the folder it runs from, on Windows.
+#[cfg(windows)]
+pub use os::program;
+
 /// Why an operation did not happen. The set is closed, so a caller can match
 /// on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
