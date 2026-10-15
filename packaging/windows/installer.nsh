@@ -45,17 +45,49 @@
 #   Users read and execute, passed on to everything inside;
 # - everything inside is reset to inherit just that.
 #
-# Any failure stops the install with an error.
+# Any failure stops the install with an error, after removing everything
+# this install put in place (see ubcVpnUndoInstall): electron-builder has
+# already written the files, the uninstall entry and the shortcut, and a
+# half-done install would leave the files owned by whoever ran it.
+#
+# Anything that must not run in a folder others could change, such as
+# registering the service, comes after these steps, never before.
 !define UBC_VPN_ACL_SYSTEM "*S-1-5-18"
 !define UBC_VPN_ACL_ADMINS "*S-1-5-32-544"
 !define UBC_VPN_ACL_INSTALLER "*S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 !define UBC_VPN_ACL_USERS "*S-1-5-32-545"
 
+# Removes what this install has put in place so far: the app's folder, the
+# Start menu and desktop shortcuts, and the uninstall and install entries.
+!macro ubcVpnUndoInstall
+  SetOutPath $TEMP
+  RMDir /r "$INSTDIR"
+  Delete "$newStartMenuLink"
+  Delete "$newDesktopLink"
+  DeleteRegKey SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}"
+  DeleteRegKey SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}"
+!macroend
+
+# Runs one step, and on failure undoes the install and stops with an error.
+#
+# A setup program built to test that (packaging/windows/tests/fail-step.nsh)
+# defines UBC_VPN_TEST_FAIL_STEP as a step's label, and that step then
+# fails without running. The define exists only in that build.
 !macro ubcVpnRun LABEL COMMAND
-  nsExec::ExecToLog '${COMMAND}'
-  Pop $0
+  !ifdef UBC_VPN_TEST_FAIL_STEP
+    !if "${LABEL}" == "${UBC_VPN_TEST_FAIL_STEP}"
+      StrCpy $0 "1"
+    !else
+      nsExec::ExecToLog '${COMMAND}'
+      Pop $0
+    !endif
+  !else
+    nsExec::ExecToLog '${COMMAND}'
+    Pop $0
+  !endif
   ${if} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "UBC VPN could not secure its folder (${LABEL}, $0). The install is not complete; run the setup program again." /SD IDOK
+    !insertmacro ubcVpnUndoInstall
+    MessageBox MB_OK|MB_ICONSTOP "UBC VPN could not secure its folder (${LABEL}, $0). Nothing was installed; run the setup program again." /SD IDOK
     SetErrorLevel 2
     Abort
   ${endif}

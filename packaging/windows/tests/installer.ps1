@@ -4,6 +4,8 @@
 #
 #   installer.ps1 refuse-folder <setup.exe>          /D= is refused and nothing is installed
 #   installer.ps1 install <setup.exe>                silent install; must succeed
+#   installer.ps1 install-fails <setup.exe>          silent install that must fail and
+#                                                    leave nothing behind
 #   installer.ps1 installed <win-unpacked folder>    what the install left, file by file
 #   installer.ps1 who-can-change                     only SYSTEM, Administrators and
 #                                                    TrustedInstaller may change the folder
@@ -35,6 +37,20 @@ function Uninstall-Entries {
     @(Get-ChildItem $UninstallKeys -ErrorAction SilentlyContinue |
             Get-ItemProperty |
             Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -like "$ProductName*" })
+}
+
+# Fails unless no trace of an install is left: the folder, the uninstall
+# entry, the install entry electron-builder keeps, and the shortcuts.
+function Assert-NotInstalled {
+    if (Test-Path -LiteralPath $InstallFolder) { Fail "$InstallFolder is still there: $((Get-ChildItem -LiteralPath $InstallFolder -Recurse -Force | ForEach-Object FullName) -join ', ')" }
+    if (@(Uninstall-Entries).Count -ne 0) { Fail 'an uninstall entry is still there' }
+    $installEntries = @(Get-ChildItem 'HKLM:\Software', 'HKCU:\Software' -ErrorAction SilentlyContinue |
+            Get-ItemProperty -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSObject.Properties['InstallLocation'] -and $_.InstallLocation -eq $InstallFolder })
+    if ($installEntries.Count -ne 0) { Fail "an install entry is still there: $($installEntries[0].PSPath)" }
+    if (Test-Path -LiteralPath $StartMenuShortcut) { Fail "$StartMenuShortcut is still there" }
+    $desktop = Join-Path $env:PUBLIC "Desktop\$ProductName.lnk"
+    if (Test-Path -LiteralPath $desktop) { Fail "$desktop is still there" }
 }
 
 function Run-Setup([string]$setup, [string[]]$arguments) {
@@ -195,12 +211,15 @@ switch ($Command) {
         }
         Write-Output 'uninstaller finished'
     }
+    'install-fails' {
+        if (Test-Path -LiteralPath $InstallFolder) { Fail "$InstallFolder exists before the test" }
+        $code = Run-Setup $Path @('/S')
+        if ($code -eq 0) { Fail 'the setup program reported success' }
+        Assert-NotInstalled
+        Write-Output "failed with exit code $code and left nothing behind"
+    }
     'removed' {
-        if (Test-Path -LiteralPath $InstallFolder) { Fail "$InstallFolder is still there: $((Get-ChildItem -LiteralPath $InstallFolder -Recurse -Force | ForEach-Object FullName) -join ', ')" }
-        if (@(Uninstall-Entries).Count -ne 0) { Fail 'an uninstall entry is still there' }
-        if (Test-Path -LiteralPath $StartMenuShortcut) { Fail "$StartMenuShortcut is still there" }
-        $desktop = Join-Path $env:PUBLIC "Desktop\$ProductName.lnk"
-        if (Test-Path -LiteralPath $desktop) { Fail "$desktop is still there" }
+        Assert-NotInstalled
         # The user's own data stays: settings and the app's profile.
         $userData = Join-Path $env:APPDATA $ProductName
         if (-not (Test-Path -LiteralPath (Join-Path $userData 'app'))) { Fail "the app's profile in $userData was removed" }
