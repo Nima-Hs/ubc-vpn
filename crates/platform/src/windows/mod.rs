@@ -28,12 +28,18 @@
 //! is open, so closing the listener also closes the connections it accepted.
 
 pub(crate) mod interrupt;
+mod journal;
 mod pipe;
+mod routes;
+#[cfg(test)]
+mod routes_tests;
 mod security;
 pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wintun;
 
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
@@ -81,11 +87,12 @@ const BUSY_WAIT: Duration = Duration::from_secs(5);
 
 pub(crate) fn native(mode: Mode) -> Result<Platform> {
     let me = security::process_user()?;
+    let paths = paths(mode, &me)?;
     Ok(Platform {
-        routes: Arc::new(Native),
+        routes: Arc::new(routes::WinRoutes::new(mode, &paths)),
         dns: Arc::new(Native),
         events: Arc::new(Native),
-        paths: paths(mode, &me)?,
+        paths,
         transport: Arc::new(PipeTransport { mode, me }),
     })
 }

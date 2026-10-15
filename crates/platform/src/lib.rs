@@ -251,7 +251,10 @@ impl PhysicalNetwork {
 ///   only an administrator can write, and also sets a route flag. It removes
 ///   a route only when it matches a journal row and carries the flag.
 /// - **Windows** has nothing to mark a route with. It writes the exact route
-///   to the same kind of journal and removes only exact matches.
+///   to the same kind of journal and removes only exact matches. Windows
+///   keeps routes to one destination through two interfaces side by side and
+///   refuses only an identical one, so the implementation reads the table
+///   before each add to return [`Error::AlreadyExists`].
 ///
 /// A journal row is written **before** the route is added, so a crash between
 /// the two leaves a row without a route and never a route without a row. If
@@ -265,6 +268,11 @@ impl PhysicalNetwork {
 /// followed in the same boot by somebody else adding the identical route,
 /// lets [`Routes::remove_all`] remove that route. It needs the same
 /// destination, interface and next hop, within one boot, after a crash.
+///
+/// The same can happen without a crash: Windows removes a route through an
+/// interface when that interface disconnects, but the row stays. If somebody
+/// else then adds the identical route in the same boot, [`Routes::remove_all`]
+/// removes theirs. This is accepted too.
 ///
 /// The `tunnel` and `interface` arguments are names, as an OS-defined token.
 /// An implementation resolves the name on every call and, where it is told
@@ -1149,6 +1157,13 @@ mod tests {
         assert_eq!(connection.write_line("late"), Err(Error::Closed));
     }
 
+    // Linux's remove_all finds earlier versions' routes by this number, so
+    // it can never change.
+    #[test]
+    fn the_linux_route_protocol_number_never_changes() {
+        assert_eq!(LINUX_ROUTE_PROTOCOL, 0xb5);
+    }
+
     // Security rule: an identity is one exact piece of text. Anything that
     // could be confused with another spelling of it is refused or unequal.
     #[test]
@@ -1242,7 +1257,7 @@ mod tests {
     // still say it is unsupported, and its checks must still fail closed.
     #[cfg(windows)]
     #[test]
-    fn windows_implements_the_channel_and_nothing_else_yet() {
+    fn windows_implements_the_channel_and_routes_and_nothing_else_yet() {
         let unsupported = Some(Error::Unsupported);
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let physical = PhysicalNetwork {
@@ -1262,12 +1277,11 @@ mod tests {
         ];
         for mode in modes {
             let native = Platform::native(mode).expect("a platform");
-            assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
-            let configured = native.routes.configure_tunnel("tun0", gateway, 1300);
-            assert_eq!(configured.err(), unsupported);
-            assert_eq!(native.routes.remove_all().err(), unsupported);
-            let routed = native.routes.uses_interface(gateway, "tun0");
-            assert_eq!(routed, Verified::Unknown);
+            // Routes are real: reading the table needs no rights. A device
+            // that does not exist is not used.
+            assert!(native.routes.capture_physical(gateway).is_ok());
+            let routed = native.routes.uses_interface(gateway, "ubc-vpn-no-such0");
+            assert_eq!(routed, Verified::No);
             assert_eq!(native.dns.clear_split_dns().err(), unsupported);
             assert_eq!(native.dns.split_dns_matches(&dns), Verified::Unknown);
             assert_eq!(native.events.subscribe(&physical).err(), unsupported);
