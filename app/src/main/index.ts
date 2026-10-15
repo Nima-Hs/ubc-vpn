@@ -18,7 +18,7 @@ import {
     registerAppScheme,
     secureSession,
 } from "./security";
-import { createTray, trayImage } from "./tray";
+import { appImage, createTray, showStateOnTaskbar } from "./tray";
 import { closeHidesWindow, connectFromTray } from "./tray-icon";
 import { createWindow, keepHidden, showWindow } from "./window";
 
@@ -147,7 +147,7 @@ async function start(): Promise<void> {
 
     // Only for the end-to-end tests: the window is never put on screen.
     const hidden = keepHidden(app, process);
-    const window = createWindow(entryUrl, trayImage("on", 64), developmentBuild, hidden);
+    const window = createWindow(entryUrl, appImage(), developmentBuild, hidden);
     registerIpc(window, controller, settings, devServerUrl);
     // The log screen: in no production build until its contract is on main.
     // Until then the only service that can be asked for its log is the
@@ -197,7 +197,11 @@ async function start(): Promise<void> {
             show();
         }
     }
-    controller.subscribe((snapshot) => tray?.update(snapshot.state));
+    controller.subscribe((snapshot) => {
+        tray?.update(snapshot.state);
+        showStateOnTaskbar(window, snapshot.state);
+    });
+    showStateOnTaskbar(window, controller.getSnapshot().state);
 
     // Closing the window leaves the app running in the tray, but only where
     // there is a way back to a hidden window. Elsewhere closing quits.

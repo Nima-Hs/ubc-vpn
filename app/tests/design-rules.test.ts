@@ -5,13 +5,18 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { appIcon, COLOURS, taskbarBadge } from "../src/main/icon/designs";
+import { draw } from "../src/main/icon/raster";
 import {
+    BUSY_FRAMES,
     COLOUR_PALETTE,
     closeHidesWindow,
     connectFromTray,
     drawTrayIcon,
     TEMPLATE_PALETTE,
+    TRAY_KINDS,
     type TrayKind,
+    taskbarBadgePng,
     trayIconPng,
 } from "../src/main/tray-icon";
 
@@ -68,11 +73,44 @@ describe("everything the interface draws", () => {
     });
 });
 
-describe("the tray icon", () => {
-    const kinds: TrayKind[] = ["off", "on", "busy", "attention"];
+/** WCAG relative luminance of an sRGB colour. */
+function luminance([r, g, b]: readonly number[]): number {
+    const linear = (channel = 0) => {
+        const c = channel / 255;
+        return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+}
+const contrast = (a: readonly number[], b: readonly number[]) => {
+    const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return ((light ?? 0) + 0.05) / ((dark ?? 0) + 0.05);
+};
+/** Windows 11's taskbar, dark and light, and a light macOS menu bar. */
+const DARK_BAR = [32, 32, 32];
+const LIGHT_BAR = [243, 243, 243];
 
-    function alpha(kind: TrayKind, size: number): number[] {
-        const png = trayIconPng(kind, TEMPLATE_PALETTE, size);
+/** The colours a drawing uses where it is solid. */
+function solidColours(pixels: Buffer): Set<string> {
+    const found = new Set<string>();
+    for (let at = 0; at < pixels.length; at += 4) {
+        if (pixels[at + 3] === 255) {
+            found.add([pixels[at], pixels[at + 1], pixels[at + 2]].join(","));
+        }
+    }
+    return found;
+}
+
+describe("the tray icon", () => {
+    const kinds = TRAY_KINDS;
+    const stateColour: Record<Exclude<TrayKind, "off">, readonly number[]> = {
+        busy: COLOUR_PALETTE.busy,
+        on: COLOUR_PALETTE.on,
+        attention: COLOUR_PALETTE.attention,
+        problem: COLOUR_PALETTE.problem,
+    };
+
+    function alpha(kind: TrayKind, size: number, frame = 0): number[] {
+        const png = trayIconPng(kind, TEMPLATE_PALETTE, size, frame);
         expect(png.subarray(0, 8)).toEqual(
             Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
         );
@@ -96,14 +134,67 @@ describe("the tray icon", () => {
     });
 
     it("has a different shape for each state, so it reads in one colour", () => {
-        const shapes = kinds.map((kind) => alpha(kind, 32).join(","));
-        expect(new Set(shapes).size).toBe(kinds.length);
+        expect([...kinds]).toEqual(["off", "busy", "on", "attention", "problem"]);
+        for (const size of [16, 32]) {
+            const shapes = kinds.map((kind) => alpha(kind, size).join(","));
+            expect(new Set(shapes).size).toBe(kinds.length);
+        }
     });
 
-    it("fills the middle only when connected", () => {
-        const middle = (kind: TrayKind) => alpha(kind, 32)[16 * 32 + 8];
-        expect(middle("on")).toBe(255);
-        expect(middle("off")).toBe(0);
+    it("draws the tunnel wide only while it is open or opening", () => {
+        // How much of the upper part, where the tunnel runs, is covered.
+        const tunnel = (kind: TrayKind) =>
+            alpha(kind, 32)
+                .slice(0, 12 * 32)
+                .reduce((sum, value) => sum + value, 0);
+        expect(tunnel("on")).toBeGreaterThan(tunnel("off") * 1.4);
+        expect(tunnel("busy")).toBeGreaterThan(tunnel("off"));
+        expect(tunnel("attention")).toBe(tunnel("off"));
+    });
+
+    it("marks needing attention with a triangle and a problem with a diamond", () => {
+        // The badge sits over the lower right; nothing else reaches its middle.
+        const badge = (kind: TrayKind) => alpha(kind, 32)[19 * 32 + 24];
+        expect(badge("attention")).toBe(255);
+        expect(badge("problem")).toBe(255);
+        expect(badge("off")).toBe(0);
+        // A diamond reaches its right-hand corner at mid-height, a triangle does not.
+        const corner = (kind: TrayKind) => alpha(kind, 32)[24 * 32 + 29] ?? 0;
+        expect(corner("problem")).toBeGreaterThan(200);
+        expect(corner("attention")).toBeLessThan(255);
+        expect(alpha("attention", 32).join()).not.toBe(alpha("problem", 32).join());
+    });
+
+    it("moves while working, in a few pictures that come round again", () => {
+        const frames = Array.from({ length: BUSY_FRAMES }, (_, frame) =>
+            alpha("busy", 16, frame).join(","),
+        );
+        expect(BUSY_FRAMES).toBeLessThanOrEqual(4);
+        expect(new Set(frames).size).toBe(BUSY_FRAMES);
+        expect(alpha("busy", 16, BUSY_FRAMES).join(",")).toBe(frames[0]);
+    });
+
+    it("gives each state its own colour, from the tokens, and draws it", () => {
+        const colours = Object.values(stateColour).map((colour) => colour.join(","));
+        expect(new Set([...colours, COLOUR_PALETTE.ink.join(",")]).size).toBe(5);
+        for (const [kind, colour] of Object.entries(stateColour)) {
+            const used = solidColours(drawTrayIcon(kind as TrayKind, COLOUR_PALETTE, 32));
+            expect(used.has(colour.join(",")), `${kind} is drawn in its colour`).toBe(true);
+        }
+        // Off is drawn in the neutral colour alone.
+        const off = solidColours(drawTrayIcon("off", COLOUR_PALETTE, 32));
+        expect([...off]).toEqual([COLOUR_PALETTE.ink.join(",")]);
+    });
+
+    it("shows on a dark taskbar by its colours, and on a light one by its rim", () => {
+        for (const colour of [COLOUR_PALETTE.ink, ...Object.values(stateColour)]) {
+            // WCAG asks 3:1 of a graphic that carries meaning.
+            expect(contrast(colour, DARK_BAR)).toBeGreaterThanOrEqual(3);
+            expect(contrast(colour, COLOUR_PALETTE.rim ?? [0, 0, 0])).toBeGreaterThanOrEqual(3);
+        }
+        expect(contrast(COLOUR_PALETTE.rim ?? [255, 255, 255], LIGHT_BAR)).toBeGreaterThanOrEqual(
+            3,
+        );
     });
 
     it("carries its own contrast, since it cannot know the taskbar's colour", () => {
@@ -115,7 +206,7 @@ describe("the tray icon", () => {
                 opaque.push(pixels[at] ?? 0);
             }
         }
-        expect(Math.max(...opaque)).toBeGreaterThan(200);
+        expect(Math.max(...opaque)).toBe(COLOUR_PALETTE.ink[0]);
         expect(Math.min(...opaque)).toBeLessThan(60);
         // macOS tints the icon itself, so there it has one colour and no rim.
         expect(TEMPLATE_PALETTE.rim).toBeNull();
@@ -124,6 +215,35 @@ describe("the tray icon", () => {
     it("uses colour as well as shape where the OS allows it", () => {
         expect(COLOUR_PALETTE.on).not.toEqual(COLOUR_PALETTE.ink);
         expect(COLOUR_PALETTE.attention).not.toEqual(COLOUR_PALETTE.ink);
+    });
+});
+
+describe("the taskbar badge", () => {
+    it("is shown for every state but off, each in its own shape and colour", () => {
+        expect(taskbarBadgePng("off", 16)).toBeNull();
+        const badges = TRAY_KINDS.filter((kind) => kind !== "off");
+        const shapes = badges.map((kind) => {
+            const pixels = draw(taskbarBadge(kind as Exclude<TrayKind, "off">), 32);
+            const used = solidColours(pixels);
+            expect(used.has(COLOUR_PALETTE[kind as Exclude<TrayKind, "off">].join(","))).toBe(true);
+            return [...pixels].filter((_, at) => at % 4 === 3).join(",");
+        });
+        expect(new Set(shapes).size).toBe(badges.length);
+    });
+});
+
+describe("the app icon", () => {
+    it("is the mark on the app's surface, edged so it shows on any taskbar", () => {
+        for (const size of [16, 32, 256]) {
+            const used = solidColours(draw(appIcon(size), size));
+            expect(used.has(COLOURS.surface.join(",")), `${size}: surface`).toBe(true);
+            expect(used.has(COLOURS.accent.join(",")), `${size}: tunnel`).toBe(true);
+            expect(used.has(COLOURS.edge.join(",")), `${size}: edge`).toBe(true);
+        }
+        expect(contrast(COLOURS.edge, DARK_BAR)).toBeGreaterThan(1.5);
+        expect(contrast(COLOURS.surface, LIGHT_BAR)).toBeGreaterThanOrEqual(3);
+        expect(contrast(COLOURS.accent, COLOURS.surface)).toBeGreaterThanOrEqual(3);
+        expect(contrast(COLOURS.tertiary, COLOURS.surface)).toBeGreaterThanOrEqual(3);
     });
 });
 

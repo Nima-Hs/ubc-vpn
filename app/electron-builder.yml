@@ -81,12 +81,20 @@ win:
   target:
     - target: nsis
       arch: [x64]
+  # The app icon, drawn from the mark in code: `pnpm icons` writes it and
+  # tests/icons.test.ts fails if it is out of date. It is the program's,
+  # the taskbar's and the Start menu shortcut's icon. build/icon.icns and
+  # build/icons/ are where macOS and Linux packaging look by default.
+  icon: build/icon.ico
   # Nothing is signed for v0.1.0. If signing is added, DLLs stay out of it,
   # so that wintun.dll keeps WireGuard's signature. electron-builder signs no
   # DLL by default; "!.dll" keeps it that way if a default changes.
   signExts: ["!.dll"]
 
 nsis:
+  # The setup program and the uninstaller show the app icon too.
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
   # Not one-click: the assisted setup program, for its licence page, which
   # the user must accept before anything is written (stage/license.txt,
   # made by packaging/windows/stage.sh). With the two settings below it has

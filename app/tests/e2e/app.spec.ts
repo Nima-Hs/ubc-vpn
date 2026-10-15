@@ -22,6 +22,7 @@ import {
     type Page,
     test,
 } from "@playwright/test";
+import { photographIcons } from "./icon-sheets";
 
 /**
  * Off the screen unless this is CI: a test run on someone's computer must
@@ -1179,6 +1180,47 @@ test("keyboard focus on the scrolling details is visible", async () => {
     await page.keyboard.press("ArrowDown");
     await expect.poll(() => details.evaluate((region) => region.scrollTop)).toBeGreaterThan(0);
     await scenario("disconnected");
+});
+
+test("the mark in the title bar takes the colour of each state, and moves to it smoothly", async () => {
+    const mark = page.locator("header svg[data-tone]");
+    const tunnel = mark.locator("path").first();
+    const colours = new Map<string, string>();
+    for (const [name, tone] of [
+        ["disconnected", "idle"],
+        ["connecting", "busy"],
+        ["connected", "on"],
+        ["login-needed", "attention"],
+        ["failed-engine-failed", "problem"],
+    ] as const) {
+        await scenario(name);
+        await expect(mark).toHaveAttribute("data-tone", tone);
+        // Once the change has run its course.
+        await page.waitForTimeout(400);
+        colours.set(tone, await tunnel.evaluate((path) => getComputedStyle(path).stroke));
+        await page
+            .locator("header")
+            .screenshot({ path: join(screenshotDir, `title-bar-${tone}.png`) });
+    }
+    // Each state its own colour.
+    expect(new Set(colours.values()).size).toBe(5);
+    // A change of colour is a transition, which carries on from the colour
+    // it is at, never a jump.
+    const transition = await tunnel.evaluate((path) => {
+        const style = getComputedStyle(path);
+        return { property: style.transitionProperty, duration: style.transitionDuration };
+    });
+    expect(transition.property).toBe("stroke");
+    expect(Number.parseFloat(transition.duration)).toBeGreaterThan(0);
+    await scenario("disconnected");
+});
+
+test("the icons the app draws outside its window, photographed", () => {
+    // The tray and the taskbar are the OS's, so they cannot be photographed
+    // from here: the same drawings are, on a dark and a light taskbar.
+    for (const file of photographIcons(screenshotDir)) {
+        expect(existsSync(join(screenshotDir, file))).toBe(true);
+    }
 });
 
 test("the component gallery", async () => {

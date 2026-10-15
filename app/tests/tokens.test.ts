@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WINDOW_BACKGROUND } from "@shared/api";
 import { describe, expect, it } from "vitest";
+import { COLOURS } from "../src/main/icon/designs";
 import { COLOUR_PALETTE } from "../src/main/tray-icon";
 import { duration, easeOut, tooltipDelay, tooltipSpace } from "../src/renderer/src/lib/motion";
 
@@ -197,14 +198,32 @@ describe("values repeated outside the token file", () => {
         expect(WINDOW_BACKGROUND).toBe(hex("--c-bg"));
     });
 
-    it("draws the tray icon in the interface's own colours", () => {
+    it("draws the icons outside the window in the interface's own colours", () => {
         const rgb = (name: string) => {
             const value = hex(name);
             return [1, 3, 5].map((at) => Number.parseInt(value.slice(at, at + 2), 16));
         };
-        expect(COLOUR_PALETTE.ink).toEqual(rgb("--c-text"));
+        // Each is named for the token it copies, in `src/main/icon/designs.ts`.
+        const names: Record<keyof typeof COLOURS, string> = {
+            bg: "--c-bg",
+            surface: "--c-surface",
+            edge: "--c-border-strong",
+            text: "--c-text",
+            secondary: "--c-text-secondary",
+            tertiary: "--c-text-tertiary",
+            accent: "--c-accent",
+            positive: "--c-positive",
+            attention: "--c-attention",
+            danger: "--c-danger",
+        };
+        for (const [key, token] of Object.entries(names)) {
+            expect(COLOURS[key as keyof typeof COLOURS], token).toEqual(rgb(token));
+        }
+        expect(COLOUR_PALETTE.ink).toEqual(rgb("--c-text-secondary"));
+        expect(COLOUR_PALETTE.busy).toEqual(rgb("--c-accent"));
         expect(COLOUR_PALETTE.on).toEqual(rgb("--c-positive"));
         expect(COLOUR_PALETTE.attention).toEqual(rgb("--c-attention"));
+        expect(COLOUR_PALETTE.problem).toEqual(rgb("--c-danger"));
         expect(COLOUR_PALETTE.rim).toEqual(rgb("--c-bg"));
     });
 
