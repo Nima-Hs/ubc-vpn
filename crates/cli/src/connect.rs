@@ -41,7 +41,7 @@ use ubc_vpn_platform::Platform;
 use std::time::Instant;
 
 use crate::client::{Client, ClientError, Limits};
-use crate::interrupt::Progress;
+use crate::interrupt::{Progress, Steps};
 use crate::{FAILED, clean, describe, explain, say, settings};
 
 /// The VPN is connected, or a connect or disconnect is in progress.
@@ -189,17 +189,20 @@ pub fn connect(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Ended {
-    let sending = || progress.sending();
-    let ended = start(
+    let started = start(
         platform,
         engines,
         ask,
         &Cancel::new(),
         limits,
-        &sending,
+        progress,
         err,
-    )
-    .and_then(|mut client| follow(&mut client, &ConnState::Connecting));
+    );
+    // The request never went, or failed: an undo waiting for its answer
+    // need wait no longer. An answered one was marked as soon as the
+    // answer came, inside `start`.
+    progress.settled();
+    let ended = started.and_then(|mut client| follow(&mut client, &ConnState::Connecting));
     // A stop from outside is being handled elsewhere, and what this saw of
     // it (a disconnect, say) is not news. Ctrl-C at a question is the user
     // leaving. Neither is reported. Otherwise the outcome is the user's to
@@ -278,16 +281,17 @@ fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
 }
 
 /// Does everything up to the service accepting the connect request: the
-/// checks, the login, and the request. `cancel` stops the login. `sending`
+/// checks, the login, and the request. `cancel` stops the login. `steps`
 /// is asked just before the request would go to the service, and the
-/// request goes only if it says so.
+/// request goes only if it says so; it is told as soon as the answer
+/// comes; and it says whether the user has stopped the command.
 pub(crate) fn start(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
     engines: Engines,
     ask: &mut dyn Ask,
     cancel: &Cancel,
     limits: Limits,
-    sending: &dyn Fn() -> bool,
+    steps: &dyn Steps,
     err: &mut dyn Write,
 ) -> Result<Client, Stop> {
     let internal = |message: &str| failed(LoginErrorCode::Internal, message);
@@ -377,18 +381,22 @@ pub(crate) fn start(
     }
     // A request to stop that has come by now found nothing to undo, so
     // there must be nothing: the request is not sent.
-    if !sending() {
+    if !steps.sending() {
         return Err(cancelled());
     }
     let asked = client.request(RequestBody::Connect(params));
+    // At once, before anything else is sent or saved: an undo waiting for
+    // this answer may go now.
+    steps.answered();
     // After the request, so that the service holds the cookie by now and
     // removes it from these lines as well, should one have kept it.
     let outcome = (LineLevel::Info, "login succeeded".to_string());
     hand_over(&mut client, &said, outcome);
     asked.map_err(stop)?;
     // Only now, with the login good and the connect accepted, is a username
-    // the user typed worth keeping.
-    if let Some(typed) = typed {
+    // the user typed worth keeping. Not if the user has stopped the
+    // command: it is being undone, and the settings stay as they were.
+    if let Some(typed) = typed.filter(|_| !steps.stopped()) {
         remember(&platform, &policy, Some(typed.expose()), err);
     }
     Ok(client)
