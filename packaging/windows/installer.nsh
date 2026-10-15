@@ -198,7 +198,10 @@
   # Only now that the folder is secured: the service. `install` checks the
   # folder itself again, makes the data folder and writes the policy into
   # it, registers the service and starts it. A first install empties a data
-  # folder someone else may have made; an update keeps the state in it.
+  # folder someone else may have made; an update keeps the state in it. So
+  # does a first install over a data folder that holds an owner, as a failed
+  # update leaves it once its undo has removed our install entry: `install
+  # --fresh` keeps such a folder itself (crates/service/src/install.rs).
   ${if} ${isUpdated}
   ${orIf} $ubcVpnEarlierInstall == "1"
     StrCpy $R5 ""

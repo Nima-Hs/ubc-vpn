@@ -19,6 +19,9 @@
 #   installer.ps1 service                            the service is registered, running, and
 #                                                    its data folder and policy are right
 #   installer.ps1 status-as-user                     `ubc-vpn status` answers a standard user
+#   installer.ps1 plant-owner                        makes a data folder Users may change,
+#                                                    with a state.json naming an owner
+#   installer.ps1 planted-gone                       the install emptied it
 #   installer.ps1 remember-state <file>              notes state.json's SHA-256 in <file>
 #   installer.ps1 state-kept <file>                  state.json is unchanged since then
 #   installer.ps1 uninstall                          silent uninstall; waits for it to finish
@@ -429,6 +432,21 @@ public static class SetupWindows {
         if (-not (Test-Path -LiteralPath $state)) { Fail "no $state" }
         (Get-FileHash -LiteralPath $state).Hash | Set-Content -LiteralPath $Path
         Write-Output "noted $state"
+    }
+    'plant-owner' {
+        # What a standard user could leave before the first install: a data
+        # folder others may change, naming an owner (a made-up one).
+        if (Test-Path -LiteralPath $DataFolder) { Fail "$DataFolder exists before the test" }
+        New-Item -ItemType Directory -Path $DataFolder | Out-Null
+        & "$env:SystemRoot\System32\icacls.exe" $DataFolder /grant '*S-1-5-32-545:(OI)(CI)M' /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "icacls exited with $LASTEXITCODE" }
+        Set-Content -LiteralPath (Join-Path $DataFolder 'state.json') -Value '{"owner":"S-1-5-21-0-0-0-1001"}' -NoNewline
+        Write-Output "planted an owner in $DataFolder, which Users may change"
+    }
+    'planted-gone' {
+        $state = Join-Path $DataFolder 'state.json'
+        if (Test-Path -LiteralPath $state) { Fail "the install kept the planted ${state}: $(Get-Content -LiteralPath $state)" }
+        Write-Output "the install emptied the planted $DataFolder"
     }
     'state-kept' {
         $state = Join-Path $DataFolder 'state.json'

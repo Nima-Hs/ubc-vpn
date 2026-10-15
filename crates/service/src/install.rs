@@ -29,6 +29,10 @@ pub fn read_policy(path: &Path) -> Result<Vec<u8>, String> {
 /// implementation is in the service binary; the order and the stopping
 /// points are here, in [`install`], where they are tested.
 pub trait Steps {
+    /// Whether the data folder is already there with an owner the service
+    /// would accept (see [`holds_an_owner`]). Asked only before a fresh
+    /// install.
+    fn holds_an_owner(&mut self) -> bool;
     /// Makes the data folder, emptied first when `fresh`, with its access list.
     fn prepare_data_folder(&mut self, fresh: bool) -> Result<(), String>;
     /// Writes the policy into it.
@@ -46,12 +50,32 @@ pub trait Steps {
 /// policy in it, then the check of that folder, and only then the service,
 /// which is started. The first step that fails stops it there, so a data
 /// folder that is not as it was set up never gets a service registered.
+///
+/// A fresh install keeps a data folder that holds an owner, and goes on as
+/// an update would. An update that fails is undone, and the undo keeps the
+/// data folder but removes the record of the install, so the setup program
+/// run next counts as a first install. Emptying the folder then would reset
+/// the owner, and anyone who could make an update fail could have the
+/// service claimed afresh. Only the administrators can make a folder that
+/// passes, so anything else is still emptied.
 pub fn install(steps: &mut impl Steps, policy: &[u8], fresh: bool) -> Result<(), String> {
+    let fresh = fresh && !steps.holds_an_owner();
     steps.prepare_data_folder(fresh)?;
     steps.write_policy(policy)?;
     steps.verify_data_folder(fresh)?;
     steps.register()?;
     steps.start()
+}
+
+/// Whether `state` holds an owner in a `state.json` the service would
+/// accept. It is read through [`StateDir`], so on Windows the folder and
+/// the file must be owned by the administrators and changeable by them
+/// alone, as the service requires; a folder or file anyone else made or
+/// could change, a damaged file, or no file at all is `false`.
+///
+/// [`StateDir`]: ubc_vpn_platform::StateDir
+pub fn holds_an_owner(state: &ubc_vpn_platform::StateDir) -> bool {
+    matches!(crate::owner::load(state), Ok(Some(_)))
 }
 
 #[cfg(test)]
@@ -63,6 +87,8 @@ mod tests {
     struct Recorded {
         taken: Vec<String>,
         fail: Option<&'static str>,
+        // What `holds_an_owner` answers.
+        owner: bool,
     }
 
     impl Recorded {
@@ -76,6 +102,10 @@ mod tests {
     }
 
     impl Steps for Recorded {
+        fn holds_an_owner(&mut self) -> bool {
+            self.taken.push("check owner".to_string());
+            self.owner
+        }
         fn prepare_data_folder(&mut self, fresh: bool) -> Result<(), String> {
             self.step(if fresh { "prepare fresh" } else { "prepare" })
         }
@@ -98,6 +128,7 @@ mod tests {
         let mut steps = Recorded::default();
         install(&mut steps, b"{}", true).unwrap();
         let all = [
+            "check owner",
             "prepare fresh",
             "write policy",
             "verify fresh",
@@ -128,8 +159,59 @@ mod tests {
         );
         assert_eq!(
             steps.taken,
-            ["prepare fresh", "write policy", "verify fresh"]
+            [
+                "check owner",
+                "prepare fresh",
+                "write policy",
+                "verify fresh"
+            ]
         );
+    }
+
+    // Security rule: a fresh install over a data folder that holds an owner,
+    // as a failed and undone update leaves it, keeps the folder and goes on
+    // as an update, so the owner is not reset (issue #184).
+    #[test]
+    fn a_fresh_install_keeps_a_folder_that_holds_an_owner() {
+        let mut steps = Recorded {
+            owner: true,
+            ..Recorded::default()
+        };
+        install(&mut steps, b"{}", true).unwrap();
+        let all = [
+            "check owner",
+            "prepare",
+            "write policy",
+            "verify",
+            "register",
+            "start",
+        ];
+        assert_eq!(steps.taken, all);
+    }
+
+    // Only a state.json with an owner the service would read counts.
+    #[test]
+    fn only_a_valid_owner_counts() {
+        let dir = std::env::temp_dir().join(format!("ubc-vpn-owner-{}", std::process::id()));
+        let state = ubc_vpn_platform::StateDir::unchecked(&dir).unwrap();
+        assert!(!holds_an_owner(&state), "no state.json");
+        let cases: [(&[u8], bool); 5] = [
+            (br#"{"owner":"S-1-5-21-1-2-3-1001"}"#, true),
+            (b"{}", false),
+            (br#"{"owner":""}"#, false),
+            (br#"{"owner":"has space"}"#, false),
+            (b"not json", false),
+        ];
+        for (bytes, expected) in cases {
+            state.write("state.json", bytes).unwrap();
+            assert_eq!(
+                holds_an_owner(&state),
+                expected,
+                "{}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // Any step that fails is the last one taken.
