@@ -110,8 +110,13 @@
             rotate: 360deg;
         }
     }
-    /* Moves a dash along a path whose length is normalised to 1. */
+    /* Moves a dash along a path whose length is normalised to 1. Both ends
+       are written down: started from the element's own resting offset, each
+       lap would jump back to it instead of carrying on from the start. */
     @keyframes flow {
+        from {
+            stroke-dashoffset: 0;
+        }
         to {
             stroke-dashoffset: -1;
         }
