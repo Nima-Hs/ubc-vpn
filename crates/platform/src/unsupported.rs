@@ -3,15 +3,17 @@
 //! check answers [`Verified::Unknown`].
 
 use std::net::Ipv4Addr;
-use std::sync::mpsc::Receiver;
 
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
-    Connection, Dns, Error, Listener, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes,
-    SplitDns, Transport, Verified,
+    Connection, Dns, Error, Listener, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns,
+    Subscription, Transport, Verified,
 };
 
+// Windows implements every part now; only this crate's own tests use the
+// stub there.
+#[cfg_attr(all(windows, not(test)), allow(dead_code))]
 pub(crate) struct Native;
 
 impl Routes for Native {
@@ -54,7 +56,7 @@ impl Dns for Native {
 }
 
 impl NetworkEvents for Native {
-    fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+    fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Subscription> {
         Err(Error::Unsupported)
     }
 }

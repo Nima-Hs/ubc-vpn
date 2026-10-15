@@ -445,13 +445,61 @@ pub enum NetworkEvent {
 
 /// Notifications pushed by the OS. There is no way to poll.
 pub trait NetworkEvents: Send + Sync {
-    /// Starts delivering events about `watching`. Dropping the receiver ends
-    /// the subscription.
+    /// Starts delivering events about `watching`, until the returned
+    /// [`Subscription`] is dropped.
     ///
     /// [`NetworkEvent::PhysicalChanged`] is sent only for a change to
     /// `watching` itself. It is never sent for a route this product added or
     /// removed, nor for anything that happens to the tunnel interface.
-    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>>;
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription>;
+}
+
+/// The events of one subscription. Dropping it ends the subscription at
+/// once: everything registered with the OS for it is released before the
+/// drop returns, without waiting for another event. The service holds one
+/// per connection and drops it at teardown.
+pub struct Subscription {
+    events: Receiver<NetworkEvent>,
+    ends: SubscriptionEnd,
+}
+
+/// The part of a [`Subscription`] whose drop ends it. Held apart from the
+/// receiver by a caller that reads events on another thread: dropping this
+/// ends the subscription, and the receiver then reports the sender gone.
+pub struct SubscriptionEnd {
+    _ends: Box<dyn Send>,
+}
+
+impl Subscription {
+    /// A subscription delivering `events`, which `ends` releases when it is
+    /// dropped. An implementation makes `ends` a value whose `Drop` unregisters
+    /// and stops whatever produces the events, drops every sender of
+    /// `events`, and returns only when that is done.
+    pub fn new(events: Receiver<NetworkEvent>, ends: impl Send + 'static) -> Self {
+        Self {
+            events,
+            ends: SubscriptionEnd {
+                _ends: Box::new(ends),
+            },
+        }
+    }
+
+    /// Where the events arrive.
+    pub fn events(&self) -> &Receiver<NetworkEvent> {
+        &self.events
+    }
+
+    /// The receiver, for a thread that reads the events, and the end, for
+    /// whoever decides when the subscription stops.
+    pub fn into_parts(self) -> (Receiver<NetworkEvent>, SubscriptionEnd) {
+        (self.events, self.ends)
+    }
+}
+
+impl fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Subscription")
+    }
 }
 
 /// An OS user, as text in one canonical form: the decimal user ID with no
@@ -1261,8 +1309,7 @@ mod tests {
     // still say it is unsupported, and its checks must still fail closed.
     #[cfg(windows)]
     #[test]
-    fn windows_implements_the_channel_routes_and_dns_and_nothing_else_yet() {
-        let unsupported = Some(Error::Unsupported);
+    fn windows_implements_the_channel_routes_dns_and_events() {
         let gateway = Ipv4Addr::new(192, 0, 2, 1);
         let physical = PhysicalNetwork {
             interface: "eth0".to_string(),
@@ -1289,7 +1336,12 @@ mod tests {
             // Split DNS is real: nothing of ours is set, and reading that
             // needs no rights.
             assert_eq!(native.dns.split_dns_matches(&dns), Verified::No);
-            assert_eq!(native.events.subscribe(&physical).err(), unsupported);
+            // Events are real: an interface that does not exist cannot be
+            // watched.
+            assert_eq!(
+                native.events.subscribe(&physical).err(),
+                Some(Error::NotFound)
+            );
             // Nothing listens on this name, and the transport can tell.
             let absent = native.transport.connect("ubc-vpn-test-nobody-listens");
             assert_eq!(absent.err(), Some(Error::NotFound));

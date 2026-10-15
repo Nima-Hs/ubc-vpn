@@ -2,6 +2,7 @@
 //! that records and can be made to misbehave, and an OS that can panic.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -22,7 +23,8 @@ use ubc_vpn_engine::{
 };
 use ubc_vpn_platform::fake::{Fake, Op};
 use ubc_vpn_platform::{
-    Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns, Verified,
+    Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns, Subscription,
+    Verified,
 };
 
 /// What a test has asked the spy to do, and what it has seen.
@@ -185,7 +187,10 @@ impl Tunnel for Watched {
 pub struct Faulty {
     fake: Fake,
     panics_at: Mutex<Option<Op>>,
-    subscriptions: Mutex<Vec<Sender<NetworkEvent>>>,
+    /// Each subscription's sender, or `None` once its stopping end is dropped.
+    subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
+    /// When set, a subscription keeps delivering after its end is dropped.
+    lingering: Arc<AtomicBool>,
 }
 
 impl Faulty {
@@ -193,12 +198,20 @@ impl Faulty {
         Self {
             fake,
             panics_at: Mutex::default(),
-            subscriptions: Mutex::default(),
+            subscriptions: Arc::default(),
+            lingering: Arc::default(),
         }
     }
 
     pub fn panic_at(&self, op: Op) {
         *self.panics_at.lock().unwrap() = Some(op);
+    }
+
+    /// Makes a subscription whose end is dropped keep delivering, as one
+    /// does on a real system for events already queued when it ended. For
+    /// tests of what the service does with such a late event.
+    pub fn keep_delivering_after_stop(&self) {
+        self.lingering.store(true, Ordering::SeqCst);
     }
 
     /// How many subscriptions were made, in order.
@@ -209,7 +222,10 @@ impl Faulty {
     /// Sends `event` to subscription `n` only, and says whether its
     /// receiver is still there.
     pub fn send_to(&self, n: usize, event: NetworkEvent) -> bool {
-        self.subscriptions.lock().unwrap()[n].send(event).is_ok()
+        let subscriptions = self.subscriptions.lock().unwrap();
+        subscriptions[n]
+            .as_ref()
+            .is_some_and(|sender| sender.send(event).is_ok())
     }
 
     fn reached(&self, op: Op) {
@@ -282,13 +298,38 @@ impl Dns for Faulty {
     }
 }
 
+/// A subscription's stopping end: dropping it ends the subscription, as on a
+/// real system, so `send_to` fails from then on.
+struct Stop {
+    subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
+    n: usize,
+    lingering: Arc<AtomicBool>,
+}
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        if self.lingering.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut subscriptions) = self.subscriptions.lock() {
+            subscriptions[self.n] = None;
+        }
+    }
+}
+
 impl NetworkEvents for Faulty {
     /// Fails as the fake was told to; otherwise a subscription of its own.
-    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription> {
         self.reached(Op::Subscribe);
         drop(self.fake.subscribe(watching)?);
         let (sender, receiver) = mpsc::channel();
-        self.subscriptions.lock().unwrap().push(sender);
-        Ok(receiver)
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+        subscriptions.push(Some(sender));
+        let stop = Stop {
+            subscriptions: self.subscriptions.clone(),
+            n: subscriptions.len() - 1,
+            lingering: self.lingering.clone(),
+        };
+        Ok(Subscription::new(receiver, stop))
     }
 }

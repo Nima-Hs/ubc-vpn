@@ -40,6 +40,8 @@ impl Machine {
     pub(crate) fn teardown(&mut self) -> bool {
         // Whatever watches the network for this connection stops.
         self.watching.store(0, std::sync::atomic::Ordering::SeqCst);
+        // And its subscription ends now, not at the next network event.
+        self.network_watch = None;
         let mut applied = std::mem::take(&mut self.applied);
         let had_some = applied.tunnel.is_some()
             || applied.gateway_route.is_some()

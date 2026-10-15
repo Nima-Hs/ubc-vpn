@@ -30,6 +30,9 @@
 mod dns;
 #[cfg(test)]
 mod dns_tests;
+mod events;
+#[cfg(test)]
+mod events_tests;
 pub(crate) mod interrupt;
 mod journal;
 mod pipe;
@@ -70,7 +73,6 @@ use windows_sys::core::GUID;
 
 use self::pipe::{End, Pipe, Stop};
 use self::security::{Descriptor, Handle, last_error, os_error, wide};
-use crate::unsupported::Native;
 use crate::{Connection, Error, Listener, Mode, Paths, Platform, Result, Transport, UserId, lock};
 
 /// The installed service's pipe. A dev-mode pipe has the user's SID appended,
@@ -95,7 +97,7 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
     Ok(Platform {
         routes: Arc::new(routes::WinRoutes::new(mode, &paths)),
         dns: Arc::new(dns::WinDns),
-        events: Arc::new(Native),
+        events: Arc::new(events::WinEvents),
         paths,
         transport: Arc::new(PipeTransport { mode, me }),
     })

@@ -18,7 +18,8 @@ use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
     Connection, Dns, Error, Listener, NetworkEvent, NetworkEvents, Paths, PhysicalNetwork,
-    Platform, RawConnection, Result, Routes, SplitDns, Transport, UserId, Verified, lock,
+    Platform, RawConnection, Result, Routes, SplitDns, Subscription, Transport, UserId, Verified,
+    lock,
 };
 
 /// The interface the fake reports as physical.
@@ -101,7 +102,8 @@ struct State {
     foreign: Vec<(String, Ipv4Net)>,
     own_addresses: Vec<Ipv4Addr>,
     on_link: Vec<Ipv4Net>,
-    subscribers: Vec<Sender<NetworkEvent>>,
+    subscribers: HashMap<u64, Sender<NetworkEvent>>,
+    next_subscriber: u64,
     listeners: HashMap<String, Endpoint>,
     /// Checks that answer `Unobservable` where they would answer `Yes`.
     unobservable: HashSet<Op>,
@@ -123,7 +125,8 @@ impl Default for State {
             foreign: Vec::new(),
             own_addresses: vec![OWN_ADDRESS],
             on_link: home.into_iter().collect(),
-            subscribers: Vec::new(),
+            subscribers: HashMap::new(),
+            next_subscriber: 0,
             listeners: HashMap::new(),
             unobservable: HashSet::new(),
             unobservable_routes: HashSet::new(),
@@ -362,8 +365,16 @@ impl Fake {
 
     /// Delivers `event` to every subscriber.
     pub fn send_event(&self, event: NetworkEvent) {
-        let mut state = self.state();
-        state.subscribers.retain(|s| s.send(event).is_ok());
+        let state = self.state();
+        for subscriber in state.subscribers.values() {
+            let _ = subscriber.send(event);
+        }
+    }
+
+    /// How many subscriptions are live. A dropped [`Subscription`] is gone
+    /// at once.
+    pub fn subscriptions(&self) -> usize {
+        self.state().subscribers.len()
     }
 
     /// Connects to `name` as `user`. [`Transport::connect`] on the fake
@@ -602,12 +613,30 @@ impl Dns for Fake {
 
 impl NetworkEvents for Fake {
     /// Delivers only what [`Fake::send_event`] injects, whatever is watched.
-    fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+    fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Subscription> {
         let (mut state, outcome) = self.start(Op::Subscribe);
         outcome?;
         let (sender, receiver) = mpsc::channel();
-        state.subscribers.push(sender);
-        Ok(receiver)
+        state.next_subscriber += 1;
+        let id = state.next_subscriber;
+        state.subscribers.insert(id, sender);
+        let ends = Unsubscribe {
+            fake: self.clone(),
+            id,
+        };
+        Ok(Subscription::new(receiver, ends))
+    }
+}
+
+/// Removes one subscriber from the fake when dropped.
+struct Unsubscribe {
+    fake: Fake,
+    id: u64,
+}
+
+impl Drop for Unsubscribe {
+    fn drop(&mut self) {
+        self.fake.state().subscribers.remove(&self.id);
     }
 }
 
@@ -1096,6 +1125,33 @@ mod tests {
         assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::No);
     }
 
+    // A dropped subscription is gone at once, and the suite notices one that
+    // lingers until the next event.
+    #[test]
+    fn a_dropped_subscription_ends_at_once() {
+        let fake = Fake::new();
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        suite::check_subscription_ends(&fake, &physical, &|| fake.subscriptions());
+
+        // One that ends only when it next has something to deliver.
+        struct Lingering(Fake);
+        impl NetworkEvents for Lingering {
+            fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription> {
+                let inner = self.0.subscribe(watching)?;
+                let (sender, receiver) = mpsc::channel();
+                drop(sender);
+                // Keeps the fake's subscription after the drop.
+                std::mem::forget(inner);
+                Ok(Subscription::new(receiver, ()))
+            }
+        }
+        let lingering = Lingering(fake.clone());
+        let check = std::panic::AssertUnwindSafe(|| {
+            suite::check_subscription_ends(&lingering, &physical, &|| fake.subscriptions());
+        });
+        assert!(std::panic::catch_unwind(check).is_err());
+    }
+
     #[test]
     fn delivers_injected_events_to_every_subscriber() {
         let fake = Fake::new();
@@ -1105,9 +1161,12 @@ mod tests {
         drop(subscribe());
         fake.send_event(NetworkEvent::PhysicalChanged);
         fake.send_event(NetworkEvent::Sleeping);
-        assert_eq!(first.try_recv(), Ok(NetworkEvent::PhysicalChanged));
-        assert_eq!(first.try_recv(), Ok(NetworkEvent::Sleeping));
-        assert_eq!(second.try_recv(), Ok(NetworkEvent::PhysicalChanged));
+        assert_eq!(first.events().try_recv(), Ok(NetworkEvent::PhysicalChanged));
+        assert_eq!(first.events().try_recv(), Ok(NetworkEvent::Sleeping));
+        assert_eq!(
+            second.events().try_recv(),
+            Ok(NetworkEvent::PhysicalChanged)
+        );
 
         fake.set_failure(Op::Subscribe, failed());
         assert_eq!(fake.subscribe(&physical).err(), failed());
