@@ -515,6 +515,67 @@ fn own_lines(peer: &mut Peer) -> Vec<String> {
     lines.map(|line| line.text.as_str().to_string()).collect()
 }
 
+// Security rule: a connect that is admitted but stops before the gateway is
+// contacted costs the client nothing, so asking for it again and again must
+// not fill the log. Here each one asks for the home network the machine is
+// on, which is refused once the network has been looked at: the same
+// failure every time. The service's first lines are still there after more
+// such connects than the log holds.
+#[test]
+fn connects_that_never_reach_the_gateway_do_not_fill_the_log() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    for round in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
+        let home = connect(COOKIE, GATEWAY, &["192.168.0.0/24"], &[]);
+        let state = alice.connect_ends(home);
+        let refused =
+            matches!(&state, ConnState::Failed { code, .. } if *code == ErrorCode::RouteRefused);
+        assert!(refused, "{round}: {state:?}");
+    }
+    assert!(rig.spy.opens().is_empty(), "the gateway was contacted");
+    let lines = own_lines(&mut alice);
+    assert!(lines[0].starts_with("service started"), "{lines:?}");
+    assert!(lines[1].starts_with("policy read"), "{lines:?}");
+    // The failure itself is in the log, once.
+    let failures = lines
+        .iter()
+        .filter(|line| line.starts_with("failed: route_refused"));
+    assert_eq!(failures.count(), 1, "{lines:?}");
+}
+
+// Security rule: the same for a connect followed at once by a disconnect,
+// which stops it before the gateway is contacted. Here the connect is held
+// while it looks at the network, so the disconnect always comes first. The
+// service's first lines are still there after more such rounds than the log
+// holds, and `disconnected` is said at most once: it started so.
+#[test]
+fn connect_then_disconnect_again_and_again_does_not_fill_the_log() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    for round in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
+        rig.os.hold_at(Op::CapturePhysical);
+        assert_eq!(alice.ask(good()), Ok(ResponseBody::Accepted), "{round}");
+        rig.os.wait_until_held();
+        assert_eq!(
+            alice.ask(RequestBody::Disconnect),
+            Ok(ResponseBody::Accepted)
+        );
+        rig.os.release();
+        let heard = [alice.state(), alice.state(), alice.state()];
+        let expected = [
+            ConnState::Connecting,
+            ConnState::Disconnecting,
+            ConnState::Disconnected,
+        ];
+        assert_eq!(heard, expected, "{round}");
+    }
+    let lines = own_lines(&mut alice);
+    assert!(lines[0].starts_with("service started"), "{lines:?}");
+    assert!(lines[1].starts_with("policy read"), "{lines:?}");
+    let disconnected = lines.iter().filter(|line| *line == "disconnected");
+    assert!(disconnected.count() <= 1, "{lines:?}");
+}
+
 // What someone helping the user reads after an ordinary session, a connect
 // refused for its routes, and a disconnect when nothing was connected: a
 // line for each thing that happened, in order, and none that only repeats.
