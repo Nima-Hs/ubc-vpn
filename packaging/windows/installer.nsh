@@ -10,9 +10,16 @@
 # electron-builder lets /D=<folder> choose another folder; in the packaging
 # trial that installed into a folder ordinary users could write to. So a
 # setup program given /D= stops, says why, and installs nothing.
+#
+# electron-builder's .onInit starts with SetOutPath $INSTDIR, which has
+# already created the /D= folder, empty, and made it the working folder by
+# the time this runs. So this leaves that folder and removes it. RMDir
+# removes it only if it is empty; folders above it that SetOutPath made stay.
 !macro customInit
   !insertmacro GetDParameter $R0
   ${if} $R0 != ""
+    SetOutPath $TEMP
+    RMDir $R0
     MessageBox MB_OK|MB_ICONSTOP "UBC VPN always installs in Program Files. The /D option is not supported. Nothing was installed." /SD IDOK
     SetErrorLevel 2
     Quit
