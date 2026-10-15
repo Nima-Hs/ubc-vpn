@@ -618,6 +618,54 @@ mod device {
         println!("RAN: tunnel reports a lost gateway after {waited:?}");
     }
 
+    // A cancel that comes once the device exists, while `open` is still
+    // finishing, gives `Cancelled`: the device is removed, the session is
+    // logged off, and no event is ever sent for the tunnel the caller never
+    // had. The cancel comes from a thread that watches for the adapter, so
+    // it may come too late, after `open` has returned the tunnel; that try
+    // is closed and another made.
+    #[test]
+    fn a_cancel_once_the_device_exists_gives_cancelled_and_no_event() {
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("accept") else {
+            return;
+        };
+        let gateway = local(library, &stand_in);
+        for attempt in 1..=10 {
+            let cancel = Cancel::new();
+            let watching = cancel.clone();
+            let watcher = std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                while start.elapsed() < Duration::from_secs(20) {
+                    if exists(HOST) {
+                        watching.cancel();
+                        return;
+                    }
+                }
+            });
+            let opened = open(engine, &gateway, &session(Ipv4Addr::LOCALHOST), &cancel);
+            watcher.join().expect("the watcher ends");
+            match &opened.result {
+                Err(TunnelError::Cancelled) => {
+                    assert!(!exists(HOST), "the adapter is left");
+                    let logged_off = |stand_in: &StandIn| disconnects(stand_in) == 1;
+                    let sent = logged(&stand_in, Duration::from_secs(5), logged_off);
+                    assert!(sent, "{:?}", stand_in.requests());
+                    std::thread::sleep(Duration::from_secs(1));
+                    assert!(opened.events.try_recv().is_err(), "an event was sent");
+                    println!("RAN: tunnel cancelled once its device exists, try {attempt}");
+                    return;
+                }
+                Ok(_) => end(opened, Some(CloseMode::KeepSession)),
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        panic!("the cancel never came between the device and the end of open");
+    }
+
     // Security rule: one tunnel handle in the process at a time. While one
     // tunnel is open another is refused, and contacts nothing; once it is
     // closed the next one opens.
