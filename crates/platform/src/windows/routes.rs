@@ -214,6 +214,13 @@ fn present(row: &Row) -> Result<Present> {
     Ok(found)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Makes an add on this thread stop, as a crash would, between writing
+    /// its journal row and adding its route.
+    pub(super) static CRASH_BEFORE_ADD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) struct WinRoutes {
     journal: Mutex<Journal>,
 }
@@ -252,6 +259,10 @@ impl WinRoutes {
         // The row goes in first, so a crash never leaves a route of ours
         // that the journal does not name.
         journal.write(now, &rows)?;
+        #[cfg(test)]
+        if CRASH_BEFORE_ADD.with(std::cell::Cell::get) {
+            panic!("a crash between writing the row and adding the route");
+        }
         // SAFETY: the row is a valid, initialised forwarding row.
         let added = checked(unsafe { CreateIpForwardEntry2(&forward_row(&row)) });
         if added.is_err() {
@@ -364,6 +375,7 @@ impl Routes for WinRoutes {
             Ipv4Net::new(Ipv4Addr::from(addr & mask), len).ok()
         });
         let mut on_link: Vec<Ipv4Net> = on_link.collect();
+        on_link.sort_by_key(|net| (net.addr(), net.prefix_len()));
         on_link.dedup();
         Ok(PhysicalNetwork {
             interface,
@@ -482,5 +494,69 @@ impl Routes for WinRoutes {
             true => Verified::Yes,
             false => Verified::No,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ubc-vpn-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[cfg(feature = "dev-mode")]
+    fn paths(state_dir: &Path) -> Paths {
+        Paths {
+            policy_dir: state_dir.to_path_buf(),
+            state_dir: state_dir.to_path_buf(),
+            settings_dir: state_dir.to_path_buf(),
+            channel_name: String::new(),
+        }
+    }
+
+    // Security rule: the routes the service runs with keep their journal in
+    // the checked state folder. One that others may change is refused, not
+    // trusted with naming the routes to remove.
+    #[cfg(feature = "dev-mode")]
+    #[test]
+    fn the_service_journal_is_kept_in_the_checked_state_folder() {
+        let base = temp("journal-checked");
+        let dir = base.join("state");
+        crate::StateDir::open(Mode::Dev, &paths(&dir)).unwrap();
+        let users = "*S-1-5-32-545:(OI)(CI)(M)";
+        let granted = std::process::Command::new("icacls")
+            .args([&dir.to_string_lossy(), "/grant", users])
+            .output()
+            .unwrap();
+        assert!(granted.status.success());
+        let refused = WinRoutes::new(Mode::Dev, &paths(&dir)).remove_all();
+        let Err(Error::Failed(why)) = refused else {
+            panic!("a journal others may change was used: {refused:?}");
+        };
+        assert!(why.contains("S-1-5-32-545"), "{why}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // A route is written to the journal before it is added, so a crash
+    // between the two leaves a row and never a route that nothing names.
+    #[test]
+    fn the_row_is_written_before_the_route_is_added() {
+        let dir = temp("journal-first");
+        let routes = WinRoutes::unchecked(&dir);
+        let gateway = Ipv4Addr::new(198, 18, 255, 1);
+        let physical = routes.capture_physical(gateway).unwrap();
+        CRASH_BEFORE_ADD.with(|crash| crash.set(true));
+        let added = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            routes.add_gateway_route(gateway, &physical)
+        }));
+        CRASH_BEFORE_ADD.with(|crash| crash.set(false));
+        assert!(added.is_err(), "the add did not stop where it was told to");
+        let rows = lock(&routes.journal).rows(boot()).unwrap();
+        let dests: Vec<String> = rows.iter().map(|row| row.dest.to_string()).collect();
+        assert_eq!(dests, ["198.18.255.1/32"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

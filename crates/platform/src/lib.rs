@@ -257,6 +257,11 @@ impl PhysicalNetwork {
 /// lets [`Routes::remove_all`] remove that route. It needs the same
 /// destination, interface and next hop, within one boot, after a crash.
 ///
+/// The same can happen without a crash: Windows removes a route through an
+/// interface when that interface disconnects, but the row stays. If somebody
+/// else then adds the identical route in the same boot, [`Routes::remove_all`]
+/// removes theirs. This is accepted too.
+///
 /// The `tunnel` and `interface` arguments are names, as an OS-defined token.
 /// An implementation resolves the name on every call and, where it is told
 /// the name is the tunnel, checks that the device it finds is one.
