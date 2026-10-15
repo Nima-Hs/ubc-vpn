@@ -547,8 +547,13 @@ fn a_dns_server_that_cannot_be_one_fails_the_connect() {
         assert!(failed_with(&state, ErrorCode::EngineFailed), "{why}");
         assert!(rig.is_clean(), "{why}");
         let calls = rig.fake.calls();
-        let routed = [Op::AddGatewayRoute, Op::AddTunnelRoutes];
-        assert!(!calls.iter().any(|op| routed.contains(op)), "{why}");
+        // Nothing is applied: not even the device is configured.
+        let applied = [
+            Op::ConfigureTunnel,
+            Op::AddGatewayRoute,
+            Op::AddTunnelRoutes,
+        ];
+        assert!(!calls.iter().any(|op| applied.contains(op)), "{why}");
     }
 
     // As many as allowed, each routed once however often it was named.
@@ -885,4 +890,140 @@ fn an_assignment_that_cannot_be_used_fails_the_connect() {
             "{mtu}: {state:?}"
         );
     }
+}
+
+/// Waits until `happened`, or fails the test after a while.
+fn soon(what: &str, happened: impl Fn() -> bool) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !happened() {
+        assert!(std::time::Instant::now() < until, "never: {what}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+// Security rule: when the physical network changes, the gateway's route
+// leads nowhere and the connection is not what was checked. Everything is
+// torn down, the session is logged off, and the user is told.
+#[test]
+fn a_change_of_network_tears_everything_down() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert_eq!(rig.os.subscriptions(), 1, "watched from the start");
+    assert!(rig.os.send_to(0, NetworkEvent::PhysicalChanged));
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
+    let ConnState::Failed { message, .. } = &state else {
+        unreachable!()
+    };
+    assert!(message.contains("network changed"), "{message}");
+    assert!(rig.is_clean());
+    let modes: Vec<_> = rig.spy.closes().iter().map(|(how, _)| *how).collect();
+    assert_eq!(modes, [CloseMode::LogOff]);
+    // Nothing is left watching. The service takes a new connect at once,
+    // and the gateway agrees the session was logged off.
+    soon("the subscription ends", || {
+        !rig.os.send_to(0, NetworkEvent::PhysicalChanged)
+    });
+    assert_eq!(alice.connect_ends(good()), ConnState::LoginNeeded);
+}
+
+// Going to sleep and waking say nothing about the network by themselves; a
+// tunnel that does not survive them ends by itself.
+#[test]
+fn sleep_and_wake_leave_the_connection_alone() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert!(rig.os.send_to(0, NetworkEvent::Sleeping));
+    assert!(rig.os.send_to(0, NetworkEvent::Woke));
+    assert!(alice.is_quiet(), "the connection stays up");
+    assert!(rig.engine.tunnel_is_open());
+}
+
+// Security rule: a change reported for an earlier connection never ends a
+// later one, which was set up on the network as it is now.
+#[test]
+fn a_change_from_an_earlier_connection_leaves_a_later_one_alone() {
+    let rig = rig();
+    rig.spy.keep_sessions();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    assert_eq!(alice.state(), ConnState::Disconnected);
+    connected(&mut alice);
+    assert_eq!(rig.os.subscriptions(), 2);
+    // The first subscription may already be gone, which is as good.
+    let _ = rig.os.send_to(0, NetworkEvent::PhysicalChanged);
+    assert!(alice.is_quiet(), "the second connection stays up");
+    assert!(rig.engine.tunnel_is_open());
+    // Its own subscription still ends it.
+    assert!(rig.os.send_to(1, NetworkEvent::PhysicalChanged));
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
+}
+
+// Security rule: the same, when the earlier attempt never opened a tunnel.
+// It watched the network it was on and failed at the gateway; the user
+// then connected on another network. A change to the first network must
+// not end the connection on the second.
+#[test]
+fn a_change_from_a_failed_attempt_leaves_a_later_connection_alone() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    rig.engine.set_reachable(false);
+    let state = alice.connect_ends(good());
+    assert!(
+        failed_with(&state, ErrorCode::GatewayUnreachable),
+        "{state:?}"
+    );
+    rig.engine.set_reachable(true);
+    connected(&mut alice);
+    assert_eq!(rig.os.subscriptions(), 2);
+    let _ = rig.os.send_to(0, NetworkEvent::PhysicalChanged);
+    assert!(alice.is_quiet(), "the later connection stays up");
+    assert!(rig.engine.tunnel_is_open());
+    assert!(rig.os.send_to(1, NetworkEvent::PhysicalChanged));
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::EngineFailed), "{state:?}");
+}
+
+// Until Windows can report network changes, a system that cannot is not a
+// reason to refuse: the connection goes ahead, and the log says once that
+// changes are not watched. A dead tunnel still ends as a lost connection.
+#[test]
+fn a_system_that_cannot_watch_the_network_still_connects_and_says_so() {
+    let rig = rig();
+    rig.fake
+        .set_failure(Op::Subscribe, Some(Error::Unsupported));
+    rig.spy.keep_sessions();
+    let mut alice = rig.owner();
+    for _ in 0..2 {
+        connected(&mut alice);
+        assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+        assert_eq!(alice.state(), ConnState::Disconnecting);
+        assert_eq!(alice.state(), ConnState::Disconnected);
+    }
+    let said = |line: &String| line.contains("network changes cannot be watched");
+    let lines = rig.logs();
+    assert_eq!(
+        lines.iter().filter(|line| said(line)).count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+// Security rule: any other failure to watch the network fails the connect
+// before the gateway is contacted, so no cookie is sent, and nothing is
+// left applied.
+#[test]
+fn a_failure_to_watch_the_network_fails_the_connect_before_the_gateway() {
+    let rig = rig();
+    rig.fake
+        .set_failure(Op::Subscribe, Some(Error::PermissionDenied));
+    let state = rig.owner().connect_ends(good());
+    assert!(failed_with(&state, ErrorCode::Internal), "{state:?}");
+    assert!(rig.spy.opens().is_empty(), "the gateway was contacted");
+    assert!(rig.is_clean());
 }

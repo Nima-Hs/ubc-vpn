@@ -2,7 +2,7 @@
 //! that records and can be made to misbehave, and an OS that can panic.
 
 use std::net::Ipv4Addr;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -21,7 +21,9 @@ use ubc_vpn_engine::{
     TunnelError, TunnelEvent,
 };
 use ubc_vpn_platform::fake::{Fake, Op};
-use ubc_vpn_platform::{Dns, PhysicalNetwork, Result, Routes, SplitDns, Verified};
+use ubc_vpn_platform::{
+    Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns, Verified,
+};
 
 /// What a test has asked the spy to do, and what it has seen.
 #[derive(Default)]
@@ -176,21 +178,38 @@ impl Tunnel for Watched {
     }
 }
 
-/// The platform fake's routes and DNS, with one operation that can be made
-/// to panic, once, as a bug in an OS implementation would.
+/// The platform fake's routes, DNS and network events, with one operation
+/// that can be made to panic, once, as a bug in an OS implementation would.
+/// Each events subscription is kept apart, so that a test can tell one
+/// connection's from another's.
 pub struct Faulty {
     fake: Fake,
     panics_at: Mutex<Option<Op>>,
+    subscriptions: Mutex<Vec<Sender<NetworkEvent>>>,
 }
 
 impl Faulty {
     pub fn new(fake: Fake) -> Self {
-        let panics_at = Mutex::default();
-        Self { fake, panics_at }
+        Self {
+            fake,
+            panics_at: Mutex::default(),
+            subscriptions: Mutex::default(),
+        }
     }
 
     pub fn panic_at(&self, op: Op) {
         *self.panics_at.lock().unwrap() = Some(op);
+    }
+
+    /// How many subscriptions were made, in order.
+    pub fn subscriptions(&self) -> usize {
+        self.subscriptions.lock().unwrap().len()
+    }
+
+    /// Sends `event` to subscription `n` only, and says whether its
+    /// receiver is still there.
+    pub fn send_to(&self, n: usize, event: NetworkEvent) -> bool {
+        self.subscriptions.lock().unwrap()[n].send(event).is_ok()
     }
 
     fn reached(&self, op: Op) {
@@ -260,5 +279,16 @@ impl Dns for Faulty {
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
         self.reached(Op::VerifyDns);
         self.fake.split_dns_matches(dns)
+    }
+}
+
+impl NetworkEvents for Faulty {
+    /// Fails as the fake was told to; otherwise a subscription of its own.
+    fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Receiver<NetworkEvent>> {
+        self.reached(Op::Subscribe);
+        drop(self.fake.subscribe(watching)?);
+        let (sender, receiver) = mpsc::channel();
+        self.subscriptions.lock().unwrap().push(sender);
+        Ok(receiver)
     }
 }

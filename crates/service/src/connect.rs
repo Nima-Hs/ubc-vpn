@@ -50,6 +50,9 @@ impl Machine {
             next_hop: physical.next_hop(),
         };
         check_against_local(&chosen.subnets, gateway_addr, &local).map_err(refused_here)?;
+        // Watched from before the tunnel exists, so no change is missed; a
+        // change during setup ends the connection as soon as it is up.
+        self.watch_network(&physical)?;
 
         let (ended, events) = mpsc::channel();
         let session = Session {

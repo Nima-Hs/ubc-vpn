@@ -11,6 +11,7 @@
 
 use std::net::Ipv4Addr;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -23,7 +24,7 @@ use ubc_vpn_core::protocol::{
 use ubc_vpn_core::routes::Ipv4Net;
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
-use ubc_vpn_platform::{Dns, PhysicalNetwork, Platform, Routes};
+use ubc_vpn_platform::{Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Platform, Routes};
 
 use crate::diagnostics::failure;
 use crate::hub::Hub;
@@ -56,6 +57,9 @@ enum Command {
     /// With the hold that keeps its cookie out of the log.
     Connect(ConnectParams, Cancel, Held),
     Disconnect,
+    /// The OS reported this about the network watched by the subscription
+    /// with this number.
+    Network(u64, NetworkEvent),
     /// The tunnel with this number ended by itself.
     Ended(u64, TunnelEvent),
     Shutdown,
@@ -81,6 +85,7 @@ pub(crate) struct Applied {
 pub(crate) struct Machine {
     pub(crate) routes: Arc<dyn Routes>,
     pub(crate) dns: Arc<dyn Dns>,
+    pub(crate) events: Arc<dyn NetworkEvents>,
     pub(crate) engine: Arc<dyn TunnelEngine>,
     /// From the service's own policy. No request can change it.
     pub(crate) gateway: Option<Gateway>,
@@ -92,8 +97,15 @@ pub(crate) struct Machine {
     /// Whether the last state written to the log was `disconnected`. It is
     /// where the service starts.
     disconnected: bool,
+    /// The number of the subscription that watches the network of the
+    /// connection now, or 0 when there is none. A subscription with any
+    /// other number forwards nothing and ends.
+    pub(crate) watching: Arc<AtomicU64>,
     /// Counts tunnels, so an ending is matched to the tunnel it came from.
     tunnels: u64,
+    /// Counts subscriptions to network events. Every attempt gets a number
+    /// of its own, whether or not its tunnel opened.
+    subscriptions: u64,
     hub: Arc<Hub>,
     gate: Arc<Mutex<Gate>>,
     commands: Sender<Command>,
@@ -131,6 +143,8 @@ impl Session {
         let machine = Machine {
             routes: platform.routes.clone(),
             dns: platform.dns.clone(),
+            events: platform.events.clone(),
+            watching: Arc::default(),
             engine,
             gateway,
             logs: logs.clone(),
@@ -138,6 +152,7 @@ impl Session {
             hidden: None,
             disconnected: true,
             tunnels: 0,
+            subscriptions: 0,
             hub,
             gate: gate.clone(),
             commands: commands.clone(),
@@ -359,10 +374,9 @@ impl Machine {
             Command::Ended(tunnel, event)
                 if tunnel == self.tunnels && self.applied.tunnel.is_some() =>
             {
-                // SEAM: auto-reconnect and network-change handling start
-                // here and in `set_up` (subscribe to `NetworkEvents`, keep
-                // the session, reopen). Until then nothing is retried and
-                // the cookie is already forgotten.
+                // SEAM: auto-reconnect starts here and at a network change
+                // (keep the session, reopen). Until then nothing is retried
+                // and the cookie is already forgotten.
                 let state = match event {
                     TunnelEvent::Closed => ConnState::Disconnected,
                     TunnelEvent::LoginNeeded => ConnState::LoginNeeded,
@@ -379,7 +393,26 @@ impl Machine {
                 };
                 self.finish_then_open(state, idle);
             }
-            Command::Ended(..) | Command::Shutdown => {}
+            // The network the connection was set up and checked on is gone,
+            // so its gateway route may lead nowhere. Only a change seen by
+            // the subscription of the connection that is up now counts:
+            // not one from an earlier attempt, opened or not, whose
+            // forwarder read the number just before a teardown.
+            Command::Network(subscription, NetworkEvent::PhysicalChanged)
+                if subscription == self.watching.load(Ordering::SeqCst)
+                    && self.applied.tunnel.is_some() =>
+            {
+                let state = failed(ErrorCode::EngineFailed, NETWORK_CHANGED);
+                let idle = |phase: &mut Phase| {
+                    if *phase == Phase::Connected {
+                        *phase = Phase::Idle;
+                    }
+                };
+                self.finish_then_open(state, idle);
+            }
+            // Sleeping and waking change nothing by themselves: a tunnel
+            // that does not survive them ends by itself.
+            Command::Network(..) | Command::Ended(..) | Command::Shutdown => {}
         }
     }
 
@@ -454,6 +487,54 @@ impl Machine {
 }
 
 const LEFT_BEHIND: &str = "Some routes or DNS settings could not be removed.";
+
+const NETWORK_CHANGED: &str = "The network changed, so the connection was closed. Connect again.";
+
+/// Said once while it stays in the log, when the system cannot report
+/// network changes. Windows cannot yet.
+const UNWATCHED: &str = "network changes cannot be watched on this system; \
+    a connection that stops working ends when the tunnel notices";
+
+impl Machine {
+    /// Starts watching `physical` for the connection being set up, under a
+    /// subscription number no other attempt has. Events reach the worker as
+    /// commands; the subscription ends at the first event after teardown, or
+    /// with the service. A system that cannot report changes is no reason to
+    /// refuse; any other failure is.
+    pub(crate) fn watch_network(
+        &mut self,
+        physical: &PhysicalNetwork,
+    ) -> Result<(), (ErrorCode, String)> {
+        self.subscriptions += 1;
+        let number = self.subscriptions;
+        self.watching.store(number, Ordering::SeqCst);
+        let events = match self.events.subscribe(physical) {
+            Ok(events) => events,
+            Err(ubc_vpn_platform::Error::Unsupported) => {
+                self.logs.warn_about("network events", UNWATCHED);
+                return Ok(());
+            }
+            Err(e) => {
+                let why = format!("Network changes cannot be watched: {e}.");
+                return Err((ErrorCode::Internal, why));
+            }
+        };
+        let (current, commands) = (self.watching.clone(), self.commands.clone());
+        let forward = move || {
+            while let Ok(event) = events.recv() {
+                let stale = current.load(Ordering::SeqCst) != number;
+                if stale || commands.send(Command::Network(number, event)).is_err() {
+                    break;
+                }
+            }
+        };
+        let started = thread::Builder::new().spawn(forward);
+        started.map(drop).map_err(|e| {
+            let why = format!("No thread to watch the network: {e}.");
+            (ErrorCode::Internal, why)
+        })
+    }
+}
 
 #[cfg(test)]
 #[path = "session_tests.rs"]
