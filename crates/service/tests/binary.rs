@@ -148,8 +148,9 @@ fn refuses_to_start_while_a_loader_variable_is_set() {
 }
 
 // On Windows the installed service runs only under the service manager. Run
-// from a console it stops at once and says so, before it opens anything.
-#[cfg(windows)]
+// from a console it stops at once and says so, before it opens anything. A
+// build with dev mode stops even before that (see the test above).
+#[cfg(all(windows, not(feature = "dev-mode")))]
 #[test]
 fn on_windows_the_installed_service_needs_the_service_manager() {
     let (refused, stderr) = run(&[], None);
