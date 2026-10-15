@@ -274,7 +274,7 @@ Wintun, the Windows tunnel driver, ships as a prebuilt signed binary under its o
 
 The app's bundled fonts are under the SIL Open Font License 1.1, approved in the same place for font files only.
 
-The Microsoft Visual C++ runtime (`vcruntime140.dll`) ships beside the service and the command-line client, copied unmodified from the building Visual Studio's `VC\redist` folder, which Microsoft's Distributable List allows. The owner approved it on the conditions in the same file; its version and checksum are pinned in `packaging/windows/vcruntime.lock`, and Microsoft's licence terms and Distributable List ship with it. The two programs are linked with `/DEPENDENTLOADFLAG:0xA00`, so the DLLs they import come from their own folder, the admin-only install folder, and System32, and never from the working folder or `PATH`.
+The Microsoft Visual C++ runtime (`vcruntime140.dll`) ships beside the service and the command-line client, copied unmodified from the building Visual Studio's `VC\redist` folder, which Microsoft's Distributable List allows. The owner approved it on the conditions in the same file; its version and checksum are pinned in `packaging/windows/vcruntime.lock`, and Microsoft's Visual Studio Community 2026 licence terms (the maintainer's licence, under which it is redistributed) and Distributable List ship with it. Their distribution requirements are met by the setup program's licence page and by indemnifying Microsoft, as the rule records. The two programs are linked with `/DEPENDENTLOADFLAG:0xA00`, so the DLLs they import come from their own folder, the admin-only install folder, and System32, and never from the working folder or `PATH`.
 
 ### What the installers must do
 

@@ -7,26 +7,32 @@ folder of the Visual Studio that built the programs. Its version and SHA-256
 are pinned in packaging/windows/vcruntime.lock in the source repository.
 It is not open source and is not under UBC VPN's licence.
 
-Microsoft lets licensed Visual Studio users distribute it with their
-programs under the "Distributable Code" section of the Visual Studio
-licence terms, for the files on the Distributable List. Both are in this
-folder, as Microsoft publishes them:
+It is redistributed under the Visual Studio Community 2026 / Build Tools
+licence of UBC VPN's maintainer, an individual developer of this
+open-source project, under that licence's "DISTRIBUTABLE CODE" section,
+for the files on the Distributable List. Among that section's conditions:
+end users must agree to terms that protect the file at least as much as
+Microsoft's licence terms do, which the setup program's licence page
+asks of whoever installs UBC VPN, and Microsoft is indemnified as that
+section says. Both texts are in this folder, as Microsoft publishes them:
 
-- microsoft-visual-studio-2026-license.txt
-  Microsoft Software License Terms, Microsoft Visual Studio Enterprise 2026,
-  Visual Studio Professional 2026, and Trial Edition (last updated
-  October 1, 2025), the edition on the build machine.
-  Page: https://visualstudio.microsoft.com/license-terms/vs2026-ga-pro-enterprise/
-  Document: https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual_Studio_2026-License-Enterprise_Professional_ENU.docx
-  SHA-256 of the document: dd2ab92a7c2bb90dd509e16572707a34b13bc0bc09b9199d115f25594ac39053
+- microsoft-visual-studio-2026-community-license.txt
+  Microsoft Software License Terms, Microsoft Visual Studio Community 2026
+  (last updated October 1, 2025).
+  Page: https://visualstudio.microsoft.com/license-terms/vs2026-ga-community/
+  Document: https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual_Studio_2026-License-Community_ENU.docx
+  SHA-256 of the document: 02ac07637f4a513a807cd3721c7620433fc483bc049d25784b0c10c54b05e1fb
   How it was extracted: the paragraphs of the document (word/document.xml)
   in order, one per line, with the text of each exactly as stored, tabs
-  and line breaks kept, and the numbers of Word's numbered lists (the
-  parts I. and II., sections 1. to 19. and their a. and i. items, from
-  word/numbering.xml)
-  written out as Word shows them, so references such as "Section 15"
-  resolve. Bulleted items start with "- ". Fonts and other formatting are
-  not kept. Nothing else is changed: spaces at line ends are as stored.
+  and line breaks kept. The numbers of Word's numbered lists are written
+  out as the document's own list definitions give them (word/numbering.xml,
+  and word/styles.xml for numbering set by a paragraph's style): sections
+  1. to 18., their a. items and the i. items below those, so references
+  such as "Section 10, DATA" resolve. Items of bulleted lists start with
+  "- ". Fonts and other formatting are not kept. Nothing else is changed:
+  spaces at line ends are as stored. Where the document's own wording and
+  its numbering disagree, as in section 14 e. naming "Section 8", the
+  text is left as Microsoft wrote it.
 
 - microsoft-visual-studio-2026-distributable-code.txt
   Distributable Code for Visual Studio 2026 (the Distributable List, or

@@ -8,10 +8,13 @@
 # updates Visual Studio, that stop shows the new version and checksum;
 # review them and change them here.
 
-# The edition whose licence terms ship (licenses/microsoft-visual-studio-2026-license.txt):
-# Visual Studio Enterprise 2026, 18.10.3 on GitHub's windows-2025-vs2026 image.
-VC_PRODUCT=Microsoft.VisualStudio.Product.Enterprise
-VC_PRODUCT_LINE_VERSION=18
+# Not pinned: the Visual Studio edition on the build machine. The runtime
+# file is the same in every edition, and it is redistributed under the
+# maintainer's own Community / Build Tools licence, whose terms ship
+# (licenses/microsoft-visual-studio-2026-community-license.txt), not under
+# the build machine's. The compiler and runtime versions below tie it to
+# Visual Studio 2026; GitHub's windows-2025-vs2026 image has Enterprise
+# 18.10.3.
 # The compiler that builds the programs, as in VC\Auxiliary\Build\
 # Microsoft.VCToolsVersion.default.txt. A program built by a newer compiler
 # than the runtime beside it may need what that runtime lacks, so the build

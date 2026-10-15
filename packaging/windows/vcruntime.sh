@@ -4,10 +4,11 @@
 #
 #   packaging/windows/vcruntime.sh <out-dir>
 #
-# It stops, and says what it found, unless the Visual Studio edition, its
-# version line, the compiler's version, the redistributable's version and
-# every file's SHA-256 are exactly those in vcruntime.lock, and the compiler
-# is no newer than that runtime. Run it in Git Bash on Windows.
+# It stops, and says what it found, unless the compiler's version, the
+# redistributable's version and every file's SHA-256 are exactly those in
+# vcruntime.lock, and the compiler is no newer than that runtime. The Visual
+# Studio edition is printed, not checked: the file is the same in every
+# edition. Run it in Git Bash on Windows.
 
 set -euo pipefail
 
@@ -16,8 +17,6 @@ lock="$here/vcruntime.lock"
 out=${1:?usage: vcruntime.sh <out-dir>}
 
 value() { sed -n "s/^$1=//p" "$lock"; }
-product=$(value VC_PRODUCT)
-line=$(value VC_PRODUCT_LINE_VERSION)
 version=$(value VC_REDIST_VERSION)
 tools=$(value VC_TOOLS_VERSION)
 folder=$(value VC_CRT_FOLDER)
@@ -29,15 +28,9 @@ property() {
     -property "$1" | tr -d '\r'
 }
 install=$(property installationPath)
-found_product=$(property productId)
-found_line=$(property catalog_productLineVersion)
-echo "Visual Studio: $found_product $found_line ($(property catalog_productDisplayVersion)) at $install"
+echo "Visual Studio: $(property productId) $(property catalog_productDisplayVersion) at $install"
 
 failed=0
-if [ "$found_product" != "$product" ] || [ "$found_line" != "$line" ]; then
-  echo "error: the lock is for $product $line, and its licence terms are what ships"
-  failed=1
-fi
 build="$(cygpath -u "$install")/VC/Auxiliary/Build"
 found_tools=$(tr -d '\r\n ' < "$build/Microsoft.VCToolsVersion.default.txt")
 echo "Compiler: $found_tools (default redistributable: $(tr -d '\r\n ' < "$build/Microsoft.VCRedistVersion.default.txt"))"
