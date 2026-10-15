@@ -38,3 +38,14 @@ The VPN server answered with a certificate that this version of UBC VPN does not
 
 1. Update UBC VPN to the latest version, then connect again.
 2. If UBC VPN is already up to date, try another network.
+
+# When a server cannot be reached while connected
+
+## Its traffic does not go through the VPN
+
+UBC VPN sends only the networks in your saved routes through the VPN. Traffic to any other address goes over your usual network, as if UBC VPN were not running, so a server that only answers from inside UBC cannot be reached.
+
+To check a server, run `ubc-vpn diagnostics --host <name>` with its name. It looks the name up as other programs on your computer do, and says for each address whether a saved network covers it and, while connected, whether it goes through the VPN.
+
+1. If it says "Covered: no", add a network that holds the address to the routes in the app, then connect again.
+2. If it says the tunnel was set up with other routes, disconnect and connect again to use the saved ones.
