@@ -3,14 +3,14 @@
 
 mod harness;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use harness::*;
 use ubc_vpn_core::protocol::{
     AddLogParams, HelloReply, LogLevel, LogsParams, PROTOCOL_VERSION, WatchLogsParams, decode,
 };
 use ubc_vpn_platform::fake::Applied;
-use ubc_vpn_platform::{Dns, Routes, SplitDns};
+use ubc_vpn_platform::{Dns, Routes, SplitDns, Transport};
 use ubc_vpn_service::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS};
 
 const DISCONNECTED: Result<ResponseBody, ErrorCode> =
@@ -179,6 +179,67 @@ fn the_owner_is_kept_only_in_the_state_folder_the_service_was_given() {
         untouched, r#"{"owner":"mallory"}"#,
         "the plain file was written"
     );
+}
+
+/// The service's channel name, held by another program, as any local user
+/// can while it is free: during an update, say, or a restart.
+fn squat(rig: &Rig) -> Box<dyn ubc_vpn_platform::Listener> {
+    let name = rig.platform().paths.channel_name;
+    rig.fake.listen(&name).expect("the name is free")
+}
+
+// Security rule: someone who takes the service's channel name while it is
+// free cannot keep the service down. It waits for the name, a while, and
+// comes up once the name is free; it says once that someone else held it.
+#[test]
+fn a_channel_name_someone_else_holds_is_waited_for() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    rig.timeouts.claim = Duration::from_secs(10);
+    let squatter = squat(&rig);
+    let releases = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        squatter.close();
+    });
+    let started = Instant::now();
+    rig.start()
+        .expect("the service comes up once the name is free");
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "it did not wait"
+    );
+    releases.join().unwrap();
+    let mut alice = rig.owner();
+    assert_eq!(alice.ask(RequestBody::Status), DISCONNECTED);
+    let held = |line: &String| line.contains("held by another program");
+    assert_eq!(rig.logs().iter().filter(|line| held(line)).count(), 1);
+}
+
+// Security rule: past the limit the service stops, cleanly and with a
+// reason. It never uses or connects to a channel it did not make: the one
+// holding the name is left as it was.
+#[test]
+fn a_channel_name_held_past_the_limit_stops_the_service() {
+    let mut rig = Rig::stopped(policy('A', ""));
+    rig.timeouts.claim = Duration::from_millis(300);
+    let _squatter = squat(&rig);
+    let (fake, name) = (rig.fake.clone(), rig.platform().paths.channel_name);
+    // On a thread of its own, so that a start that never gives up fails
+    // this test instead of hanging it.
+    let started = Instant::now();
+    let (ended, start) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = ended.send(rig.start());
+        drop(rig);
+    });
+    let started_up = start.recv_timeout(Duration::from_secs(5));
+    let refused = started_up.expect("it waited past its limit").unwrap_err();
+    assert!(refused.contains("held by another program"), "{refused}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "it did not wait"
+    );
+    // The other program's channel still has the name.
+    assert_eq!(fake.listen(&name).err(), Some(Error::AlreadyExists));
 }
 
 // Security rule: with an owner on record, a service that cannot have the OS
