@@ -326,6 +326,25 @@ fn an_empty_reply_the_login_gets_past_is_not_an_error() {
     assert_eq!(errors(&attempt), Vec::<String>::new());
 }
 
+// An empty reply before any answers were sent says nothing about the
+// username: here the gateway answers the first probe with nothing and then
+// fails in another way, before any form. That is not `CheckUsername`, so a
+// saved username, which the client forgets only after a refused login or
+// one whose username is to be checked, stays.
+#[test]
+fn an_empty_reply_before_the_answers_is_not_about_the_username() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("emptyprobefail") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert_eq!(attempt.result, Err(LoginError::Failed));
+    assert!(attempt.prompts.is_empty(), "{:?}", kinds(&attempt));
+    let lines = attempt.lines.lock().unwrap().clone();
+    assert!(lines.iter().any(|line| line == EMPTY_REPLY), "{lines:?}");
+}
+
 // A second form with one password field that is not the password asks for a
 // one-time code, with the gateway's words for it.
 #[test]

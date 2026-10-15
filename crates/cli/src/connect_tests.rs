@@ -820,6 +820,9 @@ fn what_a_failed_login_wrote_is_handed_to_the_service() {
         [progress, "Failed to connect to the gateway", outcome]
     );
     assert!(!err.contains(progress), "{err}");
+    // A login that failed in any way but a refusal, or a username to check,
+    // keeps the saved username.
+    assert_eq!(saved(&scene)["username"], "alice");
 }
 
 // A gateway that asks for the username again before any password refused
