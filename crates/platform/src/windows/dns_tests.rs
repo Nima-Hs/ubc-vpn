@@ -273,21 +273,20 @@ fn another_rule_for_our_domain_is_not_in_effect() {
     ran("dns foreign");
 }
 
-// Security rule: a member of Network Configuration Operators, who is not an
-// administrator, can make one of our rule keys before we do, and would own
-// it. Such a key is not taken as ours, and setting replaces it with one
-// Administrators own.
+// Security rule: whoever makes one of our rule keys owns it, and somebody
+// other than SYSTEM or Administrators could have made it first (on some
+// systems a member of Network Configuration Operators can). Such a key is
+// not taken as ours, and setting replaces it with one Administrators own.
+// Here the key is owned by the test's own account, which is neither.
 #[test]
-fn a_rule_key_another_user_made_first_is_not_ours() {
+fn a_rule_key_another_owner_made_first_is_not_ours() {
     let _turn = turn();
     let Some(_wintun) = wintun() else { return };
-    let Some(stranger) = super::tests::stranger() else {
-        return;
-    };
     let _rules = DnsCleanup;
     let ours = super::dns::rules(&chosen()).unwrap();
-    let made = stranger.run(|| write_rule_at(LOCAL, super::dns::RULES[0], &ours[0], None));
-    made.expect("a member of Network Configuration Operators makes our key");
+    let me = super::security::process_user().unwrap();
+    let owner = format!("O:{me}");
+    write_rule_at(LOCAL, super::dns::RULES[0], &ours[0], Some(&owner)).unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
     WinDns.set_split_dns("", &chosen()).unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);

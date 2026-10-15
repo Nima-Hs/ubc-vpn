@@ -175,12 +175,12 @@ fn on_pipe(handle: HANDLE) -> String {
 }
 
 /// A second, ordinary user, logged on for the length of a test.
-pub(super) struct Stranger {
+struct Stranger {
     token: Handle,
-    pub(super) sid: String,
+    sid: String,
 }
 
-pub(super) fn stranger() -> Option<Stranger> {
+fn stranger() -> Option<Stranger> {
     let var = |name| std::env::var(name).ok().map(|value| wide(&value));
     let both = var("UBC_VPN_TEST_USER").zip(var("UBC_VPN_TEST_PASSWORD"));
     let Some((user, password)) = both else {
@@ -209,7 +209,7 @@ pub(super) fn stranger() -> Option<Stranger> {
 
 impl Stranger {
     /// Runs `work` on a thread that acts as this user.
-    pub(super) fn run<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
+    fn run<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
         let acting = || {
             // SAFETY: the token is an open logon token; this changes only the
             // identity of this short-lived thread.

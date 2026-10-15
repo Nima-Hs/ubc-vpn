@@ -102,9 +102,6 @@ jobs:
           New-LocalUser -Name $env:TEST_USER -Password $secure -AccountNeverExpires | Out-Null
           try {
             Add-LocalGroupMember -Group Users -Member $env:TEST_USER
-            # Not an administrator, but may change network settings, including
-            # the DNS client's rules: the user the split DNS owner test plays.
-            Add-LocalGroupMember -SID 'S-1-5-32-556' -Member $env:TEST_USER
             $env:UBC_VPN_TEST_USER = $env:TEST_USER
             $env:UBC_VPN_TEST_PASSWORD = $password
             $profile = if ('${{ matrix.profile }}' -eq 'release') { '--release' } else { $null }
