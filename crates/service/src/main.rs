@@ -173,14 +173,20 @@ mod setup {
     use std::path::{Path, PathBuf};
 
     use ubc_vpn_platform::install::{self as os, Registration};
-    use ubc_vpn_platform::{Mode, Platform};
+    use ubc_vpn_platform::{Mode, Paths, Platform, StateDir};
     use ubc_vpn_service::install::{self, DESCRIPTION, DISPLAY_NAME, SERVICE_NAME};
+
+    /// Where the installed service keeps its policy and its state: one
+    /// machine-wide data folder.
+    fn paths() -> Result<Paths, String> {
+        let platform = Platform::native(Mode::Installed)
+            .map_err(|e| format!("The data folder cannot be found: {e}."))?;
+        Ok(platform.paths)
+    }
 
     /// The machine-wide folder that holds the policy and the state.
     fn data_folder() -> Result<PathBuf, String> {
-        let platform = Platform::native(Mode::Installed)
-            .map_err(|e| format!("The data folder cannot be found: {e}."))?;
-        Ok(platform.paths.policy_dir)
+        Ok(paths()?.policy_dir)
     }
 
     /// Checks the policy and this program's folder, makes the data folder
@@ -197,8 +203,10 @@ mod setup {
         let _folder = ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())?;
         let command_line = os::quoted(&program)
             .map_err(|_| format!("The service's path cannot be used: {}.", program.display()))?;
+        let paths = paths()?;
         let mut steps = Windows {
-            data: data_folder()?,
+            data: paths.policy_dir.clone(),
+            paths,
             command_line,
         };
         install::install(&mut steps, &policy, fresh)
@@ -207,10 +215,21 @@ mod setup {
     /// The steps of an install on this computer (see `install::install`).
     struct Windows {
         data: PathBuf,
+        paths: Paths,
         command_line: String,
     }
 
     impl install::Steps for Windows {
+        fn holds_an_owner(&mut self) -> bool {
+            // `StateDir::open` makes the folder when it is missing; only one
+            // that is already there can hold an owner.
+            if std::fs::symlink_metadata(&self.paths.state_dir).is_err() {
+                return false;
+            }
+            StateDir::open(Mode::Installed, &self.paths)
+                .is_ok_and(|state| install::holds_an_owner(&state))
+        }
+
         fn prepare_data_folder(&mut self, fresh: bool) -> Result<(), String> {
             os::prepare_data_folder(&self.data, fresh)
                 .map_err(|e| format!("The data folder could not be prepared: {e}."))

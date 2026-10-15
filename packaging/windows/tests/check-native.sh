@@ -5,8 +5,9 @@
 #
 #   packaging/windows/tests/check-native.sh
 #
-# An artifact matching its manifest passes; one with a changed, extra or
-# missing library or source archive is refused.
+# An artifact matching its manifest and the recipe passes; one with a
+# changed, extra or missing library, source archive or recipe file, or a
+# folder in source/ other than the recipe, is refused.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -17,7 +18,8 @@ trap 'rm -rf "$work"' EXIT
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 # make <folder>: an artifact with two libraries, two source archives, the
-# recipe, and a source recorded but not shipped, all listed in its manifest.
+# recipe, and a source recorded but not shipped, all listed in its manifest;
+# and in <folder>.recipe the recipe as the repository has it.
 make() {
   local a=$1
   mkdir -p "$a/bin" "$a/source/recipe/patches"
@@ -26,6 +28,8 @@ make() {
   printf 'source one\n' >"$a/source/one-1.0.tar.gz"
   printf 'source two\n' >"$a/source/two-2.0.tar.zst"
   printf 'a patch\n' >"$a/source/recipe/patches/fix.patch"
+  printf 'a script\n' >"$a/source/recipe/build.sh"
+  cp -R "$a/source/recipe" "$a.recipe"
   cat >"$a/manifest.json" <<EOF
 {
   "shippable": true,
@@ -54,7 +58,7 @@ failed=0
 # expect <pass|refuse> <what> <folder>
 expect() {
   local want=$1 what=$2 folder=$3 got
-  if node "$check" "$folder" >"$work/out" 2>&1; then got=pass; else got=refuse; fi
+  if node "$check" "$folder" "$folder.recipe" >"$work/out" 2>&1; then got=pass; else got=refuse; fi
   if [ "$got" = "$want" ]; then
     echo "ok: $what ($want)"
   else
@@ -101,11 +105,32 @@ a=$(case_ no-checksum)
 sed -i 's/"sha256": "[0-9a-f]*"}]/"sha256": ""}]/' "$a/manifest.json"
 expect refuse 'a listed library without a checksum' "$a"
 
+a=$(case_ changed-recipe)
+printf 'changed\n' >>"$a/source/recipe/patches/fix.patch"
+expect refuse 'a recipe file that differs from the repository' "$a"
+
+a=$(case_ extra-recipe)
+printf 'extra\n' >"$a/source/recipe/patches/extra.patch"
+expect refuse 'a recipe file the repository does not have' "$a"
+
+a=$(case_ missing-recipe)
+rm "$a/source/recipe/build.sh"
+expect refuse 'a recipe file that is missing' "$a"
+
+a=$(case_ no-recipe)
+rm -r "$a/source/recipe"
+expect refuse 'no recipe at all' "$a"
+
+a=$(case_ extra-folder)
+mkdir "$a/source/more"
+printf 'hidden\n' >"$a/source/more/hidden.tar.gz"
+expect refuse 'a folder in source/ other than the recipe' "$a"
+
 # stage.sh runs the check first: it stops on a changed library, saying so,
 # before it builds or stages anything.
 a=$(case_ staged)
 printf 'changed\n' >>"$a/bin/libone-1.dll"
-if "$root/packaging/windows/stage.sh" "$a" 1 "$work/sources.tar.gz" >"$work/out" 2>&1; then
+if "$root/packaging/windows/stage.sh" "$a" 1 "$a.recipe" "$work/sources.tar.gz" >"$work/out" 2>&1; then
   echo 'FAILED: stage.sh staged a changed library' >&2
   failed=1
 elif ! grep -q '^bin/libone-1.dll: SHA-256 ' "$work/out"; then

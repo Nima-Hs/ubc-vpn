@@ -24,7 +24,8 @@ pub enum Command {
     /// `install --policy <file> [--fresh]`: register the service, make its
     /// data folder, write the policy from `file` into it, and start it. With
     /// `--fresh`, for a first install, a data folder that is already there
-    /// is emptied first. Windows only; the setup program runs it.
+    /// is emptied first, unless it holds an owner the service would accept
+    /// (as a failed update leaves it). Windows only; the setup program runs it.
     Install { policy: PathBuf, fresh: bool },
     /// `uninstall [--keep-data]`: stop the service, which cleans up first,
     /// and remove it and the data folder. With `--keep-data`, for an update,

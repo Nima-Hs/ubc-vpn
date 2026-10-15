@@ -90,6 +90,12 @@ jobs:
           status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
           echo "The library was built from $commit; main is $status of it."
           [ "$status" = ahead ] || [ "$status" = identical ]
+          # The recipe the artifact ships must be native/windows as it is at
+          # that commit; stage.sh compares them (check-native.mjs).
+          git -C "$GITHUB_WORKSPACE" fetch --quiet --no-tags --depth=1 origin "$commit"
+          mkdir recipe
+          git -C "$GITHUB_WORKSPACE" archive "$commit" native/windows | tar -x -C recipe
+          echo "NATIVE_RECIPE=$RUNNER_TEMP/recipe/native/windows" >>"$GITHUB_ENV"
 
       # A stalled download would otherwise hold the job until its own limit.
       - name: Install the pinned Rust toolchain
@@ -107,7 +113,7 @@ jobs:
         working-directory: .
         run: |
           version=$(node -p "require('./app/package.json').version")
-          packaging/windows/stage.sh "$RUNNER_TEMP/native" "$NATIVE_RUN" "$RUNNER_TEMP/sources/ubc-vpn-$version-windows-x64-sources.tar.gz"
+          packaging/windows/stage.sh "$RUNNER_TEMP/native" "$NATIVE_RUN" "$NATIVE_RECIPE" "$RUNNER_TEMP/sources/ubc-vpn-$version-windows-x64-sources.tar.gz"
 
       # The Visual C++ runtime the setup program bundles beside the programs:
       # the pinned file from this runner's Visual Studio (vcruntime.sh stops
@@ -177,8 +183,14 @@ jobs:
         run: pwsh -NoProfile -File "$CHECK" foreign-folder dist/ubc-vpn-setup-*-x64.exe
       - name: Declining the licence page leaves nothing behind
         run: pwsh -NoProfile -File "$CHECK" decline dist/ubc-vpn-setup-*-x64.exe
-      - name: Install
-        run: pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
+      # A first install keeps only a data folder the administrators alone
+      # control (issue #184); one others could change, owner and all, is
+      # emptied.
+      - name: Install, over a data folder others could change
+        run: |
+          pwsh -NoProfile -File "$CHECK" plant-owner
+          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
+          pwsh -NoProfile -File "$CHECK" planted-gone
       - name: Every file is installed as built and staged
         run: |
           pwsh -NoProfile -File "$CHECK" installed dist/win-unpacked
@@ -235,9 +247,10 @@ jobs:
   # registered and running) and leave nothing behind: no files, no service,
   # no data folder, no registry entries. The update leg fails the same way
   # over an installed copy that has an owner: the data folder, and the owner
-  # in it, must stay. These builds have the test switch
-  # and only exist on their runner: nothing from here is uploaded, and the
-  # setup program the job above builds and keeps never has it.
+  # in it, must stay, and stay through the install after it. These builds
+  # have the test switch and only exist on their runner: nothing from here
+  # is uploaded, and the setup program the job above builds and keeps never
+  # has it.
   failing-setup:
     name: failing setup (${{ matrix.step }}${{ matrix.update && ', update' || '' }})
     needs: stage
@@ -300,4 +313,13 @@ jobs:
         if: matrix.update
         run: |
           pwsh -NoProfile -File "$CHECK" update-fails dist/fail/ubc-vpn-setup-*-x64.exe ${{ matrix.code }}
+          pwsh -NoProfile -File "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
+      # The undo removed our install entry, so the next setup program counts
+      # as a first install and runs `install --fresh`. That must keep the
+      # data folder the failed update left, owner and all (issue #184).
+      - name: The next install keeps that owner
+        if: matrix.update
+        run: |
+          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
+          pwsh -NoProfile -File "$CHECK" service
           pwsh -NoProfile -File "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"

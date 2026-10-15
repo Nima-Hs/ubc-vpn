@@ -3,14 +3,16 @@
 # beside the app, for electron-builder to pick up (app/electron-builder.yml).
 # Run from Git Bash on Windows, from the repository root:
 #
-#   packaging/windows/stage.sh <native-folder> <native-run> <sources-archive>
+#   packaging/windows/stage.sh <native-folder> <native-run> <recipe-folder> <sources-archive>
 #
 # <native-folder> is an unpacked libopenconnect-windows-x64 artifact from a
 # Native library run on main; the workflow fetching it checks its commit is
 # on main (see CONTRIBUTING.md). <native-run> is that run's ID, recorded in
-# SOURCES.txt and the sources archive so a release says which run it shipped. <sources-archive> is where the exact source
-# of the bundled LGPL libraries is written, as a .tar.gz, for publishing
-# beside the setup program.
+# SOURCES.txt and the sources archive so a release says which run it
+# shipped. <recipe-folder> is native/windows as it is at the commit the
+# artifact's manifest names, which the artifact's recipe must match.
+# <sources-archive> is where the exact source of the bundled LGPL libraries
+# is written, as a .tar.gz, for publishing beside the setup program.
 #
 # It writes app/stage/:
 #   bin/          ubc-vpn.exe and ubc-vpn-service.exe, built in release mode
@@ -25,17 +27,18 @@
 #
 # It stops at anything unexpected: an artifact not marked shippable, a
 # library or source archive that differs from the artifact's manifest.json
-# or is not listed in it (check-native.mjs), or a set of libraries other
-# than native/windows/dlls.txt.
+# or is not listed in it, a recipe that differs from <recipe-folder>
+# (check-native.mjs), or a set of libraries other than native/windows/dlls.txt.
 set -euo pipefail
 
-if [ $# -ne 3 ]; then
-  echo "usage: $0 <native-folder> <native-run> <sources-archive>" >&2
+if [ $# -ne 4 ]; then
+  echo "usage: $0 <native-folder> <native-run> <recipe-folder> <sources-archive>" >&2
   exit 2
 fi
 native=$(cd "$1" && pwd)
 run=$2
-sources=$3
+recipe=$3
+sources=$4
 [[ $run =~ ^[0-9]+$ ]] || {
   echo "the native run ID must be a number: $run" >&2
   exit 2
@@ -52,7 +55,8 @@ shippable=$(node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>
 }
 # Each library and source archive is the one its manifest records: the
 # manifest is what ties a shipped library to the source published for it.
-node "$root/packaging/windows/check-native.mjs" "$native"
+# The recipe is this repository's at the commit the manifest names.
+node "$root/packaging/windows/check-native.mjs" "$native" "$recipe"
 expected=$(sed -n 's/^\([A-Za-z0-9_.-]*\.dll\) .*/\1/p' "$root/native/windows/dlls.txt" | sort)
 found=$(cd "$native/bin" && ls -- *.dll | sort)
 if [ "$expected" != "$found" ]; then
