@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -52,7 +52,19 @@ struct Gate {
     phase: Phase,
     /// Stops the connect in progress, if there is one.
     cancel: Cancel,
+    /// The number of the last connect admitted, or 0.
+    attempt: u64,
 }
+
+/// What the log says when a connect is undone because its client went
+/// before it could be told the connect was admitted. It holds none of the
+/// words that make the log hide the rest of a line.
+pub const ABANDONED: &str =
+    "the client that asked to connect went before it was told; disconnecting";
+
+/// The number of one admitted connect, so that it alone can be undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Attempt(u64);
 
 enum Command {
     /// With the hold that keeps its cookie out of the log.
@@ -142,7 +154,11 @@ impl Session {
             Err(message) => (None, Err(message)),
         };
         let (phase, cancel) = (Phase::Idle, Cancel::new());
-        let gate = Arc::new(Mutex::new(Gate { phase, cancel }));
+        let gate = Arc::new(Mutex::new(Gate {
+            phase,
+            cancel,
+            attempt: 0,
+        }));
         let (commands, inbox) = mpsc::channel();
         let machine = Machine {
             routes: platform.routes.clone(),
@@ -182,7 +198,7 @@ impl Session {
     /// with the code it was refused with. Nothing else from the request: it
     /// holds the cookie. An admitted one is logged before the worker has it,
     /// so that the line comes before any the connect leads to.
-    pub(crate) fn connect(&self, params: ConnectParams) -> Result<(), ErrorInfo> {
+    pub(crate) fn connect(&self, params: ConnectParams) -> Result<Attempt, ErrorInfo> {
         let routes = &params.routes;
         let carries = format!(
             "{} and {}",
@@ -197,7 +213,7 @@ impl Session {
         admitted
     }
 
-    fn admit(&self, params: ConnectParams, carries: &str) -> Result<(), ErrorInfo> {
+    fn admit(&self, params: ConnectParams, carries: &str) -> Result<Attempt, ErrorInfo> {
         let refused = |code, message: String| Err(error(code, message));
         let allowed = match &self.allowed {
             Ok(allowed) => allowed.as_deref(),
@@ -226,13 +242,15 @@ impl Session {
         *gate = Gate {
             phase: Phase::Connecting,
             cancel: Cancel::new(),
+            attempt: gate.attempt + 1,
         };
         // Held from here on, before the request is anywhere a line could
         // be written about it.
         let hidden = self.logs.hold(&params.cookie);
         let line = format!("connect admitted ({carries})");
         self.logs.about_requests(LogLevel::Info, &line);
-        self.send(Command::Connect(params, gate.cancel.clone(), hidden))
+        let sent = self.send(Command::Connect(params, gate.cancel.clone(), hidden));
+        sent.map(|()| Attempt(gate.attempt))
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
@@ -240,15 +258,47 @@ impl Session {
     /// said it was; when there was something to disconnect it is logged as
     /// that, since nothing checks it.
     pub(crate) fn disconnect(&self, said: &str) -> Result<(), ErrorInfo> {
-        let mut gate = lock(&self.gate);
+        let gate = lock(&self.gate);
+        let line = format!("disconnect requested by a client that said it was {said}");
+        // Within the budget for lines that requests cause.
+        self.stop_with(gate, || self.logs.about_requests(LogLevel::Info, &line))
+    }
+
+    /// Undoes the connect `attempt` because the client that asked for it
+    /// went before it could hear that it was admitted. Nobody is watching
+    /// that connect, and nobody would undo it. Only that connect: if it has
+    /// already ended, or a later one has been admitted, nothing is done.
+    pub(crate) fn abandon(&self, attempt: Attempt) {
+        let gate = lock(&self.gate);
+        let ours = gate.attempt == attempt.0;
+        if ours && matches!(gate.phase, Phase::Connecting | Phase::Connected) {
+            // Under the repeat rule, not the budget for requests: asking again
+            // and again must never hide the first one, and connecting and
+            // going costs the client nothing, so a repeat must not fill the
+            // log either. One copy is kept while it is still in the log.
+            let say = || {
+                self.logs
+                    .at_about(LogLevel::Info, "an undone connect", ABANDONED)
+            };
+            let _ = self.stop_with(gate, say);
+        }
+    }
+
+    /// Cancels a connect in progress, if there is one, and has the worker
+    /// tear everything down. `say` writes the line about it, when there was
+    /// something to stop.
+    fn stop_with(
+        &self,
+        mut gate: MutexGuard<'_, Gate>,
+        say: impl FnOnce(),
+    ) -> Result<(), ErrorInfo> {
         match gate.phase {
             Phase::Stopping => return Err(busy()),
             Phase::Connecting => gate.cancel.cancel(),
             Phase::Idle | Phase::Connected => {}
         }
         if gate.phase != Phase::Idle {
-            let line = format!("disconnect requested by a client that said it was {said}");
-            self.logs.about_requests(LogLevel::Info, &line);
+            say();
         }
         gate.phase = Phase::Stopping;
         self.send(Command::Disconnect)

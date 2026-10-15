@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use harness::*;
+use ubc_vpn_core::protocol::{Request, encode};
 use ubc_vpn_platform::{Listener, Platform, RawConnection, Result, Transport};
 use ubc_vpn_service::{Service, Timeouts};
 
@@ -92,6 +93,9 @@ struct PeerState {
     holding_a_write: bool,
     write_limits: Vec<Option<Duration>>,
     closed: bool,
+    /// Has gone: what it sent can still be read, as from a socket whose
+    /// writer has closed, but every write to it fails at once.
+    gone: bool,
 }
 
 impl Peer {
@@ -146,6 +150,9 @@ impl RawConnection for Peer {
 
     fn write_all(&self, bytes: &[u8]) -> Result<()> {
         let mut state = self.state();
+        if state.gone {
+            return Err(Error::Closed);
+        }
         if state.takes == Some(0) {
             // Nobody reads: wait as long as the limit allows, or for ever.
             state.holding_a_write = true;
@@ -198,6 +205,90 @@ fn until(what: &str, happened: impl Fn() -> bool) {
 const HELLO: &str = r#"{"protocol_version":3,"client":"app","client_version":"0.1.0"}"#;
 const CLAIM: &str = r#"{"id":1,"body":{"method":"claim"}}"#;
 const STATUS: &str = r#"{"id":2,"body":{"method":"status"}}"#;
+
+// Security rule (#163): a client that asks to connect and goes before it
+// hears the answer is watching nothing, and nobody is left to undo the
+// connect. So when the service cannot give an admitted connect its answer,
+// it undoes that connect itself, and nothing is left connected or applied.
+#[test]
+fn a_connect_whose_client_has_gone_is_undone() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let service = start(&rig, &channel, Timeouts::default());
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+    // First the budget for lines that requests cause is spent, with
+    // connects that are refused: the line that says why the connect below
+    // was undone is not one of those, and must be written all the same.
+    let request = |id, body| encode(&Request { id, body }).unwrap();
+    let refused = || connect(COOKIE, [0, 0, 0, 0], &["10.255.0.0/24"], &[]);
+    let spend = ubc_vpn_service::REQUEST_LINES + 1;
+    for n in 0..spend {
+        owner.send(request((10 + n).try_into().unwrap(), refused()).trim_end());
+    }
+    until("the refusals", || owner.lines() == 3 + spend);
+    // Gone before the connect is read: its answer cannot reach anyone.
+    owner.state().gone = true;
+    owner.send(request(2, good()).trim_end());
+
+    let said = |what: &str| service.logs().iter().any(|line| line.starts_with(what));
+    until("the connect is undone, and said so", || {
+        said(ubc_vpn_service::ABANDONED)
+    });
+    until("disconnected", || said("disconnected"));
+    assert!(!rig.engine.tunnel_is_open());
+    assert!(rig.is_clean());
+    // Anyone who asks next hears it.
+    let next = Peer::sending(&[HELLO, STATUS]);
+    channel.connect(&next);
+    until("the status", || next.lines() == 3);
+    let received = next.state().received.clone();
+    assert!(received.contains(r#""state":"disconnected""#), "{received}");
+}
+
+// Security rule: asking to connect and going, again and again, costs the
+// client nothing (the gateway is never contacted), so the line about it
+// must not fill the log. It is written the first time, and a repeat is
+// passed over while that copy is still in the log.
+#[test]
+fn connecting_and_going_again_and_again_is_said_once() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let service = start(&rig, &channel, Timeouts::default());
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+    let undone = || {
+        let lines = service.logs();
+        lines
+            .iter()
+            .filter(|line| *line == ubc_vpn_service::ABANDONED)
+            .count()
+    };
+    // Counted from what the owner's first connection is told, not from the
+    // log: the log line comes before the clients are told, and a round may
+    // begin only once the last one's end has been sent to everyone, or a
+    // late state event would be the new connection's second line.
+    let disconnected = || owner.heard("disconnected");
+    for round in 0..40 {
+        let before = disconnected();
+        let peer = Peer::sending(&[HELLO]);
+        channel.connect(&peer);
+        // The hello's answer and the state an owner's connection is told: once
+        // both are in, nothing more is written to it until it asks.
+        until("the hello and the state", || peer.lines() == 2);
+        peer.state().gone = true;
+        let connect = encode(&Request {
+            id: 2,
+            body: good(),
+        })
+        .unwrap();
+        peer.send(connect.trim_end());
+        until(&format!("round {round} undone"), || disconnected() > before);
+    }
+    assert_eq!(undone(), 1, "{:#?}", service.logs());
+}
 
 // Security rule: every write to a client has a time limit, so one that
 // stops reading is closed and cannot hold a thread for ever.
