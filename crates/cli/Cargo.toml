@@ -16,6 +16,11 @@ path = "src/main.rs"
 # service's channel and files and logs in against a scripted pretend gateway.
 # Never enabled in a release build; without it the flag does not exist.
 dev-mode = ["ubc-vpn-platform/dev-mode", "ubc-vpn-engine/fake"]
+# The real VPN engine: `libopenconnect`, loaded at run time from the folder
+# the program was installed in. Building with it needs UBC_VPN_NATIVE_DIR to
+# name our own pinned build of the library (see CONTRIBUTING.md). Without
+# it, the program cannot connect.
+real-engine = ["ubc-vpn-engine/libopenconnect"]
 
 [dependencies]
 serde_json = "1.0.154"

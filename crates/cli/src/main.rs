@@ -122,23 +122,119 @@ fn platform(dev: bool) -> ubc_vpn_platform::Result<Platform> {
     Platform::native(Mode::Installed)
 }
 
-/// The engine that logs in. There is no real one yet. With `--dev` it is a
-/// pretend gateway that presents the dev policy's first pin and asks for a
-/// username, a password and a one-time code.
-fn login_engine(dev: bool, policy: &Policy) -> Option<Box<dyn LoginEngine>> {
+const NO_ENGINE: &str = "This build has no VPN engine, so it cannot connect.";
+
+/// The engine that logs in: the VPN library this program loaded at start,
+/// or why there is none. With `--dev` it is a pretend gateway that presents
+/// the dev policy's first pin and asks for a username, a password and a
+/// one-time code.
+fn login_engine(dev: bool, policy: &Policy, real: &Real) -> Result<Box<dyn LoginEngine>, String> {
     #[cfg(feature = "dev-mode")]
     if dev {
         use ubc_vpn_engine::fake::{FakeEngine, Script};
-        let mut script = Script::new(policy.pins.first()?.clone());
+        let no_pin = || "The dev policy has no pin.".to_string();
+        let mut script = Script::new(policy.pins.first().ok_or_else(no_pin)?.clone());
         let mut code = script.form[1].clone();
         code.0.kind = ubc_vpn_core::login::PromptKind::Code;
         code.0.label = "One-time code".to_string();
         code.1 = ubc_vpn_core::redact::Secret::new(DEV_CODE);
         script.form.push(code);
-        return Some(Box::new(FakeEngine::new(script)));
+        return Ok(Box::new(FakeEngine::new(script)));
     }
     let _ = (dev, policy);
-    None
+    real.engine()
+}
+
+/// The real VPN engine, when this build has one and the command logs in.
+#[cfg(feature = "real-engine")]
+struct Real(Option<Result<std::sync::Arc<ubc_vpn_engine::OpenConnect>, String>>);
+
+#[cfg(not(feature = "real-engine"))]
+struct Real;
+
+impl Real {
+    /// Prepares the environment and loads `libopenconnect` from this
+    /// program's own folder, for a command that logs in for real. It must
+    /// run first in `main`, before any thread exists: GnuTLS reads the
+    /// environment while it is being loaded. A failure is kept and given as
+    /// the reason the command cannot log in; nothing of the library is used
+    /// after one.
+    fn load(logs_in: bool) -> Self {
+        #[cfg(feature = "real-engine")]
+        return Self(logs_in.then(load_beside_program));
+        #[cfg(not(feature = "real-engine"))]
+        {
+            let _ = logs_in;
+            Self
+        }
+    }
+
+    fn engine(&self) -> Result<Box<dyn LoginEngine>, String> {
+        #[cfg(feature = "real-engine")]
+        return match &self.0 {
+            Some(Ok(engine)) => Ok(Box::new(Loaded(engine.clone()))),
+            Some(Err(why)) => Err(why.clone()),
+            None => Err(NO_ENGINE.to_string()),
+        };
+        #[cfg(not(feature = "real-engine"))]
+        Err(NO_ENGINE.to_string())
+    }
+
+    /// Why loading failed, if it was tried and did. The command then ends
+    /// at once: nothing of a library that failed to load is used.
+    fn failure(&self) -> Option<&str> {
+        #[cfg(feature = "real-engine")]
+        return match &self.0 {
+            Some(Err(why)) => Some(why),
+            _ => None,
+        };
+        #[cfg(not(feature = "real-engine"))]
+        None
+    }
+}
+
+/// The folder this program was installed in, where the VPN library and the
+/// libraries it needs are. It never comes from the environment, a setting or
+/// an argument.
+#[cfg(feature = "real-engine")]
+fn program_dir() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|_| LIBRARY_FAILED.to_string())?;
+    let dir = exe.parent().ok_or(LIBRARY_FAILED)?;
+    Ok(dir.to_path_buf())
+}
+
+#[cfg(feature = "real-engine")]
+const LIBRARY_FAILED: &str = "The VPN library could not be loaded.";
+
+#[cfg(feature = "real-engine")]
+fn load_beside_program() -> Result<std::sync::Arc<ubc_vpn_engine::OpenConnect>, String> {
+    use ubc_vpn_engine::{EnvironmentError, OpenConnect, Role, prepare_environment};
+    let prepared = prepare_environment(Role::Client, None).map_err(|error| match error {
+        EnvironmentError::Set(name) => {
+            format!("Refusing to log in while {name} is set. Unset it and try again.")
+        }
+        _ => "Refusing to log in: the environment is not safe.".to_string(),
+    })?;
+    let engine = OpenConnect::load(&program_dir()?, &prepared);
+    engine.map(std::sync::Arc::new).map_err(|e| e.to_string())
+}
+
+/// The loaded library as a login engine for one command. Every login made
+/// through it uses the one library this process loaded.
+#[cfg(feature = "real-engine")]
+struct Loaded(std::sync::Arc<ubc_vpn_engine::OpenConnect>);
+
+#[cfg(feature = "real-engine")]
+impl LoginEngine for Loaded {
+    fn login(
+        &self,
+        gateway: &ubc_vpn_engine::Gateway,
+        prompts: &mut ubc_vpn_engine::Prompts<'_>,
+        cancel: &ubc_vpn_engine::Cancel,
+        logs: &ubc_vpn_engine::LogSink,
+    ) -> Result<ubc_vpn_engine::Session, ubc_vpn_engine::LoginError> {
+        self.0.login(gateway, prompts, cancel, logs)
+    }
 }
 
 /// The one-time code the pretend gateway of dev mode accepts. Made up, and
@@ -196,6 +292,15 @@ fn main() -> ExitCode {
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (dev, args) = dev_flag(&args);
+    // First, before anything starts a thread.
+    let logs_in = !dev && matches!(args, ["connect"] | ["connect", "--json"]);
+    let real = Real::load(logs_in);
+    if let Some(why) = real.failure() {
+        return ExitCode::from(match args {
+            ["connect", "--json"] => connect_json::refuse(why, &mut out),
+            _ => say(&mut err, &format!("ubc-vpn: {why}"), FAILED),
+        });
+    }
     let chosen = || platform(dev);
     // The commands that read standard input are started here. The bridge
     // only for exactly this spelling.
@@ -215,14 +320,14 @@ fn main() -> ExitCode {
         return ExitCode::from(status);
     }
     if args == ["connect", "--json"] {
-        let engines = |policy: &Policy| login_engine(dev, policy);
+        let engines = |policy: &Policy| login_engine(dev, policy, &real);
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
         let status = connect_json::connect(&chosen, &engines, input, limits, &mut out, &mut err);
         return ExitCode::from(status);
     }
     if args == ["connect"] {
-        let engines = |policy: &Policy| login_engine(dev, policy);
+        let engines = |policy: &Policy| login_engine(dev, policy, &real);
         let (mut ask, limits) = (terminal::Terminal::real(), client::Limits::default());
         let progress = watch_for_a_stop(dev, &mut err);
         let ended = connect::connect(

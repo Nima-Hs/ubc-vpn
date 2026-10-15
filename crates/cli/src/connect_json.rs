@@ -105,6 +105,14 @@ pub fn connect(
     exit
 }
 
+/// Ends `connect --json` before it starts, with one error line saying
+/// `message`, and returns the exit status.
+pub fn refuse(message: &str, out: &mut dyn Write) -> u8 {
+    let (code, message) = (LoginErrorCode::Internal, message.to_string());
+    let _ = write_line(out, &CliMessage::Error { code, message });
+    crate::FAILED
+}
+
 const PANICKED: &str = "Something went wrong inside UBC VPN while logging in.";
 const NOT_UNDERSTOOD: &str = "The app sent something that is not an answer to the question asked.";
 

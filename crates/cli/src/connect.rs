@@ -114,9 +114,9 @@ fn cut(text: &str, most: usize) -> String {
     text.chars().take_while(fits).collect()
 }
 
-/// The engine that logs in to the gateway `policy` names, if this build has
-/// one.
-pub type Engines<'a> = &'a dyn Fn(&Policy) -> Option<Box<dyn LoginEngine>>;
+/// The engine that logs in to the gateway `policy` names, or why there is
+/// none: this build has no engine, or the VPN library could not be loaded.
+pub type Engines<'a> = &'a dyn Fn(&Policy) -> Result<Box<dyn LoginEngine>, String>;
 
 /// Why a command stopped.
 pub(crate) struct Stop {
@@ -300,8 +300,8 @@ pub(crate) fn start(
     let no_policy = "The policy file is missing or not valid. Reinstall UBC VPN.";
     let policy = settings::policy(&platform.paths.policy_dir).ok_or_else(|| internal(no_policy))?;
     let gateway = Gateway::from_policy(&policy).map_err(|_| internal(no_policy))?;
-    let no_engine = "This build has no VPN engine yet, so it cannot connect.";
-    let engine = engines(&policy).ok_or_else(|| internal(no_engine))?;
+
+    let engine = engines(&policy).map_err(|why| internal(&why))?;
     let saved = saved(&platform)?;
     // The routes come from the user's settings and from nowhere else.
     if let Err(why) = saved.routes.check(policy.allowed_routes.as_deref()) {

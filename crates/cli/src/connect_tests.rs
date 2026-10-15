@@ -130,7 +130,7 @@ impl Scene {
         progress: &Progress,
     ) -> (Ended, String, String) {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
-        let engines = |_: &Policy| Some(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
+        let engines = |_: &Policy| Ok(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let limits = brief();
         let ended = connect(
@@ -322,7 +322,7 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
         let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut typist = Typist::typing(&[Some(PASSWORD)]);
-        let none = |_: &Policy| None;
+        let none = |_: &Policy| Err("The VPN library could not be loaded.".to_string());
         let unwatched = Progress::default();
         let limits = brief();
         let ended = connect(
@@ -336,7 +336,11 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
         );
         assert_eq!((ended, out.is_empty()), (Ended::Status(FAILED), true));
         let err = String::from_utf8(err).unwrap();
-        assert!(err.contains("no VPN engine yet"), "{err}");
+        // The reason there is no engine is what the user is told.
+        assert!(
+            err.contains("The VPN library could not be loaded."),
+            "{err}"
+        );
         assert!(typist.asked.is_empty());
     };
     no_engine(&scene);

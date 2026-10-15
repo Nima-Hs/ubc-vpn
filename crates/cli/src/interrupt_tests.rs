@@ -195,7 +195,7 @@ fn a_stop_noted_before_the_request_keeps_it_from_going() {
 fn the_request_is_marked_as_sent_before_it_leaves() {
     let begins = |scene: &Scene, typed: &[Option<&'static str>]| {
         let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
-        let engines = |_: &Policy| Some(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
+        let engines = |_: &Policy| Ok(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
         let (progress, mut typist) = (Progress::default(), Typist::typing(typed));
         let sending = || progress.sending();
         let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());

@@ -34,10 +34,46 @@ fn run() -> Result<(), String> {
 
 fn parts(mode: Run) -> Result<Parts, String> {
     match mode {
-        Run::Installed => Err("this build has no VPN engine yet, so it cannot run".to_string()),
+        Run::Installed => installed(),
         #[cfg(feature = "dev-mode")]
         Run::Dev => dev(),
     }
+}
+
+#[cfg(not(feature = "real-engine"))]
+fn installed() -> Result<Parts, String> {
+    Err("this build has no VPN engine, so it cannot run".to_string())
+}
+
+/// The installed service: the real platform, the state folder checked for
+/// who may change it, and `libopenconnect` loaded from this program's own
+/// folder. Nothing before this has started a thread, and the environment
+/// is dealt with before the library is loaded, as the engine requires.
+#[cfg(feature = "real-engine")]
+fn installed() -> Result<Parts, String> {
+    use ubc_vpn_engine::{OpenConnect, Role, prepare_environment};
+    use ubc_vpn_platform::Mode;
+
+    // A build with dev mode also has the fake engine in it, which must
+    // never be what the installed service could run.
+    if cfg!(feature = "dev-mode") {
+        return Err("a build with dev mode cannot run as the installed service".to_string());
+    }
+    let platform = Platform::native(Mode::Installed)
+        .map_err(|e| format!("The system's network cannot be managed: {e}."))?;
+    let state = StateDir::open(Mode::Installed, &platform.paths)
+        .map_err(|e| format!("The state folder cannot be used: {e}."))?;
+    // The library's temporary files go where only the system and
+    // administrators can write.
+    let temp = state.temp_dir();
+    let temp = temp.map_err(|e| format!("The state folder cannot be used: {e}."))?;
+    let prepared =
+        prepare_environment(Role::Service, Some(&temp)).map_err(args::environment_message)?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("This program's folder is unknown: {e}."))?;
+    let dir = exe.parent().ok_or("This program's folder is unknown.")?;
+    let engine = OpenConnect::load(dir, &prepared).map_err(|e| e.to_string())?;
+    Ok((platform, state, Arc::new(engine)))
 }
 
 /// Dev mode: the real channel and files for `Mode::Dev`, with fake routing,
