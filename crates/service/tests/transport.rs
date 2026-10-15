@@ -96,6 +96,10 @@ struct PeerState {
     /// Has gone: what it sent can still be read, as from a socket whose
     /// writer has closed, but every write to it fails at once.
     gone: bool,
+    /// The same for answers to requests only: state events still arrive.
+    /// So the service closes the connection only once its requests are
+    /// done, and a test can tell when that is.
+    gone_for_answers: bool,
 }
 
 impl Peer {
@@ -150,7 +154,8 @@ impl RawConnection for Peer {
 
     fn write_all(&self, bytes: &[u8]) -> Result<()> {
         let mut state = self.state();
-        if state.gone {
+        let answer = String::from_utf8_lossy(bytes).starts_with(r#"{"type":"response""#);
+        if state.gone || (state.gone_for_answers && answer) {
             return Err(Error::Closed);
         }
         if state.takes == Some(0) {
@@ -288,6 +293,49 @@ fn connecting_and_going_again_and_again_is_said_once() {
         until(&format!("round {round} undone"), || disconnected() > before);
     }
     assert_eq!(undone(), 1, "{:#?}", service.logs());
+}
+
+// Security rule: connecting and going, more times than the log holds, does
+// not push the service's own first lines out. Each connect is held before
+// the gateway would be contacted until the service has undone it, so none
+// reaches the gateway: the undo line and the state lines it leads to are
+// each said once at most, not once a round.
+#[test]
+fn connecting_and_going_does_not_fill_the_log() {
+    let rig = Rig::stopped(policy('A', ""));
+    let channel = Scripted::default();
+    let service = start(&rig, &channel, Timeouts::default());
+    let owner = Peer::sending(&[HELLO, CLAIM]);
+    channel.connect(&owner);
+    until("the claim", || owner.lines() == 3);
+    let disconnected = || owner.heard("disconnected");
+    for round in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
+        let before = disconnected();
+        rig.os.hold_at(Op::CapturePhysical);
+        let peer = Peer::sending(&[HELLO]);
+        channel.connect(&peer);
+        until("the hello and the state", || peer.lines() == 2);
+        peer.state().gone_for_answers = true;
+        let connect = encode(&Request {
+            id: 2,
+            body: good(),
+        })
+        .unwrap();
+        peer.send(connect.trim_end());
+        // The service closes the connection once its requests are done:
+        // the connect was admitted, could not be answered, and was undone.
+        until(&format!("round {round} answered"), || peer.state().closed);
+        rig.os.wait_until_held();
+        rig.os.release();
+        until(&format!("round {round} undone"), || disconnected() > before);
+    }
+    assert!(rig.spy.opens().is_empty(), "the gateway was contacted");
+    let lines = service.logs();
+    assert!(lines[0].starts_with("service started"), "{lines:#?}");
+    assert!(lines[1].starts_with("policy read"), "{lines:#?}");
+    let said = |what: &str| lines.iter().filter(|line| *line == what).count();
+    assert_eq!(said(ubc_vpn_service::ABANDONED), 1, "{lines:#?}");
+    assert!(said("disconnected") <= 1, "{lines:#?}");
 }
 
 // Security rule: every write to a client has a time limit, so one that
