@@ -571,8 +571,9 @@ fn an_output_that_breaks_ends_the_bridge() {
             ..ubc_vpn_service::Timeouts::default()
         };
         let platform = rig.fake.platform(&rig.root);
+        let state = ubc_vpn_platform::StateDir::unchecked(&platform.paths.state_dir).unwrap();
         let _service =
-            ubc_vpn_service::Service::start(platform, Arc::new(engine), patient).unwrap();
+            ubc_vpn_service::Service::start(platform, state, Arc::new(engine), patient).unwrap();
         let (app, lines): (Sender<Vec<u8>>, _) = mpsc::channel();
         let (fake, root) = (rig.fake.clone(), rig.root.clone());
         let exit = thread::spawn(move || {

@@ -2,7 +2,7 @@
 //! doing the handshake and the owner check on every request.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -15,7 +15,7 @@ use ubc_vpn_core::protocol::{
     ServerMessage, decode, encode, peek_protocol_version,
 };
 use ubc_vpn_engine::TunnelEngine;
-use ubc_vpn_platform::{Connection, Error, Listener, Platform, UserId};
+use ubc_vpn_platform::{Connection, Error, Listener, Platform, StateDir, UserId};
 
 use crate::diagnostics::About;
 use crate::hub::{Hub, send};
@@ -113,7 +113,7 @@ struct Shared {
     narrowing_due: AtomicBool,
     logs: Logs,
     about: About,
-    state_dir: PathBuf,
+    state: StateDir,
     timeouts: Timeouts,
 }
 
@@ -125,18 +125,24 @@ impl Service {
     /// and refuses every `connect`. A state file it cannot read or understand
     /// does, and so does a channel it cannot open or cannot narrow to the
     /// owner it has stored; the error is a sentence for the log.
+    ///
+    /// `state` is the state folder, opened by the caller: the installed
+    /// service opens it with [`StateDir::open`], which checks who may change
+    /// it. The owner is read and written through it and nothing else.
     pub fn start(
         platform: Platform,
+        state: StateDir,
         engine: Arc<dyn TunnelEngine>,
         timeouts: Timeouts,
     ) -> Result<Self, String> {
-        Self::start_in(platform, engine, timeouts, false)
+        Self::start_in(platform, state, engine, timeouts, false)
     }
 
     /// [`Service::start`], saying in its first log line whether this is a
     /// dev-mode run.
     pub fn start_in(
         platform: Platform,
+        state: StateDir,
         engine: Arc<dyn TunnelEngine>,
         timeouts: Timeouts,
         dev_mode: bool,
@@ -163,7 +169,7 @@ impl Service {
         for error in cleaned.into_iter().filter_map(Result::err) {
             logs.error(&format!("start-up cleanup failed: {error}"));
         }
-        let owner = owner::load(&platform.paths.state_dir)?;
+        let owner = owner::load(&state)?;
         let listener = platform.transport.listen(&platform.paths.channel_name);
         let listener = listener.map_err(|e| format!("The channel could not be opened: {e}."))?;
         if let Some(owner) = &owner {
@@ -182,7 +188,7 @@ impl Service {
             hub,
             logs,
             about,
-            state_dir: platform.paths.state_dir,
+            state,
             timeouts,
         });
         let accepting = shared.clone();
@@ -445,7 +451,7 @@ impl Shared {
     fn claim(&self, user: &UserId) -> Result<ResponseBody, ErrorInfo> {
         let mut recorded = false;
         let persist = || {
-            owner::save(&self.state_dir, user)?;
+            owner::save(&self.state, user)?;
             recorded = true;
             Ok(())
         };

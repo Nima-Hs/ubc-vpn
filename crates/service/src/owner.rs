@@ -1,30 +1,29 @@
 //! The owner, kept in `state.json` in the state folder so it survives a
 //! restart and an update.
 //!
-//! The state folder must be writable by an admin only. Making it so is the
-//! installer's job, and checking it needs OS code this crate does not have;
-//! nothing here verifies who owns the folder or the file.
-
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::Path;
+//! The file is read and written only through [`StateDir`], never with plain
+//! file calls. On Windows that checks, before every read and write, that
+//! only the system's administrators made or can change the folder and the
+//! file, so a standard user who created the folder first cannot name
+//! themselves the owner. It also writes a new file and moves it into place,
+//! so a crash leaves the old owner or the new one.
 
 use serde_json::{Value, json};
-use ubc_vpn_platform::UserId;
+use ubc_vpn_platform::{StateDir, UserId};
 
 const FILE: &str = "state.json";
-const PARTIAL: &str = "state.json.tmp";
 
 /// Reads the owner. A missing file means nobody has claimed the service. A
 /// file that cannot be read or understood is an error, never "no owner":
 /// treating it as unclaimed would let any local user take the service over.
-pub(crate) fn load(dir: &Path) -> Result<Option<UserId>, String> {
-    let text = match fs::read_to_string(dir.join(FILE)) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("The state file cannot be read: {}.", e.kind())),
+/// So is a state folder that fails its checks.
+pub(crate) fn load(state: &StateDir) -> Result<Option<UserId>, String> {
+    let bytes = match state.read(FILE) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(format!("The state file cannot be read: {e}.")),
     };
-    let value: Option<Value> = serde_json::from_str(&text).ok();
+    let value: Option<Value> = serde_json::from_slice(&bytes).ok();
     let owner = value.as_ref().and_then(|v| v.get("owner")?.as_str());
     let owner = owner.and_then(|text| text.parse().ok());
     owner.map(Some).ok_or_else(|| {
@@ -32,36 +31,9 @@ pub(crate) fn load(dir: &Path) -> Result<Option<UserId>, String> {
     })
 }
 
-/// Writes the owner so that a crash or a power loss leaves either no file or
-/// the whole new one: a fresh partial file, synced, then renamed into place.
-pub(crate) fn save(dir: &Path, owner: &UserId) -> Result<(), String> {
+/// Writes the owner.
+pub(crate) fn save(state: &StateDir, owner: &UserId) -> Result<(), String> {
     let text = json!({ "owner": owner.to_string() }).to_string();
-    let write = || {
-        fs::create_dir_all(dir)?;
-        let partial = dir.join(PARTIAL);
-        // Whatever is at the partial file's name is removed first: a file a
-        // crash left, or a link someone put there. Removing a link removes
-        // the link and leaves what it points at alone.
-        match fs::remove_file(&partial) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => {}
-        }
-        // `create_new` never opens what is already there, so nothing that
-        // appears at the name in the meantime is written through either.
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&partial)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&partial, dir.join(FILE))?;
-        // Makes the rename itself last, where the OS lets a folder be
-        // opened and synced. Windows does not.
-        if let Ok(folder) = File::open(dir) {
-            let _ = folder.sync_all();
-        }
-        Ok(())
-    };
-    write().map_err(|e| format!("The owner could not be saved: {}.", e.kind()))
+    let written = state.write(FILE, text.as_bytes());
+    written.map_err(|e| format!("The owner could not be saved: {e}."))
 }

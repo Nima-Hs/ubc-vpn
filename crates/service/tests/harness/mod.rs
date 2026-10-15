@@ -18,7 +18,7 @@ use std::time::Duration;
 pub use ubc_vpn_core::protocol::{ErrorCode, RequestBody, ResponseBody};
 pub use ubc_vpn_core::state::ConnState;
 pub use ubc_vpn_platform::fake::{Fake, Op};
-pub use ubc_vpn_platform::{Connection, Error, UserId};
+pub use ubc_vpn_platform::{Connection, Error, StateDir, UserId};
 
 pub use spy::{Faulty, Spy};
 use ubc_vpn_core::VERSION;
@@ -128,8 +128,20 @@ impl Rig {
 
     pub fn start(&mut self) -> Result<(), String> {
         let platform = self.platform();
-        self.service = Some(Service::start(platform, self.spy.clone(), self.timeouts)?);
+        let service = Service::start(platform, self.state(), self.spy.clone(), self.timeouts);
+        self.service = Some(service?);
         Ok(())
+    }
+
+    /// The state folder the service is given. Deliberately not the fake's
+    /// `paths.state_dir`, so that a test reading the owner here shows the
+    /// service used the folder it was given and no other.
+    pub fn state_dir(&self) -> PathBuf {
+        self.root.join("given-state")
+    }
+
+    pub fn state(&self) -> StateDir {
+        StateDir::unchecked(&self.state_dir()).unwrap()
     }
 
     /// The fake OS, with routes and DNS going through [`Faulty`].
