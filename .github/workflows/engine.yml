@@ -104,7 +104,16 @@ jobs:
           # "behind" and "diverged" mean the commit is not part of main.
           [ "$status" = ahead ] || [ "$status" = identical ]
 
-      - run: rustup toolchain install
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        timeout-minutes: 4
+        run: rustup toolchain install
 
       - name: The build refuses to look for a library by itself
         run: |
