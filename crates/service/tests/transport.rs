@@ -218,23 +218,25 @@ fn a_connect_whose_client_has_gone_is_undone() {
     let owner = Peer::sending(&[HELLO, CLAIM]);
     channel.connect(&owner);
     until("the claim", || owner.lines() == 3);
+    // First the budget for lines that requests cause is spent, with
+    // connects that are refused: the line that says why the connect below
+    // was undone is not one of those, and must be written all the same.
+    let request = |id, body| encode(&Request { id, body }).unwrap();
+    let refused = || connect(COOKIE, [0, 0, 0, 0], &["10.255.0.0/24"], &[]);
+    let spend = ubc_vpn_service::REQUEST_LINES + 1;
+    for n in 0..spend {
+        owner.send(request((10 + n).try_into().unwrap(), refused()).trim_end());
+    }
+    until("the refusals", || owner.lines() == 3 + spend);
     // Gone before the connect is read: its answer cannot reach anyone.
     owner.state().gone = true;
-    let connect = encode(&Request {
-        id: 2,
-        body: good(),
-    })
-    .unwrap();
-    owner.send(connect.trim_end());
+    owner.send(request(2, good()).trim_end());
 
-    let said = |what: &str| service.logs().iter().any(|line| line == what);
-    until("the connect is admitted", || {
-        service
-            .logs()
-            .iter()
-            .any(|line| line.starts_with("connect admitted"))
+    let said = |what: &str| service.logs().iter().any(|line| line.starts_with(what));
+    until("the connect is undone, and said so", || {
+        said(ubc_vpn_service::ABANDONED)
     });
-    until("the connect is undone", || said("disconnected"));
+    until("disconnected", || said("disconnected"));
     assert!(!rig.engine.tunnel_is_open());
     assert!(rig.is_clean());
     // Anyone who asks next hears it.

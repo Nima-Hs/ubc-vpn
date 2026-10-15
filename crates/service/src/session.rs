@@ -55,6 +55,12 @@ struct Gate {
     attempt: u64,
 }
 
+/// What the log says when a connect is undone because its client went
+/// before it could be told the connect was admitted. It holds none of the
+/// words that make the log hide the rest of a line.
+pub const ABANDONED: &str =
+    "the client that asked to connect went before it was told; disconnecting";
+
 /// The number of one admitted connect, so that it alone can be undone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Attempt(u64);
@@ -247,7 +253,8 @@ impl Session {
     pub(crate) fn disconnect(&self, said: &str) -> Result<(), ErrorInfo> {
         let gate = lock(&self.gate);
         let line = format!("disconnect requested by a client that said it was {said}");
-        self.stop_with(gate, &line)
+        // Within the budget for lines that requests cause.
+        self.stop_with(gate, || self.logs.about_requests(LogLevel::Info, &line))
     }
 
     /// Undoes the connect `attempt` because the client that asked for it
@@ -258,23 +265,28 @@ impl Session {
         let gate = lock(&self.gate);
         let ours = gate.attempt == attempt.0;
         if ours && matches!(gate.phase, Phase::Connecting | Phase::Connected) {
-            let line = "the client that asked to connect went before hearing the answer; \
-                disconnecting";
-            let _ = self.stop_with(gate, line);
+            // Outside the budget for requests: it is what came of a connect
+            // that was admitted, and asking again and again must never hide
+            // it. Each one needs an admitted connect, which is in the budget.
+            let _ = self.stop_with(gate, || self.logs.at(LogLevel::Info, ABANDONED));
         }
     }
 
     /// Cancels a connect in progress, if there is one, and has the worker
-    /// tear everything down. `line` is logged when there was something to
-    /// stop.
-    fn stop_with(&self, mut gate: MutexGuard<'_, Gate>, line: &str) -> Result<(), ErrorInfo> {
+    /// tear everything down. `say` writes the line about it, when there was
+    /// something to stop.
+    fn stop_with(
+        &self,
+        mut gate: MutexGuard<'_, Gate>,
+        say: impl FnOnce(),
+    ) -> Result<(), ErrorInfo> {
         match gate.phase {
             Phase::Stopping => return Err(busy()),
             Phase::Connecting => gate.cancel.cancel(),
             Phase::Idle | Phase::Connected => {}
         }
         if gate.phase != Phase::Idle {
-            self.logs.about_requests(LogLevel::Info, line);
+            say();
         }
         gate.phase = Phase::Stopping;
         self.send(Command::Disconnect)

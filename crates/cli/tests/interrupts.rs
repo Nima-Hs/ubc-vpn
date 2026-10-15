@@ -272,9 +272,7 @@ fn an_interrupt_leaves_the_terminal_and_the_service_as_they_should_be() {
         "the service to undo the connect of a client that went",
         || {
             let (_, logged) = home.run(&["logs"], "");
-            logged
-                .contains("went before hearing the answer")
-                .then_some(())
+            logged.contains(ubc_vpn_service::ABANDONED).then_some(())
         },
     );
     within("the service to be disconnected after that", || {
