@@ -27,6 +27,41 @@ const CROWDED_TUNNEL: TunnelInfo = {
     ],
 };
 
+/**
+ * A list shaped like a real one: a range saved as the 16 pieces that leave
+ * out one address in it, the way a route table must hold "all of it but the
+ * VPN server", and a few subnets of their own. 21 in all. 10.0.0.0/8 is
+ * private, so none of it is a real network either.
+ */
+const PIECES_TUNNEL: TunnelInfo = {
+    interface: "utun4",
+    address: "198.51.100.42",
+    subnets: [
+        "198.51.100.0/24",
+        "10.20.0.0/17",
+        "10.20.128.0/18",
+        "10.20.192.0/19",
+        "10.20.224.0/20",
+        "10.20.240.0/21",
+        "10.20.248.0/22",
+        "10.20.252.0/23",
+        "10.20.254.0/24",
+        "10.20.255.0/25",
+        "10.20.255.128/26",
+        "10.20.255.192/27",
+        "10.20.255.224/28",
+        "10.20.255.240/29",
+        "10.20.255.248/30",
+        "10.20.255.252/31",
+        "10.20.255.255/32",
+        "10.30.0.0/16",
+        "10.40.8.0/22",
+        "192.0.2.0/24",
+        "203.0.113.128/25",
+    ],
+    dns_domains: ["campus.example"],
+};
+
 const FAILURES: Record<ErrorCode, string> = {
     not_owner: "only the owner may do this",
     not_claimed: "the service has no owner yet",
@@ -51,6 +86,7 @@ const SCENARIOS: Record<string, LinkState> = {
     connecting: { link: "ready", conn: { state: "connecting" } },
     connected: { link: "ready", conn: { state: "connected", tunnel: TUNNEL } },
     "connected-crowded": { link: "ready", conn: { state: "connected", tunnel: CROWDED_TUNNEL } },
+    "connected-pieces": { link: "ready", conn: { state: "connected", tunnel: PIECES_TUNNEL } },
     "connected-empty": {
         link: "ready",
         conn: { state: "connected", tunnel: { ...TUNNEL, subnets: [], dns_domains: [] } },
