@@ -174,7 +174,7 @@ fn on_windows_the_installed_service_needs_the_service_manager() {
 /// and the administrators may change, or nothing, with a message, when this
 /// process may not make one: making Administrators the owner needs an
 /// elevated process. CI's Windows runners are elevated, and only they run it.
-#[cfg(windows)]
+#[cfg(all(windows, not(feature = "dev-mode")))]
 fn safe_copy(tag: &str) -> Option<std::path::PathBuf> {
     // It writes under ProgramData, which only CI runners may have changed.
     if std::env::var_os("CI").is_none() {
@@ -219,8 +219,9 @@ fn safe_copy(tag: &str) -> Option<std::path::PathBuf> {
 
 // Security rule (architecture): on Windows the installed service does not
 // run from a folder that others could change. A copy in a folder every user
-// may change is refused at once, before anything else is opened.
-#[cfg(windows)]
+// may change is refused at once, before anything else is opened. (A build
+// with dev mode is refused before that, whatever its folder.)
+#[cfg(all(windows, not(feature = "dev-mode")))]
 #[test]
 fn on_windows_the_installed_service_refuses_a_folder_others_could_change() {
     let folder = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
