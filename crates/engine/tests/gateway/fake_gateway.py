@@ -30,6 +30,14 @@ Scenarios, by what the gateway does after showing the login form:
             when the login address has no path; the pinned builds carry the fix
   sso       shows a single sign-on form for an external browser, whose
             login page is on the other listener
+  emptyreply answers the username and password with an empty reply, as
+            UBC's gateway does a username not in the form it expects
+  usernameagain asks for the username alone, and asks for it again with an
+            error ("Unknown user.")
+  emptyprobe answers a client's first request, an XML POST, with an empty
+            reply, and the rest as "accept" does
+  emptyprobefail answers the first request with an empty reply too, and
+            then fails every request with 500, before any form is shown
 
 Never run a client against "sso" that may have the external-browser login:
 such a client starts a browser on the machine it runs on.
@@ -70,6 +78,7 @@ COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef=="
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
     "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended", "end", "expire", "drop",
+    "emptyreply", "usernameagain", "emptyprobe", "emptyprobefail",
 )
 # The CSTP packet types the gateway reads or sends.
 CSTP_DISCONNECT = 5
@@ -146,6 +155,7 @@ def form(action, fields, message="Please log in.", error=None, extra=""):
 
 
 LOGIN = (("text", "username", "Username:"), ("password", "password", "Password:"))
+USERNAME = (("text", "username", "Username:"),)
 CODE = (("password", "secondary_password", "Code:"),)
 GROUP = (
     '<select name="group_list" label="Group:">'
@@ -246,7 +256,11 @@ class Gateway(http.server.BaseHTTPRequestHandler):
             else:
                 self.reply(SUCCESS, COOKIE)
         elif self.path.startswith("/auth"):
-            if scenario == "hang":
+            if scenario == "emptyreply":
+                self.reply(b"")
+            elif scenario == "usernameagain":
+                self.reply(form("/auth", USERNAME, error="Unknown user."))
+            elif scenario == "hang":
                 time.sleep(3600)
             elif scenario == "reject":
                 self.reply(form("/auth", LOGIN, error="Login failed."))
@@ -254,6 +268,13 @@ class Gateway(http.server.BaseHTTPRequestHandler):
                 self.reply(form("/code", CODE, message="Enter the code."))
             else:
                 self.reply(SUCCESS, COOKIE)
+        elif scenario in ("emptyprobe", "emptyprobefail") and self.command == "POST" \
+                and self.path == "/":
+            self.reply(b"")
+        elif scenario == "emptyprobefail":
+            self.reply(b"Made-up server error.", status=500)
+        elif scenario == "usernameagain":
+            self.reply(form("/auth", USERNAME))
         elif scenario == "redirect":
             self.reply(b"", status=302, location=elsewhere + "/")
         elif scenario == "csdstub" and self.path == "/":

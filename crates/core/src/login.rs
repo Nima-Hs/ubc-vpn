@@ -82,6 +82,10 @@ pub enum LoginErrorCode {
     /// It does not say which: it simply shows the form again. The client stops
     /// at once and never retries, so no further MFA request is sent.
     WrongPassword,
+    /// The gateway did not take the login in a way that points at the
+    /// username's format: it sent an empty reply to the answers, or asked for
+    /// the username again before any password. Check the username.
+    CheckUsername,
     /// The gateway's certificate matched none of the policy's pins.
     PinMismatch,
     /// The user cancelled.
@@ -165,6 +169,7 @@ mod tests {
         use LoginErrorCode::*;
         let names = [
             (WrongPassword, "wrong_password"),
+            (CheckUsername, "check_username"),
             (PinMismatch, "pin_mismatch"),
             (Cancelled, "cancelled"),
             (GatewayUnreachable, "gateway_unreachable"),

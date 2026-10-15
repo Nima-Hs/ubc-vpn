@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use gateway::Gateway as StandIn;
-use ubc_vpn_core::login::PromptKind;
+use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::{Pin, Policy};
 use ubc_vpn_core::redact::{REDACTED, Secret};
 use ubc_vpn_engine::ffi::{Callbacks, FieldKind, FormAnswer, Handle, Library};
@@ -89,15 +89,21 @@ struct Attempt {
     result: Result<Session, LoginError>,
     prompts: Vec<Prompt>,
     lines: Arc<Mutex<Vec<String>>>,
+    /// The lines that came as errors, which the command-line client prints.
+    errors: Arc<Mutex<Vec<String>>>,
     logs: LogSink,
 }
 
 /// Logs in, answering each kind of question with the made-up value for it.
 fn attempt(engine: &OpenConnect, gateway: &Gateway) -> Attempt {
     let lines = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&lines);
-    let logs = LogSink::new(LogLevel::Debug, move |_, line: &str| {
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let (seen, failed) = (Arc::clone(&lines), Arc::clone(&errors));
+    let logs = LogSink::new(LogLevel::Debug, move |level, line: &str| {
         seen.lock().unwrap().push(line.to_string());
+        if level == LogLevel::Error {
+            failed.lock().unwrap().push(line.to_string());
+        }
     });
     let mut prompts = Vec::new();
     let mut ask = |prompt: &Prompt| {
@@ -113,9 +119,18 @@ fn attempt(engine: &OpenConnect, gateway: &Gateway) -> Attempt {
         result,
         prompts,
         lines,
+        errors,
         logs,
     }
 }
+
+/// The lines of an attempt that came as errors.
+fn errors(attempt: &Attempt) -> Vec<String> {
+    attempt.errors.lock().unwrap().clone()
+}
+
+/// What the library logs when a reply has no body.
+const EMPTY_REPLY: &str = "Unexpected empty response body from server";
 
 fn kinds(attempt: &Attempt) -> Vec<PromptKind> {
     attempt.prompts.iter().map(|prompt| prompt.kind).collect()
@@ -244,6 +259,90 @@ fn a_form_shown_again_is_a_wrong_password_and_nothing_is_sent_twice() {
         [PromptKind::Username, PromptKind::Password]
     );
     assert_eq!((sent(&stand_in, NAME), sent(&stand_in, PASSWORD)), (1, 1));
+    // The gateway's own words on the form it showed again are what tells
+    // the user what was wrong: they come as an error, to be printed.
+    assert_eq!(errors(&attempt), ["The gateway said: Login failed."]);
+}
+
+// A gateway that answers the username and password with an empty reply
+// judged no password: seen at UBC's gateway with a username not in the form
+// it expects. That is its own error, which points at the username, and the
+// library's complaint about the reply is kept as progress, not as an error.
+#[test]
+fn an_empty_reply_to_the_answers_asks_to_check_the_username() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("emptyreply") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert_eq!(attempt.result, Err(LoginError::CheckUsername));
+    assert_eq!(
+        kinds(&attempt),
+        [PromptKind::Username, PromptKind::Password]
+    );
+    assert_eq!((sent(&stand_in, NAME), sent(&stand_in, PASSWORD)), (1, 1));
+    let lines = attempt.lines.lock().unwrap().clone();
+    assert!(lines.iter().any(|line| line == EMPTY_REPLY), "{lines:?}");
+    assert_eq!(errors(&attempt), Vec::<String>::new());
+    assert_eq!(
+        LoginErrorCode::from(LoginError::CheckUsername),
+        LoginErrorCode::CheckUsername
+    );
+}
+
+// A gateway that asks for the username again before any password has
+// refused the username: that points at the username too, and the gateway's
+// words come as an error. Nothing is sent twice.
+#[test]
+fn a_username_asked_again_before_a_password_asks_to_check_it() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("usernameagain") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert_eq!(attempt.result, Err(LoginError::CheckUsername));
+    assert_eq!(kinds(&attempt), [PromptKind::Username]);
+    assert_eq!(sent(&stand_in, NAME), 1);
+    assert_eq!(errors(&attempt), ["The gateway said: Unknown user."]);
+}
+
+// An empty reply that does not end the login, here to the library's first
+// probe of the gateway, which it then asks again another way, is no error
+// at all: the login succeeds and nothing comes as an error to be printed.
+// The library's complaint is kept as progress for the log.
+#[test]
+fn an_empty_reply_the_login_gets_past_is_not_an_error() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("emptyprobe") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert!(attempt.result.is_ok(), "{:?}", attempt.result);
+    let lines = attempt.lines.lock().unwrap().clone();
+    assert!(lines.iter().any(|line| line == EMPTY_REPLY), "{lines:?}");
+    assert_eq!(errors(&attempt), Vec::<String>::new());
+}
+
+// An empty reply before any answers were sent says nothing about the
+// username: here the gateway answers the first probe with nothing and then
+// fails in another way, before any form. That is not `CheckUsername`, so a
+// saved username, which the client forgets only after a refused login or
+// one whose username is to be checked, stays.
+#[test]
+fn an_empty_reply_before_the_answers_is_not_about_the_username() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("emptyprobefail") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let attempt = attempt(engine, &gateway(&stand_in, &pin));
+    assert_eq!(attempt.result, Err(LoginError::Failed));
+    assert!(attempt.prompts.is_empty(), "{:?}", kinds(&attempt));
+    let lines = attempt.lines.lock().unwrap().clone();
+    assert!(lines.iter().any(|line| line == EMPTY_REPLY), "{lines:?}");
 }
 
 // A second form with one password field that is not the password asks for a

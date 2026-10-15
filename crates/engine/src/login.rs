@@ -12,6 +12,8 @@ use std::ffi::{CStr, CString, c_int};
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::policy::Pin;
@@ -79,7 +81,22 @@ struct Notes {
     stopped: Cell<Option<LoginError>>,
     /// How many one-time codes the user was asked for.
     codes: Cell<usize>,
+    /// What the library's lines said, which the line callback notes from
+    /// whatever thread it is called on.
+    heard: Arc<Heard>,
 }
+
+/// What the line callback of one login notes.
+#[derive(Default)]
+struct Heard {
+    /// A form has been filled in and sent.
+    answered: AtomicBool,
+    /// After that, the library said the gateway's reply was empty.
+    empty_reply: AtomicBool,
+}
+
+/// What the library logs when a reply has no body at all.
+const EMPTY_REPLY: &str = "Unexpected empty response body from server";
 
 /// Whether `hash`, as the library reports a certificate, is a full pin that
 /// the gateway accepts. The hash of nothing never is, whatever the policy.
@@ -102,6 +119,28 @@ pub(crate) fn deliver(logs: &LogSink, level: c_int, line: &CStr, state: LineStat
         _ => LogLevel::Debug,
     };
     logs.log(level, &line.to_string_lossy());
+}
+
+/// Passes one of the library's lines from a login to the sink, at most at
+/// [`LogLevel::Info`]. The library logs as errors things that do not end a
+/// login, such as an empty reply to its first probe of the gateway, after
+/// which it carries on; the login's own result says what failed. A line
+/// that was cut, or that failed to format, is dropped whole. An empty reply
+/// once the answers have been sent is noted.
+fn deliver_login(logs: &LogSink, heard: &Heard, level: c_int, line: &CStr, state: LineState) {
+    if state != LineState::Whole {
+        return;
+    }
+    let line = line.to_string_lossy();
+    if heard.answered.load(Ordering::SeqCst) && line.trim_end() == EMPTY_REPLY {
+        heard.empty_reply.store(true, Ordering::SeqCst);
+    }
+    // The library's PRG_ERR and PRG_INFO, then PRG_DEBUG and PRG_TRACE.
+    let level = match level {
+        0 | 1 => LogLevel::Info,
+        _ => LogLevel::Debug,
+    };
+    logs.log(level, &line);
 }
 
 /// The questions a form asks: for each, the field's place in the form, the
@@ -165,7 +204,18 @@ fn fill(
             label: label.to_string(),
             message: message.clone(),
         };
-        let answer = prompts.ask(&prompt)?;
+        let answer = match prompts.ask(&prompt) {
+            Ok(answer) => answer,
+            Err(refused @ (LoginError::WrongPassword | LoginError::CheckUsername)) => {
+                // The gateway's own words on the form it showed again are
+                // what tells the user what was wrong, so they are an error.
+                if let Some(said) = message.as_deref().filter(|said| !said.trim().is_empty()) {
+                    logs.log(LogLevel::Error, &format!("The gateway said: {said}"));
+                }
+                return Err(refused);
+            }
+            Err(other) => return Err(other),
+        };
         // The sink does not register an answer shorter than `MIN_HIDDEN_LEN`
         // (4 bytes), so such an answer is not taken out of log lines. That is
         // decided, not overlooked: an answer that short is a choice, such as
@@ -189,6 +239,8 @@ struct Ended {
     refused: bool,
     stopped: Option<LoginError>,
     cancelled: bool,
+    /// The gateway sent an empty reply once the answers were sent.
+    empty_reply: bool,
     cookie: Option<Secret>,
     address: Option<SocketAddrV4>,
 }
@@ -208,6 +260,11 @@ fn conclude(ended: Ended) -> Result<Session, LoginError> {
     }
     if ended.cancelled {
         return Err(LoginError::Cancelled);
+    }
+    if ended.result != 0 && ended.empty_reply {
+        // Seen with a username the gateway does not take in that form: it
+        // answers the password with nothing at all.
+        return Err(LoginError::CheckUsername);
     }
     if ended.result != 0 {
         // With no certificate shown, nothing answered at the gateway's address.
@@ -259,8 +316,11 @@ impl LoginEngine for OpenConnect {
         let notes = Rc::new(Notes::default());
         let (judging, filling, resolving) = (notes.clone(), notes.clone(), notes.clone());
         let (pinned, sought, sink) = (gateway.clone(), gateway.clone(), logs.clone());
+        let heard = Arc::clone(&notes.heard);
         let callbacks = Callbacks {
-            lines: Box::new(move |level, line, state| deliver(&sink, level, line, state)),
+            lines: Box::new(move |level, line, state| {
+                deliver_login(&sink, &heard, level, line, state);
+            }),
             certificate: Box::new(move |hash| {
                 let matches = pin_matches(&pinned, hash);
                 judging.judged.set(true);
@@ -269,7 +329,10 @@ impl LoginEngine for OpenConnect {
             }),
             form: Box::new(
                 move |form| match fill(form, prompts, logs, &filling.codes) {
-                    Ok(()) => FormAnswer::Submit,
+                    Ok(()) => {
+                        filling.heard.answered.store(true, Ordering::SeqCst);
+                        FormAnswer::Submit
+                    }
                     Err(error) => {
                         filling.stopped.set(Some(error));
                         match error {
@@ -332,6 +395,7 @@ fn finish(
         refused: notes.refused.get(),
         stopped: notes.stopped.take(),
         cancelled: cancel.is_cancelled(),
+        empty_reply: notes.heard.empty_reply.load(Ordering::SeqCst),
         cookie,
         address: notes.address.get(),
     })
@@ -428,6 +492,7 @@ mod tests {
             refused: false,
             stopped: None,
             cancelled: false,
+            empty_reply: false,
             cookie: Some(Secret::new("NOT-A-REAL-COOKIE")),
             address: Some(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), HTTPS)),
         }

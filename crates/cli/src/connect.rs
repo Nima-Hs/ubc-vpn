@@ -49,6 +49,14 @@ use crate::{FAILED, clean, describe, explain, say, settings};
 pub const BUSY: u8 = 7;
 /// The gateway refused the login, or the session has ended.
 pub const LOGIN_REFUSED: u8 = 8;
+
+/// What a user is told when the gateway did not take the login in a way that
+/// points at the username. UBC's gateway reads the way to confirm the login
+/// from the username, so a username in another form is the usual cause. The
+/// example is made up.
+pub const CHECK_USERNAME: &str = "The gateway did not take the login. Check your username: \
+UBC's gateway expects your CWL username, your department and the way to confirm, \
+as CWL.dept@method, for example user.ece@app.";
 /// The user gave up.
 pub const CANCELLED: u8 = 9;
 
@@ -361,7 +369,8 @@ pub(crate) fn start(
             // The gateway does not say which answer it refused. A saved
             // username may be the one, and nothing else lets the user
             // change it, so it is forgotten and asked for next time.
-            if stop.code == LoginErrorCode::WrongPassword && name.is_some() {
+            let refused = [LoginErrorCode::WrongPassword, LoginErrorCode::CheckUsername];
+            if refused.contains(&stop.code) && name.is_some() {
                 remember(&platform, &policy, None, err);
             }
             return Err(stop);
@@ -431,22 +440,29 @@ fn saved(platform: &Platform) -> Result<Settings, Stop> {
     }
 }
 
-/// Gives the service what the login wrote, for its log: the lines this
-/// program printed, as it printed them, the last of them if there are more
-/// than one connection may add. A line too long to keep is left out with
-/// the marker. This never fails a connect: it stops at the first line the
-/// service does not take, and whatever broke shows at the next request.
-pub(crate) fn hand_over(client: &mut Client, said: &[String], outcome: (LineLevel, String)) {
-    let said: Vec<&String> = said.iter().filter(|line| !line.trim().is_empty()).collect();
+/// Gives the service what the login wrote, for its log: its lines, each at
+/// its own level and as cleaned as the printed ones, the last of them if
+/// there are more than one connection may add. A line too long to keep is
+/// left out with the marker. This never fails a connect: it stops at the
+/// first line the service does not take, and whatever broke shows at the
+/// next request.
+pub(crate) fn hand_over(
+    client: &mut Client,
+    said: &[(LineLevel, String)],
+    outcome: (LineLevel, String),
+) {
+    let said: Vec<&(LineLevel, String)> = said
+        .iter()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .collect();
     // The outcome is always sent, and last, so the lines before it leave
     // room for it.
     let from = said.len().saturating_sub(MAX_ADDED_LOG_LINES - 1);
-    // Only what failed is printed, so the printed lines are errors.
-    let printed = said[from..]
+    let kept = said[from..]
         .iter()
-        .map(|line| (LineLevel::Error, line.as_str()));
+        .map(|(level, line)| (*level, line.as_str()));
     let (level, text) = (outcome.0, outcome.1.as_str());
-    for (level, line) in printed.chain([(level, text)]) {
+    for (level, line) in kept.chain([(level, text)]) {
         let text = LogText::cleaned(line).unwrap_or_else(|_| LogText::left_out());
         let add = RequestBody::AddLog(AddLogParams {
             level,
@@ -459,12 +475,16 @@ pub(crate) fn hand_over(client: &mut Client, said: &[String], outcome: (LineLeve
 }
 
 /// How a login failed, for the log: the word the protocol sends, such as
-/// `gateway_unreachable`. Not for a refused login: its word holds `pass`,
-/// which the log takes for the start of a secret and cuts, so that one is
-/// said in other words.
+/// `gateway_unreachable`. Not for a refused login, or one whose name is to
+/// be checked: their words hold `pass` and `username`, which the log takes
+/// for the start of a secret and cuts, so those are said in other words.
 fn word(code: &LoginErrorCode) -> String {
-    if *code == LoginErrorCode::WrongPassword {
-        return "refused by the gateway".to_string();
+    match code {
+        LoginErrorCode::WrongPassword => return "refused by the gateway".to_string(),
+        LoginErrorCode::CheckUsername => {
+            return "refused by the gateway, check the name's form".to_string();
+        }
+        _ => {}
     }
     let quoted = serde_json::to_string(code).unwrap_or_default();
     quoted.trim_matches('"').to_string()
@@ -476,8 +496,9 @@ struct Asked<'a> {
     username: Option<&'a str>,
     /// A username the user was asked for.
     typed: &'a mut Option<Secret>,
-    /// The lines the login wrote, as they were printed.
-    said: &'a mut Vec<String>,
+    /// The lines the login wrote, each with its level, cleaned as a printed
+    /// line is.
+    said: &'a mut Vec<(LineLevel, String)>,
 }
 
 /// Logs in, asking the user what the gateway asks. A saved username answers
@@ -498,8 +519,11 @@ fn login(
     } = asked;
     let lines = Arc::new(Mutex::new(Vec::new()));
     let kept = lines.clone();
-    let keep = move |_, line: &str| kept.lock().unwrap().push(line.to_string());
-    let logs = LogSink::new(LogLevel::Error, keep);
+    let keep = move |level, line: &str| kept.lock().unwrap().push((level, line.to_string()));
+    // Progress as well as errors, for the service's log. Only errors are
+    // printed: the engine reports the library's own complaints as progress,
+    // since many do not end a login, and says itself what failed.
+    let logs = LogSink::new(LogLevel::Info, keep);
     let mut answer = |prompt: &Prompt| {
         let given = match (prompt.kind, username) {
             (PromptKind::Username, Some(name)) => Some(Secret::new(name)),
@@ -520,14 +544,20 @@ fn login(
     // certificate was judged, so they go through `clean` like any text that
     // is not this program's own.
     let cookie = result.as_ref().ok().map(|session| session.cookie.expose());
-    for line in lines.lock().unwrap().iter() {
+    for (level, line) in lines.lock().unwrap().iter() {
         let line = match cookie {
             Some(cookie) if !cookie.is_empty() => line.replace(cookie, REDACTED),
             _ => line.clone(),
         };
         let line = clean(&line);
-        let _ = writeln!(err, "ubc-vpn: {line}");
-        said.push(line);
+        let level = match level {
+            LogLevel::Error => LineLevel::Error,
+            _ => LineLevel::Info,
+        };
+        if level == LineLevel::Error {
+            let _ = writeln!(err, "ubc-vpn: {line}");
+        }
+        said.push((level, line));
     }
     // A login that stopped at a question was given up by the user, unless
     // the one asking says otherwise.
@@ -538,6 +568,7 @@ fn login(
         }
         let (exit, code) = match error {
             LoginError::WrongPassword => (LOGIN_REFUSED, LoginErrorCode::WrongPassword),
+            LoginError::CheckUsername => (LOGIN_REFUSED, LoginErrorCode::CheckUsername),
             LoginError::Cancelled => return cancelled(),
             LoginError::PinMismatch => (FAILED, LoginErrorCode::PinMismatch),
             LoginError::GatewayUnreachable => (FAILED, LoginErrorCode::GatewayUnreachable),
@@ -547,6 +578,7 @@ fn login(
         // certificate was replaced: the user is told to update.
         let message = match error {
             LoginError::PinMismatch => CERTIFICATE_CHANGED.to_string(),
+            LoginError::CheckUsername => CHECK_USERNAME.to_string(),
             other => other.to_string(),
         };
         Stop {

@@ -883,6 +883,9 @@ test("logs: the report is copied only after the user is told what it holds, and 
 });
 
 test("every state, photographed", async () => {
+    // About a second a state, and there are more of them than fit the usual
+    // minute on the slowest runner.
+    test.setTimeout(120_000);
     const scenarios = (await page.evaluate(() => window.ubcVpn.demo?.listScenarios())) ?? [];
     expect(scenarios.length).toBeGreaterThan(20);
     for (const name of scenarios) {

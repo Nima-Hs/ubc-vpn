@@ -179,6 +179,7 @@ const PROMPT_KINDS: Record<PromptKind, true> = {
 
 const LOGIN_ERROR_CODES: Record<LoginErrorCode, true> = {
     wrong_password: true,
+    check_username: true,
     pin_mismatch: true,
     cancelled: true,
     gateway_unreachable: true,

@@ -202,6 +202,7 @@ describe("a login", () => {
 describe("how a login ends badly", () => {
     const codes: LoginErrorCode[] = [
         "wrong_password",
+        "check_username",
         "pin_mismatch",
         "gateway_unreachable",
         "route_refused",

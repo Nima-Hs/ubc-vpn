@@ -31,8 +31,11 @@ pub struct Prompt {
 /// It wraps the caller's callback and enforces the no-retry rule: the username
 /// and the password are each asked for at most once in a login. A gateway that
 /// asks for either again has rejected the login, so the second request does
-/// not reach the caller and fails with [`LoginError::WrongPassword`]. One-time
-/// codes and free text may be asked for again; each is typed afresh.
+/// not reach the caller and fails with [`LoginError::WrongPassword`], or with
+/// [`LoginError::CheckUsername`] when it is the username again and no
+/// password has been asked for yet: then only the username can have been
+/// refused. One-time codes and free text may be asked for again; each is
+/// typed afresh.
 ///
 /// The callback and the record of what was asked cannot be reached directly:
 ///
@@ -63,7 +66,12 @@ impl<'a> Prompts<'a> {
     pub fn ask(&mut self, prompt: &Prompt) -> Result<Secret, LoginError> {
         let once_only = matches!(prompt.kind, PromptKind::Username | PromptKind::Password);
         if once_only && self.asked(prompt.kind) {
-            return Err(LoginError::WrongPassword);
+            let only_the_username =
+                prompt.kind == PromptKind::Username && !self.asked(PromptKind::Password);
+            return Err(match only_the_username {
+                true => LoginError::CheckUsername,
+                false => LoginError::WrongPassword,
+            });
         }
         self.asked.push(prompt.kind);
         (self.ask)(prompt).ok_or(LoginError::Cancelled)

@@ -12,6 +12,7 @@ const CODE: LoginPrompt = { id: 2, kind: "code", label: "Enter the code from you
 
 const FAILURES: Record<Exclude<LoginErrorCode, "cancelled">, string> = {
     wrong_password: "the gateway showed the login form again",
+    check_username: "the gateway sent an empty reply to the login",
     pin_mismatch: "the gateway's key matches no pin in the policy",
     gateway_unreachable: "timed out connecting to the gateway",
     route_refused: "198.51.100.0/4 is wider than /8",

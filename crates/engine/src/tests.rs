@@ -176,9 +176,27 @@ fn prompts_never_ask_twice_for_a_username_or_password() {
         assert!(prompts.ask(&prompt(kind)).is_ok());
         assert!(prompts.asked(kind));
         let again = prompts.ask(&prompt(kind));
-        assert_eq!(again.unwrap_err(), LoginError::WrongPassword);
+        // The username alone asked again, with no password asked, can only
+        // be the username refused.
+        let refused = match kind {
+            PromptKind::Username => LoginError::CheckUsername,
+            _ => LoginError::WrongPassword,
+        };
+        assert_eq!(again.unwrap_err(), refused);
         assert_eq!(calls, 1);
     }
+}
+
+// Once a password has been asked, a username asked again is a refusal that
+// does not say which answer was wrong.
+#[test]
+fn a_username_asked_again_after_the_password_is_a_wrong_password() {
+    let mut ask = |_: &Prompt| Some(Secret::new("x"));
+    let mut prompts = Prompts::new(&mut ask);
+    assert!(prompts.ask(&prompt(PromptKind::Username)).is_ok());
+    assert!(prompts.ask(&prompt(PromptKind::Password)).is_ok());
+    let again = prompts.ask(&prompt(PromptKind::Username));
+    assert_eq!(again.unwrap_err(), LoginError::WrongPassword);
 }
 
 #[test]
