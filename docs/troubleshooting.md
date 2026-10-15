@@ -29,3 +29,12 @@ To make yourself the owner, an administrator deletes the file `state.json` from 
 ## "Another program is answering in place of the UBC VPN service" (status 6)
 
 Something other than UBC VPN is listening where the service should be, and UBC VPN sent it nothing. Restart the computer. If it happens again, reinstall UBC VPN.
+
+# When connecting fails
+
+## "The VPN server's certificate has changed" (status 1)
+
+The VPN server answered with a certificate that this version of UBC VPN does not recognise, so UBC VPN sent it nothing: not your password, and not your session. Either UBC has replaced the server's certificate, or the network you are on is intercepting the connection, as some hotel and café networks do.
+
+1. Update UBC VPN to the latest version, then connect again.
+2. If UBC VPN is already up to date, try another network.
