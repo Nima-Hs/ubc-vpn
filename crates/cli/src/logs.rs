@@ -88,8 +88,8 @@ impl From<ClientError> for Stopped {
 /// Connects to the service without claiming it.
 fn service(platform: Chosen) -> Result<Client, ClientError> {
     let platform = platform()?;
-    let name = &platform.paths.channel_name;
-    Client::connect(&*platform.transport, name, ClientKind::Cli)
+
+    Client::reach(&platform, ClientKind::Cli, crate::client::Limits::default())
 }
 
 /// The sentence and exit status for a failure. A service nobody owns yet

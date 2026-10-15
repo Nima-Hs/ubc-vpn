@@ -92,7 +92,7 @@ Exit status:
   0  done
   1  failed for another reason
   2  wrong usage
-  3  the service is not running
+  3  UBC VPN is not installed, or its service is not running
   4  version mismatch: update UBC VPN
   5  you are not the owner
   6  another program is answering in place of the service
@@ -399,8 +399,8 @@ fn status(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
 ) -> Result<ConnState, ClientError> {
     let platform = platform()?;
-    let name = &platform.paths.channel_name;
-    let mut client = Client::connect(&*platform.transport, name, ClientKind::Cli)?;
+
+    let mut client = Client::reach(&platform, ClientKind::Cli, client::Limits::default())?;
     client.claim_if_unowned()?;
     match client.request(RequestBody::Status)? {
         ResponseBody::Status(state) => Ok(state),
@@ -442,12 +442,28 @@ fn describe(state: &ConnState) -> String {
     }
 }
 
+/// What to do when the service is installed but stopped. The Windows
+/// service is registered as `ubc-vpn` ("UBC VPN Service") by the service's
+/// install command.
+#[cfg(windows)]
+const START_THE_SERVICE: &str = "Start it from an administrator's command prompt with \
+     `sc start ubc-vpn`, or restart the computer.";
+#[cfg(not(windows))]
+const START_THE_SERVICE: &str = "Start the UBC VPN service as an administrator, or \
+     restart the computer.";
+
 /// The exit code and the sentence for each way of failing.
 fn explain(error: &ClientError) -> (u8, String) {
     match error {
+        ClientError::NotInstalled => (
+            NOT_RUNNING,
+            "UBC VPN is not installed on this computer: there is no UBC VPN service. \
+             Install UBC VPN, then try again."
+                .to_string(),
+        ),
         ClientError::NotRunning => (
             NOT_RUNNING,
-            "The UBC VPN service is not running.".to_string(),
+            format!("The UBC VPN service is installed but not running. {START_THE_SERVICE}"),
         ),
         ClientError::Mismatch(service) => {
             let service = service
@@ -461,8 +477,10 @@ fn explain(error: &ClientError) -> (u8, String) {
         }
         ClientError::NotOwner => (
             NOT_OWNER,
-            "You are not the owner. Only the first user of UBC VPN on this computer can \
-             control it."
+            "You are not the owner: UBC VPN on this computer belongs to another user, the \
+             first to use it, and only that user can control it. Ask them, or an \
+             administrator can make you the owner by deleting the file state.json in \
+             UBC VPN's state folder and restarting the service."
                 .to_string(),
         ),
         ClientError::NotTheService => (

@@ -98,12 +98,56 @@ fn status_claims_on_first_use_and_prints_the_state() {
     assert_eq!(refused, Some(Error::PermissionDenied));
 }
 
+/// Writes a policy where the installer would, as an installed UBC VPN has.
+fn install_policy(rig: &Rig) {
+    let dir = paths(&rig.root).policy_dir;
+    std::fs::create_dir_all(&dir).unwrap();
+    let pin = format!("pin-sha256:{}=", "A".repeat(43));
+    let policy = format!(r#"{{"gateway":"vpn.example.test","pins":["{pin}"]}}"#);
+    std::fs::write(dir.join("policy.json"), policy).unwrap();
+}
+
+// When `status` cannot reach the service it says which of the three it is,
+// and what to do next: install UBC VPN, start its service, or ask the
+// owner or an administrator.
+#[test]
+fn status_says_why_it_cannot_reach_the_service_and_what_to_do() {
+    // Nothing installed: no service and no policy.
+    let rig = Rig::new();
+    let (code, out, err) = rig.run(&["status"]);
+    assert_eq!((code, out.as_str()), (NOT_RUNNING, ""));
+    assert!(err.contains("UBC VPN is not installed"), "{err}");
+    assert!(err.contains("Install UBC VPN"), "{err}");
+
+    // Installed, so its policy is there, but the service is stopped.
+    install_policy(&rig);
+    let (code, out, err) = rig.run(&["status"]);
+    assert_eq!((code, out.as_str()), (NOT_RUNNING, ""));
+    assert!(err.contains("installed but not running"), "{err}");
+    assert!(err.contains("restart the computer"), "{err}");
+    #[cfg(windows)]
+    assert!(err.contains("sc start ubc-vpn"), "{err}");
+
+    // Running, but the channel is kept to another user.
+    let rig = Rig::new();
+    install_policy(&rig);
+    let _service = rig.service();
+    rig.claim_as_someone_else();
+    let (code, out, err) = rig.run(&["status"]);
+    assert_eq!((code, out.as_str()), (NOT_OWNER, ""));
+    assert!(err.contains("belongs to another user"), "{err}");
+    assert!(
+        err.contains("administrator can make you the owner"),
+        "{err}"
+    );
+}
+
 #[test]
 fn each_failure_has_its_own_exit_code_and_message() {
     let rig = Rig::new();
     let (code, out, err) = rig.run(&["status"]);
     assert_eq!((code, out.as_str()), (NOT_RUNNING, ""));
-    assert!(err.contains("service is not running"), "{err}");
+    assert!(err.contains("not installed"), "{err}");
 
     // Not the owner: refused by the OS, and, where the OS could not narrow
     // the channel, refused by the service.
@@ -168,7 +212,7 @@ fn each_failure_has_its_own_exit_code_and_message() {
     let (code, help, _) = rig.run(&["help"]);
     assert_eq!(code, 0);
     for line in [
-        "3  the service is not running",
+        "3  UBC VPN is not installed, or its service is not running",
         "6  another program",
         "9  cancelled",
         "connect, disconnect or status becomes the owner",

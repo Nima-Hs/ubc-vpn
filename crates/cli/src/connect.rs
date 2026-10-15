@@ -273,8 +273,7 @@ fn service(
 }
 
 fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
-    let (transport, name) = (&*platform.transport, &platform.paths.channel_name);
-    let connected = Client::connect_within(transport, name, ClientKind::Cli, limits);
+    let connected = Client::reach(platform, ClientKind::Cli, limits);
     let mut client = connected.map_err(stop)?;
     client.claim_if_unowned().map_err(stop)?;
     Ok(client)
