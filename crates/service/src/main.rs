@@ -25,11 +25,28 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mode = args::parse(std::env::args_os().skip(1))?;
     args::check_environment(mode)?;
-    let (platform, state, engine) = parts(mode)?;
-    let dev_mode = mode != Run::Installed;
-    let service = Service::start_in(platform, state, engine, Timeouts::default(), dev_mode)?;
+    // On Windows the installed service is started by the service manager,
+    // and stops when it asks.
+    #[cfg(windows)]
+    if mode == Run::Installed {
+        return ubc_vpn_platform::service::run(move |control, stop| {
+            let service = start(mode)?;
+            control.running().map_err(|e| {
+                format!("The service manager could not be told the service is running: {e}.")
+            })?;
+            service.serve_until(stop)
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    let service = start(mode)?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
     Err(service.wait())
+}
+
+fn start(mode: Run) -> Result<Service, String> {
+    let (platform, state, engine) = parts(mode)?;
+    let dev_mode = mode != Run::Installed;
+    Service::start_in(platform, state, engine, Timeouts::default(), dev_mode)
 }
 
 fn parts(mode: Run) -> Result<Parts, String> {

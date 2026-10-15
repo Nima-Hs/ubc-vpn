@@ -34,6 +34,7 @@ mod routes;
 #[cfg(test)]
 mod routes_tests;
 mod security;
+pub mod service;
 pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
