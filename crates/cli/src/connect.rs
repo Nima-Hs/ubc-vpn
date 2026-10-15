@@ -190,7 +190,7 @@ pub fn connect(
     err: &mut dyn Write,
 ) -> Ended {
     let sending = || progress.sending();
-    let ended = start(
+    let started = start(
         platform,
         engines,
         ask,
@@ -198,8 +198,12 @@ pub fn connect(
         limits,
         &sending,
         err,
-    )
-    .and_then(|mut client| follow(&mut client, &ConnState::Connecting));
+    );
+    // The service has answered the connect request, or it never went or
+    // got no answer. A disconnect sent to undo it from now on cannot
+    // overtake it.
+    progress.settled();
+    let ended = started.and_then(|mut client| follow(&mut client, &ConnState::Connecting));
     // A stop from outside is being handled elsewhere, and what this saw of
     // it (a disconnect, say) is not news. Ctrl-C at a question is the user
     // leaving. Neither is reported. Otherwise the outcome is the user's to

@@ -12,6 +12,11 @@
 //!   question must not stay open.
 //! - **After it has gone** the service would carry on connecting with nobody
 //!   watching, so it is told to disconnect first, and then the program ends.
+//!   The disconnect goes on a connection of its own, and the service serves
+//!   connections independently, so it is sent only once the service has
+//!   answered the connect request (or [`SETTLE`] has passed). Sent sooner,
+//!   it could be served first, find nothing to stop, and let the connect
+//!   through.
 //! - **Once the connect has its outcome** and is telling the user, there is
 //!   again nothing to undo. A Ctrl-C in that last instant ends the program
 //!   and leaves the VPN as the user was just told it is.
@@ -28,7 +33,8 @@
 //! printed by then, such as an error line from the gateway's side, stays.
 
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use ubc_vpn_platform::interrupt::Stop;
 
@@ -48,11 +54,19 @@ enum Stage {
 /// How far a connect has got. The connect and whoever handles a request to
 /// stop share one.
 #[derive(Debug, Default, Clone)]
-pub struct Progress(Arc<Mutex<Stage>>);
+pub struct Progress(Arc<Shared>);
+
+#[derive(Debug, Default)]
+struct Shared {
+    stage: Mutex<Stage>,
+    /// Whether the connect request has been answered, or has failed.
+    settled: Mutex<bool>,
+    settling: Condvar,
+}
 
 impl Progress {
     fn stage(&self) -> std::sync::MutexGuard<'_, Stage> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.stage.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The connect request is about to go to the service. Returns whether
@@ -87,7 +101,47 @@ impl Progress {
     pub fn stop(&self) -> bool {
         std::mem::replace(&mut *self.stage(), Stage::Stopping) == Stage::Sent
     }
+
+    /// The connect request has its answer from the service, or failed to
+    /// get one, or was never sent. An undo waits for this before it tells
+    /// the service to disconnect.
+    pub fn settled(&self) {
+        *self
+            .0
+            .settled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+        self.0.settling.notify_all();
+    }
+
+    /// Whether [`Progress::settled`] was called.
+    #[cfg(test)]
+    pub fn is_settled(&self) -> bool {
+        *self
+            .0
+            .settled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits until [`Progress::settled`], or `limit` at most.
+    fn wait_settled(&self, limit: Duration) {
+        let settled = self
+            .0
+            .settled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let waiting = |settled: &mut bool| !*settled;
+        let waited = self.0.settling.wait_timeout_while(settled, limit, waiting);
+        drop(waited.unwrap_or_else(PoisonError::into_inner));
+    }
 }
+
+/// How long an undo waits for the service to answer the connect request
+/// before it sends the disconnect all the same. Past it the service may not
+/// have the request yet, so the disconnect could find nothing to stop; that
+/// is the most that can be done for a service that does not answer.
+pub const SETTLE: Duration = Duration::from_secs(3);
 
 /// Handles requests to stop for as long as they come. `undo` tells the
 /// service to disconnect; `exit` ends the program with the status for the
@@ -106,8 +160,13 @@ pub fn serve(
     for stop in requests {
         match undo.take().filter(|_| progress.stop()) {
             Some(undo) => {
-                let exit = exit.clone();
+                let (exit, progress) = (exit.clone(), progress.clone());
                 std::thread::spawn(move || {
+                    // The disconnect goes on a connection of its own, and the
+                    // service serves connections independently. Sent before
+                    // the connect is answered, it could be served first,
+                    // find nothing to stop, and let the connect through.
+                    progress.wait_settled(SETTLE);
                     undo();
                     exit(stop);
                 });

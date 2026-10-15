@@ -92,6 +92,7 @@ fn a_stop_after_the_request_undoes_it_first() {
     let progress = Progress::default();
     let handler = handler(&progress);
     progress.sending();
+    progress.settled();
     handler.requests.send(Stop::Terminate).unwrap();
     assert_eq!(handler.next(), Did::Undo);
     assert!(!progress.finish(), "a stopped connect reports nothing");
@@ -107,11 +108,75 @@ fn a_second_stop_does_not_wait_for_the_undo() {
     let progress = Progress::default();
     let handler = handler(&progress);
     progress.sending();
+    progress.settled();
     handler.requests.send(Stop::Interrupt).unwrap();
     assert_eq!(handler.next(), Did::Undo);
     handler.requests.send(Stop::Interrupt).unwrap();
     assert_eq!(handler.next(), Did::Exit(Stop::Interrupt));
     handler.nothing_more();
+}
+
+// Security rule: the disconnect that undoes a connect is never sent before
+// the service has answered that connect. The two go on different
+// connections, and the service serves connections independently: a
+// disconnect that overtook the connect would find nothing to stop, and the
+// connect behind it would leave the VPN connected with nobody watching.
+#[test]
+fn the_undo_waits_until_the_connect_request_is_answered() {
+    let progress = Progress::default();
+    let handler = handler(&progress);
+    progress.sending();
+    handler.requests.send(Stop::Interrupt).unwrap();
+    // The connect request is still out: nothing is undone yet.
+    handler.nothing_more();
+    let answered = Instant::now();
+    progress.settled();
+    assert_eq!(handler.next(), Did::Undo);
+    // As soon as the answer is in, not at the end of the limit.
+    assert!(
+        answered.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        answered.elapsed()
+    );
+    handler.let_undo_end.send(()).unwrap();
+    assert_eq!(handler.next(), Did::Exit(Stop::Interrupt));
+}
+
+// A connect marks its request settled once the service has answered it, so
+// that an undo waits no longer than that. Here once accepted and once with
+// a wrong password, where nothing was sent at all.
+#[test]
+fn a_connect_settles_its_request_however_it_ends() {
+    for (typed, connected) in [(PASSWORD, true), ("wrong-password-0000", false)] {
+        let scene = Scene::usual();
+        let progress = Progress::default();
+        let mut typist = Typist::typing(&[Some(typed), Some(CODE)]);
+        let (ended, out, _) = scene.connect_watched(&mut typist, &progress);
+        assert_eq!(out.starts_with("Connected"), connected, "{ended:?} {out}");
+        assert!(progress.is_settled(), "{typed}");
+    }
+}
+
+// A service that never answers does not keep the user waiting for ever:
+// past the limit the disconnect goes all the same, as the best that can be
+// done, and a second stop still ends the program at once meanwhile.
+#[test]
+fn the_undo_does_not_wait_for_an_answer_for_ever() {
+    let progress = Progress::default();
+    let handler = handler(&progress);
+    progress.sending();
+    let first = Instant::now();
+    handler.requests.send(Stop::Interrupt).unwrap();
+    let patience = crate::interrupt::SETTLE + Duration::from_secs(5);
+    let did = handler
+        .did
+        .recv_timeout(patience)
+        .expect("the handler acted");
+    assert_eq!(did, Did::Undo);
+    assert!(
+        first.elapsed() >= crate::interrupt::SETTLE,
+        "it did not wait"
+    );
 }
 
 // Security rule: Ctrl-C at a hidden question ends the connect there. It is
