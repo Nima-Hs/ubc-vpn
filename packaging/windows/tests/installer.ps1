@@ -65,7 +65,7 @@ $ChangeRights = [Security.AccessControl.FileSystemRights]'WriteData, AppendData,
 $GenericChange = 0x10000000 -bor 0x40000000
 # On a folder above the install folder, the rights that could swap what is
 # in it: delete it, delete what is inside, change its access list or owner,
-# or all of them. Adding something new to C: does not change any path.
+# or all of them. Adding something new to C:\ does not change any path.
 $ReplaceRights = [Security.AccessControl.FileSystemRights]'DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership'
 $GenericReplace = 0x10000000
 
@@ -134,7 +134,9 @@ switch ($Command) {
             }
         }
         # Only the updater uses it, so the installer removes it.
-        if (-not $built.Remove('resourceselevate.exe')) { Fail 'the build has no resourceselevate.exe, so this check is out of date' }
+        $elevate = 'resources\elevate.exe'
+        if (-not $built.ContainsKey($elevate)) { Fail "the build has no $elevate, so this check is out of date" }
+        $built.Remove($elevate)
         if ($built.Count -ne 0) { Fail "not installed: $($built.Keys -join ', ')" }
         if (($extra.Count -ne 1) -or ($extra[0] -ne "Uninstall $ProductName.exe")) { Fail "unexpected files: $($extra -join ', ')" }
         if (-not (Test-Path -LiteralPath $StartMenuShortcut)) { Fail "no shortcut at $StartMenuShortcut" }
