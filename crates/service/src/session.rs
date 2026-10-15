@@ -52,8 +52,6 @@ struct Gate {
     phase: Phase,
     /// Stops the connect in progress, if there is one.
     cancel: Cancel,
-    /// The number of the last connect admitted, or 0.
-    attempt: u64,
 }
 
 /// What the log says when a connect is undone because its client went
@@ -62,13 +60,26 @@ struct Gate {
 pub const ABANDONED: &str =
     "the client that asked to connect went before it was told; disconnecting";
 
-/// The number of one admitted connect, so that it alone can be undone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Attempt(u64);
+/// One admitted connect, as its worker waits to hear whether the client that
+/// asked was told it was admitted. Dropping it unsettled counts as told.
+#[derive(Debug)]
+pub(crate) struct Attempt {
+    settled: Sender<bool>,
+}
+
+impl Attempt {
+    /// Says whether the client was told its connect was admitted. The worker
+    /// does nothing for the connect until it hears this, and undoes one whose
+    /// client was not told: nobody is watching it, and nobody would undo it.
+    pub(crate) fn settle(&self, told: bool) {
+        let _ = self.settled.send(told);
+    }
+}
 
 enum Command {
-    /// With the hold that keeps its cookie out of the log.
-    Connect(ConnectParams, Cancel, Held),
+    /// With the hold that keeps its cookie out of the log, and what tells
+    /// it whether the client was told it was admitted.
+    Connect(ConnectParams, Cancel, Held, Receiver<bool>),
     Disconnect,
     /// The OS reported this about the network watched by the subscription
     /// with this number.
@@ -154,11 +165,7 @@ impl Session {
             Err(message) => (None, Err(message)),
         };
         let (phase, cancel) = (Phase::Idle, Cancel::new());
-        let gate = Arc::new(Mutex::new(Gate {
-            phase,
-            cancel,
-            attempt: 0,
-        }));
+        let gate = Arc::new(Mutex::new(Gate { phase, cancel }));
         let (commands, inbox) = mpsc::channel();
         let machine = Machine {
             routes: platform.routes.clone(),
@@ -242,15 +249,15 @@ impl Session {
         *gate = Gate {
             phase: Phase::Connecting,
             cancel: Cancel::new(),
-            attempt: gate.attempt + 1,
         };
         // Held from here on, before the request is anywhere a line could
         // be written about it.
         let hidden = self.logs.hold(&params.cookie);
         let line = format!("connect admitted ({carries})");
         self.logs.about_requests(LogLevel::Info, &line);
-        let sent = self.send(Command::Connect(params, gate.cancel.clone(), hidden));
-        sent.map(|()| Attempt(gate.attempt))
+        let (settled, answered) = mpsc::channel();
+        let command = Command::Connect(params, gate.cancel.clone(), hidden, answered);
+        self.send(command).map(|()| Attempt { settled })
     }
 
     /// Asks the worker to tear everything down. One that arrives during a
@@ -262,26 +269,6 @@ impl Session {
         let line = format!("disconnect requested by a client that said it was {said}");
         // Within the budget for lines that requests cause.
         self.stop_with(gate, || self.logs.about_requests(LogLevel::Info, &line))
-    }
-
-    /// Undoes the connect `attempt` because the client that asked for it
-    /// went before it could hear that it was admitted. Nobody is watching
-    /// that connect, and nobody would undo it. Only that connect: if it has
-    /// already ended, or a later one has been admitted, nothing is done.
-    pub(crate) fn abandon(&self, attempt: Attempt) {
-        let gate = lock(&self.gate);
-        let ours = gate.attempt == attempt.0;
-        if ours && matches!(gate.phase, Phase::Connecting | Phase::Connected) {
-            // Under the repeat rule, not the budget for requests: asking again
-            // and again must never hide the first one, and connecting and
-            // going costs the client nothing, so a repeat must not fill the
-            // log either. One copy is kept while it is still in the log.
-            let say = || {
-                self.logs
-                    .at_about(LogLevel::Info, "an undone connect", ABANDONED)
-            };
-            let _ = self.stop_with(gate, say);
-        }
     }
 
     /// Cancels a connect in progress, if there is one, and has the worker
@@ -423,7 +410,9 @@ impl Machine {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Connect(params, cancel, hidden) => self.connect(params, &cancel, hidden),
+            Command::Connect(params, cancel, hidden, answered) => {
+                self.connect(params, &cancel, hidden, &answered)
+            }
             Command::Disconnect => {
                 self.publish(ConnState::Disconnecting);
                 let idle = |phase: &mut Phase| *phase = Phase::Idle;
@@ -487,8 +476,36 @@ impl Machine {
         self.logs.forget(STATE);
     }
 
-    fn connect(&mut self, params: ConnectParams, cancel: &Cancel, hidden: Held) {
+    fn connect(
+        &mut self,
+        params: ConnectParams,
+        cancel: &Cancel,
+        hidden: Held,
+        answered: &Receiver<bool>,
+    ) {
         self.publish(ConnState::Connecting);
+        // Nothing is done for a connect until the client that asked has been
+        // told it was admitted. One that could not be told has gone: nobody
+        // is watching this connect, and nobody would undo it, so it is
+        // undone here, before anything is applied or the gateway contacted.
+        // An attempt dropped unsettled counts as told. One cancelled by now
+        // is ended by the disconnect that cancelled it.
+        let told = answered.recv().unwrap_or(true);
+        if !told && !cancel.is_cancelled() {
+            drop(hidden);
+            // Under the repeat rule, not the budget for requests: connecting
+            // and going costs the client nothing, so a repeat must not fill
+            // the log, and nothing can hide the first one.
+            let line = ABANDONED;
+            self.logs
+                .at_about(LogLevel::Info, "an undone connect", line);
+            let idle = |phase: &mut Phase| {
+                if *phase == Phase::Connecting {
+                    *phase = Phase::Idle;
+                }
+            };
+            return self.finish_then_open(ConnState::Disconnected, idle);
+        }
         let clean = self.teardown();
         // After the teardown, which lets go of the hold before this one.
         self.hidden = Some(hidden);

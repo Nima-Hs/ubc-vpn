@@ -375,10 +375,11 @@ impl Shared {
             let (answer, keep, admitted) = self.answer(user, conn, kind, &mut added, body);
             let outcome = answer.map_or_else(Outcome::Error, Outcome::Ok);
             let sent = send(conn, &ServerMessage::Response(Response { id, outcome }));
-            // A client that went before hearing that its connect was
-            // admitted is watching nothing, and nobody would undo it.
-            if let Some(attempt) = admitted.filter(|_| !sent) {
-                self.session.abandon(attempt);
+            // The connect's worker does nothing until it hears whether the
+            // client was told. One that went before it was is watching
+            // nothing, and nobody would undo it: the worker undoes it.
+            if let Some(attempt) = admitted {
+                attempt.settle(sent);
             }
             if !(sent && keep) {
                 return;
@@ -412,8 +413,9 @@ impl Shared {
             RequestBody::Status => Ok(ResponseBody::Status(self.hub.state())),
             RequestBody::Connect(params) => {
                 let attempt = self.session.connect(params);
-                admitted = attempt.as_ref().ok().copied();
-                accepted(attempt.map(drop))
+                let answer = attempt.as_ref().map(drop).map_err(Clone::clone);
+                admitted = attempt.ok();
+                accepted(answer)
             }
             RequestBody::Disconnect => {
                 let said = match kind {
