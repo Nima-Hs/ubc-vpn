@@ -186,7 +186,8 @@ impl Tunnel for Watched {
 pub struct Faulty {
     fake: Fake,
     panics_at: Mutex<Option<Op>>,
-    subscriptions: Mutex<Vec<Sender<NetworkEvent>>>,
+    /// Each subscription's sender, or `None` once its stopping end is dropped.
+    subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
 }
 
 impl Faulty {
@@ -194,7 +195,7 @@ impl Faulty {
         Self {
             fake,
             panics_at: Mutex::default(),
-            subscriptions: Mutex::default(),
+            subscriptions: Arc::default(),
         }
     }
 
@@ -210,7 +211,10 @@ impl Faulty {
     /// Sends `event` to subscription `n` only, and says whether its
     /// receiver is still there.
     pub fn send_to(&self, n: usize, event: NetworkEvent) -> bool {
-        self.subscriptions.lock().unwrap()[n].send(event).is_ok()
+        let subscriptions = self.subscriptions.lock().unwrap();
+        subscriptions[n]
+            .as_ref()
+            .is_some_and(|sender| sender.send(event).is_ok())
     }
 
     fn reached(&self, op: Op) {
@@ -283,13 +287,33 @@ impl Dns for Faulty {
     }
 }
 
+/// A subscription's stopping end: dropping it ends the subscription, as on a
+/// real system, so `send_to` fails from then on.
+struct Stop {
+    subscriptions: Arc<Mutex<Vec<Option<Sender<NetworkEvent>>>>>,
+    n: usize,
+}
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        if let Ok(mut subscriptions) = self.subscriptions.lock() {
+            subscriptions[self.n] = None;
+        }
+    }
+}
+
 impl NetworkEvents for Faulty {
     /// Fails as the fake was told to; otherwise a subscription of its own.
     fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription> {
         self.reached(Op::Subscribe);
         drop(self.fake.subscribe(watching)?);
         let (sender, receiver) = mpsc::channel();
-        self.subscriptions.lock().unwrap().push(sender);
-        Ok(Subscription::new(receiver, ()))
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+        subscriptions.push(Some(sender));
+        let stop = Stop {
+            subscriptions: self.subscriptions.clone(),
+            n: subscriptions.len() - 1,
+        };
+        Ok(Subscription::new(receiver, stop))
     }
 }

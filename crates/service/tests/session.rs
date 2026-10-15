@@ -928,6 +928,23 @@ fn a_change_of_network_tears_everything_down() {
     assert_eq!(alice.connect_ends(good()), ConnState::LoginNeeded);
 }
 
+// The watch on the network ends with the connection's teardown itself, not
+// at the next network event, which might never come.
+#[test]
+fn a_disconnect_ends_the_network_watch_at_once() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert_eq!(rig.os.subscriptions(), 1, "watched from the start");
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(
+        [alice.state(), alice.state()],
+        [ConnState::Disconnecting, ConnState::Disconnected]
+    );
+    // Already ended: no event was needed to end it.
+    assert!(!rig.os.send_to(0, NetworkEvent::Sleeping), "still watching");
+}
+
 // Going to sleep and waking say nothing about the network by themselves; a
 // tunnel that does not survive them ends by itself.
 #[test]
