@@ -68,6 +68,10 @@ mod os;
 #[path = "windows/mod.rs"]
 mod os;
 
+/// Registering the service and making its data folder, on Windows.
+#[cfg(windows)]
+pub use os::install;
+
 /// Running as a Windows service, started by the service manager.
 #[cfg(windows)]
 pub use os::service;

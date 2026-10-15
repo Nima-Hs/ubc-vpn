@@ -1,6 +1,7 @@
 //! The service binary's command line and the environment it accepts.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use ubc_vpn_engine::{EnvironmentError, Role};
 
@@ -13,6 +14,69 @@ pub enum Run {
     /// the `dev-mode` feature.
     #[cfg(feature = "dev-mode")]
     Dev,
+}
+
+/// What the binary was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Run the service.
+    Run(Run),
+    /// `install --policy <file> [--fresh]`: register the service, make its
+    /// data folder, write the policy from `file` into it, and start it. With
+    /// `--fresh`, for a first install, a data folder that is already there
+    /// is emptied first. Windows only; the setup program runs it.
+    Install { policy: PathBuf, fresh: bool },
+    /// `uninstall [--keep-data]`: stop the service, which cleans up first,
+    /// and remove it and the data folder. With `--keep-data`, for an update,
+    /// the data folder stays. Windows only; the setup program runs it.
+    Uninstall { keep_data: bool },
+}
+
+/// Reads the arguments after the program name: `install` or `uninstall`
+/// and their options, or the arguments of a run (see [`parse`]). Anything
+/// unknown or repeated is an error.
+pub fn command(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
+    let args: Vec<OsString> = args.into_iter().collect();
+    match args.first().and_then(|first| first.to_str()) {
+        Some("install") => install(&args[1..]),
+        Some("uninstall") => uninstall(&args[1..]),
+        _ => parse(args).map(Command::Run),
+    }
+}
+
+fn install(args: &[OsString]) -> Result<Command, String> {
+    let (mut policy, mut fresh) = (None, false);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--fresh") if !fresh => fresh = true,
+            Some("--policy") if policy.is_none() => {
+                let path = args.next().ok_or("--policy needs a file")?;
+                policy = Some(PathBuf::from(path));
+            }
+            _ => return Err(unknown(arg)),
+        }
+    }
+    let policy = policy.ok_or("install needs --policy <file>")?;
+    Ok(Command::Install { policy, fresh })
+}
+
+fn uninstall(args: &[OsString]) -> Result<Command, String> {
+    let mut keep_data = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--keep-data") if !keep_data => keep_data = true,
+            _ => return Err(unknown(arg)),
+        }
+    }
+    Ok(Command::Uninstall { keep_data })
+}
+
+fn unknown(arg: &OsString) -> String {
+    match arg.to_str() {
+        Some(arg) => format!("unknown or repeated argument: {arg}"),
+        None => "unknown argument: it is not valid Unicode".to_string(),
+    }
 }
 
 /// Reads the arguments after the program name. Anything unknown is an error,
@@ -74,5 +138,54 @@ mod tests {
         assert_eq!(environment_role(Run::Installed), Role::Service);
         #[cfg(feature = "dev-mode")]
         assert_eq!(environment_role(Run::Dev), Role::Client);
+    }
+
+    fn command_of(args: &[&str]) -> Result<Command, String> {
+        command(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn reads_install_and_uninstall() {
+        let policy = PathBuf::from("policy.json");
+        assert_eq!(
+            command_of(&["install", "--policy", "policy.json"]),
+            Ok(Command::Install {
+                policy: policy.clone(),
+                fresh: false
+            })
+        );
+        assert_eq!(
+            command_of(&["install", "--fresh", "--policy", "policy.json"]),
+            Ok(Command::Install {
+                policy,
+                fresh: true
+            })
+        );
+        assert_eq!(
+            command_of(&["uninstall"]),
+            Ok(Command::Uninstall { keep_data: false })
+        );
+        assert_eq!(
+            command_of(&["uninstall", "--keep-data"]),
+            Ok(Command::Uninstall { keep_data: true })
+        );
+        assert_eq!(command_of(&[]), Ok(Command::Run(Run::Installed)));
+    }
+
+    #[test]
+    fn refuses_what_install_and_uninstall_do_not_know() {
+        let refused: [&[&str]; 8] = [
+            &["install"],
+            &["install", "--policy"],
+            &["install", "--policy", "a", "--policy", "b"],
+            &["install", "--fresh", "--fresh", "--policy", "a"],
+            &["install", "--policy", "a", "--keep-data"],
+            &["uninstall", "--keep-data", "--keep-data"],
+            &["uninstall", "--fresh"],
+            &["status"],
+        ];
+        for args in refused {
+            assert!(command_of(args).is_err(), "{args:?}");
+        }
     }
 }

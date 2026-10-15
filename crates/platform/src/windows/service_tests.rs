@@ -205,10 +205,11 @@ fn the_service_manager_starts_it_and_stops_it() {
         match status.dwCurrentState {
             SERVICE_STOPPED => break status,
             SERVICE_STOP_PENDING => {
-                assert!(
-                    !done.exists(),
-                    "the cleanup was done before stopping was over"
-                );
+                // Only well inside the cleanup: once the marker is written,
+                // "stopped" may take a moment to be seen.
+                if started.elapsed() < CLEANUP - Duration::from_secs(1) {
+                    assert!(!done.exists(), "the cleanup was done too soon");
+                }
                 checkpoints.push(status.dwCheckPoint);
             }
             state => panic!("state {state} after the stop request"),

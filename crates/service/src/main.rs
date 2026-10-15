@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use ubc_vpn_engine::TunnelEngine;
 use ubc_vpn_platform::{Platform, StateDir};
-use ubc_vpn_service::args::{self, Run};
+use ubc_vpn_service::args::{self, Command, Run};
 use ubc_vpn_service::{Service, Timeouts};
 
 type Parts = (Platform, StateDir, Arc<dyn TunnelEngine>);
@@ -23,7 +23,19 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mode = args::parse(std::env::args_os().skip(1))?;
+    let mode = match args::command(std::env::args_os().skip(1))? {
+        Command::Run(mode) => mode,
+        // Run by the setup program, as an administrator, with the same
+        // checks of the environment as the service.
+        Command::Install { policy, fresh } => {
+            args::check_environment(Run::Installed)?;
+            return setup::install(&policy, fresh);
+        }
+        Command::Uninstall { keep_data } => {
+            args::check_environment(Run::Installed)?;
+            return setup::uninstall(keep_data);
+        }
+    };
     args::check_environment(mode)?;
     // A build with dev mode has the fake engine in it and never runs as the
     // installed service. Said here, before anything else and before the
@@ -148,4 +160,77 @@ fn dev() -> Result<Parts, String> {
     // Logging in happens in another process, so this fake keeps accepting
     // the dev cookie after a log-off. Otherwise dev mode would connect once.
     Ok((platform, state, Arc::new(FakeEngine::for_dev_mode(script))))
+}
+
+/// `install` and `uninstall`, run by the Windows setup program.
+#[cfg(windows)]
+mod setup {
+    use std::path::{Path, PathBuf};
+
+    use ubc_vpn_platform::install::{self as os, Registration};
+    use ubc_vpn_platform::{Mode, Platform};
+    use ubc_vpn_service::install::{self, DESCRIPTION, DISPLAY_NAME, SERVICE_NAME};
+
+    /// The machine-wide folder that holds the policy and the state.
+    fn data_folder() -> Result<PathBuf, String> {
+        let platform = Platform::native(Mode::Installed)
+            .map_err(|e| format!("The data folder cannot be found: {e}."))?;
+        Ok(platform.paths.policy_dir)
+    }
+
+    /// Checks the policy and this program's folder, makes the data folder
+    /// and writes the policy into it, registers the service from where this
+    /// program is, and starts it. Nothing is changed if the policy is not
+    /// valid or the folder is not safe.
+    pub fn install(policy: &Path, fresh: bool) -> Result<(), String> {
+        let policy = install::read_policy(policy)?;
+        let program = std::env::current_exe()
+            .map_err(|e| format!("The service cannot tell where it is: {e}."))?;
+        // Never register a service whose folder others could change: the
+        // same check the service makes when it starts, done before anything
+        // is changed.
+        let _folder = ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())?;
+        let command_line = os::quoted(&program)
+            .map_err(|_| format!("The service's path cannot be used: {}.", program.display()))?;
+        let data = data_folder()?;
+        os::prepare_data_folder(&data, fresh)
+            .map_err(|e| format!("The data folder could not be prepared: {e}."))?;
+        os::write_policy(&data, &policy)
+            .map_err(|e| format!("The policy could not be written: {e}."))?;
+        let registration = Registration {
+            name: SERVICE_NAME,
+            display_name: DISPLAY_NAME,
+            description: DESCRIPTION,
+            command_line,
+        };
+        os::register(&registration)
+            .map_err(|e| format!("The service could not be registered: {e}."))?;
+        os::start(SERVICE_NAME).map_err(|e| format!("The service could not be started: {e}."))
+    }
+
+    /// Stops the service, which removes its routes and DNS first, removes
+    /// it, and, unless `keep_data`, removes the data folder.
+    pub fn uninstall(keep_data: bool) -> Result<(), String> {
+        os::unregister(SERVICE_NAME)
+            .map_err(|e| format!("The service could not be removed: {e}."))?;
+        if keep_data {
+            return Ok(());
+        }
+        os::remove_data_folder(&data_folder()?)
+            .map_err(|e| format!("The data folder could not be removed: {e}."))
+    }
+}
+
+/// On macOS and Linux the packages' own scripts do this.
+#[cfg(not(windows))]
+mod setup {
+    const ONLY: &str = "install and uninstall are for the Windows setup program only";
+
+    pub fn install(_policy: &std::path::Path, _fresh: bool) -> Result<(), String> {
+        Err(ONLY.to_string())
+    }
+
+    pub fn uninstall(_keep_data: bool) -> Result<(), String> {
+        Err(ONLY.to_string())
+    }
 }
