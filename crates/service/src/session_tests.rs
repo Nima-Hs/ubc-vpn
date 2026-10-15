@@ -7,7 +7,7 @@ use ubc_vpn_core::policy::Pin;
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::RouteSet;
 use ubc_vpn_engine::fake::{FakeEngine, Script};
-use ubc_vpn_platform::fake::Fake;
+use ubc_vpn_platform::fake::{Fake, Op};
 
 use super::*;
 
@@ -51,7 +51,7 @@ fn a_cookie_is_wiped_on_an_idle_service_when_its_time_is_up() {
             dns_domains: Vec::new(),
         },
     };
-    session.connect(params).unwrap();
+    session.connect(params).unwrap().settle(true);
     until("connected", || {
         matches!(hub.state(), ConnState::Connected { .. })
     });
@@ -71,7 +71,7 @@ fn a_cookie_is_wiped_on_an_idle_service_when_its_time_is_up() {
 
 /// A session on fakes whose gateway keeps honouring the cookie, so that
 /// it can connect again after a disconnect.
-fn reconnecting_session() -> (Session, Arc<Hub>) {
+fn reconnecting_session() -> (Session, Arc<Hub>, Fake) {
     let fake = Fake::new();
     let platform = fake.platform(&std::env::temp_dir().join("ubc-vpn-made-up"));
     let pin: Pin = format!("pin-sha256:{}=", "A".repeat(43))
@@ -85,7 +85,7 @@ fn reconnecting_session() -> (Session, Arc<Hub>) {
     };
     let hub = Arc::new(Hub::new(None));
     let session = Session::start(&platform, engine, Ok(policy), hub.clone(), Logs::default());
-    (session.unwrap(), hub)
+    (session.unwrap(), hub, fake)
 }
 
 fn params() -> ConnectParams {
@@ -104,7 +104,7 @@ fn params() -> ConnectParams {
 // before and after it, whose clients were told, connect.
 #[test]
 fn a_connect_whose_client_was_not_told_is_undone_and_only_that_one() {
-    let (session, hub) = reconnecting_session();
+    let (session, hub, _) = reconnecting_session();
     let connected = || matches!(hub.state(), ConnState::Connected { .. });
     // Each is settled as the server settles it.
     let first = session.connect(params()).unwrap();
@@ -122,6 +122,30 @@ fn a_connect_whose_client_was_not_told_is_undone_and_only_that_one() {
         session.connect(params()).ok()
     });
     let next = next.expect("the service never became idle again");
+    next.settle(true);
+    until("the next one connects", connected);
+    session.stop();
+}
+
+// Security rule: fail closed. An attempt dropped without being settled, as
+// when the thread holding it panics between admitting the connect and
+// answering it, counts as "not told": the connect is undone before anything
+// is done for it, and the service takes the next one.
+#[test]
+fn a_connect_never_settled_is_undone() {
+    let (session, hub, fake) = reconnecting_session();
+    let connected = || matches!(hub.state(), ConnState::Connected { .. });
+    drop(session.connect(params()).unwrap());
+    let next = (0..5000).find_map(|_| {
+        assert!(!connected(), "a connect nobody settled connected");
+        thread::sleep(Duration::from_millis(2));
+        session.connect(params()).ok()
+    });
+    let next = next.expect("the service never became idle again");
+    // Nothing was done for it: not even the network was looked at, which
+    // comes before any step towards the gateway.
+    let calls = fake.calls();
+    assert!(!calls.contains(&Op::CapturePhysical), "{calls:?}");
     next.settle(true);
     until("the next one connects", connected);
     session.stop();

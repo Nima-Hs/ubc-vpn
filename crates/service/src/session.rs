@@ -61,7 +61,8 @@ pub const ABANDONED: &str =
     "the client that asked to connect went before it was told; disconnecting";
 
 /// One admitted connect, as its worker waits to hear whether the client that
-/// asked was told it was admitted. Dropping it unsettled counts as told.
+/// asked was told it was admitted. Dropping it unsettled counts as not told:
+/// fail closed, so a thread that dies before it answers undoes the connect.
 #[derive(Debug)]
 pub(crate) struct Attempt {
     settled: Sender<bool>,
@@ -488,9 +489,10 @@ impl Machine {
         // told it was admitted. One that could not be told has gone: nobody
         // is watching this connect, and nobody would undo it, so it is
         // undone here, before anything is applied or the gateway contacted.
-        // An attempt dropped unsettled counts as told. One cancelled by now
+        // An attempt dropped unsettled counts as not told: whatever stopped
+        // the answer, nobody is known to watch this connect. One cancelled by now
         // is ended by the disconnect that cancelled it.
-        let told = answered.recv().unwrap_or(true);
+        let told = answered.recv().unwrap_or(false);
         if !told && !cancel.is_cancelled() {
             drop(hidden);
             // Under the repeat rule, not the budget for requests: connecting
