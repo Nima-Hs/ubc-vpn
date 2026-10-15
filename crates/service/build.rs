@@ -5,9 +5,12 @@
 //! never searched for them.
 //!
 //! The program's folder is needed for the Visual C++ runtime the installer
-//! puts beside it (packaging/windows/vcruntime.lock). That folder is the
-//! install folder, which only administrators can change and which the
-//! service checks before it starts. `tests/binary.rs` reads the flag back
+//! puts beside it (packaging/windows/vcruntime.lock). Windows loads that DLL
+//! as it starts the program, before any of our code runs, so no check of
+//! ours can protect that load, the service's folder check included. What
+//! protects it is the install folder's access list alone: only SYSTEM,
+//! Administrators and TrustedInstaller can change the folder or anything in
+//! it, which the setup program sets. `tests/binary.rs` reads the flag back
 //! from the linked program.
 
 fn main() {

@@ -12,12 +12,20 @@ on:
     paths:
       - app/**
       - packaging/windows/**
+      - crates/service/**
+      - crates/cli/**
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/installer-windows.yml
   push:
     branches: [main]
     paths:
       - app/**
       - packaging/windows/**
+      - crates/service/**
+      - crates/cli/**
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/installer-windows.yml
   workflow_dispatch:
 
@@ -54,6 +62,20 @@ jobs:
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+
+      # The Visual C++ runtime the installer bundles beside the service and
+      # the client: the pinned file from this runner's Visual Studio
+      # (packaging/windows/vcruntime.sh stops if the image has moved), and the
+      # service starts with it beside it and loads that copy. Only here, so
+      # an image update stops packaging and nothing else.
+      - run: rustup toolchain install
+        working-directory: .
+      - name: The bundled Visual C++ runtime
+        working-directory: .
+        run: |
+          packaging/windows/vcruntime.sh "$RUNNER_TEMP/vcruntime"
+          UBC_VPN_TEST_VCRUNTIME_DIR="$RUNNER_TEMP/vcruntime" cargo test --locked -p ubc-vpn-service --test binary the_service_starts_with_the_bundled_runtime_beside_it -- --nocapture | tee "$RUNNER_TEMP/vcruntime.log"
+          grep -q "RAN: bundled runtime" "$RUNNER_TEMP/vcruntime.log"
 
       # electron-builder downloads Electron, NSIS and its other tools itself,
       # each checked against a checksum this version of it carries.

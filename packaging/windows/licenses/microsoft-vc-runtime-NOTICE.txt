@@ -19,8 +19,14 @@ folder, as Microsoft publishes them:
   Page: https://visualstudio.microsoft.com/license-terms/vs2026-ga-pro-enterprise/
   Document: https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual_Studio_2026-License-Enterprise_Professional_ENU.docx
   SHA-256 of the document: dd2ab92a7c2bb90dd509e16572707a34b13bc0bc09b9199d115f25594ac39053
-  The text is the document's own, paragraph by paragraph; only the
-  formatting is lost.
+  How it was extracted: the paragraphs of the document (word/document.xml)
+  in order, one per line, with the text of each exactly as stored, tabs
+  and line breaks kept, and the numbers of Word's numbered lists (the
+  parts I. and II., sections 1. to 19. and their a. and i. items, from
+  word/numbering.xml)
+  written out as Word shows them, so references such as "Section 15"
+  resolve. Bulleted items start with "- ". Fonts and other formatting are
+  not kept. Nothing else is changed: spaces at line ends are as stored.
 
 - microsoft-visual-studio-2026-distributable-code.txt
   Distributable Code for Visual Studio 2026 (the Distributable List, or

@@ -12,6 +12,13 @@
 # Visual Studio Enterprise 2026, 18.10.3 on GitHub's windows-2025-vs2026 image.
 VC_PRODUCT=Microsoft.VisualStudio.Product.Enterprise
 VC_PRODUCT_LINE_VERSION=18
+# The compiler that builds the programs, as in VC\Auxiliary\Build\
+# Microsoft.VCToolsVersion.default.txt. A program built by a newer compiler
+# than the runtime beside it may need what that runtime lacks, so the build
+# also stops if the compiler is newer than VC_REDIST_VERSION. The runner
+# keeps several redistributable folders, so without this an image with a
+# newer compiler would still find the pinned runtime.
+VC_TOOLS_VERSION=14.51.36231
 # The redistributable's version folder, VC\Redist\MSVC\<version>.
 VC_REDIST_VERSION=14.51.36231
 VC_CRT_FOLDER=Microsoft.VC145.CRT

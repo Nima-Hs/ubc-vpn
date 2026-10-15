@@ -11,7 +11,10 @@ repos:
         args: [--branch, main]
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
+        # Microsoft's licence texts ship exactly as extracted, spaces included.
+        exclude: ^packaging/windows/licenses/
       - id: end-of-file-fixer
+        exclude: ^packaging/windows/licenses/
       - id: check-yaml
         # pnpm writes its lockfile as more than one YAML document.
         exclude: ^app/pnpm-lock\.yaml$
