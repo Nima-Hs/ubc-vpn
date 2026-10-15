@@ -37,7 +37,7 @@ fn drive_through<T: Send + 'static>(
     let (input, to_cli) = std::io::pipe().unwrap();
     let playing = std::thread::spawn(move || app(BufReader::new(from_cli).lines(), to_cli));
     let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
-    let engines = |_: &Policy| Some(engine());
+    let engines = |_: &Policy| Ok(engine());
     let mut err = Vec::new();
     let input = BufReader::new(input);
     let code = connect(&platform, &engines, input, brief(), &mut out, &mut err);
@@ -477,7 +477,7 @@ fn a_panic_still_ends_with_an_error_line() {
 fn a_cancel_before_the_service_is_contacted_claims_nothing() {
     let look_for_service = |scene: &Scene| {
         let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
-        let engines = |_: &Policy| Some(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
+        let engines = |_: &Policy| Ok(Box::new(scene.gateway.clone()) as Box<dyn LoginEngine>);
         let (cancel, mut typist) = (Cancel::new(), Typist::typing(&[Some(PASSWORD)]));
         cancel.cancel();
         let mut err = Vec::new();
@@ -525,7 +525,7 @@ fn a_reader_that_panics_cancels_the_login() {
     let begun = Arc::new(AtomicBool::new(false));
     let engines = |_: &Policy| {
         let (asks, begun) = (false, begun.clone());
-        Some(Box::new(TooLate { asks, begun }) as Box<dyn LoginEngine>)
+        Ok(Box::new(TooLate { asks, begun }) as Box<dyn LoginEngine>)
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let input = BufReader::new(Broken);

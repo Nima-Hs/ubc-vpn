@@ -10,6 +10,9 @@ on:
     paths:
       - crates/engine/**
       - crates/core/**
+      - crates/platform/**
+      - crates/service/**
+      - crates/cli/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -19,6 +22,9 @@ on:
     paths:
       - crates/engine/**
       - crates/core/**
+      - crates/platform/**
+      - crates/service/**
+      - crates/cli/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -247,6 +253,21 @@ jobs:
           UBC_VPN_TEST_GATEWAY_DIR: ${{ runner.temp }}/gateway
           UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests --release
+
+      # The command-line client and the service built with the real engine,
+      # as a release builds them: one program at a time. The client's test
+      # copies it into folders of its own, with and without the libraries
+      # beside it, and shows it loads them from there and nowhere else.
+      - name: The client and the service with the real engine
+        if: runner.os == 'Windows'
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+        run: |
+          cargo clippy --locked -p ubc-vpn-cli --features real-engine --all-targets -- -D warnings
+          cargo clippy --locked -p ubc-vpn-service --features real-engine --all-targets -- -D warnings
+          cargo test --locked -p ubc-vpn-cli --features real-engine --test real_engine
+          # With dev mode as well, the service refuses to run as the installed one.
+          cargo test --locked -p ubc-vpn-service --features real-engine,dev-mode --test binary
 
       # Every tunnel test removes its device on every path. Whatever the
       # tests reported, show that no Wintun adapter is left on the runner.

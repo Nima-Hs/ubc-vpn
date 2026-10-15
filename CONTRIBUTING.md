@@ -31,6 +31,16 @@ gh run download <run-id> --name libopenconnect-windows-x64 --dir <folder>
 UBC_VPN_NATIVE_DIR=<folder> cargo test -p ubc-vpn-engine --features libopenconnect,fake
 ```
 
+The command-line client and the service connect for real only when built with their `real-engine` feature, which takes the same folder. They load the library from the folder the program is in, and from nowhere else, so on Windows put the libraries beside the programs after building:
+
+```sh
+UBC_VPN_NATIVE_DIR=<folder> cargo build -p ubc-vpn-cli --features real-engine
+UBC_VPN_NATIVE_DIR=<folder> cargo build -p ubc-vpn-service --features real-engine
+native/windows/stage.sh <folder> target/debug
+```
+
+`stage.sh` also downloads the Wintun pinned in `native/windows/wintun.pin` and checks its checksum. That copy is for your own machine only: Wintun's licence lets us pass it on only inside our installer. Build each program with `-p`, not `--workspace`, so no other crate's features are switched on for it. A build with `real-engine` and `dev-mode` together refuses to run as the installed service. `ubc-vpn connect` then logs in to the gateway named in the installed policy. The service, in installed mode, needs administrator rights and the installed policy and state folders, so until the installer exists run it only on a machine you can reset.
+
 The macOS and Linux artifacts hold a tarball to unpack, and the tests there build a small stand-in library with the system's C compiler (`cc`). `.github/workflows/engine.yml` has the exact steps.
 
 The engine's login tests talk to a stand-in gateway in `crates/engine/tests/gateway/`, written for the Python version pinned in that workflow, with nothing beyond its standard library. Without it those tests are skipped and say so. To run them, make a throwaway key in a folder outside the repository and name the Python and the folder:

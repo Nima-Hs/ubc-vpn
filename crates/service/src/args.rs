@@ -49,13 +49,18 @@ pub fn environment_role(run: Run) -> Role {
 /// variable itself. The message names a variable only when the name is one
 /// of the engine's own list, never text taken from the environment.
 pub fn check_environment(run: Run) -> Result<(), String> {
-    ubc_vpn_engine::check_environment(environment_role(run)).map_err(|error| match error {
+    ubc_vpn_engine::check_environment(environment_role(run)).map_err(environment_message)
+}
+
+/// What the service says when the environment is not safe.
+pub fn environment_message(error: EnvironmentError) -> String {
+    match error {
         EnvironmentError::Set(name) => format!("refusing to start while {name} is set"),
         EnvironmentError::LoaderVariable => "refusing to start while a variable that steers \
             the system loader is set (LD_* or DYLD_*)"
             .to_string(),
         _ => "refusing to start: the environment is not safe".to_string(),
-    })
+    }
 }
 
 #[cfg(test)]
