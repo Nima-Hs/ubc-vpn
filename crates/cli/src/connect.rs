@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::protocol::CERTIFICATE_CHANGED;
 use ubc_vpn_core::protocol::LogLevel as LineLevel;
 use ubc_vpn_core::protocol::{
     AddLogParams, ClientKind, ConnectParams, ErrorCode, Event, LogText, MAX_ADDED_LOG_LINES,
@@ -542,9 +543,15 @@ fn login(
             LoginError::GatewayUnreachable => (FAILED, LoginErrorCode::GatewayUnreachable),
             LoginError::Failed => (FAILED, LoginErrorCode::Internal),
         };
+        // A key the policy does not pin almost always means the gateway's
+        // certificate was replaced: the user is told to update.
+        let message = match error {
+            LoginError::PinMismatch => CERTIFICATE_CHANGED.to_string(),
+            other => other.to_string(),
+        };
         Stop {
             exit,
-            ..failed(code, &error.to_string())
+            ..failed(code, &message)
         }
     })
 }

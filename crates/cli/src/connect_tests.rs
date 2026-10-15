@@ -462,7 +462,11 @@ fn a_gateway_that_is_wrong_or_away_is_explained() {
     let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
     let (code, _, err) = scene.connect(&mut typist);
     assert_eq!(code, FAILED);
-    assert!(err.contains("certificate is not the expected one"), "{err}");
+    // The user is told what to do: the certificate changed, so update.
+    assert!(
+        err.contains(ubc_vpn_core::protocol::CERTIFICATE_CHANGED),
+        "{err}"
+    );
     assert!(typist.asked.is_empty() && !scene.gateway_was_asked());
 }
 

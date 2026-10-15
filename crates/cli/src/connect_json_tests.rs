@@ -316,7 +316,8 @@ fn every_failure_has_its_code() {
     let mut scene = Scene::usual();
     let other = format!("pin-sha256:{}=", "B".repeat(43));
     scene.gateway = FakeEngine::new(Script::new(other.try_into().unwrap()));
-    assert_eq!(fails(&scene, &[], "pin_mismatch", FAILED, "certificate"), 0);
+    let said = ubc_vpn_core::protocol::CERTIFICATE_CHANGED;
+    assert_eq!(fails(&scene, &[], "pin_mismatch", FAILED, said), 0);
 }
 
 // What the service can answer, as the app is told it.
