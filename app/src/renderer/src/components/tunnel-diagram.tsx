@@ -1,7 +1,9 @@
 import type { Tone } from "@shared/copy";
 import { motion } from "motion/react";
+import { useRef } from "react";
 import { cn } from "@/lib/cn";
 import { duration, easeOut } from "@/lib/motion";
+import { useClockLock, useLinger } from "@/lib/steady-loop";
 
 // The app's one picture: this computer on the left, and the two ways its
 // traffic can go. The upper lane is the tunnel to UBC, which fills when the
@@ -29,6 +31,12 @@ const ubc: Record<Tone, string> = {
 
 /** Decorative: the words beside it always say the same thing. */
 export function TunnelDiagram({ tone, className }: { tone: Tone; className?: string }) {
+    const busy = tone === "busy";
+    // The pulse keeps moving while it fades out, and runs on the page's
+    // clock, so no change of state or screen makes it jump.
+    const pulsing = useLinger(busy, duration.base * 1000);
+    const pulse = useRef<SVGPathElement>(null);
+    useClockLock(pulse, pulsing);
     return (
         <svg
             viewBox="0 0 340 150"
@@ -56,17 +64,26 @@ export function TunnelDiagram({ tone, className }: { tone: Tone; className?: str
                         : { duration: duration.fast, ease: easeOut }
                 }
             />
-            {/* Working: a pulse travels along the tunnel. Without motion it rests mid-way. */}
-            {tone === "busy" && (
+            {/* Working: a pulse travels the tunnel from this computer to UBC,
+                entering and leaving under the two dots, and fades in and out
+                with the state. Without motion it rests mid-way. */}
+            <g
+                className={cn(
+                    "transition-opacity duration-(--dur-base) ease-out",
+                    busy ? "opacity-100" : "opacity-0",
+                )}
+            >
                 <path
+                    ref={pulse}
+                    data-pulse
                     d={TUNNEL}
                     pathLength={1}
                     strokeWidth={7}
                     strokeDasharray="0.16 0.84"
                     strokeDashoffset={-0.42}
-                    className="stroke-accent motion-safe:animate-flow"
+                    className={cn("stroke-accent", pulsing && "motion-safe:animate-flow")}
                 />
-            )}
+            </g>
             <circle cx={22} cy={75} r={8} className="fill-text" />
             <circle
                 cx={318}

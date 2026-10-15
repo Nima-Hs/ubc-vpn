@@ -2,6 +2,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { LoaderCircle } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { lockToClock } from "@/lib/steady-loop";
 
 /** Shared by every pressable control, so they all feel the same under the hand. */
 export const pressable = cn(
@@ -80,7 +81,13 @@ export function Button({
             {...props}
         >
             {loading ? (
-                <LoaderCircle aria-hidden className="size-4 motion-safe:animate-spin" />
+                // On the page's clock, so a spinner that replaces another, as
+                // the screens of a login give way to each other, does not jump.
+                <LoaderCircle
+                    aria-hidden
+                    ref={lockToClock}
+                    className="size-4 motion-safe:animate-spin"
+                />
             ) : (
                 icon
             )}

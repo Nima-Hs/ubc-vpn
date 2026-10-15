@@ -126,6 +126,7 @@ If a screen needs something the components cannot do, change the component or ad
 - **Instrument Sans** for the interface: narrow enough for a small window, plain enough to disappear. **Geist Mono** for addresses and subnets, which are read one character at a time.
 - **The diagram is the app's one picture.** One line leaves this computer and splits: a wide lane to UBC that fills when the VPN is on, and a thin lane for everything else that is always there. That is split tunnelling.
 - **Motion is short and has a reason.** New text settles in over 240 ms, the tunnel fills over 420 ms, a pressed button shrinks to 96%. With reduced motion on, things fade and nothing moves.
+- **What loops never jumps.** The "working" pulse, the breathing status mark and the spinner all run on the page's clock ([`lib/steady-loop.ts`](src/renderer/src/lib/steady-loop.ts)), so a change of state or screen picks each one up where it was instead of starting it again, and each fades out still moving when the work ends.
 
 ## Dependencies
 
