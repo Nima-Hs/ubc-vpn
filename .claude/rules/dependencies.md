@@ -28,6 +28,10 @@ Cargo does not manage native libraries, build and packaging tools, GitHub Action
   - Not pinned: everything those run on, such as the shell, coreutils, tar, curl, gpg and pacman.
   - It could be pinned by starting from a dated `msys2-base` archive with a known checksum instead of the runner's copy. That is not done yet.
   - Nothing from the base ships: every DLL in the output comes from our own build or from a package in `packages.lock`, and the build stops on any other. The output's `build-packages.txt` records every installed package and its version, and the workflow's tests run on the output itself.
+- Approved exception: ocserv, an AnyConnect-compatible server under GPL-2.0, is used as a real gateway in the engine's Linux CI tests (`crates/engine/tests/ocserv.rs`). It is a test tool only: never shipped, and never linked into anything we ship.
+  - Pinned: ocserv `1.1.3-1` from a dated Ubuntu snapshot, set in `crates/engine/tests/ocserv/start.sh`. The script stops if apt would download from any other source or install any other version.
+  - It runs only on GitHub-hosted Linux runners, with a made-up account on loopback addresses. Its packaged service is kept from starting.
+  - Not pinned: the base system libraries of the runner image that ocserv links, such as GnuTLS and libc. They change when GitHub updates the image.
 
 ## Licenses
 
