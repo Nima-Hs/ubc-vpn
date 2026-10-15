@@ -249,8 +249,8 @@ describe("the tray icon's state", () => {
         );
         expect(trayKind({ link: "ready", conn: { state: "connecting" } })).toBe("busy");
         expect(trayKind({ link: "ready", conn: { state: "login_needed" } })).toBe("attention");
-        expect(trayKind({ link: "unavailable", reason: "not_running" })).toBe("attention");
-        expect(trayKind({ link: "untrusted_service" })).toBe("attention");
+        expect(trayKind({ link: "unavailable", reason: "not_running" })).toBe("problem");
+        expect(trayKind({ link: "untrusted_service" })).toBe("problem");
         // The tray's tooltip is "UBC VPN: " and the title, so a title must
         // read as a state, not as an instruction.
         expect(`UBC VPN: ${copyFor({ link: "untrusted_service" }).title}`).toBe(

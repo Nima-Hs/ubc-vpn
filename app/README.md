@@ -40,6 +40,7 @@ pnpm test:system     # the real app against the real client and a dev-mode servi
 pnpm build           # production build, into out/
 pnpm check:build     # the production build contains no demo code
 pnpm check:licenses  # everything shipped has an allowed licence
+pnpm icons           # draws the app icon files in build/ again, after the mark changes
 ```
 
 The end-to-end tests keep the app's window off the screen when run on your own computer, so they do not open windows over your work: they set `UBC_VPN_TEST_HIDDEN=1`, which an app that is not installed honours by never showing its window and making no tray icon, and an installed app ignores. In CI the window and the tray icon are shown, so the few tests about showing, hiding and closing to the tray run there and are skipped locally.
@@ -95,7 +96,9 @@ Chromium's `--remote-debugging-port`, `--remote-debugging-pipe` and `--remote-de
 
 Closing the window hides it and leaves the app in the tray, but only where there is a way back to a hidden window. macOS always has the Dock, and Windows always has a tray. GNOME has no tray unless an extension adds one, and Electron cannot tell, so on GNOME without Ubuntu's extension closing the window quits the app. Starting the app a second time always brings the window back.
 
-The tray icon is light with a dark rim, so it shows on a dark taskbar and a light one; macOS tints it itself. A click on it shows the window.
+The tray icon is the app's mark, drawn for each state in a shape of its own: off, both lines thin; working, the upper line wide and in moving dashes (three pictures, stepped only while working); on, the upper line wide and whole; needs attention, a triangle over the lower line's end; a problem, a diamond there. On Windows and Linux each state also has its colour from the tokens (neutral, accent, green, amber, red), with a dark rim so it shows on a dark taskbar and a light one. macOS tints it itself, so there the shapes alone tell the states apart. A click on it shows the window. On Windows the taskbar button carries the state too, as a small badge in the same colour and its own shape, while the window is open.
+
+The app icon (the program, the Start menu, the setup program) is the mark on the app's dark surface. It is drawn in code from the same description as the tray icon and the title bar's mark ([`src/shared/mark.ts`](src/shared/mark.ts), [`src/main/icon`](src/main/icon)), and written to `build/` by `pnpm icons`; `tests/icons.test.ts` fails if the files there are out of date. No image tool is used.
 
 Not yet checked on a real desktop, and to be checked before the first release: the tray on macOS and on Linux (GNOME with and without the extension, KDE), the rimmed icon on a light Windows taskbar, and the click on Windows.
 
