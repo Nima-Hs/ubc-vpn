@@ -200,6 +200,16 @@ fn is_registered(name: &str) -> bool {
     open_service(&manager, name).unwrap().is_some()
 }
 
+/// Whether `name` is gone, or stopped. Asked through one handle, so the
+/// service being removed between two questions cannot fail the test.
+fn stopped_or_removed(name: &str) -> bool {
+    let manager = manager(SC_MANAGER_CONNECT).unwrap();
+    match open_service(&manager, name).unwrap() {
+        None => true,
+        Some(service) => state_of(&service).unwrap().dwCurrentState == SERVICE_STOPPED,
+    }
+}
+
 fn status(name: &str) -> u32 {
     let manager = manager(SC_MANAGER_CONNECT).unwrap();
     let service = open_service(&manager, name).unwrap().expect("registered");
@@ -323,7 +333,10 @@ fn installs_updates_and_uninstalls() {
 
     // An uninstall as part of an update keeps the data; a real one does not.
     unregister(&name).unwrap();
-    assert!(!is_registered(&name) || status(&name) == SERVICE_STOPPED);
+    assert!(
+        stopped_or_removed(&name),
+        "removing left the service running"
+    );
     assert!(data.join(POLICY).exists());
     unregister(&name).unwrap();
     remove_data_folder(&data).unwrap();
