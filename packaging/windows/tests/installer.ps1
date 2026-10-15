@@ -86,14 +86,14 @@ switch ($Command) {
         if ($code -eq 0) { Fail 'the setup program accepted /D= and reported success' }
         if (Test-Path -LiteralPath $elsewhere) { Fail "it created $elsewhere" }
         if (Test-Path -LiteralPath $InstallFolder) { Fail "it installed into $InstallFolder" }
-        if ((Uninstall-Entries).Count -ne 0) { Fail 'it registered an uninstaller' }
+        if (@(Uninstall-Entries).Count -ne 0) { Fail 'it registered an uninstaller' }
         Write-Output 'refused /D= and installed nothing'
     }
     'install' {
         $code = Run-Setup $Path @('/S')
         if ($code -ne 0) { Fail "exit code $code" }
         if (-not (Test-Path -LiteralPath (Join-Path $InstallFolder "$ProductName.exe"))) { Fail "no $ProductName.exe in $InstallFolder" }
-        $entries = Uninstall-Entries
+        $entries = @(Uninstall-Entries)
         if ($entries.Count -ne 1) { Fail "$($entries.Count) uninstall entries, not 1" }
         if ($entries[0].PSPath -notlike '*HKEY_LOCAL_MACHINE*') { Fail "the uninstall entry is not for the whole machine: $($entries[0].PSPath)" }
         $expected = "`"$InstallFolder\Uninstall $ProductName.exe`""
@@ -149,14 +149,14 @@ switch ($Command) {
         if ($code -ne 0) { Fail "exit code $code" }
         # The uninstaller copies itself to a temporary folder and carries on
         # from there, so the process started above can end before it is done.
-        for ($i = 0; $i -lt 120 -and ((Test-Path -LiteralPath $InstallFolder) -or (Uninstall-Entries).Count -ne 0); $i++) {
+        for ($i = 0; $i -lt 120 -and ((Test-Path -LiteralPath $InstallFolder) -or @(Uninstall-Entries).Count -ne 0); $i++) {
             Start-Sleep -Seconds 1
         }
         Write-Output 'uninstaller finished'
     }
     'removed' {
         if (Test-Path -LiteralPath $InstallFolder) { Fail "$InstallFolder is still there: $((Get-ChildItem -LiteralPath $InstallFolder -Recurse -Force | ForEach-Object FullName) -join ', ')" }
-        if ((Uninstall-Entries).Count -ne 0) { Fail 'an uninstall entry is still there' }
+        if (@(Uninstall-Entries).Count -ne 0) { Fail 'an uninstall entry is still there' }
         if (Test-Path -LiteralPath $StartMenuShortcut) { Fail "$StartMenuShortcut is still there" }
         $desktop = Join-Path $env:PUBLIC "Desktop\$ProductName.lnk"
         if (Test-Path -LiteralPath $desktop) { Fail "$desktop is still there" }
