@@ -198,6 +198,11 @@ fn a_safe_folder_inside_an_open_one_is_refused() {
 /// may change, or nothing, with a message, when this process may not make
 /// one: making Administrators the owner needs an elevated process.
 fn safe_folder(tag: &str) -> Option<std::path::PathBuf> {
+    // It writes under ProgramData, which only CI runners may have changed.
+    if std::env::var_os("CI").is_none() {
+        println!("SKIPPED: it changes ProgramData, so it runs on CI only");
+        return None;
+    }
     let program_data = std::env::var_os("ProgramData").expect("ProgramData is set");
     let folder =
         Path::new(&program_data).join(format!("ubc-vpn-test-{tag}-{}", std::process::id()));

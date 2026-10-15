@@ -2,3 +2,12 @@
 # CI fails if the committed files differ from what the Rust types produce.
 [env]
 TS_RS_EXPORT_DIR = { value = "app/src/shared/protocol", relative = true }
+
+# Windows: the C runtime is linked into every program and test built here,
+# so the service and the command-line client need no Visual C++
+# redistributable, and their imports can come from System32 alone
+# (/DEPENDENTLOADFLAG:0x800, in their build.rs). libopenconnect and its DLLs
+# are built with MinGW by native/windows and are not affected. The runtime's
+# licence and where its source comes from: packaging/windows/msvc-runtime.txt.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

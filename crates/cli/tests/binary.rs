@@ -122,40 +122,90 @@ fn a_profile_with_no_roaming_folder_has_default_settings() {
     assert!(after.contains("10.19.0.0/16"), "{after}");
 }
 
-/// The `DependentLoadFlags` of a 64-bit Windows program: the field of its
-/// load configuration that says where Windows looks for the DLLs it imports.
+/// A 64-bit Windows program, read for what its headers say about loading.
 #[cfg(all(windows, target_env = "msvc"))]
-fn dependent_load_flags(program: &std::path::Path) -> u16 {
-    let image = std::fs::read(program).unwrap();
-    let u16_at = |at: usize| u16::from_le_bytes([image[at], image[at + 1]]);
-    let u32_at = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
-    let pe = u32_at(0x3c) as usize;
-    assert_eq!(&image[pe..pe + 4], b"PE\0\0", "not a Windows program");
-    let coff = pe + 4;
-    let sections = usize::from(u16_at(coff + 2));
-    let optional = coff + 20;
-    assert_eq!(u16_at(optional), 0x20b, "not a 64-bit program");
-    // Data directory 10 is the load configuration; a 64-bit program's
-    // directories start 112 bytes into its optional header.
-    let directory = optional + 112 + 10 * 8;
-    let (rva, size) = (u32_at(directory), u32_at(directory + 4));
-    assert!(size > 0, "the program has no load configuration");
-    let table = optional + usize::from(u16_at(coff + 16));
-    for section in (0..sections).map(|n| table + n * 40) {
-        let (length, address, offset) = (
-            u32_at(section + 8),
-            u32_at(section + 12),
-            u32_at(section + 20),
+struct Image(Vec<u8>);
+
+#[cfg(all(windows, target_env = "msvc"))]
+impl Image {
+    fn read(program: &std::path::Path) -> Self {
+        let image = Self(std::fs::read(program).unwrap());
+        let pe = image.u32_at(0x3c) as usize;
+        assert_eq!(&image.0[pe..pe + 4], b"PE\0\0", "not a Windows program");
+        assert_eq!(
+            image.u16_at(image.optional()),
+            0x20b,
+            "not a 64-bit program"
         );
-        if (address..address + length).contains(&rva) {
-            let config = (rva - address + offset) as usize;
-            // The field is at offset 78 of IMAGE_LOAD_CONFIG_DIRECTORY64,
-            // whose own first field is its size.
-            assert!(u32_at(config) >= 80, "the load configuration is too short");
-            return u16_at(config + 78);
-        }
+        image
     }
-    panic!("the load configuration is in no section");
+
+    fn u16_at(&self, at: usize) -> u16 {
+        u16::from_le_bytes([self.0[at], self.0[at + 1]])
+    }
+
+    fn u32_at(&self, at: usize) -> u32 {
+        u32::from_le_bytes(self.0[at..at + 4].try_into().unwrap())
+    }
+
+    /// Where the optional header starts, after the signature and COFF header.
+    fn optional(&self) -> usize {
+        self.u32_at(0x3c) as usize + 4 + 20
+    }
+
+    /// The file offset of data directory `index`: its start and size. A
+    /// 64-bit program's directories start 112 bytes into its optional header.
+    fn directory(&self, index: usize) -> (usize, u32) {
+        let entry = self.optional() + 112 + index * 8;
+        let (rva, size) = (self.u32_at(entry), self.u32_at(entry + 4));
+        assert!(size > 0, "the program has no data directory {index}");
+        (self.offset(rva), size)
+    }
+
+    /// The file offset of a relative virtual address.
+    fn offset(&self, rva: u32) -> usize {
+        let coff = self.u32_at(0x3c) as usize + 4;
+        let sections = usize::from(self.u16_at(coff + 2));
+        let table = self.optional() + usize::from(self.u16_at(coff + 16));
+        for section in (0..sections).map(|n| table + n * 40) {
+            let (length, address, raw) = (
+                self.u32_at(section + 8),
+                self.u32_at(section + 12),
+                self.u32_at(section + 20),
+            );
+            if (address..address + length).contains(&rva) {
+                return (rva - address + raw) as usize;
+            }
+        }
+        panic!("address {rva:#x} is in no section");
+    }
+
+    /// `DependentLoadFlags` from the load configuration (directory 10): where
+    /// Windows looks for the DLLs the program imports. It sits at offset 78
+    /// of IMAGE_LOAD_CONFIG_DIRECTORY64, whose first field is its size.
+    fn dependent_load_flags(&self) -> u16 {
+        let (config, _) = self.directory(10);
+        assert!(
+            self.u32_at(config) >= 80,
+            "the load configuration is too short"
+        );
+        self.u16_at(config + 78)
+    }
+
+    /// The names of the DLLs the program imports (directory 1), in lower
+    /// case. Each import descriptor is 20 bytes, the name's address at 12,
+    /// and an all-zero one ends the list.
+    fn imports(&self) -> Vec<String> {
+        let (mut descriptor, _) = self.directory(1);
+        let mut names = Vec::new();
+        while self.u32_at(descriptor + 12) != 0 {
+            let start = self.offset(self.u32_at(descriptor + 12));
+            let end = start + self.0[start..].iter().position(|&b| b == 0).unwrap();
+            names.push(String::from_utf8_lossy(&self.0[start..end]).to_lowercase());
+            descriptor += 20;
+        }
+        names
+    }
 }
 
 // Security rule: the program's own imports come from System32 only, never
@@ -163,6 +213,31 @@ fn dependent_load_flags(program: &std::path::Path) -> u16 {
 #[cfg(all(windows, target_env = "msvc"))]
 #[test]
 fn imports_are_loaded_from_system32_only() {
-    let program = std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn"));
-    assert_eq!(dependent_load_flags(program), 0x800);
+    let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn")));
+    assert_eq!(program.dependent_load_flags(), 0x800);
+}
+
+// The C runtime is linked into the program (+crt-static in
+// .cargo/config.toml), so it needs no Visual C++ redistributable, which the
+// load flag above would only look for in System32.
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn the_c_runtime_is_linked_in() {
+    let program = Image::read(std::path::Path::new(env!("CARGO_BIN_EXE_ubc-vpn")));
+    let imports = program.imports();
+    assert!(
+        imports.iter().any(|name| name == "kernel32.dll"),
+        "{imports:?}"
+    );
+    let runtime = |name: &&String| {
+        name.starts_with("vcruntime")
+            || name.starts_with("msvcp")
+            || name.starts_with("api-ms-win-crt-")
+            || *name == "ucrtbase.dll"
+    };
+    let found: Vec<_> = imports.iter().filter(runtime).collect();
+    assert!(
+        found.is_empty(),
+        "the program imports the C runtime: {found:?}"
+    );
 }
