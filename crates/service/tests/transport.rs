@@ -352,3 +352,43 @@ fn accepting_that_ends_by_itself_is_an_error() {
     // Shutting down on purpose is not waiting, and still works.
     drop(start(&rig, &Scripted::default(), Timeouts::default()));
 }
+
+// A service manager's stop request ends serving without an error, and shuts
+// the service down as dropping it does, the tunnel included.
+#[test]
+fn a_stop_request_ends_serving_and_cleans_up() {
+    let mut rig = harness::rig();
+    let mut alice = rig.owner();
+    let state = alice.connect_ends(good());
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+    assert!(!rig.is_clean());
+    let service = rig.service.take().unwrap();
+    let (stop, requests) = std::sync::mpsc::channel();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(service.serve_until(requests)));
+    stop.send(()).unwrap();
+    let ended = ended.recv_timeout(WAIT).expect("serving never ended");
+    assert_eq!(ended, Ok(()));
+    assert!(rig.is_clean());
+}
+
+// Accepting that ends by itself is still an error while serving until a stop
+// request, and a stop channel whose sender is gone asks for nothing.
+#[test]
+fn accepting_that_ends_before_a_stop_request_is_an_error() {
+    let rig = Rig::stopped(policy('A', ""));
+    let closing = Scripted::default();
+    closing.close();
+    let service = start(&rig, &closing, Timeouts::default());
+    let (stop, requests) = std::sync::mpsc::channel::<()>();
+    drop(stop);
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(service.serve_until(requests)));
+    let ended = ended.recv_timeout(WAIT).expect("serving never ended");
+    assert!(
+        ended
+            .as_ref()
+            .is_err_and(|why| why.contains("stopped accepting")),
+        "{ended:?}"
+    );
+}

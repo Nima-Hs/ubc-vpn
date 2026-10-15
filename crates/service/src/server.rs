@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -62,6 +63,9 @@ impl Default for Timeouts {
         }
     }
 }
+
+/// Why serving ended when nothing asked it to.
+const UNEXPECTED: &str = "The service stopped accepting connections unexpectedly.";
 
 /// The running service. Dropping it shuts it down.
 pub struct Service {
@@ -216,7 +220,31 @@ impl Service {
     /// serving and must not look healthy.
     pub fn wait(mut self) -> String {
         self.join();
-        "The service stopped accepting connections unexpectedly.".to_string()
+        UNEXPECTED.to_string()
+    }
+
+    /// Serves until `stop` receives a request, then shuts down as dropping
+    /// it does: the tunnel is torn down and every connection closed. For a
+    /// service manager, which asks a service to stop when someone stops it
+    /// and when the computer shuts down.
+    ///
+    /// If accepting ends first, nothing asked for that, and the error is
+    /// the one [`Service::wait`] gives. A `stop` whose sender is dropped
+    /// without a request asks for nothing.
+    pub fn serve_until(mut self, stop: Receiver<()>) -> Result<(), String> {
+        let asked = Arc::new(AtomicBool::new(false));
+        let (shared, asking) = (self.shared.clone(), asked.clone());
+        thread::spawn(move || {
+            if stop.recv().is_ok() {
+                asking.store(true, Ordering::SeqCst);
+                shared.listener.close();
+            }
+        });
+        self.join();
+        match asked.load(Ordering::SeqCst) {
+            true => Ok(()),
+            false => Err(UNEXPECTED.to_string()),
+        }
     }
 
     fn join(&mut self) {

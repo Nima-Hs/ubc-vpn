@@ -68,6 +68,10 @@ mod os;
 #[path = "windows/mod.rs"]
 mod os;
 
+/// Running as a Windows service, started by the service manager.
+#[cfg(windows)]
+pub use os::service;
+
 /// Why an operation did not happen. The set is closed, so a caller can match
 /// on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
