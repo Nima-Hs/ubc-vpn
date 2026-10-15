@@ -65,11 +65,13 @@ jobs:
       - name: Unpack
         run: mkdir stage && tar -xzf libopenconnect-linux-x64.tar.gz -C stage
 
+      # At the versions pinned in test-packages.sh, from its dated Ubuntu
+      # snapshot, with ocserv's packaged service kept from ever starting.
       - name: Install the test server
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ocserv pkg-config
-          sudo systemctl stop ocserv.socket ocserv.service || true
+          mkdir "$RUNNER_TEMP/packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" ocserv pkg-config
+          sudo systemctl disable ocserv.service
       - name: Check that no distribution libopenconnect is installed
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
