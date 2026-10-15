@@ -18,8 +18,10 @@ const BEFORE_OPEN: [Op; 5] = [
     Op::RemoveAllRoutes,
     Op::CapturePhysical,
 ];
-/// Applying, then one check per subnet, the gateway, the DNS server and DNS.
-const AFTER_OPEN: [Op; 8] = [
+/// Configuring the device, applying, then one check per subnet, the gateway,
+/// the DNS server and DNS.
+const AFTER_OPEN: [Op; 9] = [
+    Op::ConfigureTunnel,
     Op::AddGatewayRoute,
     Op::AddTunnelRoutes,
     Op::SetSplitDns,
@@ -47,8 +49,9 @@ fn connected(alice: &mut Peer) -> ConnState {
 }
 
 // Security rule: the physical network is captured before the tunnel exists,
-// the gateway's own route goes in before the tunnel's, and "connected" is
-// reported only after every check has been made.
+// the device is configured before any route goes in, the gateway's own
+// route goes in before the tunnel's, and "connected" is reported only after
+// every check has been made.
 #[test]
 fn connect_applies_in_order_and_verifies_before_connected() {
     let rig = rig();
@@ -71,6 +74,12 @@ fn connect_applies_in_order_and_verifies_before_connected() {
     };
     assert_eq!(tunnel.interface, "fake0");
     assert_eq!(tunnel.address, "10.255.0.2");
+    // The device got the assigned address, as a host, and packet size,
+    // before any route was added.
+    let address = std::net::Ipv4Addr::new(10, 255, 0, 2);
+    let configured = ("fake0".to_string(), address, 1300);
+    assert_eq!(rig.fake.configured(), [configured]);
+    assert_eq!(rig.fake.device_addresses("fake0"), [address]);
     let applied = rig.fake.applied();
     let (routed, via) = &applied.gateway_routes[0];
     assert_eq!(
@@ -186,6 +195,7 @@ fn each_refusal_has_its_code_and_leaves_nothing_behind() {
     // so each case gets a service of its own.
     for op in [
         Op::CapturePhysical,
+        Op::ConfigureTunnel,
         Op::AddGatewayRoute,
         Op::AddTunnelRoutes,
         Op::SetSplitDns,
@@ -411,6 +421,7 @@ fn a_dns_server_outside_the_subnets_gets_its_own_route() {
     let routed = routed.map(|net| ("fake0".to_string(), net.parse().unwrap()));
     assert_eq!(rig.fake.applied().tunnel_routes, routed);
     let after_open = [
+        Op::ConfigureTunnel,
         Op::AddGatewayRoute,
         Op::AddTunnelRoutes,
         Op::SetSplitDns,
@@ -442,6 +453,7 @@ fn without_dns_domains_no_dns_is_set_and_no_server_is_routed() {
     let routed = [("fake0".to_string(), "192.0.2.0/24".parse().unwrap())];
     assert_eq!(applied.tunnel_routes, routed);
     let after_open = [
+        Op::ConfigureTunnel,
         Op::AddGatewayRoute,
         Op::AddTunnelRoutes,
         Op::VerifyRoute,
@@ -556,6 +568,7 @@ fn a_tunnel_at_another_address_is_torn_down() {
 fn a_panic_part_way_through_a_connect_leaves_nothing_behind() {
     let stages = [
         Op::CapturePhysical,
+        Op::ConfigureTunnel,
         Op::AddGatewayRoute,
         Op::AddTunnelRoutes,
         Op::SetSplitDns,
