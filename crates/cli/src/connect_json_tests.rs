@@ -40,7 +40,15 @@ fn drive_through<T: Send + 'static>(
     let engines = |_: &Policy| Ok(engine());
     let mut err = Vec::new();
     let input = BufReader::new(input);
-    let code = connect(&platform, &engines, input, brief(), &mut out, &mut err);
+    let code = connect(
+        &platform,
+        None,
+        &engines,
+        input,
+        brief(),
+        &mut out,
+        &mut err,
+    );
     drop(out);
     let played = playing.join().unwrap();
     (code, played, String::from_utf8(err).unwrap())
@@ -495,6 +503,7 @@ fn a_cancel_before_the_service_is_contacted_claims_nothing() {
         let limits = brief();
         let ended = start(
             &platform,
+            None,
             &engines,
             &mut typist,
             &cancel,
@@ -539,7 +548,15 @@ fn a_reader_that_panics_cancels_the_login() {
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let input = BufReader::new(Broken);
-    let code = connect(&platform, &engines, input, brief(), &mut out, &mut err);
+    let code = connect(
+        &platform,
+        None,
+        &engines,
+        input,
+        brief(),
+        &mut out,
+        &mut err,
+    );
     let line = format!("{}\n", error_line("cancelled", CANCELLED_LINE));
     assert_eq!((code, String::from_utf8(out).unwrap()), (CANCELLED, line));
 }
@@ -557,4 +574,32 @@ fn the_username_the_app_sent_is_remembered_after_done() {
     let (code, lines, _) = drive(&scene, answering(&["alice", PASSWORD, CODE]));
     assert_eq!((code, lines.len()), (0, 4), "{lines:?}");
     assert_eq!(saved(&scene)["username"], "alice");
+}
+
+// For the app as in a terminal: a saved password answers its question, so
+// the app is asked only for the code, and the password is in no line it
+// is sent. One the app typed is saved after `done`.
+#[test]
+fn the_app_is_not_asked_for_a_saved_password() {
+    use ubc_vpn_core::profiles::ProfileId;
+
+    let settings = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
+    let scene = Scene::new(Some(&settings), "");
+    let (code, lines, _) = drive(&scene, answering(&[PASSWORD, CODE]));
+    assert_eq!((code, lines.len()), (0, 3), "{lines:?}");
+    let keyring = crate::keys::test::fake().secrets();
+    let kept = keyring.load(ProfileId::first().as_str()).unwrap().unwrap();
+    assert_eq!(
+        (kept.username.as_str(), kept.password.expose()),
+        ("alice", PASSWORD)
+    );
+    assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
+
+    // A new service, whose gateway takes a new login; the saved password
+    // is the one from before.
+    let scene = Scene::new(Some(&settings), "");
+    let (code, lines, _) = drive(&scene, answering(&[CODE]));
+    assert_eq!((code, lines.len()), (0, 2), "{lines:?}");
+    assert!(lines[0].contains(r#""kind":"code""#), "{lines:?}");
+    assert!(lines.iter().all(|line| !line.contains(PASSWORD)));
 }

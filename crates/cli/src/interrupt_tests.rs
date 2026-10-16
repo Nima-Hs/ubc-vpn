@@ -200,6 +200,7 @@ fn start_typing_the_username(scene: &Scene, steps: &Watching) -> (bool, bool) {
     let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
     let accepted = start(
         &platform,
+        None,
         &engines,
         &mut typist,
         &cancel,
@@ -359,6 +360,7 @@ fn the_request_is_marked_as_sent_before_it_leaves() {
         let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
         let accepted = start(
             &platform,
+            None,
             &engines,
             &mut typist,
             &cancel,

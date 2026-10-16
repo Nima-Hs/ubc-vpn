@@ -493,14 +493,14 @@ fn a_new_username_from_a_connect_forgets_the_old_ones_password() {
     let machine = Machine::new();
     let dir = machine.root.join("settings");
     crate::tests::settings_folder(&dir);
-    crate::settings::remember_username(&dir, None, Some("user@app")).unwrap();
+    crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("user@app")).unwrap();
     save_password(&ProfileId::first(), "user@app");
-    crate::settings::remember_username(&dir, None, Some("user@app")).unwrap();
+    crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("user@app")).unwrap();
     assert!(
         has_password(&ProfileId::first()),
         "the same username forgot it"
     );
-    crate::settings::remember_username(&dir, None, Some("other@app")).unwrap();
+    crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("other@app")).unwrap();
     assert!(!has_password(&ProfileId::first()), "a new username kept it");
 }
 

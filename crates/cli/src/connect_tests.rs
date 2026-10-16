@@ -31,7 +31,7 @@ pub(crate) const ROUTES: &str =
 #[derive(Default)]
 pub(crate) struct Typist {
     answers: VecDeque<Option<&'static str>>,
-    asked: Vec<PromptKind>,
+    pub(crate) asked: Vec<PromptKind>,
     unusable: Option<String>,
     /// Whether a `None` answer is Ctrl-C rather than giving up.
     interrupted: bool,
@@ -131,12 +131,22 @@ impl Scene {
         typist: &mut dyn Ask,
         progress: &Progress,
     ) -> (Ended, String, String) {
+        self.connect_as(None, typist, progress)
+    }
+
+    /// `connect --profile <profile>`, or with the active profile for `None`.
+    pub(crate) fn connect_as(
+        &self,
+        profile: Option<&ubc_vpn_core::profiles::ProfileId>,
+        typist: &mut dyn Ask,
+        progress: &Progress,
+    ) -> (Ended, String, String) {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
         let engines = |_: &Policy| Ok(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let limits = brief();
         let ended = connect(
-            &platform, &engines, typist, progress, limits, &mut out, &mut err,
+            &platform, profile, &engines, typist, progress, limits, &mut out, &mut err,
         );
         let text = |bytes| String::from_utf8(bytes).unwrap();
         (ended, text(out), text(err))
@@ -329,6 +339,7 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
         let limits = brief();
         let ended = connect(
             &platform,
+            None,
             &none,
             &mut typist,
             &unwatched,
@@ -606,7 +617,7 @@ fn the_logins_lines_follow_the_connect_request() {
 
 /// A scene whose service takes a new login after a log-off, with these
 /// settings saved.
-fn returning(settings: &str) -> Scene {
+pub(crate) fn returning(settings: &str) -> Scene {
     let mut scene = Scene::new(Some(settings), "");
     scene.service = None;
     scene.service = Some(
@@ -618,7 +629,7 @@ fn returning(settings: &str) -> Scene {
 }
 
 /// The settings file, byte for byte.
-fn settings_text(scene: &Scene) -> String {
+pub(crate) fn settings_text(scene: &Scene) -> String {
     std::fs::read_to_string(scene.rig.root.join("settings/settings.json")).unwrap()
 }
 
@@ -683,24 +694,24 @@ fn no_username_is_kept_from_a_connect_that_did_not_start() {
     assert_eq!(saved(&scene), before);
 }
 
-// A saved username the gateway refuses is forgotten, and nothing else is:
-// the next connect asks for it. Until it can be forgotten on purpose, that
-// is how a wrong one is put right.
+// A refused password keeps the saved username: the gateway does not say
+// which answer it refused, and the user can change the username in the
+// app. The next connect asks only for the password and the code. (A
+// username refused as one is forgotten: see
+// `a_refused_username_is_to_be_checked_and_is_forgotten`.)
 #[test]
-fn a_saved_username_that_is_refused_is_asked_for_next_time() {
+fn a_refused_password_keeps_the_saved_username() {
     let scene = returning(&format!(
         r#"{{"username":"alice","theme":"dark",{ROUTES}}}"#
     ));
-    let mut expected = saved(&scene);
+    let before = settings_text(&scene);
     let mut typist = Typist::typing(&[Some("wrong-password-0000"), Some(CODE)]);
     assert_eq!(scene.connect(&mut typist).0, LOGIN_REFUSED);
-    expected.as_object_mut().unwrap().remove("username");
-    assert_eq!(saved(&scene), expected);
+    assert_eq!(settings_text(&scene), before);
 
-    let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD), Some(CODE)]);
+    let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
     assert_eq!(scene.connect(&mut typist).0, 0);
-    let asked = [PromptKind::Username, PromptKind::Password, PromptKind::Code];
-    assert_eq!(typist.asked, asked);
+    assert_eq!(typist.asked, [PromptKind::Password, PromptKind::Code]);
     assert_eq!(saved(&scene)["username"], "alice");
 
     // Any other failure leaves a saved username where it is.

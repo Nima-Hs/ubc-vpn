@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ubc_vpn_core::profiles::ProfileId;
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode};
 use ubc_vpn_core::settings_cli::{
     LiveRoutes, ResetReply, RouteProblemCode, RoutesReply, SettingsFailure, SettingsFailureCode,
@@ -875,13 +876,16 @@ fn a_username_that_would_not_fit_beside_the_routes_is_not_saved() {
     assert!(fitting.is_some(), "some size can be shown");
     let before = std::fs::read_to_string(machine.settings_file()).unwrap();
     let long = "u".repeat(200);
-    let refused = remember_username(&dir, None, Some(&long));
+    let refused = remember_username(&dir, None, &ProfileId::first(), Some(&long));
     assert_eq!(refused, Err(SettingsFailureCode::BadInput));
     let untouched = std::fs::read_to_string(machine.settings_file()).unwrap();
     assert_eq!(untouched, before);
     assert_eq!(machine.run(Command::Get, "").0, 0);
     // Forgetting never makes a file longer, so it always goes through.
-    assert_eq!(remember_username(&dir, None, None), Ok(()));
+    assert_eq!(
+        remember_username(&dir, None, &ProfileId::first(), None),
+        Ok(())
+    );
 }
 
 // Security rule: the settings folder is the user's alone. One this program

@@ -7,12 +7,17 @@
 //! checked first, so that a connect which could not succeed asks nothing and
 //! sends no MFA request.
 //!
-//! A username the user typed is saved in their settings once the service
-//! has accepted a connect made with it, so it is not asked for again. A
-//! saved username that the gateway refuses is removed, so the next connect
-//! asks for it: until there is a way to forget it on purpose, that is how a
-//! wrong one is corrected. Nothing is saved after a login that failed or
-//! was given up.
+//! A connect uses the active profile, or the one `--profile` names: its
+//! username, its routes, and its saved password when it saves one (see
+//! `passwords.rs` for when one is sent, and what a refusal does to it).
+//!
+//! A username the user typed is saved in the profile once the service has
+//! accepted a connect made with it, so it is not asked for again, and so is
+//! a typed password when the profile saves it. A saved username that the
+//! gateway refuses as a username is removed, with its saved password, so
+//! the next connect asks for it. A refused password keeps the username: the
+//! user can change it in the app. Nothing is saved after a login that
+//! failed or was given up.
 //!
 //! The password, the one-time code and the cookie are [`Secret`]s. They are
 //! never printed or put in a message, they are registered with the engine's
@@ -24,6 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::profiles::{Profile, ProfileId};
 use ubc_vpn_core::protocol::CERTIFICATE_CHANGED;
 use ubc_vpn_core::protocol::LogLevel as LineLevel;
 use ubc_vpn_core::protocol::{
@@ -31,7 +37,6 @@ use ubc_vpn_core::protocol::{
     RequestBody, ResponseBody,
 };
 use ubc_vpn_core::redact::{REDACTED, Secret};
-use ubc_vpn_core::settings::Settings;
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::{
@@ -43,7 +48,7 @@ use std::time::Instant;
 
 use crate::client::{Client, ClientError, Limits};
 use crate::interrupt::{Progress, Steps};
-use crate::{FAILED, clean, describe, explain, say, settings};
+use crate::{FAILED, clean, describe, explain, passwords, say, settings};
 
 /// The VPN is connected, or a connect or disconnect is in progress.
 pub const BUSY: u8 = 7;
@@ -186,11 +191,14 @@ fn busy() -> Stop {
     }
 }
 
-/// Runs `connect` and says how it ended. `progress` is told when the
-/// connect request goes to the service, and is asked whether a request to
-/// stop has come.
+/// Runs `connect` with `profile`, or the active profile when that is
+/// `None`, and says how it ended. `progress` is told when the connect
+/// request goes to the service, and is asked whether a request to stop has
+/// come.
+#[allow(clippy::too_many_arguments)]
 pub fn connect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    profile: Option<&ProfileId>,
     engines: Engines,
     ask: &mut dyn Ask,
     progress: &Progress,
@@ -200,6 +208,7 @@ pub fn connect(
 ) -> Ended {
     let started = start(
         platform,
+        profile,
         engines,
         ask,
         &Cancel::new(),
@@ -293,8 +302,10 @@ fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
 /// is asked just before the request would go to the service, and the
 /// request goes only if it says so; it is told as soon as the answer
 /// comes; and it says whether the user has stopped the command.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    profile: Option<&ProfileId>,
     engines: Engines,
     ask: &mut dyn Ask,
     cancel: &Cancel,
@@ -314,9 +325,11 @@ pub(crate) fn start(
     let gateway = Gateway::from_policy(&policy).map_err(|_| internal(no_policy))?;
 
     let engine = engines(&policy).map_err(|why| internal(&why))?;
-    let saved = saved(&platform)?;
+    let dir = platform.paths.settings_dir.as_path();
+    let profile = chosen(dir, profile)?;
+    let id = &profile.id;
     // The routes come from the user's settings and from nowhere else.
-    if let Err(why) = saved.routes.check(policy.allowed_routes.as_deref()) {
+    if let Err(why) = profile.routes.check(policy.allowed_routes.as_deref()) {
         // The reason can quote the settings file. It does so with every
         // control character written out as an escape, which a test checks.
         let message = format!("The saved routes cannot be used: {why}. Change them in the app.");
@@ -339,10 +352,16 @@ pub(crate) fn start(
     }
 
     let (mut typed, mut said) = (None, Vec::new());
-    let name = saved.username.as_deref();
+    let name = profile.username.as_deref();
+    // Looked for only now, with nothing left to stop the login first.
+    let keyring = passwords::usable(dir, &profile, err);
+    let saved_password = keyring.password;
+    let mut answers = Answers::default();
     let asked = Asked {
         username: name,
+        password: saved_password.as_ref(),
         typed: &mut typed,
+        answers: &mut answers,
         said: &mut said,
     };
     let logged_in = login(&*engine, &gateway, asked, ask, cancel, err);
@@ -366,12 +385,22 @@ pub(crate) fn start(
                 LoginErrorCode::Cancelled => hand_over(&mut client, &[], outcome),
                 _ => hand_over(&mut client, &said, outcome),
             }
-            // The gateway does not say which answer it refused. A saved
-            // username may be the one, and nothing else lets the user
-            // change it, so it is forgotten and asked for next time.
-            let refused = [LoginErrorCode::WrongPassword, LoginErrorCode::CheckUsername];
-            if refused.contains(&stop.code) && name.is_some() {
-                remember(&platform, &policy, None, err);
+            match stop.code {
+                // A saved password that was sent and refused is never sent
+                // again as it is (see `passwords.rs`). The username stays:
+                // the gateway does not say which answer it refused.
+                LoginErrorCode::WrongPassword => {
+                    if let Some(sent) = saved_password.as_ref().filter(|_| answers.sent_saved) {
+                        let _ = passwords::refused(dir, id, sent, answers.code_entered);
+                    }
+                }
+                // Only the username can have been refused. A saved one is
+                // forgotten, and its saved password with it, and asked for
+                // next time.
+                LoginErrorCode::CheckUsername if name.is_some() => {
+                    remember(dir, &policy, id, None, err);
+                }
+                _ => {}
             }
             return Err(stop);
         }
@@ -380,7 +409,7 @@ pub(crate) fn start(
     let params = ConnectParams {
         cookie,
         gateway_addr,
-        routes: saved.routes,
+        routes: profile.routes.clone(),
     };
     // The last moment a cancel can still stop the connect. A login that was
     // cancelled too late to stop still yields a session; it is thrown away
@@ -403,20 +432,37 @@ pub(crate) fn start(
     hand_over(&mut client, &said, outcome);
     asked.map_err(stop)?;
     // Only now, with the login good and the connect accepted, is a username
-    // the user typed worth keeping. Not if the user has stopped the
-    // command: it is being undone, and the settings stay as they were.
-    if let Some(typed) = typed.filter(|_| !steps.stopped()) {
-        remember(&platform, &policy, Some(typed.expose()), err);
+    // or a password the user typed worth keeping. Not if the user has
+    // stopped the command: it is being undone, and the settings and the
+    // keyring stay as they were.
+    if steps.stopped() {
+        return Ok(client);
+    }
+    if let Some(typed) = &typed {
+        remember(dir, &policy, id, Some(typed.expose()), err);
+    }
+    // The username the login was made with, whichever answered.
+    let used = typed.as_ref().map(Secret::expose).or(name);
+    if let (Some(password), Some(username)) = (&answers.typed_password, used)
+        && keyring.may_save
+    {
+        passwords::keep(dir, id, username, password, err);
     }
     Ok(client)
 }
 
-/// Saves `username` in the user's settings, or forgets the saved one. A
-/// connect never fails over this: the user is told, and is asked for the
-/// username again next time. A name too odd to keep is quietly not kept.
-fn remember(platform: &Platform, policy: &Policy, username: Option<&str>, err: &mut dyn Write) {
-    let dir = &platform.paths.settings_dir;
-    let kept = settings::remember_username(dir, Some(policy), username);
+/// Saves `username` in profile `id`, or forgets the saved one and the
+/// password saved with it. A connect never fails over this: the user is
+/// told, and is asked for the username again next time. A name too odd to
+/// keep is quietly not kept.
+fn remember(
+    dir: &std::path::Path,
+    policy: &Policy,
+    id: &ProfileId,
+    username: Option<&str>,
+    err: &mut dyn Write,
+) {
+    let kept = settings::remember_username(dir, Some(policy), id, username);
     if kept.is_err_and(|why| why != SettingsFailureCode::BadInput) {
         let _ = writeln!(
             err,
@@ -425,19 +471,23 @@ fn remember(platform: &Platform, policy: &Policy, username: Option<&str>, err: &
     }
 }
 
-/// The user's settings, or the defaults when none are saved.
-fn saved(platform: &Platform) -> Result<Settings, Stop> {
-    let dir = &platform.paths.settings_dir;
+/// The profile to connect with: the one `which` names, or the active one.
+/// From the user's settings, or the defaults when none are saved.
+fn chosen(dir: &std::path::Path, which: Option<&ProfileId>) -> Result<Profile, Stop> {
     let unreadable = |_| {
         let unsafe_folder = settings::folder_problem(dir);
         let why = unsafe_folder.unwrap_or_else(|| "The settings file cannot be read.".to_string());
         failed(LoginErrorCode::Internal, &why)
     };
-    let text = settings::stored(dir).map_err(unreadable)?;
-    match text {
-        Some(text) => settings::understood(&text).map_err(unreadable),
-        None => Ok(Settings::default()),
-    }
+    let profiles = settings::read_profiles(dir).map_err(unreadable)?.profiles;
+    let Some(id) = which else {
+        return Ok(profiles.active().clone());
+    };
+    let unknown = "No profile has that id. `ubc-vpn profiles list --json` shows them.";
+    let profile = profiles
+        .profile(id)
+        .map_err(|_| failed(LoginErrorCode::Internal, unknown));
+    profile.cloned()
 }
 
 /// Gives the service what the login wrote, for its log: its lines, each at
@@ -494,16 +544,33 @@ fn word(code: &LoginErrorCode) -> String {
 struct Asked<'a> {
     /// The saved username, which answers that question for the user.
     username: Option<&'a str>,
+    /// The saved password that may be sent, which answers that question.
+    password: Option<&'a Secret>,
     /// A username the user was asked for.
     typed: &'a mut Option<Secret>,
+    /// How the password and the codes were answered.
+    answers: &'a mut Answers,
     /// The lines the login wrote, each with its level, cleaned as a printed
     /// line is.
     said: &'a mut Vec<(LineLevel, String)>,
 }
 
-/// Logs in, asking the user what the gateway asks. A saved username answers
-/// the question for it; everything else is asked, and nothing is asked twice
-/// (the engine's [`Prompts`] sees to that).
+/// How a login's password and codes were answered.
+#[derive(Default)]
+struct Answers {
+    /// Whether the saved password was sent.
+    sent_saved: bool,
+    /// The password the user typed, if they were asked for it.
+    typed_password: Option<Secret>,
+    /// Whether a one-time code was entered: then a refusal may have been
+    /// the code's, not the password's.
+    code_entered: bool,
+}
+
+/// Logs in, asking the user what the gateway asks. A saved username and a
+/// saved password answer their questions for the user; everything else is
+/// asked, and nothing is asked twice (the engine's [`Prompts`] sees to
+/// that, so a saved password is sent at most once in a login).
 fn login(
     engine: &dyn LoginEngine,
     gateway: &Gateway,
@@ -514,7 +581,9 @@ fn login(
 ) -> Result<Session, Stop> {
     let Asked {
         username,
+        password,
         typed,
+        answers,
         said,
     } = asked;
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -530,6 +599,21 @@ fn login(
             (PromptKind::Username, None) => {
                 *typed = ask.ask(prompt);
                 typed.clone()
+            }
+            (PromptKind::Password, _) => match password {
+                Some(saved) => {
+                    answers.sent_saved = true;
+                    Some(saved.clone())
+                }
+                None => {
+                    answers.typed_password = ask.ask(prompt);
+                    answers.typed_password.clone()
+                }
+            },
+            (PromptKind::Code, _) => {
+                let code = ask.ask(prompt);
+                answers.code_entered |= code.is_some();
+                code
             }
             _ => ask.ask(prompt),
         };

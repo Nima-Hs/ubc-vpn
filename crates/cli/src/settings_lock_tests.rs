@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
+use ubc_vpn_core::profiles::ProfileId;
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_platform::fake::Fake;
 
@@ -135,7 +136,7 @@ fn a_reset_and_a_username_wait_too() {
     waits_its_turn(&folder, || {
         let (dir, (done, ended)) = (folder.dir(), channel());
         std::thread::spawn(move || {
-            let saved = remember_username(&dir, None, Some("jdoe"));
+            let saved = remember_username(&dir, None, &ProfileId::first(), Some("jdoe"));
             let _ = done.send((u8::from(saved.is_err()), format!("{saved:?}")));
         });
         ended
@@ -157,7 +158,10 @@ fn every_writer_holds_the_lock_while_it_writes() {
     DURING_A_SAVE.with(|during| *during.borrow_mut() = Some(Box::new(look)));
 
     assert_eq!(folder.run(Command::SetRoutes, ROUTES).0, 0);
-    assert_eq!(remember_username(&folder.dir(), None, Some("jdoe")), Ok(()));
+    assert_eq!(
+        remember_username(&folder.dir(), None, &ProfileId::first(), Some("jdoe")),
+        Ok(())
+    );
     assert_eq!(folder.run(Command::Reset { force: true }, "").0, 0);
 
     DURING_A_SAVE.with(|during| *during.borrow_mut() = None);

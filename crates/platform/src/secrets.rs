@@ -350,6 +350,8 @@ struct FakeStore {
     unusable: bool,
     /// Writes and deletes of these accounts fail.
     failing: std::collections::BTreeSet<String>,
+    /// Deletes of these accounts fail; writes work.
+    failing_deletes: std::collections::BTreeSet<String>,
     /// Reading the index takes a moment, so that two changes at once
     /// overlap.
     slow_index: bool,
@@ -373,6 +375,16 @@ impl FakeSecrets {
         match failing {
             true => store.failing.insert(account.to_string()),
             false => store.failing.remove(account),
+        };
+    }
+
+    /// Makes deleting `account` fail, or work again, while writing it
+    /// still works.
+    pub fn fail_deletes_of(&self, account: &str, failing: bool) {
+        let mut store = crate::lock(&self.0);
+        match failing {
+            true => store.failing_deletes.insert(account.to_string()),
+            false => store.failing_deletes.remove(account),
         };
     }
 
@@ -441,7 +453,7 @@ impl Store for FakeSecrets {
         if store.unusable {
             return Err(Error::Unsupported);
         }
-        if store.failing.contains(account) {
+        if store.failing.contains(account) || store.failing_deletes.contains(account) {
             return Err(failed());
         }
         store.entries.remove(account);
