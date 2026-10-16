@@ -84,6 +84,7 @@ export function describeProfilesError(error: ProfilesError, doing: "read" | "cha
         case "last_profile":
         case "bad_username":
         case "id_taken":
+        case "keyring_not_cleared":
             // Not something this screen sends yet; said plainly if it happens.
             return "The change was not made. Try again.";
     }

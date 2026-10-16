@@ -310,6 +310,7 @@ const PROFILE_FAILURE_CODES: Record<ProfileFailureCode, true> = {
     last_profile: true,
     bad_username: true,
     id_taken: true,
+    keyring_not_cleared: true,
 };
 
 const START_MODES: Record<StartMode, true> = { off: true, window: true, tray: true };
