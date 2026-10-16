@@ -89,6 +89,18 @@ fn the_service_and_the_client_work_together() {
     let answered = bridge.until(r#""id":1"#);
     assert!(answered.contains(&state("disconnected")), "{answered}");
 
+    // Security rule: no test touches the keyring of the machine it runs on.
+    // From here a connect saves a username, and changing a saved username
+    // forgets the password saved for it, in the keyring. A debug build
+    // keeps that in this run's folder; a release build cannot be pointed
+    // away from the OS keyring, so the rest runs on CI only, whose machines
+    // are thrown away. Without it there is no `RAN: system` line, so the
+    // workflow cannot take this for a run.
+    if !cfg!(debug_assertions) && std::env::var_os("CI").is_none() {
+        eprintln!("SKIPPED: system: a release build would use the OS keyring; CI only");
+        return;
+    }
+
     // Connect and disconnect, twice: the pretend gateway takes a new login
     // after a log-off. The username is asked for the first time only: once
     // a connect made with it was accepted, it is remembered.

@@ -179,6 +179,10 @@ pub enum ResetReply {
         /// The name, inside the settings folder, of the file the old
         /// settings were moved to.
         kept: String,
+        /// Whether every password this product saved was removed from the
+        /// OS keyring. When `false` the keyring could not be used for it,
+        /// and saved passwords may still be there.
+        passwords_forgotten: bool,
     },
     /// Nothing was changed. Either there is no settings file, or it can be
     /// read and the command was not told to reset it all the same.
@@ -583,16 +587,30 @@ mod tests {
 
     #[test]
     fn reset_replies_have_a_stable_wire_format() {
-        let kept = "settings.json.damaged-1".to_string();
+        let kept = || "settings.json.damaged-1".to_string();
         let lines = [
             (
-                ResetReply::Reset { kept },
-                "{\"type\":\"reset\",\"kept\":\"settings.json.damaged-1\"}\n",
+                ResetReply::Reset {
+                    kept: kept(),
+                    passwords_forgotten: true,
+                },
+                "{\"type\":\"reset\",\"kept\":\"settings.json.damaged-1\",\"passwords_forgotten\":true}\n",
+            ),
+            (
+                ResetReply::Reset {
+                    kept: kept(),
+                    passwords_forgotten: false,
+                },
+                "{\"type\":\"reset\",\"kept\":\"settings.json.damaged-1\",\"passwords_forgotten\":false}\n",
             ),
             (ResetReply::NotNeeded, "{\"type\":\"not_needed\"}\n"),
         ];
-        // A reply always says where the old file went.
-        assert!(decode::<ResetReply>("{\"type\":\"reset\",\"kept\":null}").is_err());
+        // A reply always says where the old file went, and whether saved
+        // passwords may be left.
+        let no_kept = "{\"type\":\"reset\",\"kept\":null,\"passwords_forgotten\":true}";
+        assert!(decode::<ResetReply>(no_kept).is_err());
+        let no_word = "{\"type\":\"reset\",\"kept\":\"settings.json.damaged-1\"}";
+        assert!(decode::<ResetReply>(no_word).is_err());
         assert!(decode::<ResetReply>("{\"type\":\"reset\"}").is_err());
         for (reply, line) in lines {
             assert_eq!(encode(&reply).unwrap(), line);

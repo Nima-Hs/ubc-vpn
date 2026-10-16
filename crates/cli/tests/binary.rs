@@ -331,7 +331,9 @@ fn a_test_run_talks_to_the_channel_it_is_given() {
     });
     let settings = std::env::temp_dir().join(format!("ubc-vpn-cli-guard-{}", std::process::id()));
     std::fs::create_dir_all(&settings).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"))
+    // From the helper, for its keyring of this run's; the channel it names
+    // is replaced by the one served here.
+    let mut child = program()
         .args(["settings", "set-routes", "--json"])
         .env(TEST_CHANNEL, &channel)
         .env("USERPROFILE", &settings)

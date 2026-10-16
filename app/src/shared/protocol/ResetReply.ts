@@ -8,4 +8,10 @@ export type ResetReply = { "type": "reset",
  * The name, inside the settings folder, of the file the old
  * settings were moved to.
  */
-kept: string, } | { "type": "not_needed" };
+kept: string, 
+/**
+ * Whether every password this product saved was removed from the
+ * OS keyring. When `false` the keyring could not be used for it,
+ * and saved passwords may still be there.
+ */
+passwords_forgotten: boolean, } | { "type": "not_needed" };

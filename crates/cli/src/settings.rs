@@ -309,9 +309,12 @@ fn reset(
     // this product saved goes, found through the keyring's own index and
     // not through the old file's ids, which may be unreadable. The fresh
     // profile has an id of its own, which no password was saved under.
+    // Whether that worked is told, not hidden: a password left behind is
+    // the user's to remove by hand.
     let fresh = |dir: &Path| {
-        let _ = keys::keyring().forget_all();
-        save(dir, &Profiles::fresh(new_id()).to_text())
+        let forgotten = keys::keyring().forget_all().is_ok();
+        save(dir, &Profiles::fresh(new_id()).to_text())?;
+        Ok(forgotten)
     };
     reset_with(dir, policy, force, &keep_aside, &fresh)
 }
@@ -343,13 +346,14 @@ pub(crate) fn new_id() -> ProfileId {
 
 /// [`reset`], with the two things it does to the files given by the caller:
 /// `aside` moves the settings file away and returns its new name, and
-/// `fresh` writes the new one.
+/// `fresh` writes the new one and says whether the saved passwords were
+/// forgotten.
 pub(crate) fn reset_with(
     dir: &Path,
     policy: Option<&Policy>,
     force: bool,
     aside: &dyn Fn(&Path) -> io::Result<String>,
-    fresh: &dyn Fn(&Path) -> io::Result<()>,
+    fresh: &dyn Fn(&Path) -> io::Result<bool>,
 ) -> Result<ResetReply, SettingsFailureCode> {
     // A folder others can write to is not touched, to reset it either.
     if folder_problem(dir).is_some() {
@@ -380,8 +384,11 @@ pub(crate) fn reset_with(
     }
     let unwritable = |_| SettingsFailureCode::Unwritable;
     let kept = aside(dir).map_err(unwritable)?;
-    fresh(dir).map_err(unwritable)?;
-    Ok(ResetReply::Reset { kept })
+    let passwords_forgotten = fresh(dir).map_err(unwritable)?;
+    Ok(ResetReply::Reset {
+        kept,
+        passwords_forgotten,
+    })
 }
 
 /// The names a reset keeps old settings files under, lowest first.

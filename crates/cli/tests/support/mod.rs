@@ -157,8 +157,9 @@ impl Home {
             ],
         };
         // Saved passwords in a folder of this run's, never the user's
-        // keyring. Only a debug build of the client reads this; the tests
-        // here run debug builds.
+        // keyring. Only a debug build of the client reads this. A release
+        // build ignores it and uses the OS keyring, so a test that would
+        // reach the keyring that way runs it on CI only.
         variables.push(("UBC_VPN_TEST_KEYRING", at("keyring")));
         // Not folders: names. Nothing should read them; if anything does,
         // a test that looks for this name finds it.

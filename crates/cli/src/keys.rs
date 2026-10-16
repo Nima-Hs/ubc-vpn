@@ -37,8 +37,16 @@ pub(crate) fn dev_mode() {
 }
 
 /// The service name dev mode keeps its passwords under.
-#[cfg(not(test))]
 const DEV_SERVICE: &str = "io.github.nima-hs.ubc-vpn.dev";
+
+/// The service name in the OS keyring that saved passwords are kept under:
+/// the installed product's, or in dev mode one of its own.
+fn service(dev: bool) -> &'static str {
+    match dev {
+        true => DEV_SERVICE,
+        false => ubc_vpn_platform::secrets::SERVICE,
+    }
+}
 
 /// The keyring this program keeps saved passwords in.
 pub(crate) fn keyring() -> Arc<dyn Secrets> {
@@ -57,10 +65,7 @@ pub(crate) fn keyring() -> Arc<dyn Secrets> {
             let slow = std::env::var_os(SLOW_KEYRING).is_some();
             return secrets::file_backed(std::path::Path::new(&dir), slow);
         }
-        match DEV.load(std::sync::atomic::Ordering::SeqCst) {
-            true => secrets::under(DEV_SERVICE),
-            false => secrets::native(),
-        }
+        secrets::under(service(DEV.load(std::sync::atomic::Ordering::SeqCst)))
     }
 }
 
@@ -76,5 +81,15 @@ pub(crate) mod test {
     /// The keyring this thread's test sees, to plant entries in and look at.
     pub(crate) fn fake() -> FakeSecrets {
         FAKE.with(Clone::clone)
+    }
+
+    // Security rule: dev mode keeps its passwords apart from the installed
+    // product's, so it can never read or forget theirs.
+    #[test]
+    fn dev_mode_has_a_keyring_service_of_its_own() {
+        use ubc_vpn_platform::secrets::SERVICE;
+        assert_eq!(super::service(false), SERVICE);
+        assert_eq!(super::service(true), "io.github.nima-hs.ubc-vpn.dev");
+        assert_ne!(super::service(true), SERVICE);
     }
 }

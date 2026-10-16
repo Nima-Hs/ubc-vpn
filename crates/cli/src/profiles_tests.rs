@@ -90,6 +90,29 @@ impl Machine {
         decode::<ProfileFailure>(&line).unwrap().error
     }
 
+    /// Runs `settings reset --json`, which must reset; returns whether the
+    /// saved passwords were forgotten and where the old file went.
+    fn reset(&self) -> (bool, String) {
+        let platform = || Ok(Fake::new().platform(&self.root));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let status = crate::settings::run(
+            crate::settings::Command::Reset { force: false },
+            &platform,
+            &mut "".as_bytes(),
+            &mut out,
+            &mut err,
+        );
+        let line = String::from_utf8(out).unwrap();
+        assert_eq!(status, 0, "{line}");
+        match decode::<ResetReply>(&line).unwrap() {
+            ResetReply::Reset {
+                kept,
+                passwords_forgotten,
+            } => (passwords_forgotten, kept),
+            ResetReply::NotNeeded => panic!("{line}"),
+        }
+    }
+
     /// Makes a profile and returns its id.
     fn create(&self, name: &str, username: &str) -> ProfileId {
         let input = format!(r#"{{"name":"{name}","username":"{username}","save_password":true}}"#);
@@ -218,6 +241,58 @@ fn a_refused_change_changes_nothing() {
     }
 }
 
+// Security rule: a password is never taken in through a profiles command,
+// so none can end up in the settings file. Every change command's own
+// input with a password added is bad input, and changes neither the file
+// nor the keyring.
+#[test]
+fn no_change_command_takes_a_password() {
+    let machine = Machine::new();
+    let lab = machine.create("Lab", "user.lab@app");
+    save_password(&lab, "user.lab@app");
+    let id = format!(r#""id":"{}""#, lab.as_str());
+    // In an order in which each, without the password, is taken.
+    let inputs = [
+        (
+            Command::Create,
+            r#""name":"Home","username":"user@app""#.to_string(),
+        ),
+        (Command::Rename, format!(r#"{id},"name":"Lab 2""#)),
+        (
+            Command::SetRoutes,
+            format!(r#"{id},"subnets":["10.255.0.0/16"],"dns_domains":[]"#),
+        ),
+        (
+            Command::SetStartup,
+            r#""start":"tray","auto_connect":true"#.to_string(),
+        ),
+        (Command::Switch, id.clone()),
+        (Command::Update, format!(r#"{id},"save_password":false"#)),
+        (Command::ForgetPassword, id.clone()),
+        (Command::Delete, id.clone()),
+    ];
+    for (command, fields) in inputs {
+        // A saved password each time, which a change taken would forget.
+        save_password(&lab, "user.lab@app");
+        let before = std::fs::read_to_string(machine.settings_file()).unwrap();
+        let saved = keyring().entries();
+        let input = format!(r#"{{{fields},"password":"made-up-pass-0002"}}"#);
+        let (status, line) = machine.run(command, &input);
+        assert_eq!(
+            (status, line.as_str()),
+            (1, "{\"error\":\"bad_input\"}\n"),
+            "{input}"
+        );
+        let now = std::fs::read_to_string(machine.settings_file()).unwrap();
+        assert_eq!(now, before, "{input} changed the file");
+        assert!(!now.contains("made-up-pass"), "{input}");
+        assert_eq!(keyring().entries(), saved, "{input} changed the keyring");
+        // The same input without the password is the command's own.
+        let (status, line) = machine.run(command, &format!("{{{fields}}}"));
+        assert_eq!(status, 0, "{fields}: {line}");
+    }
+}
+
 // Security rule: a profile's saved password is forgotten when it is
 // deleted, when it stops saving it, when its username changes, and when
 // the user asks; a rename keeps it, since the id stays.
@@ -293,25 +368,38 @@ fn a_reset_forgets_every_saved_password() {
     // Left by settings that are gone.
     save_password(&ProfileId::from_random([7; 16]), "gone@app");
     machine.write_settings("not settings at all");
-    let platform = || Ok(Fake::new().platform(&machine.root));
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let status = crate::settings::run(
-        crate::settings::Command::Reset { force: false },
-        &platform,
-        &mut "".as_bytes(),
-        &mut out,
-        &mut err,
+    assert_eq!(
+        machine.reset(),
+        (true, "settings.json.damaged-1".to_string())
     );
-    let line = String::from_utf8(out).unwrap();
-    assert_eq!(status, 0, "{line}");
-    assert!(matches!(
-        decode::<ResetReply>(&line).unwrap(),
-        ResetReply::Reset { .. }
-    ));
     assert_eq!(keyring().entries(), [], "a saved password was kept");
     let fresh = machine.stored();
     assert_eq!(fresh.profiles.len(), 1);
     assert_ne!(fresh.active().id, ProfileId::first());
+}
+
+// A reset whose keyring will not let a saved password go still resets the
+// settings, and says the password may be left, for the user to remove.
+#[test]
+fn a_reset_says_when_saved_passwords_could_not_be_forgotten() {
+    let machine = Machine::new();
+    let lab = machine.create("Lab", "user.lab@app");
+    save_password(&lab, "user.lab@app");
+    keyring().fail_writes_to(lab.as_str(), true);
+    machine.write_settings("not settings at all");
+    let said = machine.reset();
+    keyring().fail_writes_to(lab.as_str(), false);
+    assert_eq!(said, (false, "settings.json.damaged-1".to_string()));
+    assert!(has_password(&lab));
+    assert_ne!(machine.stored().active().id, ProfileId::first());
+
+    // With no keyring at all, it cannot be said that none is left either.
+    save_password(&lab, "user.lab@app");
+    machine.write_settings("not settings at all");
+    keyring().set_unusable(true);
+    let said = machine.reset();
+    keyring().set_unusable(false);
+    assert_eq!(said, (false, "settings.json.damaged-2".to_string()));
 }
 
 // Settings from before profiles keep their routes when first saved, and
@@ -340,34 +428,61 @@ fn version_1_settings_are_kept_when_saved_as_version_2() {
     assert_eq!(view.settings.username.as_deref(), Some("user.ece@app"));
 }
 
-// A username today's rules refuse is cleared when read, said once on
-// standard error, and its saved password forgotten at the next save.
+// Security rule: a username today's rules refuse is cleared when read,
+// said once on standard error, and its saved password forgotten at the
+// next save, whichever command saves.
 #[test]
 fn a_cleaned_username_loses_its_saved_password() {
-    let machine = Machine::new();
-    machine.write_settings(r#"{"username":"user.ece@app\nsudo","save_password":true}"#);
-    save_password(
-        &ProfileId::first(),
-        "user.ece@app\nsudo".split('\n').next().unwrap(),
-    );
-    machine.list();
-    assert!(
-        machine.said.borrow().contains("could not be kept"),
-        "{}",
-        machine.said.borrow()
-    );
-    assert!(
-        has_password(&ProfileId::first()),
-        "a list changed the keyring"
-    );
-    machine.changed(
-        Command::SetStartup,
-        r#"{"start":"window","auto_connect":false}"#,
-    );
-    assert!(!has_password(&ProfileId::first()));
-    assert_eq!(machine.stored().active().username, None);
-    machine.list();
-    assert_eq!(*machine.said.borrow(), "", "said again once saved");
+    let through_profiles = |machine: &Machine| {
+        machine.changed(
+            Command::SetStartup,
+            r#"{"start":"window","auto_connect":false}"#,
+        );
+    };
+    let through_settings = |machine: &Machine| {
+        let platform = || Ok(Fake::new().platform(&machine.root));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let status = crate::settings::run(
+            crate::settings::Command::SetRoutes,
+            &platform,
+            &mut r#"{"subnets":["10.255.0.0/16"],"dns_domains":[]}"#.as_bytes(),
+            &mut out,
+            &mut err,
+        );
+        let line = String::from_utf8(out).unwrap();
+        assert_eq!(status, 0, "{line}");
+        assert!(
+            matches!(decode(&line).unwrap(), RoutesReply::Ok { .. }),
+            "{line}"
+        );
+    };
+    let saves = [
+        (
+            "settings set-startup",
+            &through_profiles as &dyn Fn(&Machine),
+        ),
+        ("settings set-routes", &through_settings),
+    ];
+    for (name, saving) in saves {
+        let machine = Machine::new();
+        machine.write_settings(r#"{"username":"user.ece@app\nsudo","save_password":true}"#);
+        save_password(&ProfileId::first(), "user.ece@app");
+        machine.list();
+        assert!(
+            machine.said.borrow().contains("could not be kept"),
+            "{}",
+            machine.said.borrow()
+        );
+        assert!(
+            has_password(&ProfileId::first()),
+            "a list changed the keyring"
+        );
+        saving(&machine);
+        assert!(!has_password(&ProfileId::first()), "{name} kept it");
+        assert_eq!(machine.stored().active().username, None, "{name}");
+        machine.list();
+        assert_eq!(*machine.said.borrow(), "", "said again once saved");
+    }
 }
 
 // Security rule: a connect that saves a username the user typed, other

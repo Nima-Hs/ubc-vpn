@@ -1006,7 +1006,10 @@ impl Machine {
 
 fn was_reset(n: usize) -> ResetReply {
     let kept = format!("settings.json.damaged-{n}");
-    ResetReply::Reset { kept }
+    ResetReply::Reset {
+        kept,
+        passwords_forgotten: true,
+    }
 }
 
 // A settings file that cannot be read is the user's dead end without this:
