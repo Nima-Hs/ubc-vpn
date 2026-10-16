@@ -2,6 +2,11 @@
 //! service on the fakes. Tests marked "Security rule" must fail if the rule
 //! they name is removed. Every value is made up.
 
+use std::cell::RefCell;
+use std::path::Path;
+use std::rc::Rc;
+use std::time::Duration;
+
 use ubc_vpn_core::protocol::{ClientKind, ErrorCode, decode};
 use ubc_vpn_core::settings_cli::{LiveRoutes, SettingsFailure, SettingsFailureCode, TunnelReply};
 use ubc_vpn_core::state::{ConnState, TunnelMode};
@@ -9,6 +14,8 @@ use ubc_vpn_core::state::{ConnState, TunnelMode};
 use crate::client::{Client, Limits};
 use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist, settings_text};
 use crate::profiles::{Command, run};
+use crate::settings::DURING_A_SAVE;
+use crate::settings_lock::change_within;
 
 const FULL: &str = r#"{"mode":"full"}"#;
 const SPLIT: &str = r#"{"mode":"split"}"#;
@@ -173,4 +180,55 @@ fn input_that_is_not_a_mode_is_refused() {
         assert_eq!(failure.error, SettingsFailureCode::BadInput, "{typed}");
     }
     assert_eq!(settings_text(&scene), before, "something was saved");
+}
+
+/// Runs `look` with the settings folder in the middle of every save this
+/// thread makes while `run` runs.
+fn during_a_save<T>(look: impl Fn(&Path) + 'static, run: impl FnOnce() -> T) -> T {
+    DURING_A_SAVE.with(|during| *during.borrow_mut() = Some(Box::new(look)));
+    let ran = run();
+    DURING_A_SAVE.with(|during| *during.borrow_mut() = None);
+    ran
+}
+
+// Security rule: the mode is saved under the settings lock, from the read
+// to the save, so it cannot undo a change made at the same time.
+#[test]
+fn the_mode_is_saved_under_the_settings_lock() {
+    let scene = Scene::usual();
+    let found = Rc::new(RefCell::new(Vec::new()));
+    let looked = found.clone();
+    let look = move |dir: &Path| {
+        let tried = change_within(dir, Duration::from_millis(100));
+        looked
+            .borrow_mut()
+            .push(tried.map(|changing| changing.unlocked()));
+    };
+    during_a_save(look, || reply(&scene, FULL));
+    let held = Err(SettingsFailureCode::Unwritable);
+    assert_eq!(*found.borrow(), [held], "the lock was not held");
+    assert_eq!(saved_mode(&scene), "full");
+}
+
+// Security rule: the live connection is switched only once the mode is
+// saved. A save that fails is a failure, and the service is not asked.
+#[test]
+fn a_mode_that_could_not_be_saved_is_not_applied() {
+    let scene = Scene::usual();
+    connect(&scene);
+    let calls = scene.rig.fake.calls();
+    // In the middle of the save, a folder takes the file's name, so the
+    // new file cannot be put in its place.
+    let block = |dir: &Path| {
+        let file = dir.join("settings.json");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("in-the-way"), "").unwrap();
+    };
+    let (status, out) = during_a_save(block, || set_tunnel(&scene, FULL));
+    assert_eq!(status, 1, "{out}");
+    let failure: SettingsFailure = decode(out.trim_end()).unwrap();
+    assert_eq!(failure.error, SettingsFailureCode::Unwritable);
+    assert_eq!(scene.rig.fake.calls(), calls, "the service was asked");
+    assert_eq!(live_mode(&scene), Some(TunnelMode::Split));
 }
