@@ -9,20 +9,21 @@
 // `UBC_VPN_PACKAGED_APP` names its program. The installer workflow does
 // that on a CI runner; an installed app cannot be kept off the screen.
 
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import electronPath from "electron";
-import { launchEnvironment } from "./safe-env";
+import { spawnApp } from "./launch";
+import { isCi } from "./safe-env";
 
 /**
  * Off the screen unless this is CI: a test run on someone's computer must
  * not open windows over their work. See `keepHidden` in `src/main/window.ts`.
  */
-const HIDDEN = process.env.CI ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
+const HIDDEN = isCi(process.env) ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
 
 /** A port nothing is using right now. */
 function freePort(): Promise<number> {
@@ -64,13 +65,11 @@ function launch(build: Build, port: number, env: Record<string, string> = {}): C
         typeof build === "string"
             ? [electronPath as unknown as string, [resolve(build, "main/index.js"), debugging]]
             : [build.program, [debugging]];
-    const child = spawn(program, args, {
+    const child = spawnApp(program, args, {
         stdio: "ignore",
         // Its own profile, never the installed product's folder. A
         // packaged app ignores the variable and uses its own.
-        // Off CI, nothing that could lead it to a real client; see safe-env.ts.
         env: {
-            ...launchEnvironment(process.env),
             ...HIDDEN,
             UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
             ...env,
@@ -139,7 +138,7 @@ test("an unpackaged build in dev mode can be driven by the tests", async () => {
 
 test("the packaged app cannot be debugged from outside", async () => {
     test.skip(
-        PACKAGED_APP === undefined || !process.env.CI,
+        PACKAGED_APP === undefined || !isCi(process.env),
         "only on CI, with UBC_VPN_PACKAGED_APP naming the installed program",
     );
     test.setTimeout(180_000);

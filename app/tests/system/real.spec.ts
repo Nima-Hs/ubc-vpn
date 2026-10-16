@@ -50,7 +50,7 @@ import {
  * Off the screen unless this is CI: a test run on someone's computer must
  * not open windows over their work. See `keepHidden` in `src/main/window.ts`.
  */
-const HIDDEN = process.env.CI ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
+const HIDDEN = process.env.CI === "true" ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
 
 const SERVICE = process.env.UBC_VPN_SYSTEM_SERVICE;
 const CLI = process.env.UBC_VPN_SYSTEM_CLI;
@@ -278,7 +278,7 @@ test.afterAll(async () => {
 test("the app, the client and a dev-mode service work together", async () => {
     // Real programs and a real channel: on a throwaway CI machine only, never
     // on someone's own computer, where a UBC VPN may be installed and in use.
-    if (!process.env.CI) {
+    if (process.env.CI !== "true") {
         tell(
             "SKIPPED: app-system: runs on CI only (CI is not set); it starts real programs and a real channel",
         );

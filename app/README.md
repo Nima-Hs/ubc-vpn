@@ -45,7 +45,7 @@ pnpm icons           # draws the app icon files in build/ again, after the mark 
 
 The end-to-end tests keep the app's window off the screen when run on your own computer, so they do not open windows over your work: they set `UBC_VPN_TEST_HIDDEN=1`, which an app that is not installed honours by never showing its window and making no tray icon, and an installed app ignores. In CI the window and the tray icon are shown, so the few tests about showing, hiding and closing to the tray run there and are skipped locally.
 
-On your own computer they also never reach a real client, the installed service, your settings or your saved password: the apps they launch do not inherit `UBC_VPN_CLI`, `UBC_VPN_DEV` or any `UBC_VPN_SYSTEM_*` variable from your shell ([`tests/e2e/safe-env.ts`](tests/e2e/safe-env.ts)). A test that needs one sets it itself. On CI nothing is removed.
+On your own computer they also never reach a real client, the installed service, your settings or your saved password: the apps they launch do not inherit `UBC_VPN_CLI`, `UBC_VPN_DEV` or any `UBC_VPN_SYSTEM_*` variable from your shell. Every app they start goes through [`tests/e2e/launch.ts`](tests/e2e/launch.ts), which filters the environment ([`tests/e2e/safe-env.ts`](tests/e2e/safe-env.ts)), and a unit test fails if a spec starts one any other way. A test that needs one of those variables sets it itself. Only `CI=true` counts as CI, and there nothing is removed.
 
 The end-to-end test saves a screenshot of every state to `test-results/screens`, or to `SCREENSHOT_DIR` if that is set. On Linux without a display, run it under `xvfb-run`.
 

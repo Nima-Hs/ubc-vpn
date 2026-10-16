@@ -14,22 +14,16 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import {
-    type ElectronApplication,
-    _electron as electron,
-    expect,
-    type Locator,
-    type Page,
-    test,
-} from "@playwright/test";
+import { type ElectronApplication, expect, type Locator, type Page, test } from "@playwright/test";
 import { photographIcons } from "./icon-sheets";
-import { launchEnvironment } from "./safe-env";
+import { launchApp } from "./launch";
+import { isCi } from "./safe-env";
 
 /**
  * Off the screen unless this is CI: a test run on someone's computer must
  * not open windows over their work. See `keepHidden` in `src/main/window.ts`.
  */
-const HIDDEN = process.env.CI ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
+const HIDDEN = isCi(process.env) ? {} : { UBC_VPN_TEST_HIDDEN: "1" };
 /** Whether this run keeps the window off the screen, so showing and hiding it cannot be watched. */
 const offScreen = Object.keys(HIDDEN).length > 0;
 
@@ -69,8 +63,6 @@ const contentsOf = (folder: string): string[] =>
         : ["(no such folder)"];
 const installedFolderBefore = contentsOf(installedFolder);
 const launchEnv = {
-    // Off CI, nothing that could lead an app to a real client; see safe-env.ts.
-    ...launchEnvironment(process.env),
     ...HIDDEN,
     UBC_VPN_DEMO_STEP_MS: "600",
     // Whatever desktop the test machine runs, behave as on one with a tray.
@@ -87,7 +79,7 @@ const problems: string[] = [];
 
 test.beforeAll(async () => {
     mkdirSync(screenshotDir, { recursive: true });
-    app = await electron.launch({
+    app = await launchApp({
         ...launchOptions,
         args: launchArgs(),
         env: { ...launchEnv, UBC_VPN_PROFILE: mainProfile },
@@ -241,7 +233,7 @@ test("a second copy with a profile of its own runs beside the first", async () =
     // file in the profile folder. Were the profile chosen after the lock is
     // taken, both copies would use Electron's own folder, and this second
     // one would find the first one's lock and leave at once.
-    const other = await electron.launch({
+    const other = await launchApp({
         ...launchOptions,
         args: launchArgs(),
         env: { ...launchEnv, UBC_VPN_PROFILE: newProfile() },
@@ -1610,7 +1602,7 @@ test("closing the window keeps the app in the tray", async () => {
 });
 
 test("a test run can keep the window off the screen, and only a test run", async () => {
-    const other = await electron.launch({
+    const other = await launchApp({
         ...launchOptions,
         args: launchArgs(),
         env: { ...launchEnv, UBC_VPN_PROFILE: newProfile(), UBC_VPN_TEST_HIDDEN: "1" },
@@ -1684,7 +1676,7 @@ test("it cannot reach the network, open a window or leave its page", async () =>
 
 test("a built app ignores a dev server address in its environment", async () => {
     await app.close();
-    const other = await electron.launch({
+    const other = await launchApp({
         ...launchOptions,
         args: launchArgs(),
         env: {
@@ -1704,7 +1696,7 @@ test("a built app ignores a dev server address in its environment", async () => 
 });
 
 test("says on every screen that it is in development mode, when it is", async () => {
-    const other = await electron.launch({
+    const other = await launchApp({
         ...launchOptions,
         args: launchArgs(),
         env: { ...launchEnv, UBC_VPN_PROFILE: newProfile(), UBC_VPN_DEV: "1" },
