@@ -227,6 +227,11 @@ pub enum ProfileFailureCode {
     /// Another profile has that id already. The caller makes a new random
     /// id and tries again.
     IdTaken,
+    /// Saving the password was to be turned on, and what the keyring still
+    /// holds for the profile could not be removed first: the keyring cannot
+    /// be used, or would not remove it. Saving stays off, so nothing left
+    /// there is ever sent.
+    KeyringNotCleared,
 }
 
 /// What reading a settings file found that today's rules refuse, and made

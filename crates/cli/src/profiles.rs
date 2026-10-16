@@ -271,8 +271,18 @@ fn apply(
             .map(|()| Made::Profiles),
         Asked::Update(update) => {
             let username = update.username.as_ref().map(|name| name.as_deref());
+            let was_saving = profiles.profile(&update.id).map(|p| p.save_password);
             let password = profiles.update(&update.id, username, update.save_password)?;
             forgets(password, &update.id, forget);
+            // Turned on: whatever the keyring still holds for the profile
+            // goes first. A password refused while the keyring would not
+            // let it go was set aside by turning saving off, and is still
+            // there; it must not be sent once saving is back on. If it
+            // cannot go, saving stays off.
+            if was_saving == Ok(false) && update.save_password == Some(true) {
+                let cleared = keys::keyring().forget(update.id.as_str());
+                cleared.map_err(|_| ProfileFailureCode::KeyringNotCleared)?;
+            }
             Ok(Made::Profiles)
         }
         Asked::Delete(which) => {
