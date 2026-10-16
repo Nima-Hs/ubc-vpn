@@ -342,10 +342,10 @@ impl NetworkEvents for WinEvents {
         Ok(Subscription::new(receiver, ending))
     }
 
-    // The notifications are registered for IPv4 only: `Ipv6Changed` is not
-    // sent yet, so full mode must not be had here until it is.
+    // The notifications are registered for IPv4 and IPv6 alike, and the
+    // worker sends `Ipv6Changed` whenever the IPv6 leak paths change.
     fn reports_ipv6_changes(&self) -> bool {
-        false
+        true
     }
 }
 

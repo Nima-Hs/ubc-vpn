@@ -229,7 +229,7 @@ A chosen subnet may contain the gateway itself; UBC's gateway sits inside a camp
 
 ### Full tunnel
 
-**Where it is available.** Full mode needs the operating system to do it and to report every IPv6 change (`NetworkEvents::reports_ipv6_changes`). No OS does both yet: Windows will once its part (#220) lands. Until then the service refuses full mode, with the reason below.
+**Where it is available.** Full mode needs the operating system to do it and to report every IPv6 change (`NetworkEvents::reports_ipv6_changes`). Only Windows does, for now; on macOS and Linux the service refuses full mode, with the reason below.
 
 Split tunnel is the default and the reason this client exists. A user may instead send everything through the VPN: one global setting, `global.tunnel` in the settings file, `split` or `full`, shared by every profile. The policy file may forbid full mode (`"full_tunnel": "forbidden"`); left out, it is allowed. Full mode is not a route the user chooses: the rules above for routes still apply to the user's own subnets, and full mode is modelled and checked on its own.
 

@@ -1531,6 +1531,8 @@ mod tests {
             // Routes are real: reading the table needs no rights. A device
             // that does not exist is not used.
             assert!(native.routes.capture_physical(gateway).is_ok());
+            // Full mode needs IPv6 changes reported, which Windows does.
+            assert!(native.events.reports_ipv6_changes());
             let routed = native.routes.uses_interface(gateway, "ubc-vpn-no-such0");
             assert_eq!(routed, Verified::No);
             // Split DNS is real: nothing of ours is set, and reading that
