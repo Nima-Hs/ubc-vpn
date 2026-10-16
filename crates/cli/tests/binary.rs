@@ -5,11 +5,23 @@
 //! this run alone names and nobody serves, with `UBC_VPN_TEST_CHANNEL`. Only
 //! a debug build takes that, so in a release build a test that could reach a
 //! service runs only on CI, whose machines have no service installed.
+//!
+//! Security rule: no test may touch the user's keyring either. Every run
+//! names a keyring of its own, a folder of files, with
+//! `UBC_VPN_TEST_KEYRING`, which also only a debug build takes.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const TEST_CHANNEL: &str = "UBC_VPN_TEST_CHANNEL";
+const TEST_KEYRING: &str = "UBC_VPN_TEST_KEYRING";
+
+/// A keyring folder for this run alone.
+fn own_keyring() -> std::path::PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir().join(format!("ubc-vpn-test-keyring-{}-{n}", std::process::id()))
+}
 
 /// A channel name for this run alone, which nobody serves.
 fn unserved() -> String {
@@ -37,41 +49,130 @@ fn may_reach_a_service() -> bool {
     false
 }
 
-/// The program, pointed at a channel nobody serves.
+/// The program, pointed at a channel nobody serves and a keyring of its
+/// own.
 fn program() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"));
     command.env(TEST_CHANNEL, unserved());
+    command.env(TEST_KEYRING, own_keyring());
     command
 }
 
-// Security rule: every run of the program here names a channel of its own,
-// so the helper cannot quietly lose it.
+// Security rule: every run of the program here names a channel and a
+// keyring of its own, so the helper cannot quietly lose either.
 #[test]
 fn every_run_names_its_own_channel() {
-    let named = |command: &Command| {
-        command
-            .get_envs()
-            .find(|(name, _)| *name == TEST_CHANNEL)
-            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
-    };
-    let (one, two) = (named(&program()), named(&program()));
-    assert!(
-        one.as_deref().is_some_and(|name| !name.is_empty()),
-        "{one:?}"
-    );
-    assert_ne!(one, two, "each run names a channel of its own");
+    for variable in [TEST_CHANNEL, TEST_KEYRING] {
+        let named = |command: &Command| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == variable)
+                .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let (one, two) = (named(&program()), named(&program()));
+        assert!(
+            one.as_deref().is_some_and(|name| !name.is_empty()),
+            "{variable}: {one:?}"
+        );
+        assert_ne!(one, two, "each run names a {variable} of its own");
+    }
 }
 
 // Security rule: a release build, which is what ships, cannot be pointed
-// at another channel: it does not even hold the name of the variable that
-// would do it.
+// at another channel or at a keyring other than the user's own: it does not
+// even hold the names of the variables that would do it.
 #[cfg(not(debug_assertions))]
 #[test]
 fn a_release_build_knows_no_test_channel() {
     let program = std::fs::read(env!("CARGO_BIN_EXE_ubc-vpn")).unwrap();
-    let name = TEST_CHANNEL.as_bytes();
-    let found = program.windows(name.len()).any(|bytes| bytes == name);
-    assert!(!found, "a release build holds {TEST_CHANNEL}");
+    for variable in [TEST_CHANNEL, TEST_KEYRING] {
+        let name = variable.as_bytes();
+        let found = program.windows(name.len()).any(|bytes| bytes == name);
+        assert!(!found, "a release build holds {variable}");
+    }
+}
+
+// Security rule: two processes that change saved passwords at once are
+// kept apart by the settings lock, so neither drops the other's change to
+// the keyring's index. Here several forget a password each, at once, with
+// a keyring of files that is slow to read its index; every password must
+// be gone, and the index with them. On Windows, where the settings folder
+// follows the profile folder it is given.
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn processes_changing_saved_passwords_at_once_are_kept_apart() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use ubc_vpn_core::profiles::{ProfileId, Profiles};
+    use ubc_vpn_core::redact::Secret;
+    use ubc_vpn_core::routes::RouteSet;
+    use ubc_vpn_platform::secrets::{Saved, file_backed};
+
+    let root = std::env::temp_dir().join(format!("ubc-vpn-cli-two-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (profile, keyring) = (root.join("profile"), root.join("keyring"));
+    let settings = profile.join(r"AppData\Roaming\UBC VPN");
+    std::fs::create_dir_all(&settings).unwrap();
+
+    // Six profiles, each with a password saved.
+    let mut all = Profiles::fresh(ProfileId::from_random([1; 16]));
+    let ids: Vec<ProfileId> = (2..7u8)
+        .map(|n| {
+            let id = ProfileId::from_random([n; 16]);
+            let name = format!("Lab {n}");
+            all.create(id.clone(), &name, None, RouteSet::default(), true)
+                .unwrap();
+            id
+        })
+        .chain([ProfileId::from_random([1; 16])])
+        .collect();
+    std::fs::write(settings.join("settings.json"), all.to_text()).unwrap();
+    let secrets = file_backed(&keyring, false);
+    for id in &ids {
+        let saved = Saved {
+            username: "user@app".to_string(),
+            password: Secret::new("made-up-pass-0001"),
+            in_doubt: false,
+        };
+        secrets.save(id.as_str(), &saved).unwrap();
+    }
+
+    let children: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            let mut child = program()
+                .args(["password", "forget", "--json"])
+                .env("USERPROFILE", &profile)
+                .env(TEST_KEYRING, &keyring)
+                .env("UBC_VPN_TEST_KEYRING_SLOW", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = format!("{{\"id\":\"{}\"}}\n", id.as_str());
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            child
+        })
+        .collect();
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "{said}");
+    }
+    let left = secrets.saved().unwrap();
+    let kept: Vec<_> = ids
+        .iter()
+        .filter(|id| secrets.load(id.as_str()).unwrap().is_some())
+        .collect();
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(left, Vec::<String>::new(), "the index kept lines");
+    assert_eq!(kept, Vec::<&ProfileId>::new(), "passwords were kept");
 }
 
 /// Runs the program and returns its exit status and what it printed.
@@ -230,7 +331,9 @@ fn a_test_run_talks_to_the_channel_it_is_given() {
     });
     let settings = std::env::temp_dir().join(format!("ubc-vpn-cli-guard-{}", std::process::id()));
     std::fs::create_dir_all(&settings).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"))
+    // From the helper, for its keyring of this run's; the channel it names
+    // is replaced by the one served here.
+    let mut child = program()
         .args(["settings", "set-routes", "--json"])
         .env(TEST_CHANNEL, &channel)
         .env("USERPROFILE", &settings)

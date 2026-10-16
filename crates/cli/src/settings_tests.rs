@@ -17,6 +17,16 @@ use crate::settings::{
     sweep, write_partial,
 };
 
+/// Checks that `text` is fresh settings, as a reset writes them: one empty
+/// profile, whose id is a new one and not the fixed id of untouched users.
+fn assert_fresh(text: &str) {
+    use ubc_vpn_core::profiles::{ProfileId, Profiles};
+    let fresh = Profiles::read(Some(text)).unwrap().profiles;
+    assert_eq!(fresh.profiles.len(), 1, "{text}");
+    assert_ne!(fresh.active().id, ProfileId::first(), "{text}");
+    assert_eq!(fresh.v1_view(), Default::default(), "{text}");
+}
+
 const GOOD: &str =
     r#"{"subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test"]}"#;
 
@@ -179,7 +189,7 @@ fn set_routes_replaces_the_routes_and_keeps_everything_else() {
         RoutesReply::Ok { .. }
     ));
     let after: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(machine.settings_file()).unwrap()).unwrap();
+        crate::tests::as_v1(&std::fs::read_to_string(machine.settings_file()).unwrap());
     let expected = serde_json::json!({
         "username": "jdoe",
         "save_password": true,
@@ -780,7 +790,8 @@ fn routes_too_long_to_report_are_refused_before_anything_is_saved() {
 #[test]
 fn set_routes_reckons_with_what_is_already_stored() {
     let machine = Machine::new();
-    let before = format!(r#"{{"username":"{}"}}"#, "u".repeat(1000));
+    // The longest username that is kept.
+    let before = format!(r#"{{"username":"{}"}}"#, "u".repeat(250));
     machine.write_settings(&before);
     // The longest routes `check-routes` accepts: they fit, but only just.
     let sizes = (0..40).map(|step| MAX_LINE_BYTES - step * 16);
@@ -800,18 +811,14 @@ fn set_routes_reckons_with_what_is_already_stored() {
     assert_eq!(untouched, before, "nothing was saved");
     assert_eq!(
         machine.view().settings.username.map(|name| name.len()),
-        Some(1000)
+        Some(250)
     );
 
-    // A file already too long for `get` to show is unreadable to both.
+    // A username longer than any that is kept is cleared when read, as a
+    // rule made stricter later never loses the file; `get` writes nothing.
     let huge = format!(r#"{{"username":"{}"}}"#, "u".repeat(MAX_LINE_BYTES));
     machine.write_settings(&huge);
-    for command in [Command::Get, Command::SetRoutes] {
-        assert_eq!(
-            machine.fails(command, GOOD),
-            SettingsFailureCode::Unreadable
-        );
-    }
+    assert_eq!(machine.view().settings.username, None);
     assert_eq!(
         std::fs::read_to_string(machine.settings_file()).unwrap(),
         huge
@@ -841,14 +848,16 @@ fn routes_that_are_too_long_can_be_replaced_by_shorter_ones() {
     assert_eq!(view.settings.username.as_deref(), Some("jdoe"));
     assert_eq!(view.settings.routes.dns_domains.len(), 1);
 
+    // A username too long to keep is cleared, and the routes are saved.
     let long = format!(r#"{{"username":"{}"}}"#, "u".repeat(MAX_LINE_BYTES));
     machine.write_settings(&long);
-    let why = machine.fails(Command::SetRoutes, GOOD);
-    assert_eq!(why, SettingsFailureCode::Unreadable);
-    assert_eq!(
-        std::fs::read_to_string(machine.settings_file()).unwrap(),
-        long
-    );
+    assert!(matches!(
+        machine.routes(Command::SetRoutes, GOOD),
+        RoutesReply::Ok { .. }
+    ));
+    let view = machine.view();
+    assert_eq!(view.settings.username, None);
+    assert_eq!(view.settings.routes.dns_domains.len(), 1);
 }
 
 // Security rule: nothing a connect saves can leave `get` unable to answer.
@@ -997,7 +1006,10 @@ impl Machine {
 
 fn was_reset(n: usize) -> ResetReply {
     let kept = format!("settings.json.damaged-{n}");
-    ResetReply::Reset { kept }
+    ResetReply::Reset {
+        kept,
+        passwords_forgotten: true,
+    }
 }
 
 // A settings file that cannot be read is the user's dead end without this:
@@ -1025,7 +1037,7 @@ fn a_damaged_file_is_put_aside_and_the_settings_start_afresh() {
         assert_eq!(std::fs::read(machine.kept(1)).unwrap(), bytes);
         assert_eq!(machine.view().settings, Default::default());
         let fresh = std::fs::read_to_string(machine.settings_file()).unwrap();
-        assert_eq!(fresh, "{}\n");
+        assert_fresh(&fresh);
         // And they can be used again.
         assert!(matches!(
             machine.routes(Command::SetRoutes, GOOD),
@@ -1097,8 +1109,8 @@ fn no_number_of_resets_replaces_a_kept_file() {
             std::fs::read_to_string(machine.settings_file()).unwrap(),
             now
         );
-        let all = [kept(1), kept(2), kept(3)];
-        assert_eq!(all, [good, "{}\n", "damaged, the third time"]);
+        assert_eq!([kept(1), kept(3)], [good, "damaged, the third time"]);
+        assert_fresh(&kept(2));
         assert!(!machine.kept(4).exists(), "three are kept, and no more");
     }
 

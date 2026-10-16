@@ -623,7 +623,7 @@ fn settings_text(scene: &Scene) -> String {
 }
 
 pub(crate) fn saved(scene: &Scene) -> serde_json::Value {
-    serde_json::from_str(&settings_text(scene)).unwrap()
+    crate::tests::as_v1(&settings_text(scene))
 }
 
 // A username the user typed is kept once a connect made with it has been

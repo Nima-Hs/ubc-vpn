@@ -28,10 +28,14 @@ mod hosts_tests;
 mod interrupt;
 #[cfg(test)]
 mod interrupt_tests;
+mod keys;
 mod live;
 #[cfg(test)]
 mod live_tests;
 mod logs;
+mod profiles;
+#[cfg(test)]
+mod profiles_tests;
 mod settings;
 mod settings_lock;
 #[cfg(test)]
@@ -67,16 +71,27 @@ Commands:
   settings check-routes --json   Check the routes given on standard input
   settings set-routes --json     Check them and, if they pass, save them
   settings reset [--force] --json  Start afresh when the settings cannot be read
+  settings set-startup --json    Set how UBC VPN starts when you sign in
+  profiles list --json           Show the profiles and which saves its password
+  profiles create|rename|update|delete|switch --json  Change the profiles
+  profile set-routes --json      Check and save one profile's routes
+  password forget --json         Forget a profile's saved password
   help              Show this text
   version           Show the version
 
 The first user to run connect, disconnect or status becomes the owner of the
 service, and from then on only that user can control UBC VPN on this computer.
 The bridge claims nothing itself; it leaves that to the app. Of the settings
-commands only set-routes talks to the service, and it claims nothing: when
+and profiles commands only set-routes talks to the service (for the active
+profile, with `profile set-routes`), and it claims nothing: when
 the VPN is connected it asks the service to apply the routes it has just
 saved, and its reply says whether they were applied, refused, or are used
 at the next connect. A connection that cannot take them is closed.
+
+Passwords are saved only in the OS keyring, never in the settings file.
+A profile's saved password is forgotten when the profile is deleted, when
+it stops saving it, when its username changes, and with password forget. A
+reset forgets every password UBC VPN saved.
 
 connect asks for the password and the one-time code in the terminal. They are
 never taken from an argument, a variable or a file. Ctrl-C stops a
@@ -120,9 +135,14 @@ Exit status:
 /// Whether the arguments start with `--dev`, and the arguments after it. The
 /// flag exists only in a build with the `dev-mode` feature; in any other it
 /// is an argument like any unknown one.
+///
+/// With it, this run's saved passwords are kept apart from the installed
+/// product's from here on (see [`keys::dev_mode`]), so no command run with
+/// `--dev` can read or forget theirs.
 fn dev_flag<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
     #[cfg(feature = "dev-mode")]
     if let ["--dev", rest @ ..] = args {
+        keys::dev_mode();
         return (true, rest);
     }
     (false, args)
@@ -344,6 +364,12 @@ fn main() -> ExitCode {
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
         let status = bridge::run(&chosen, input, limits, &mut out, &mut err);
+        return ExitCode::from(status);
+    }
+    // So do the profiles commands, and setting how UBC VPN starts.
+    if let Some(command) = profiles::Command::parse(args) {
+        let mut input = std::io::stdin().lock();
+        let status = profiles::run(command, &chosen, &mut input, &mut out, &mut err);
         return ExitCode::from(status);
     }
     // The settings commands read standard input too.

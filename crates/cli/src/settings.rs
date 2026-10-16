@@ -12,19 +12,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use serde_json::{Map, Value};
 use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::profiles::{Password, ProfileId, Profiles};
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode, encode};
 use ubc_vpn_core::routes::RouteSet;
 use ubc_vpn_core::settings::Settings;
 use ubc_vpn_core::settings_cli::{
     ResetReply, RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, SettingsView,
-    check_input, replace_routes, replace_username,
+    check_input,
 };
 use ubc_vpn_platform::{Paths, Platform};
 
-use crate::live;
 use crate::settings_lock::change;
+use crate::{keys, live};
 
 const SETTINGS: &str = "settings.json";
 /// How long a partial file is left alone. No save takes this long, so an
@@ -188,48 +188,107 @@ fn answer(
     })
     .map_err(too_long)?;
     let mut settings = Settings::default();
-    let mut current = None;
+    let mut read = None;
     // Held from the read of the stored settings to the save below, so that
     // no other change to them can fall in between and be undone by it.
     let mut _changing = None;
     if command == Command::SetRoutes {
         let dir = settings_dir.ok_or(SettingsFailureCode::Unwritable)?;
         _changing = Some(change(dir)?);
-        current = stored(dir)?;
-        if let Some(text) = &current {
-            settings = understood(text)?;
-            // A file `get` cannot show is unreadable here as well, unless
-            // its own routes are what makes it too long. Those are about to
-            // be replaced, and saving shorter ones is how it is repaired.
-            let mut kept = settings.clone();
-            kept.routes = Settings::default().routes;
-            encode(&SettingsView::new(kept, policy.as_ref())).map_err(unencodable)?;
-        }
+        let found = read_profiles(dir)?;
+        settings = found.profiles.v1_view();
+        // A file `get` cannot show is unreadable here as well, unless its
+        // own routes are what makes it too long. Those are about to be
+        // replaced, and saving shorter ones is how it is repaired.
+        let mut kept = settings.clone();
+        kept.routes = Settings::default().routes;
+        encode(&SettingsView::new(kept, policy.as_ref())).map_err(unencodable)?;
+        read = Some(found);
     }
     settings.routes = routes.clone();
     encode(&SettingsView::new(settings, policy.as_ref())).map_err(too_long)?;
-    if let Some(dir) = settings_dir.filter(|_| command == Command::SetRoutes) {
-        let text = replace_routes(current.as_deref(), &routes)?;
-        save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)?;
+    if let (Some(dir), Some(found)) = (settings_dir, read) {
+        // These are the active profile's routes.
+        let mut profiles = found.profiles;
+        let active = profiles.global.active_profile.clone();
+        let set = profiles.set_routes(&active, routes.clone());
+        set.map_err(|_| SettingsFailureCode::Unreadable)?;
+        let forget: Vec<ProfileId> = found.cleaned_passwords;
+        write_profiles(dir, &profiles, &forget)?;
     }
     let saved = (command == Command::SetRoutes).then_some(routes);
     Ok((line, saved))
 }
 
-/// Saves `username` in the settings in `dir`, or removes the saved one when
-/// it is `None`, changing nothing else in the file. Nothing is saved that
-/// would leave `settings get` unable to show the file.
+/// The settings in `dir` as read, profiles and all: the defaults when there
+/// are none, and with what today's rules refuse cleaned. The caller holds
+/// the settings lock when it will save them.
+pub(crate) fn read_profiles(dir: &Path) -> Result<Found, SettingsFailureCode> {
+    let read = Profiles::read(stored(dir)?.as_deref())?;
+    let cleaned_passwords = read.passwords_to_forget().cloned().collect();
+    Ok(Found {
+        cleaned: !read.cleaned.is_empty(),
+        cleaned_passwords,
+        profiles: read.profiles,
+    })
+}
+
+/// The settings as read by [`read_profiles`].
+pub(crate) struct Found {
+    /// The settings, every rule holding.
+    pub(crate) profiles: Profiles,
+    /// Whether a name or a username had to be changed to be kept.
+    pub(crate) cleaned: bool,
+    /// The profiles whose username was cleared on the way, whose saved
+    /// passwords go when the settings are next saved.
+    pub(crate) cleaned_passwords: Vec<ProfileId>,
+}
+
+/// Saves `profiles` in `dir`, having first forgotten the saved passwords of
+/// the profiles in `forget`. The caller holds the settings lock, so no
+/// other process of this program changes the keyring at the same time.
+///
+/// A password that cannot be forgotten is passed over: it stays bound to
+/// the username it was saved for and to an id, and is never sent for
+/// another, and the user can forget it later.
+pub(crate) fn write_profiles(
+    dir: &Path,
+    profiles: &Profiles,
+    forget: &[ProfileId],
+) -> Result<(), SettingsFailureCode> {
+    if !forget.is_empty() {
+        let keyring = keys::keyring();
+        for id in forget {
+            let _ = keyring.forget(id.as_str());
+        }
+    }
+    save(dir, &profiles.to_text()).map_err(|_| SettingsFailureCode::Unwritable)
+}
+
+/// Saves `username` as the active profile's, or removes the saved one when
+/// it is `None`, changing nothing else. When the username changes, the
+/// profile's saved password is forgotten: it was the old username's.
+/// Nothing is saved that would leave `settings get` unable to show the
+/// file.
 pub(crate) fn remember_username(
     dir: &Path,
     policy: Option<&Policy>,
     username: Option<&str>,
 ) -> Result<(), SettingsFailureCode> {
     let _changing = change(dir)?;
-    let current = stored(dir)?;
-    let text = replace_username(current.as_deref(), username)?;
+    let Found {
+        mut profiles,
+        cleaned_passwords: mut forget,
+        ..
+    } = read_profiles(dir)?;
+    let active = profiles.global.active_profile.clone();
+    let password = profiles.update(&active, Some(username), None);
+    if password.map_err(|_| SettingsFailureCode::BadInput)? == Password::Forget {
+        forget.push(active);
+    }
     let too_long = |_| SettingsFailureCode::BadInput;
-    encode(&SettingsView::new(understood(&text)?, policy)).map_err(too_long)?;
-    save(dir, &text).map_err(|_| SettingsFailureCode::Unwritable)
+    encode(&SettingsView::new(profiles.v1_view(), policy)).map_err(too_long)?;
+    write_profiles(dir, &profiles, &forget)
 }
 
 /// Starts the settings afresh when the file cannot be read, or whatever it
@@ -246,19 +305,55 @@ fn reset(
     policy: Option<&Policy>,
     force: bool,
 ) -> Result<ResetReply, SettingsFailureCode> {
-    let fresh = |dir: &Path| save(dir, "{}\n");
+    // Under the settings lock, with the old file aside: every password
+    // this product saved goes, found through the keyring's own index and
+    // not through the old file's ids, which may be unreadable. The fresh
+    // profile has an id of its own, which no password was saved under.
+    // Whether that worked is told, not hidden: a password left behind is
+    // the user's to remove by hand.
+    let fresh = |dir: &Path| {
+        let forgotten = keys::keyring().forget_all().is_ok();
+        save(dir, &Profiles::fresh(new_id()).to_text())?;
+        Ok(forgotten)
+    };
     reset_with(dir, policy, force, &keep_aside, &fresh)
+}
+
+/// A new profile id, random enough to be unique to this user. It is no
+/// secret: a clash is refused and another is made.
+pub(crate) fn new_id() -> ProfileId {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let half = |salt: u64| {
+        // Each `RandomState` is keyed afresh from the OS's randomness.
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(salt);
+        hasher.write_u128(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        hasher.write_u32(std::process::id());
+        hasher.write_u64(COUNT.fetch_add(1, Ordering::SeqCst));
+        hasher.finish().to_le_bytes()
+    };
+    let (one, two) = (half(1), half(2));
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&one);
+    bytes[8..].copy_from_slice(&two);
+    ProfileId::from_random(bytes)
 }
 
 /// [`reset`], with the two things it does to the files given by the caller:
 /// `aside` moves the settings file away and returns its new name, and
-/// `fresh` writes the new one.
+/// `fresh` writes the new one and says whether the saved passwords were
+/// forgotten.
 pub(crate) fn reset_with(
     dir: &Path,
     policy: Option<&Policy>,
     force: bool,
     aside: &dyn Fn(&Path) -> io::Result<String>,
-    fresh: &dyn Fn(&Path) -> io::Result<()>,
+    fresh: &dyn Fn(&Path) -> io::Result<bool>,
 ) -> Result<ResetReply, SettingsFailureCode> {
     // A folder others can write to is not touched, to reset it either.
     if folder_problem(dir).is_some() {
@@ -289,8 +384,11 @@ pub(crate) fn reset_with(
     }
     let unwritable = |_| SettingsFailureCode::Unwritable;
     let kept = aside(dir).map_err(unwritable)?;
-    fresh(dir).map_err(unwritable)?;
-    Ok(ResetReply::Reset { kept })
+    let passwords_forgotten = fresh(dir).map_err(unwritable)?;
+    Ok(ResetReply::Reset {
+        kept,
+        passwords_forgotten,
+    })
 }
 
 /// The names a reset keeps old settings files under, lowest first.
@@ -339,6 +437,12 @@ pub(crate) fn policy(dir: &Path) -> Option<Policy> {
 
 /// The one line of input, read without ever taking in more than the limit.
 fn typed(input: &mut dyn BufRead) -> Result<RouteInput, SettingsFailureCode> {
+    decode(&line(input)?).map_err(|_| SettingsFailureCode::BadInput)
+}
+
+/// The one line of input, as text, read without ever taking in more than
+/// the limit.
+pub(crate) fn line(input: &mut dyn BufRead) -> Result<String, SettingsFailureCode> {
     let bad = SettingsFailureCode::BadInput;
     let mut line = Vec::new();
     let limit = MAX_LINE_BYTES as u64 + 1;
@@ -346,8 +450,7 @@ fn typed(input: &mut dyn BufRead) -> Result<RouteInput, SettingsFailureCode> {
     if !read.is_ok_and(|n| n > 0) {
         return Err(bad);
     }
-    let text = String::from_utf8(line).map_err(|_| bad)?;
-    decode(&text).map_err(|_| bad)
+    String::from_utf8(line).map_err(|_| bad)
 }
 
 /// Why the settings folder is not used, when it is not. On Unix that is a
@@ -401,12 +504,11 @@ pub(crate) fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> 
     }
 }
 
-/// The settings in `text`. Anything but a JSON object is refused, although
-/// the settings type alone would read some other shapes as defaults.
+/// The active profile's settings in `text`, in the shape from before
+/// profiles, for the commands and the app that do not know profiles yet.
+/// Anything but settings that can be read is refused.
 pub(crate) fn understood(text: &str) -> Result<Settings, SettingsFailureCode> {
-    let unreadable = |_| SettingsFailureCode::Unreadable;
-    serde_json::from_str::<Map<String, Value>>(text).map_err(unreadable)?;
-    serde_json::from_str(text).map_err(unreadable)
+    Profiles::read(Some(text)).map(|read| read.profiles.v1_view())
 }
 
 /// Opens a new file for the settings. On Unix it is created with mode 0600,
