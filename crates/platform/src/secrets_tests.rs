@@ -74,8 +74,8 @@ fn the_saved_accounts_come_from_the_index() {
 fn a_file_backed_keyring_is_shared_through_its_folder() {
     let dir = std::env::temp_dir().join(format!("ubc-vpn-keyring-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let one = file_backed(&dir);
-    let two = file_backed(&dir);
+    let one = file_backed(&dir, false);
+    let two = file_backed(&dir, false);
     one.save(PROFILE, &saved("a@app", "made-up-1")).unwrap();
     assert_eq!(
         two.load(PROFILE).unwrap().unwrap().password.expose(),

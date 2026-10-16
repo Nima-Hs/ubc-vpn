@@ -241,14 +241,17 @@ pub fn under(service: &str) -> Arc<dyn Secrets> {
 /// several processes of the command-line client and need them to share
 /// one. It touches nothing but that folder: never the OS keyring. It exists
 /// only in a debug build, so a program that ships cannot use it.
+///
+/// With `slow_index`, reading the index comes back a moment late, so that
+/// changes from two processes overlap unless something keeps them apart.
 #[cfg(debug_assertions)]
-pub fn file_backed(dir: &std::path::Path) -> Arc<dyn Secrets> {
-    Arc::new(Kept::new(Files(dir.to_path_buf())))
+pub fn file_backed(dir: &std::path::Path, slow_index: bool) -> Arc<dyn Secrets> {
+    Arc::new(Kept::new(Files(dir.to_path_buf(), slow_index)))
 }
 
 /// The keyring as files in a folder: see [`file_backed`].
 #[cfg(debug_assertions)]
-struct Files(std::path::PathBuf);
+struct Files(std::path::PathBuf, bool);
 
 #[cfg(debug_assertions)]
 impl Files {
@@ -266,11 +269,15 @@ impl Files {
 #[cfg(debug_assertions)]
 impl Store for Files {
     fn get(&self, account: &str) -> Result<Option<Secret>> {
-        match std::fs::read_to_string(self.path(account)?) {
-            Ok(text) => Ok(Some(Secret::new(text))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(failed()),
+        let read = match std::fs::read_to_string(self.path(account)?) {
+            Ok(text) => Some(Secret::new(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(failed()),
+        };
+        if self.1 && account == INDEX {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        Ok(read)
     }
 
     fn set(&self, account: &str, value: &str) -> Result<()> {
