@@ -17,7 +17,7 @@ const views: View[] = [
     ...(__LOGS__
         ? [{ id: "logs", label: "Logs", Component: lazy(() => import("@/views/logs-view")) }]
         : []),
-    // How the app starts, and the saved password. Not in a production build yet: see `__SETTINGS__`.
+    // How the app starts, and the saved password. See `__SETTINGS__`.
     ...(__SETTINGS__
         ? [
               {

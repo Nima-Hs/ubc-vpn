@@ -1437,28 +1437,30 @@ test("settings: on Windows the tray choice becomes a Run entry with --hidden", a
     const seen = await app.evaluate(({ app: electronApp }) => {
         const item = { openAtLogin: true, args: ["--hidden"] };
         electronApp.setLoginItemSettings(item);
-        const written = electronApp.getLoginItemSettings({ args: item.args });
+        // Electron compares the whole command line in the Run entry with the
+        // one asked about, so this says whether `--hidden` was written.
+        const withHidden = electronApp.getLoginItemSettings({ args: item.args });
+        const withoutArgs = electronApp.getLoginItemSettings({ args: [] });
         electronApp.setLoginItemSettings({ openAtLogin: false, args: item.args });
         const removed = electronApp.getLoginItemSettings({ args: item.args });
         return {
             program: process.execPath,
-            openAtLogin: written.openAtLogin,
-            entries: written.launchItems.map(({ path, args, scope, enabled }) => ({
+            withHidden: withHidden.openAtLogin,
+            withoutArgs: withoutArgs.openAtLogin,
+            // Electron lists the entry's program, but not its arguments.
+            entries: withHidden.launchItems.map(({ path, scope, enabled }) => ({
                 path,
-                args,
                 scope,
                 enabled,
             })),
             removed: removed.openAtLogin,
         };
     });
-    expect(seen.openAtLogin).toBe(true);
-    expect(seen.entries).toContainEqual({
-        path: seen.program,
-        args: ["--hidden"],
-        scope: "user",
-        enabled: true,
-    });
+    // The Run entry starts this program, for this user, with `--hidden`.
+    expect(seen.withHidden).toBe(true);
+    expect(seen.withoutArgs).toBe(false);
+    expect(seen.entries).toContainEqual({ path: seen.program, scope: "user", enabled: true });
+    // And it is gone again once turned off.
     expect(seen.removed).toBe(false);
 });
 
