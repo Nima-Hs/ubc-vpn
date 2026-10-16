@@ -7,8 +7,13 @@
 //! Windows keeps routes to one destination through two interfaces side by
 //! side and refuses only an identical one, so every add first reads the table
 //! and fails with `AlreadyExists` when the destination is routed elsewhere.
+//!
+//! Full mode adds the two IPv4 halves and, on a tunnel that has IPv6 but no
+//! IPv6 address, the two IPv6 halves, which make IPv6 fail at once. The OS's
+//! best-route lookup fails for a destination those cover (there is no
+//! source address), so IPv6 checks match the forwarding table themselves.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(test)]
 use std::path::Path;
 use std::ptr::{null, null_mut};
@@ -34,10 +39,11 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
-use super::journal::{Boot, Journal, Row, Store};
+use super::journal::{Boot, Journal, Prefix, Row, Store};
 use super::security::{os_error, wide};
 use crate::{
-    Error, Ipv6Block, Mode, Paths, PhysicalNetwork, Result, Routes, TUNNEL_MTU, Verified, lock,
+    Error, FULL_TUNNEL_V4, FULL_TUNNEL_V6, Ipv6Block, Mode, Paths, PhysicalNetwork, Result, Routes,
+    TUNNEL_MTU, Verified, lock,
 };
 
 pub(super) fn v4(addr: Ipv4Addr) -> SOCKADDR_INET {
@@ -46,6 +52,34 @@ pub(super) fn v4(addr: Ipv4Addr) -> SOCKADDR_INET {
     socket.si_family = AF_INET;
     socket.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(addr.octets());
     socket
+}
+
+pub(super) fn v6(addr: Ipv6Addr) -> SOCKADDR_INET {
+    // SAFETY: SOCKADDR_INET is a plain union for which all zeroes is valid.
+    let mut socket: SOCKADDR_INET = unsafe { std::mem::zeroed() };
+    socket.si_family = AF_INET6;
+    socket.Ipv6.sin6_addr.u.Byte = addr.octets();
+    socket
+}
+
+fn sockaddr(ip: IpAddr) -> SOCKADDR_INET {
+    match ip {
+        IpAddr::V4(ip) => v4(ip),
+        IpAddr::V6(ip) => v6(ip),
+    }
+}
+
+/// The address in `socket`, of either family.
+fn ip_of(socket: &SOCKADDR_INET) -> Option<IpAddr> {
+    if let Some(ip) = addr_of(socket) {
+        return Some(IpAddr::V4(ip));
+    }
+    // SAFETY: as in `addr_of`, the IPv6 member is read only when the family
+    // says it is the one in use.
+    unsafe {
+        (socket.si_family == AF_INET6)
+            .then(|| IpAddr::V6(Ipv6Addr::from(socket.Ipv6.sin6_addr.u.Byte)))
+    }
 }
 
 pub(super) fn addr_of(socket: &SOCKADDR_INET) -> Option<Ipv4Addr> {
@@ -120,9 +154,14 @@ impl<T> Drop for Table<T> {
 
 /// Every IPv4 route in the system's table.
 pub(super) fn route_table() -> Result<Vec<MIB_IPFORWARD_ROW2>> {
+    routes_of(AF_INET)
+}
+
+/// Every route of one family in the system's table.
+pub(super) fn routes_of(family: u16) -> Result<Vec<MIB_IPFORWARD_ROW2>> {
     let mut table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
     // SAFETY: the out pointer is valid; the table is freed by `Table`.
-    checked(unsafe { GetIpForwardTable2(AF_INET, &mut table) })?;
+    checked(unsafe { GetIpForwardTable2(family, &mut table) })?;
     let table = Table(table);
     // SAFETY: on success the table holds `NumEntries` initialised rows.
     let rows = unsafe {
@@ -166,6 +205,15 @@ pub(super) fn row_dest(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Net> {
     Ipv4Net::new(addr, row.DestinationPrefix.PrefixLength).ok()
 }
 
+/// The destination of a system route, of either family.
+fn prefix_of(row: &MIB_IPFORWARD_ROW2) -> Option<Prefix> {
+    let len = row.DestinationPrefix.PrefixLength;
+    match ip_of(&row.DestinationPrefix.Prefix)? {
+        IpAddr::V4(addr) => Ipv4Net::new(addr, len).ok().map(Prefix::V4),
+        IpAddr::V6(addr) => Prefix::v6(addr, len),
+    }
+}
+
 /// A forwarding row for one route, ready to add or delete.
 fn forward_row(row: &Row) -> MIB_IPFORWARD_ROW2 {
     // SAFETY: plain data for which all zeroes is valid; then initialised.
@@ -173,9 +221,12 @@ fn forward_row(row: &Row) -> MIB_IPFORWARD_ROW2 {
     // SAFETY: the pointer is to a valid row.
     unsafe { InitializeIpForwardEntry(&mut forward) };
     forward.InterfaceLuid = net_luid(row.luid);
-    forward.DestinationPrefix.Prefix = v4(row.dest.addr());
-    forward.DestinationPrefix.PrefixLength = row.dest.prefix_len();
-    forward.NextHop = v4(row.next_hop);
+    forward.DestinationPrefix.Prefix = match row.dest {
+        Prefix::V4(net) => v4(net.addr()),
+        Prefix::V6(addr, _) => v6(addr),
+    };
+    forward.DestinationPrefix.PrefixLength = row.dest.len();
+    forward.NextHop = sockaddr(row.next_hop);
     forward.Metric = 0;
     forward.Protocol = MIB_IPPROTO_NETMGMT;
     forward
@@ -202,12 +253,16 @@ enum Present {
 }
 
 fn present(row: &Row) -> Result<Present> {
-    let table = route_table()?;
-    let same_dest = table.iter().filter(|r| row_dest(r) == Some(row.dest));
+    let family = match row.dest {
+        Prefix::V4(_) => AF_INET,
+        Prefix::V6(..) => AF_INET6,
+    };
+    let table = routes_of(family)?;
+    let same_dest = table.iter().filter(|r| prefix_of(r) == Some(row.dest));
     let mut found = Present::None;
     for existing in same_dest {
         let luid = value(&existing.InterfaceLuid);
-        if luid == row.luid && addr_of(&existing.NextHop) == Some(row.next_hop) {
+        if luid == row.luid && ip_of(&existing.NextHop) == Some(row.next_hop) {
             found = Present::Identical;
         } else {
             return Ok(Present::Elsewhere);
@@ -442,18 +497,18 @@ impl Routes for WinRoutes {
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
         let dest = Ipv4Net::new(gateway, 32).map_err(|e| Error::Failed(e.to_string()))?;
         self.add(Row {
-            dest,
+            dest: Prefix::V4(dest),
             luid: luid(&via.interface)?,
-            next_hop: via.next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            next_hop: IpAddr::V4(via.next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED)),
             interface: via.interface.clone(),
         })
     }
 
     fn remove_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
-        let next_hop = via.next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let next_hop = IpAddr::V4(via.next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED));
+        let dest = Ipv4Net::new(gateway, 32).map_err(|e| Error::Failed(e.to_string()))?;
         self.remove(|row| {
-            row.dest.addr() == gateway
-                && row.dest.prefix_len() == 32
+            row.dest == Prefix::V4(dest)
                 && row.interface == via.interface
                 && row.next_hop == next_hop
         })
@@ -463,9 +518,9 @@ impl Routes for WinRoutes {
         let luid = tunnel_luid(tunnel)?;
         for dest in subnets {
             self.add(Row {
-                dest: *dest,
+                dest: Prefix::V4(*dest),
                 luid,
-                next_hop: Ipv4Addr::UNSPECIFIED,
+                next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 interface: tunnel.to_string(),
             })?;
         }
@@ -474,7 +529,8 @@ impl Routes for WinRoutes {
 
     fn remove_tunnel_routes(&self, tunnel: &str, subnets: &[Ipv4Net]) -> Result<()> {
         self.remove(|row| {
-            row.interface == tunnel && row.next_hop.is_unspecified() && subnets.contains(&row.dest)
+            let listed = matches!(row.dest, Prefix::V4(net) if subnets.contains(&net));
+            row.interface == tunnel && row.next_hop.is_unspecified() && listed
         })
     }
 
@@ -498,27 +554,242 @@ impl Routes for WinRoutes {
         }
     }
 
-    // Full mode is not written for Windows yet: it is refused, and nothing
-    // of it can have been added, so there is nothing to remove.
-    fn full_tunnel_ipv6(&self, _tunnel: &str) -> Result<Ipv6Block> {
+    fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block> {
+        ipv6_decision(tunnel_luid(tunnel)?)
+    }
+
+    fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
+        let luid = tunnel_luid(tunnel)?;
+        // Decided before anything is added, so a refusal leaves nothing.
+        let blocks = ipv6_decision(luid)? == Ipv6Block::Blocked;
+        let row = |dest| Row {
+            dest,
+            luid,
+            next_hop: match dest {
+                Prefix::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                Prefix::V6(..) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            },
+            interface: tunnel.to_string(),
+        };
+        let (v4_halves, v6_halves) = halves();
+        for half in v4_halves {
+            self.add(row(half))?;
+        }
+        if !blocks {
+            return Ok(Ipv6Block::NothingToBlock);
+        }
+        for half in v6_halves {
+            match self.add(row(half)) {
+                Ok(()) => {}
+                // IPv6 was unbound from the device since it was checked.
+                Err(Error::NotFound) => {
+                    if leak_path(luid)? {
+                        self.remove_full_tunnel(tunnel)?;
+                        return Err(Error::Unsupported);
+                    }
+                    return Ok(Ipv6Block::NothingToBlock);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Ipv6Block::Blocked)
+    }
+
+    fn remove_full_tunnel(&self, tunnel: &str) -> Result<()> {
+        let (v4_halves, v6_halves) = halves();
+        self.remove(|row| {
+            let half = v4_halves.contains(&row.dest) || v6_halves.contains(&row.dest);
+            row.interface == tunnel && row.next_hop.is_unspecified() && half
+        })
+    }
+
+    fn foreign_full_tunnel(&self, tunnel: &str) -> Result<bool> {
+        let tunnel = match luid(tunnel) {
+            Ok(luid) => Some(luid),
+            Err(Error::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+        let mut table = routes_of(AF_INET)?;
+        table.extend(routes_of(AF_INET6)?);
+        let table: Vec<_> = table
+            .iter()
+            .filter_map(|route| {
+                let hop = ip_of(&route.NextHop)?;
+                Some((prefix_of(route)?, value(&route.InterfaceLuid), hop))
+            })
+            .collect();
+        Ok(foreign_halves(&table, tunnel))
+    }
+
+    fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified {
+        let Ok(table) = routes_of(AF_INET6) else {
+            return Verified::Unknown;
+        };
+        let wanted = match luid(interface) {
+            Ok(luid) => luid,
+            // An interface that does not exist is not the one used.
+            Err(Error::NotFound) => return Verified::No,
+            Err(_) => return Verified::Unknown,
+        };
+        let table: Vec<_> = table
+            .iter()
+            .filter_map(|route| Some((prefix_of(route)?, value(&route.InterfaceLuid))))
+            .collect();
+        longest_match_through(&table, IpAddr::V6(dest), wanted)
+    }
+}
+
+/// Whether the longest prefix in `table` (destination, interface) that
+/// holds `dest` goes through `wanted`. Several routes of the longest length
+/// could each be used, so only when all of them go through `wanted` is it
+/// surely the one. No route at all is `No`.
+fn longest_match_through(table: &[(Prefix, u64)], dest: IpAddr, wanted: u64) -> Verified {
+    let matching: Vec<_> = table
+        .iter()
+        .filter(|(prefix, _)| prefix.contains(dest))
+        .collect();
+    let Some(longest) = matching.iter().map(|(prefix, _)| prefix.len()).max() else {
+        return Verified::No;
+    };
+    let mut longest = matching
+        .iter()
+        .filter(|(prefix, _)| prefix.len() == longest);
+    match longest.all(|(_, luid)| *luid == wanted) {
+        true => Verified::Yes,
+        false => Verified::No,
+    }
+}
+
+/// Whether `table` (destination, interface, next hop) has a half of full
+/// mode that is not ours on the tunnel `tunnel`: exactly `0.0.0.0/1`,
+/// `128.0.0.0/1`, `::/1` or `8000::/1`, through another interface or
+/// through a next hop. Any other route, such as a virtual adapter's own
+/// network, is not one, however it is configured.
+fn foreign_halves(table: &[(Prefix, u64, IpAddr)], tunnel: Option<u64>) -> bool {
+    let (v4_halves, v6_halves) = halves();
+    table.iter().any(|(dest, luid, hop)| {
+        let half = v4_halves.contains(dest) || v6_halves.contains(dest);
+        let ours = Some(*luid) == tunnel && hop.is_unspecified();
+        half && !ours
+    })
+}
+
+/// The halves of full mode, IPv4 and IPv6.
+fn halves() -> ([Prefix; 2], [Prefix; 2]) {
+    let parse = |text: &str| text.parse::<Prefix>().expect("a half");
+    (FULL_TUNNEL_V4.map(parse), FULL_TUNNEL_V6.map(parse))
+}
+
+/// What full mode can do about IPv6 with the tunnel `luid`, as
+/// [`Routes::full_tunnel_ipv6`] says.
+fn ipv6_decision(luid: u64) -> Result<Ipv6Block> {
+    if has_ipv6(luid)? {
+        Ok(Ipv6Block::Blocked)
+    } else if leak_path(luid)? {
         Err(Error::Unsupported)
+    } else {
+        Ok(Ipv6Block::NothingToBlock)
     }
+}
 
-    fn add_full_tunnel(&self, _tunnel: &str) -> Result<Ipv6Block> {
-        Err(Error::Unsupported)
+/// Whether IPv6 is bound to the device with `luid`, so that routes of that
+/// family can be added on it.
+fn has_ipv6(luid: u64) -> Result<bool> {
+    // SAFETY: plain data for which all zeroes is valid; then initialised.
+    let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
+    // SAFETY: the pointer is to a valid row.
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = AF_INET6;
+    row.InterfaceLuid = net_luid(luid);
+    // SAFETY: the row names the interface and is valid for the call.
+    match checked(unsafe { GetIpInterfaceEntry(&mut row) }) {
+        Ok(()) => Ok(true),
+        Err(Error::NotFound) => Ok(false),
+        Err(error) => Err(error),
     }
+}
 
-    fn remove_full_tunnel(&self, _tunnel: &str) -> Result<()> {
-        Ok(())
-    }
+/// Whether IPv6 could leave by an interface other than the one with
+/// `tunnel`: any unicast IPv6 route there, the interface up or down, other
+/// than link-local (`fe80::/10`), loopback (`::1/128`) and multicast
+/// (`ff00::/8`), which every interface with IPv6 has and none carries
+/// traffic away. Teredo's `2001::/32` counts.
+fn leak_path(tunnel: u64) -> Result<bool> {
+    let table: Vec<_> = routes_of(AF_INET6)?
+        .iter()
+        .filter_map(|route| Some((prefix_of(route)?, value(&route.InterfaceLuid))))
+        .collect();
+    Ok(leaks(&table, tunnel))
+}
 
-    fn foreign_full_tunnel(&self, _tunnel: &str) -> Result<bool> {
-        Err(Error::Unsupported)
-    }
+/// Whether `table` (destination, interface) has a route IPv6 could leave
+/// by on an interface other than `tunnel` ([`could_leak`]). An IPv4 route
+/// is never one.
+fn leaks(table: &[(Prefix, u64)], tunnel: u64) -> bool {
+    table
+        .iter()
+        .any(|(dest, luid)| *luid != tunnel && could_leak(*dest))
+}
 
-    fn uses_interface_v6(&self, _dest: Ipv6Addr, _interface: &str) -> Verified {
-        Verified::Unknown
-    }
+/// Every IPv6 route that could be a leak path ([`could_leak`]), on any
+/// interface, but full mode's own halves, as (interface, destination, next
+/// hop), sorted. Windows keeps a host route for each of the machine's own
+/// addresses, so an address added or removed changes this too.
+pub(super) fn ipv6_paths() -> Result<Vec<(u64, String, String)>> {
+    let (_, v6_halves) = halves();
+    let mut paths: Vec<_> = routes_of(AF_INET6)?
+        .iter()
+        .filter_map(|route| {
+            let dest = prefix_of(route)?;
+            let wanted = could_leak(dest) && !v6_halves.contains(&dest);
+            let hop = ip_of(&route.NextHop)?;
+            wanted.then(|| {
+                (
+                    value(&route.InterfaceLuid),
+                    dest.to_string(),
+                    hop.to_string(),
+                )
+            })
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Every IPv6 address on the machine that is not link-local, loopback or
+/// multicast, as (interface, address), sorted. Watched beside
+/// [`ipv6_paths`], so a new address is noticed even before, or without,
+/// the host route Windows keeps for it.
+pub(super) fn ipv6_addresses() -> Result<Vec<(u64, Ipv6Addr)>> {
+    let mut found: Vec<_> = addresses_of(AF_INET6)?
+        .iter()
+        .filter_map(|row| match ip_of(&row.Address)? {
+            IpAddr::V6(addr) => Some((value(&row.InterfaceLuid), addr)),
+            IpAddr::V4(_) => None,
+        })
+        .filter(|(_, addr)| Prefix::v6(*addr, 128).is_some_and(could_leak))
+        .collect();
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+/// Whether an IPv6 route to `dest` could carry traffic off the machine:
+/// any but one inside link-local, loopback or multicast space.
+fn could_leak(dest: Prefix) -> bool {
+    let Prefix::V6(addr, len) = dest else {
+        return false;
+    };
+    let local = [
+        Prefix::v6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+        Prefix::v6(Ipv6Addr::LOCALHOST, 128),
+        Prefix::v6(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+    ];
+    !local
+        .into_iter()
+        .flatten()
+        .any(|net| net.len() <= len && net.contains(IpAddr::V6(addr)))
 }
 
 #[cfg(test)]
@@ -562,6 +833,134 @@ mod tests {
         };
         assert!(why.contains("S-1-5-32-545"), "{why}");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    fn prefix(text: &str) -> Prefix {
+        text.parse().unwrap()
+    }
+
+    // Security rule: IPv6 can leave by any unicast route but link-local,
+    // loopback and multicast ones, which every interface with IPv6 has.
+    // Teredo's prefix and a unique local network count.
+    #[test]
+    fn only_link_local_loopback_and_multicast_routes_cannot_leak() {
+        for local in [
+            "fe80::/64",
+            "fe80::1/128",
+            "::1/128",
+            "ff00::/8",
+            "ff02::/16",
+        ] {
+            assert!(!could_leak(prefix(local)), "{local}");
+        }
+        for leaks in [
+            "::/0",
+            "2001::/32",
+            "2002::/16",
+            "fd00::/8",
+            "2001:db8::/64",
+            "fe80::/9",
+            "::/1",
+        ] {
+            assert!(could_leak(prefix(leaks)), "{leaks}");
+        }
+        assert!(!could_leak(prefix("0.0.0.0/0")));
+    }
+
+    // A machine with two virtual host-only adapters and a physical network
+    // (made-up ranges). The adapters' IPv4 on-link routes are not another
+    // program's full mode, and IPv4 routes never count as a way out for
+    // IPv6. An IPv6 unicast route on any interface but the tunnel does, as
+    // do another interface's halves.
+    #[test]
+    fn virtual_adapters_networks_are_not_halves_but_their_ipv6_routes_leak() {
+        let (tunnel, wire, host_a, host_b) = (7, 9, 11, 12);
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let on_link = |text: &str, luid| (prefix(text), luid, ip("0.0.0.0"));
+        let host_only = [
+            on_link("172.31.130.0/24", host_a),
+            on_link("172.31.130.1/32", host_a),
+            on_link("172.31.130.255/32", host_a),
+            on_link("172.31.140.0/24", host_b),
+            on_link("172.31.140.1/32", host_b),
+            on_link("172.31.140.255/32", host_b),
+            on_link("224.0.0.0/4", host_a),
+            on_link("255.255.255.255/32", host_b),
+            (prefix("0.0.0.0/0"), wire, ip("198.51.100.1")),
+            on_link("198.51.100.0/24", wire),
+            (prefix("fe80::/64"), host_a, ip("::")),
+            (prefix("ff00::/8"), host_b, ip("::")),
+        ];
+        let mut table = host_only.to_vec();
+        assert!(!foreign_halves(&table, Some(tunnel)));
+        assert!(!foreign_halves(&table, None));
+        // Ours, on the tunnel with no next hop, are not foreign.
+        for half in FULL_TUNNEL_V4.into_iter().chain(FULL_TUNNEL_V6) {
+            let any = if half.contains(':') { "::" } else { "0.0.0.0" };
+            table.push((prefix(half), tunnel, ip(any)));
+        }
+        assert!(!foreign_halves(&table, Some(tunnel)));
+        assert!(
+            foreign_halves(&table, Some(99)),
+            "the same halves elsewhere"
+        );
+        // A half on a host-only adapter, or ours given a next hop, is.
+        let elsewhere = [on_link("128.0.0.0/1", host_a)];
+        assert!(foreign_halves(&elsewhere, Some(tunnel)));
+        let via = [(prefix("::/1"), tunnel, ip("fe80::1"))];
+        assert!(foreign_halves(&via, Some(tunnel)));
+
+        let v6 = |table: &[(Prefix, u64, IpAddr)]| -> Vec<(Prefix, u64)> {
+            table.iter().map(|(dest, luid, _)| (*dest, *luid)).collect()
+        };
+        assert!(!leaks(&v6(&host_only), tunnel), "IPv4 is not an IPv6 leak");
+        let global = [(prefix("2001:db8:a::/64"), host_a)];
+        assert!(leaks(&global, tunnel), "a host-only adapter's IPv6 network");
+        let unique_local = [(prefix("fd00:b::1/128"), host_b)];
+        assert!(leaks(&unique_local, tunnel));
+        // The tunnel's own IPv6 routes are not a way out past it.
+        let own = [(prefix("2001:db8::/64"), tunnel), (prefix("::/1"), tunnel)];
+        assert!(!leaks(&own, tunnel));
+    }
+
+    // Security rule: an IPv6 destination counts as going through an
+    // interface only when every route of the longest matching length does.
+    #[test]
+    fn the_longest_ipv6_match_counts_only_when_all_of_it_agrees() {
+        let (tunnel, physical) = (7, 9);
+        let dest: IpAddr = "2001:db8::1".parse().unwrap();
+        let halves = [(prefix("::/1"), tunnel), (prefix("8000::/1"), tunnel)];
+        assert_eq!(longest_match_through(&halves, dest, tunnel), Verified::Yes);
+        assert_eq!(longest_match_through(&halves, dest, physical), Verified::No);
+        // A default route is less specific than a half.
+        let with_default = [halves[0], halves[1], (prefix("::/0"), physical)];
+        assert_eq!(
+            longest_match_through(&with_default, dest, tunnel),
+            Verified::Yes
+        );
+        // A half beside ours on another interface: either could be used.
+        let shared = [halves[0], (prefix("::/1"), physical)];
+        assert_eq!(longest_match_through(&shared, dest, tunnel), Verified::No);
+        // A more specific route elsewhere wins.
+        let narrower = [halves[0], (prefix("2001:db8::/32"), physical)];
+        assert_eq!(longest_match_through(&narrower, dest, tunnel), Verified::No);
+        // Nothing matches.
+        assert_eq!(longest_match_through(&[], dest, tunnel), Verified::No);
+    }
+
+    #[test]
+    fn an_ipv6_prefix_holds_exactly_the_addresses_under_it() {
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        assert!(prefix("::/1").contains(ip("7fff::1")));
+        assert!(!prefix("::/1").contains(ip("8000::")));
+        assert!(prefix("8000::/1").contains(ip("ffff::1")));
+        assert!(prefix("::/0").contains(ip("2001:db8::1")));
+        assert!(prefix("2001:db8::1/128").contains(ip("2001:db8::1")));
+        assert!(!prefix("2001:db8::1/128").contains(ip("2001:db8::2")));
+        assert!(!prefix("::/0").contains(ip("192.0.2.1")));
+        let (v4, v6) = halves();
+        assert_eq!(v4.map(|p| p.to_string()), FULL_TUNNEL_V4);
+        assert_eq!(v6.map(|p| p.to_string()), FULL_TUNNEL_V6);
     }
 
     // A route is written to the journal before it is added, so a crash

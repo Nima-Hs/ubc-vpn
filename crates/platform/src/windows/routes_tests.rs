@@ -267,7 +267,7 @@ fn a_row_whose_route_was_never_added_is_dropped_at_the_next_start() {
     let row = super::journal::Row {
         dest: "192.0.2.1/32".parse().unwrap(),
         luid: luid(physical.interface()).unwrap(),
-        next_hop: physical.next_hop().unwrap_or(Ipv4Addr::UNSPECIFIED),
+        next_hop: physical.next_hop().unwrap_or(Ipv4Addr::UNSPECIFIED).into(),
         interface: physical.interface().to_string(),
     };
     let mut journal = super::journal::Journal::new(super::journal::Store::Unchecked(dir.clone()));

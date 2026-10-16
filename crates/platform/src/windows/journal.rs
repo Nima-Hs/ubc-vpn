@@ -8,12 +8,19 @@
 //! ```text
 //! boot 1760300000 5212
 //! route 192.0.2.0/24 0x47008000000000 0.0.0.0 ubc-vpn0
+//! route ::/1 0x47008000000000 :: ubc-vpn0
 //! ```
 //!
 //! A route line holds the destination, the interface's LUID, the next hop
-//! and, last so that it may contain spaces, the interface's name.
+//! and, last so that it may contain spaces, the interface's name. The
+//! destination and the next hop are both IPv4 or both IPv6.
+//!
+//! IPv6 rows came with full mode. A version from before it cannot read a
+//! journal that has one, and fails at start-up rather than guess; nothing
+//! was released before then, so no installed version is that old.
 
-use std::net::Ipv4Addr;
+use std::fmt;
+use std::net::{IpAddr, Ipv6Addr};
 #[cfg(test)]
 use std::path::PathBuf;
 
@@ -21,12 +28,71 @@ use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{Error, Mode, Paths, Result, StateDir};
 
+/// A route's destination: an IPv4 network, or an IPv6 one (only the halves
+/// of full mode, which block IPv6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Prefix {
+    V4(Ipv4Net),
+    V6(Ipv6Addr, u8),
+}
+
+impl Prefix {
+    /// An IPv6 prefix, refused unless its address has no bits set past `len`.
+    pub(super) fn v6(addr: Ipv6Addr, len: u8) -> Option<Self> {
+        let host = u128::MAX.checked_shr(u32::from(len)).unwrap_or(0);
+        (len <= 128 && u128::from(addr) & host == 0).then_some(Self::V6(addr, len))
+    }
+
+    /// Whether `ip` lies inside this prefix.
+    pub(super) fn contains(&self, ip: IpAddr) -> bool {
+        match (self, ip) {
+            (Self::V4(net), IpAddr::V4(ip)) => net.contains_addr(ip),
+            (Self::V6(addr, len), IpAddr::V6(ip)) => {
+                let host = u128::MAX.checked_shr(u32::from(*len)).unwrap_or(0);
+                u128::from(ip) & !host == u128::from(*addr)
+            }
+            _ => false,
+        }
+    }
+
+    /// The prefix length.
+    pub(super) fn len(&self) -> u8 {
+        match self {
+            Self::V4(net) => net.prefix_len(),
+            Self::V6(_, len) => *len,
+        }
+    }
+}
+
+impl fmt::Display for Prefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V4(net) => net.fmt(f),
+            Self::V6(addr, len) => write!(f, "{addr}/{len}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Prefix {
+    type Err = ();
+
+    fn from_str(text: &str) -> std::result::Result<Self, ()> {
+        if !text.contains(':') {
+            return text.parse().map(Self::V4).map_err(|_| ());
+        }
+        let (addr, len) = text.split_once('/').ok_or(())?;
+        let len = len.parse().map_err(|_| ())?;
+        Self::v6(addr.parse().map_err(|_| ())?, len).ok_or(())
+    }
+}
+
 /// One route exactly as it was added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Row {
-    pub(super) dest: Ipv4Net,
+    pub(super) dest: Prefix,
     pub(super) luid: u64,
-    pub(super) next_hop: Ipv4Addr,
+    /// Of the same family as `dest`.
+    pub(super) next_hop: IpAddr,
     pub(super) interface: String,
 }
 
@@ -139,9 +205,12 @@ fn parse(text: &str) -> Option<(Boot, Vec<Row>)> {
     }
     let rows = lines.map(|line| {
         let mut parts = line.strip_prefix("route ")?.splitn(4, ' ');
-        let dest = parts.next()?.parse().ok()?;
+        let dest: Prefix = parts.next()?.parse().ok()?;
         let luid = u64::from_str_radix(parts.next()?.strip_prefix("0x")?, 16).ok()?;
-        let next_hop = parts.next()?.parse().ok()?;
+        let next_hop: IpAddr = parts.next()?.parse().ok()?;
+        if matches!(dest, Prefix::V4(_)) != next_hop.is_ipv4() {
+            return None;
+        }
         let interface = parts.next().filter(|name| !name.is_empty())?.to_string();
         Some(Row {
             dest,
@@ -162,7 +231,11 @@ mod tests {
         Row {
             dest: dest.parse().unwrap(),
             luid: 0x4700_8000_0000_0000,
-            next_hop: Ipv4Addr::new(192, 168, 0, 1),
+            next_hop: if dest.contains(':') {
+                IpAddr::from(Ipv6Addr::UNSPECIFIED)
+            } else {
+                IpAddr::from([192, 168, 0, 1])
+            },
             interface: interface.to_string(),
         }
     }
@@ -187,6 +260,8 @@ mod tests {
         let rows = [
             row("192.0.2.0/24", "Wi-Fi 2"),
             row("198.51.100.1/32", "ubc-vpn0"),
+            row("::/1", "ubc-vpn0"),
+            row("8000::/1", "ubc-vpn0"),
         ];
         journal.write(BOOT, &rows).unwrap();
         assert_eq!(journal.rows(BOOT), Ok(rows.to_vec()));
@@ -242,6 +317,12 @@ mod tests {
             "boot 1 2\nroute 10.0.0.1/8 0x1 0.0.0.0 a\n",
             "boot 1 2\nroute 10.0.0.0/8 1 0.0.0.0 a\n",
             "boot 1 2\nsomething else\n",
+            // A destination and a next hop of different families.
+            "boot 1 2\nroute ::/1 0x1 0.0.0.0 a\n",
+            "boot 1 2\nroute 0.0.0.0/1 0x1 :: a\n",
+            // An IPv6 network with bits past its length, or too long.
+            "boot 1 2\nroute 8000::/0 0x1 :: a\n",
+            "boot 1 2\nroute ::/129 0x1 :: a\n",
         ] {
             assert_eq!(parse(bad), None, "{bad:?}");
         }
