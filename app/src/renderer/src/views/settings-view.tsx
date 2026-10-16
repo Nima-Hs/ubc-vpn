@@ -6,6 +6,7 @@ import { KeyRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ChoiceList } from "@/components/ui/choice-list";
+import { Confirm } from "@/components/ui/confirm";
 import { Panel } from "@/components/ui/panel";
 import { Switch } from "@/components/ui/switch";
 import { Heading, Subheading, Text } from "@/components/ui/text";
@@ -200,31 +201,14 @@ function Ready({
                     </div>
                 )}
                 {saved && asking && (
-                    <div role="alert">
-                        <Panel tone="attention">
-                            <Text>{SETTINGS.password.ask}</Text>
-                            <div className="flex gap-2 pt-1">
-                                {/* The question takes the keyboard, so it cannot be missed. */}
-                                <Button
-                                    size="sm"
-                                    variant="destructive"
-                                    loading={busy}
-                                    ref={(button) => button?.focus()}
-                                    onClick={onForget}
-                                >
-                                    {SETTINGS.password.yes}
-                                </Button>
-                                <Button
-                                    size="sm"
-                                    variant="quiet"
-                                    disabled={busy}
-                                    onClick={() => onAsk(false)}
-                                >
-                                    {SETTINGS.password.no}
-                                </Button>
-                            </div>
-                        </Panel>
-                    </div>
+                    <Confirm
+                        question={SETTINGS.password.ask}
+                        confirm={SETTINGS.password.yes}
+                        cancel={SETTINGS.password.no}
+                        busy={busy}
+                        onConfirm={onForget}
+                        onCancel={() => onAsk(false)}
+                    />
                 )}
                 {forgotten && (
                     <p role="status" className="sr-only">

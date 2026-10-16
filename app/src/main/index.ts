@@ -211,10 +211,9 @@ async function start(): Promise<void> {
         });
     }
     registerDemo?.(window);
-    // The Settings screen: in no production build until the client's
-    // commands for it are on main (#208). Until then only the demo build has
-    // it, against a fake. Only an installed app ever asks the OS to start it
-    // at sign-in; anything else records the request instead.
+    // The Settings screen, asking the command-line client (#208); a demo
+    // build asks its fake instead. Only an installed app ever asks the OS to
+    // start it at sign-in; anything else records the request instead.
     let profiles: ProfilesService | undefined;
     if (__SETTINGS__) {
         profiles = demoProfiles ?? new ProfilesRunner(settingsCommand(app, process));

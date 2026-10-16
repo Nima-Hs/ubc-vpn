@@ -1468,18 +1468,36 @@ test("settings: the saved password is forgotten only once the user says so", asy
     await scenario("settings");
     await tab("Settings").click();
     await expect(page.getByText(/Your password is saved in/)).toBeVisible();
-    await page.getByRole("button", { name: "Forget saved password" }).click();
-    // It asks, and the question takes the keyboard.
-    const question = page.getByRole("alert");
-    await expect(question).toContainText("Forget your saved password?");
-    await expect(question.getByRole("button", { name: "Forget password" })).toBeFocused();
+    const forget = page.getByRole("button", { name: "Forget saved password" });
+    const question = page.getByRole("alertdialog", { name: "Forget your saved password?" });
+
+    // From the keyboard, Enter twice: the second lands on "Keep it", so the
+    // password stays. The question is named by itself and takes the keyboard,
+    // on its safe answer.
+    await forget.focus();
+    await page.keyboard.press("Enter");
+    await expect(question).toBeVisible();
+    await expect(question.getByRole("button", { name: "Keep it" })).toBeFocused();
     await shoot("settings-forget-ask");
-    // "Keep it" changes nothing.
-    await question.getByRole("button", { name: "Keep it" }).click();
+    await page.keyboard.press("Enter");
+    await expect(question).toHaveCount(0);
     await expect(page.getByText(/Your password is saved in/)).toBeVisible();
-    // Asked again, and confirmed.
-    await page.getByRole("button", { name: "Forget saved password" }).click();
-    await page.getByRole("alert").getByRole("button", { name: "Forget password" }).click();
+
+    // The keyboard stays where the user puts it: the question takes it once.
+    await forget.click();
+    await page.keyboard.press("Shift+Tab");
+    const confirm = question.getByRole("button", { name: "Forget password" });
+    await expect(confirm).toBeFocused();
+    await page.waitForTimeout(300);
+    await expect(confirm).toBeFocused();
+    // Escape keeps it too.
+    await page.keyboard.press("Escape");
+    await expect(question).toHaveCount(0);
+    await expect(page.getByText(/Your password is saved in/)).toBeVisible();
+
+    // Asked again, and confirmed deliberately.
+    await forget.click();
+    await question.getByRole("button", { name: "Forget password" }).click();
     await expect(page.getByText("No password is saved.", { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "Forget saved password" })).toHaveCount(0);
     await tab("Connection").click();
