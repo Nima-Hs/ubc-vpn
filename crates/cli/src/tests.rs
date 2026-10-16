@@ -298,6 +298,7 @@ fn requests_are_answered_or_refused_with_the_services_reason() {
             cookie: ubc_vpn_core::redact::Secret::new("made-up-cookie"),
             gateway_addr: [192, 0, 2, 1].into(),
             routes: nothing,
+            tunnel: Default::default(),
         },
     ));
     let Err(ClientError::Refused(why)) = refused else {
@@ -421,6 +422,7 @@ fn every_state_is_printed_exactly() {
             "ece.example.test".to_string(),
             "cs.example.test".to_string(),
         ],
+        mode: ubc_vpn_core::state::TunnelMode::Split,
     };
     let failed = ConnState::Failed {
         code: ErrorCode::VerificationFailed,
@@ -460,7 +462,7 @@ fn every_state_is_printed_exactly() {
             ConnState::Connected { tunnel },
             "Connected (utun4 as 10.255.0.2)\n  Subnets: 10.19.0.0/16, 142.103.0.0/16\n  \
              DNS domains: ece.example.test, cs.example.test\n",
-            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test","cs.example.test"]}}"#,
+            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test","cs.example.test"],"mode":"split"}}"#,
         ),
     ];
     for (state, words, json) in states {

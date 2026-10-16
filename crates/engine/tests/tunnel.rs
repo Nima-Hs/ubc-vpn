@@ -79,6 +79,7 @@ fn gateway(port: u16, pin: &str) -> Gateway {
         gateway: HOST.to_string(),
         pins: vec![Pin::try_from(pin.to_string()).expect("a full pin")],
         allowed_routes: None,
+        full_tunnel: Default::default(),
     };
     let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
     Gateway::for_test(&policy, endpoint).expect("a valid policy and a local endpoint")

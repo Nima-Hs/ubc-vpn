@@ -71,8 +71,25 @@ pub struct Policy {
     /// certificate change happen without locking users out.
     pub pins: Vec<Pin>,
     /// When present, the only networks the user's routes may fall inside.
+    /// It says nothing of full mode, which is not a route the user chose:
+    /// see `full_tunnel`.
     #[serde(default)]
     pub allowed_routes: Option<Vec<Ipv4Net>>,
+    /// Whether users may send all their traffic through the tunnel. Left
+    /// out, they may.
+    #[serde(default)]
+    pub full_tunnel: FullTunnel,
+}
+
+/// What a [`Policy`] says of full mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FullTunnel {
+    /// Users may choose it.
+    #[default]
+    Allowed,
+    /// It is refused: at connect, on a switch, and when it would be saved.
+    Forbidden,
 }
 
 /// Why a [`Policy`] is unusable.
@@ -150,7 +167,24 @@ mod tests {
             gateway: gateway.to_string(),
             pins: pins.iter().map(|p| pin(p).unwrap()).collect(),
             allowed_routes: None,
+            full_tunnel: FullTunnel::Allowed,
         }
+    }
+
+    // Full mode is allowed unless the policy says otherwise, and the policy
+    // says so with exactly these words.
+    #[test]
+    fn full_mode_is_allowed_unless_forbidden() {
+        let json =
+            |extra: &str| format!(r#"{{"gateway":"myvpn.ubc.ca","pins":["{GOOD_PIN}"]{extra}}}"#);
+        let read = |extra| serde_json::from_str::<Policy>(&json(extra));
+        assert_eq!(read("").unwrap().full_tunnel, FullTunnel::Allowed);
+        let allowed = read(r#","full_tunnel":"allowed""#).unwrap();
+        assert_eq!(allowed.full_tunnel, FullTunnel::Allowed);
+        let forbidden = read(r#","full_tunnel":"forbidden""#).unwrap();
+        assert_eq!(forbidden.full_tunnel, FullTunnel::Forbidden);
+        assert!(read(r#","full_tunnel":true"#).is_err());
+        assert!(read(r#","full_tunnel":"Forbidden""#).is_err());
     }
 
     #[test]

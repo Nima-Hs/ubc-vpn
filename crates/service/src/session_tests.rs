@@ -36,6 +36,7 @@ fn a_cookie_is_wiped_on_an_idle_service_when_its_time_is_up() {
         gateway: "vpn.example.test".to_string(),
         pins: vec![pin],
         allowed_routes: None,
+        full_tunnel: Default::default(),
     };
     let hub = Arc::new(Hub::new(None));
     let logs = Logs::lingering(Duration::from_millis(50));
@@ -50,6 +51,7 @@ fn a_cookie_is_wiped_on_an_idle_service_when_its_time_is_up() {
             subnets: subnets.iter().map(|s| s.parse().unwrap()).collect(),
             dns_domains: Vec::new(),
         },
+        tunnel: Default::default(),
     };
     session.connect(params).unwrap().settle(true);
     until("connected", || {
@@ -82,6 +84,7 @@ fn reconnecting_session() -> (Session, Arc<Hub>, Fake) {
         gateway: "vpn.example.test".to_string(),
         pins: vec![pin],
         allowed_routes: None,
+        full_tunnel: Default::default(),
     };
     let hub = Arc::new(Hub::new(None));
     let session = Session::start(&platform, engine, Ok(policy), hub.clone(), Logs::default());
@@ -96,6 +99,7 @@ fn params() -> ConnectParams {
             subnets: vec!["10.255.0.0/24".parse().unwrap()],
             dns_domains: Vec::new(),
         },
+        tunnel: Default::default(),
     }
 }
 
@@ -148,5 +152,50 @@ fn a_connect_never_settled_is_undone() {
     assert!(!calls.contains(&Op::CapturePhysical), "{calls:?}");
     next.settle(true);
     until("the next one connects", connected);
+    session.stop();
+}
+
+// Until full mode can be applied it is refused, at connect and on a switch,
+// with nothing done for it; split is the mode every tunnel has, so a switch
+// to split is no change while connected and waits for a connect otherwise.
+#[test]
+fn full_mode_is_refused_until_it_can_be_applied() {
+    let (session, hub, fake) = reconnecting_session();
+    let full = ConnectParams {
+        tunnel: TunnelMode::Full,
+        ..params()
+    };
+    let refused = session.connect(full).map(drop).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::RouteRefused);
+    assert_eq!(refused.message, FULL_NOT_YET);
+    assert!(fake.calls().is_empty(), "something was done for it");
+
+    let idle = session.set_tunnel(TunnelMode::Split).map(drop).unwrap_err();
+    assert_eq!(idle.code, ErrorCode::NotConnected);
+    let refused = session.set_tunnel(TunnelMode::Full).map(drop).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::RouteRefused);
+
+    session.connect(params()).unwrap().settle(true);
+    until("connected", || {
+        matches!(hub.state(), ConnState::Connected { .. })
+    });
+    let ConnState::Connected { tunnel } = hub.state() else {
+        panic!("{:?}", hub.state())
+    };
+    assert_eq!(tunnel.mode, TunnelMode::Split);
+    let calls = fake.calls().len();
+    let refused = session.set_tunnel(TunnelMode::Full).map(drop).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::RouteRefused);
+    assert_eq!(refused.message, FULL_NOT_YET);
+    match session.set_tunnel(TunnelMode::Split) {
+        Ok(Admitted::Unchanged(same)) => assert_eq!(same, tunnel),
+        other => panic!("{:?}", other.map(drop)),
+    }
+    assert_eq!(
+        fake.calls().len(),
+        calls,
+        "a refusal or no change did something"
+    );
+    assert_eq!(hub.state(), ConnState::Connected { tunnel });
     session.stop();
 }

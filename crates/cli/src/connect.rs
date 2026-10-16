@@ -419,6 +419,9 @@ pub(crate) fn start(
         cookie,
         gateway_addr,
         routes: profile.routes.clone(),
+        // Split until this client can set the mode: the saved setting is
+        // sent once `settings set-tunnel` exists.
+        tunnel: ubc_vpn_core::state::TunnelMode::Split,
     };
     // The last moment a cancel can still stop the connect. A login that was
     // cancelled too late to stop still yields a session; it is thrown away

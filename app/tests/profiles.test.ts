@@ -18,7 +18,7 @@ const LF = String.fromCharCode(10);
 const OTHER = "fedcba9876543210fedcba9876543210";
 
 const VIEW: ProfilesView = {
-    global: { start: "off", auto_connect: false, active_profile: ID },
+    global: { start: "off", auto_connect: false, active_profile: ID, tunnel: "split" },
     profiles: [
         {
             id: ID,
@@ -127,6 +127,9 @@ describe("the profiles commands", () => {
             { line: { ...VIEW, global: { ...VIEW.global, active_profile: "not-an-id" } } },
             { line: { ...VIEW, profiles: [VIEW.profiles[0], VIEW.profiles[0]] } },
             { line: { ...VIEW, global: { ...VIEW.global, start: "sometimes" } } },
+            // A tunnel mode that is not one of the two, or none.
+            { line: { ...VIEW, global: { ...VIEW.global, tunnel: "everything" } } },
+            { line: { ...VIEW, global: { ...VIEW.global, tunnel: undefined } } },
             // Not one line.
             { raw: `${JSON.stringify(VIEW)}\n${JSON.stringify(VIEW)}\n` },
             { raw: "not json\n" },

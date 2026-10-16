@@ -336,6 +336,7 @@ describe("events and requests", () => {
                 cookie: COOKIE,
                 gateway_addr: "192.0.2.1",
                 routes: { subnets: ["203.0.113.0/24"], dns_domains: [] },
+                tunnel: "split",
             },
         };
         // @ts-expect-error The type does not accept `connect`; this checks the guard behind it.
@@ -445,6 +446,14 @@ describe("when the bridge ends", () => {
         }
         // The same unknown word on an event is let through, to be ignored.
         expect(isServerMessage({ type: "event", data: { kind: "comet_sighted" } })).toBe(true);
+        // A connected state says its tunnel mode, one of the two.
+        const connected = (tunnel: unknown) =>
+            answer({ kind: "status", value: { state: "connected", tunnel } });
+        expect(isServerMessage(connected(TUNNEL))).toBe(true);
+        expect(isServerMessage(connected({ ...TUNNEL, mode: "full" }))).toBe(true);
+        for (const mode of ["everything", "Full", "", undefined, true]) {
+            expect(isServerMessage(connected({ ...TUNNEL, mode })), String(mode)).toBe(false);
+        }
     });
 
     // Protocol 4 adds `not_connected`. Every code of the contract is taken;
@@ -1098,6 +1107,7 @@ describe("the mock bridge follows the contract", () => {
                     cookie: COOKIE,
                     gateway_addr: "192.0.2.1",
                     routes: { subnets: ["203.0.113.0/24"], dns_domains: [] },
+                    tunnel: "split",
                 },
             },
         };

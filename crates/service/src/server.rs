@@ -483,6 +483,13 @@ impl Shared {
                 }
                 Err(refusal) => Err(refusal),
             },
+            RequestBody::SetTunnel(params) => match self.session.set_tunnel(params.mode) {
+                Ok(Admitted::Changing) => Ok(ResponseBody::Accepted),
+                Ok(Admitted::Unchanged(tunnel)) => {
+                    Ok(ResponseBody::Status(ConnState::Connected { tunnel }))
+                }
+                Err(refusal) => Err(refusal),
+            },
         };
         let stranger = matches!(&answer, Err(refusal) if refusal.code == ErrorCode::NotOwner);
         (answer, !stranger, admitted)

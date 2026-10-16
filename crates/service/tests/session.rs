@@ -130,6 +130,7 @@ fn the_gateway_comes_only_from_the_policy() {
         gateway: "vpn.example.test".to_string(),
         pins: vec![pin('A').try_into().unwrap()],
         allowed_routes: None,
+        full_tunnel: Default::default(),
     };
     assert_eq!(rig.spy.opens()[0].0, Gateway::from_policy(&policy).unwrap());
 

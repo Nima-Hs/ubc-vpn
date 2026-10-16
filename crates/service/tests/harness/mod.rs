@@ -64,6 +64,7 @@ pub fn connect(cookie: &str, addr: [u8; 4], subnets: &[&str], domains: &[&str]) 
             subnets: subnets.iter().map(|s| s.parse().unwrap()).collect(),
             dns_domains: domains.iter().map(|d| d.to_string()).collect(),
         },
+        tunnel: Default::default(),
     })
 }
 

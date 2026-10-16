@@ -62,6 +62,7 @@ use serde_json::{Map, Value};
 use crate::routes::{Ipv4Net, RouteSet};
 use crate::settings::{Settings, lenient_routes};
 use crate::settings_cli::{RouteInput, SettingsFailureCode, misleads, usable_username};
+use crate::state::TunnelMode;
 
 /// The version of the settings file this module writes.
 pub const SETTINGS_VERSION: u32 = 2;
@@ -158,10 +159,21 @@ pub struct GlobalSettings {
     pub auto_connect: bool,
     /// The profile `connect` uses unless told otherwise.
     pub active_profile: ProfileId,
+    /// Split or full, for every profile. Left out, or not a word this
+    /// version knows, it reads as split: the narrower of the two, so a
+    /// damaged file never sends more through the tunnel than was chosen.
+    #[serde(default, deserialize_with = "lenient_tunnel")]
+    pub tunnel: TunnelMode,
     /// Fields this version does not know, kept as they are.
     #[serde(flatten)]
     #[cfg_attr(test, ts(skip))]
     pub other: Map<String, Value>,
+}
+
+/// Reads a tunnel mode, taking anything that is not one as split.
+fn lenient_tunnel<'de, D: Deserializer<'de>>(reader: D) -> Result<TunnelMode, D::Error> {
+    let value = Value::deserialize(reader)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 /// One way to connect.
@@ -310,6 +322,7 @@ impl Profiles {
                 start: StartMode::Off,
                 auto_connect: false,
                 active_profile: id,
+                tunnel: TunnelMode::Split,
                 other: Map::new(),
             },
             profiles: vec![profile],
@@ -613,6 +626,12 @@ impl Profiles {
     pub fn set_startup(&mut self, start: StartMode, auto_connect: bool) {
         self.global.start = start;
         self.global.auto_connect = auto_connect;
+    }
+
+    /// Sets split or full for every profile. Whether full may be had is the
+    /// policy's to say, and the caller's to ask before this.
+    pub fn set_tunnel(&mut self, mode: TunnelMode) {
+        self.global.tunnel = mode;
     }
 
     /// The active profile as the settings were before profiles, for the

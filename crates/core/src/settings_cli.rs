@@ -63,6 +63,7 @@ use crate::policy::Policy;
 use crate::protocol::ErrorCode;
 use crate::routes::{Ipv4Net, MAX_ROUTES, MIN_PREFIX_LEN, RouteSet, is_valid_domain};
 use crate::settings::Settings;
+use crate::state::TunnelMode;
 
 /// The longest entry [`check_input`] will look at. Anything longer is reported
 /// as a problem without being examined.
@@ -132,6 +133,33 @@ pub enum RoutesReply {
         /// Every problem found, in the order of the input.
         problems: Vec<RouteProblem>,
     },
+}
+
+/// The input of `settings set-tunnel`: split or full, for every profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct TunnelInput {
+    /// The mode to save, and to switch a live connection to.
+    pub mode: TunnelMode,
+}
+
+/// The answer to `settings set-tunnel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub enum TunnelReply {
+    /// The mode is saved.
+    Ok {
+        /// The mode now saved.
+        tunnel: TunnelMode,
+        /// What became of the live connection, as for `set-routes`: it was
+        /// switched, it is used at the next connect, or the service refused
+        /// or failed to switch it.
+        live: LiveRoutes,
+    },
+    /// The policy forbids full mode. Nothing was saved.
+    Forbidden,
 }
 
 /// What saving routes did to the user's live connection.
@@ -619,6 +647,31 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_lines_have_a_stable_wire_format() {
+        let input: TunnelInput = decode(r#"{"mode":"full"}"#).unwrap();
+        assert_eq!(input.mode, TunnelMode::Full);
+        for wrong in [
+            r#"{"mode":"all"}"#,
+            r#"{}"#,
+            r#"{"mode":"full","subnets":[]}"#,
+        ] {
+            assert!(decode::<TunnelInput>(wrong).is_err(), "{wrong}");
+        }
+        let ok = TunnelReply::Ok {
+            tunnel: TunnelMode::Full,
+            live: LiveRoutes::Applied,
+        };
+        let line = encode(&ok).unwrap();
+        assert_eq!(
+            line,
+            "{\"type\":\"ok\",\"tunnel\":\"full\",\"live\":{\"result\":\"applied\"}}\n"
+        );
+        assert_eq!(decode::<TunnelReply>(&line).unwrap(), ok);
+        let forbidden = encode(&TunnelReply::Forbidden).unwrap();
+        assert_eq!(forbidden, "{\"type\":\"forbidden\"}\n");
+    }
+
+    #[test]
     fn replies_have_a_stable_wire_format() {
         let ok = RoutesReply::Ok {
             routes: check_input(&input(&["10.19.0.0/16"], &[]), None).unwrap(),
@@ -691,6 +744,7 @@ mod tests {
             gateway: "vpn.example.test".to_string(),
             pins: Vec::new(),
             allowed_routes,
+            full_tunnel: Default::default(),
         };
         let limit = vec!["142.103.0.0/16".parse().unwrap()];
 

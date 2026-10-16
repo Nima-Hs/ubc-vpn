@@ -104,6 +104,7 @@ export const TUNNEL = {
     address: "198.51.100.42",
     subnets: ["203.0.113.0/24"],
     dns_domains: ["campus.example"],
+    mode: "split",
 };
 
 /** One thing the mock `connect --json` does next. See `mock-cli.mjs`. */

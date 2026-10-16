@@ -114,7 +114,8 @@ pub enum BridgeLine {
 /// cannot write into the log it shows the user. An `update_routes` is
 /// refused too: the routes a tunnel carries come from the user's saved
 /// settings, sent by the command-line client that saved them, and never
-/// from the app directly.
+/// from the app directly. A `set_tunnel` is refused for the same reason:
+/// the mode is the user's saved setting.
 ///
 /// Every request is listed, with no catch-all, so a request added later does
 /// not compile until someone decides whether the app may send it.
@@ -123,6 +124,7 @@ pub fn bridge_allows(request: &RequestBody) -> bool {
         RequestBody::Claim | RequestBody::Status | RequestBody::Disconnect => true,
         RequestBody::Logs(_) | RequestBody::WatchLogs(_) | RequestBody::Diagnostics => true,
         RequestBody::Connect(_) | RequestBody::AddLog(_) | RequestBody::UpdateRoutes(_) => false,
+        RequestBody::SetTunnel(_) => false,
     }
 }
 
@@ -185,6 +187,7 @@ mod tests {
             cookie: Secret::new("c"),
             gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
             routes: RouteSet::default(),
+            tunnel: Default::default(),
         });
         assert!(!bridge_allows(&connect));
         // Nor may the app write into the log it shows the user.
@@ -197,6 +200,11 @@ mod tests {
         // sent by the command-line client that saved them.
         let update = RequestBody::UpdateRoutes(RouteSet::default());
         assert!(!bridge_allows(&update));
+        // Nor switch the tunnel's mode: that is the saved setting too.
+        let full = RequestBody::SetTunnel(crate::protocol::SetTunnelParams {
+            mode: crate::state::TunnelMode::Full,
+        });
+        assert!(!bridge_allows(&full));
         for allowed in [
             RequestBody::Claim,
             RequestBody::Status,

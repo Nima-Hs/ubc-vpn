@@ -23,7 +23,7 @@ use ubc_vpn_core::protocol::{
     is_plausible_gateway_addr,
 };
 use ubc_vpn_core::routes::{Ipv4Net, LocalNetworks, RouteSet, check_against_local};
-use ubc_vpn_core::state::{ConnState, TunnelInfo};
+use ubc_vpn_core::state::{ConnState, TunnelInfo, TunnelMode};
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
 use ubc_vpn_platform::{Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Platform, Routes};
 
@@ -274,6 +274,9 @@ impl Session {
         if let Err(why) = params.routes.check(allowed) {
             return refused(ErrorCode::RouteRefused, format!("Route refused: {why}."));
         }
+        if params.tunnel == TunnelMode::Full {
+            return refused(ErrorCode::RouteRefused, FULL_NOT_YET.to_string());
+        }
         // The machine's own addresses and the networks it is on are known
         // only once the worker captures them, so `set_up` refuses those,
         // still before the gateway is contacted.
@@ -331,6 +334,45 @@ impl Session {
             self.logs.about_requests(LogLevel::Warn, &line);
         }
         admitted
+    }
+
+    /// Switches the live tunnel between split and full.
+    ///
+    /// Until this service can apply full mode, full is refused, at once and
+    /// before anything else, and every tunnel is split: so a switch to
+    /// split, while connected, is no change.
+    pub(crate) fn set_tunnel(&self, mode: TunnelMode) -> Result<Admitted, ErrorInfo> {
+        let admitted = self.admit_set_tunnel(mode);
+        if let Err(refusal) = &admitted {
+            let line = format!(
+                "tunnel mode change refused: {}; the connection is as it was",
+                word!(refusal.code)
+            );
+            self.logs.about_requests(LogLevel::Warn, &line);
+        }
+        admitted
+    }
+
+    fn admit_set_tunnel(&self, mode: TunnelMode) -> Result<Admitted, ErrorInfo> {
+        if mode == TunnelMode::Full {
+            return Err(error(ErrorCode::RouteRefused, FULL_NOT_YET.to_string()));
+        }
+        let gate = lock(&self.gate);
+        match gate.phase {
+            Phase::Connected => {}
+            Phase::Idle => {
+                let message = "The VPN is not connected. The mode is used at the next connect.";
+                return Err(error(ErrorCode::NotConnected, message.to_string()));
+            }
+            Phase::Connecting | Phase::Updating | Phase::Stopping => return Err(busy()),
+        }
+        match &gate.live {
+            Some(live) => Ok(Admitted::Unchanged(live.tunnel.clone())),
+            None => {
+                let message = "The connection's network is not known.";
+                Err(error(ErrorCode::Internal, message.to_string()))
+            }
+        }
     }
 
     fn admit_update(&self, routes: RouteSet, carries: &str) -> Result<Admitted, ErrorInfo> {
@@ -766,6 +808,9 @@ impl Machine {
         thread::Builder::new().spawn(forward).map(drop)
     }
 }
+
+/// What a request for full mode is told until this service can apply it.
+const FULL_NOT_YET: &str = "Full tunnel is not available in this version yet.";
 
 const LEFT_BEHIND: &str = "Some routes or DNS settings could not be removed.";
 
