@@ -2,8 +2,11 @@ import type { LoginPrompt, LoginState } from "@shared/api";
 import {
     describeLoginFailure,
     describePrompt,
+    describeReveal,
+    isSecretKind,
     LOGIN_CANCELLING,
     LOGIN_WORKING,
+    revealAfter,
 } from "@shared/copy";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -25,11 +28,21 @@ function Prompt({ prompt }: { prompt: LoginPrompt }) {
     const field = useRef<HTMLInputElement>(null);
     // Only whether there is anything to send, never what it is.
     const [empty, setEmpty] = useState(true);
-    const hidden = prompt.kind === "password" || prompt.kind === "code";
+    // Whether a hidden answer is shown. It starts hidden for every question,
+    // since each question gets a new field.
+    const [shown, setShown] = useState(false);
+    const reveal = describeReveal(prompt.kind, shown);
 
     // A new question takes the keyboard, so the user can simply type.
     useEffect(() => {
         field.current?.focus();
+    }, []);
+
+    // Leaving the window hides the answer again, so it is not left on screen.
+    useEffect(() => {
+        const hide = () => setShown((now) => revealAfter(now, "blur"));
+        window.addEventListener("blur", hide);
+        return () => window.removeEventListener("blur", hide);
     }, []);
 
     const submit = (event: FormEvent) => {
@@ -41,11 +54,18 @@ function Prompt({ prompt }: { prompt: LoginPrompt }) {
         const value = input.value;
         input.value = "";
         setEmpty(true);
+        setShown((now) => revealAfter(now, "submit"));
         void api.answerPrompt(prompt.id, value);
     };
 
     return (
-        <form className="flex min-h-0 flex-1 flex-col gap-5" onSubmit={submit} noValidate>
+        // Nothing typed here is offered to be kept or filled in again.
+        <form
+            className="flex min-h-0 flex-1 flex-col gap-5"
+            onSubmit={submit}
+            noValidate
+            autoComplete="off"
+        >
             <section className="flex shrink-0 animate-arrive flex-col gap-2">
                 <div className="flex items-center gap-3">
                     <StatusIndicator tone="busy" size="lg" />
@@ -66,7 +86,16 @@ function Prompt({ prompt }: { prompt: LoginPrompt }) {
                     ref={field}
                     label={prompt.label}
                     name={`login-${prompt.kind}`}
-                    type={hidden ? "password" : "text"}
+                    // Hidden unless the kind is known to be plain; the
+                    // button can only show what is hidden this way.
+                    type={isSecretKind(prompt.kind) ? "password" : "text"}
+                    {...(reveal !== null && {
+                        reveal: {
+                            shown,
+                            label: reveal.label,
+                            onToggle: () => setShown((now) => revealAfter(now, "toggle")),
+                        },
+                    })}
                     inputMode={prompt.kind === "code" ? "numeric" : "text"}
                     autoCapitalize="none"
                     autoCorrect="off"

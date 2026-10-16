@@ -3,9 +3,12 @@ import {
     describe as describe_,
     describeLoginFailure,
     describePrompt,
+    describeReveal,
+    isSecretKind,
     LOGIN_WORKING,
     loginAnnouncement,
     loginHasScreen,
+    revealAfter,
 } from "@shared/copy";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import type { PromptKind } from "@shared/protocol/PromptKind";
@@ -192,6 +195,39 @@ describe("the demo login", () => {
         for (const name of ["disconnected", "__proto__", "constructor"]) {
             login.setScenario(name);
             expect(seen.at(-1)).toEqual({ phase: "idle" });
+        }
+    });
+});
+
+describe("showing a hidden answer", () => {
+    it("is offered for a password and a code, named for what pressing it does", () => {
+        expect(describeReveal("password", false)).toEqual({ label: "Show password" });
+        expect(describeReveal("password", true)).toEqual({ label: "Hide password" });
+        expect(describeReveal("code", false)).toEqual({ label: "Show code" });
+        expect(describeReveal("code", true)).toEqual({ label: "Hide code" });
+        // A username or a question's answer is shown as it is typed.
+        expect(describeReveal("username", false)).toBeNull();
+        expect(describeReveal("text", false)).toBeNull();
+    });
+
+    it("hides any answer whose kind is not known to be plain", () => {
+        expect(isSecretKind("password")).toBe(true);
+        expect(isSecretKind("code")).toBe(true);
+        expect(isSecretKind("username")).toBe(false);
+        expect(isSecretKind("text")).toBe(false);
+        // A kind a newer client might send, which this app does not know.
+        expect(isSecretKind("recovery_key")).toBe(true);
+        expect(describeReveal("recovery_key" as PromptKind, false)).toEqual({
+            label: "Show answer",
+        });
+    });
+
+    it("is undone by sending the answer or leaving the window; only the button shows it", () => {
+        expect(revealAfter(false, "toggle")).toBe(true);
+        expect(revealAfter(true, "toggle")).toBe(false);
+        for (const shown of [true, false]) {
+            expect(revealAfter(shown, "submit")).toBe(false);
+            expect(revealAfter(shown, "blur")).toBe(false);
         }
     });
 });

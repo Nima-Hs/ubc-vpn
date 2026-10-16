@@ -379,6 +379,161 @@ test("a login answer is checked before the main process takes it", async () => {
     });
 });
 
+const passwordField = () => page.getByLabel("Password", { exact: true });
+
+test("a password is hidden until shown, and hidden again when sent or the window is left", async () => {
+    await scenario("login-password");
+    const field = passwordField();
+    await expect(field).toBeFocused();
+    // Hidden by default, with a button that says what it does.
+    await expect(field).toHaveAttribute("type", "password");
+    const show = page.getByRole("button", { name: "Show password" });
+    await expect(show).toBeVisible();
+    // The button sits inside the field, at its end and in its middle.
+    const fieldBox = await field.boundingBox();
+    const buttonBox = await show.boundingBox();
+    expect(fieldBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+    if (fieldBox !== null && buttonBox !== null) {
+        expect(buttonBox.y).toBeGreaterThanOrEqual(fieldBox.y);
+        expect(buttonBox.y + buttonBox.height).toBeLessThanOrEqual(fieldBox.y + fieldBox.height);
+        expect(buttonBox.x).toBeGreaterThanOrEqual(fieldBox.x);
+        expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(fieldBox.x + fieldBox.width);
+        const middle = (box: { y: number; height: number }) => box.y + box.height / 2;
+        expect(Math.abs(middle(buttonBox) - middle(fieldBox))).toBeLessThanOrEqual(1);
+    }
+    // Nothing typed is offered to be kept or filled in.
+    await expect(field).toHaveAttribute("autocomplete", "off");
+    await expect(page.locator("form")).toHaveAttribute("autocomplete", "off");
+
+    await field.fill("hunter2-not-real");
+    await show.click();
+    await expect(field).toHaveAttribute("type", "text");
+    const hide = page.getByRole("button", { name: "Hide password" });
+    await expect(hide).toBeVisible();
+    await shoot("login-password-shown");
+    await hide.click();
+    await expect(field).toHaveAttribute("type", "password");
+
+    // Leaving the window hides it again.
+    await page.getByRole("button", { name: "Show password" }).click();
+    await expect(field).toHaveAttribute("type", "text");
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await expect(field).toHaveAttribute("type", "password");
+
+    // So does sending it; the next question starts hidden too.
+    await page.getByRole("button", { name: "Show password" }).click();
+    await expect(field).toHaveAttribute("type", "text");
+    await field.press("Enter");
+    // Taken: the field is gone, and the next question's answer starts hidden.
+    await expect(field).toHaveCount(0);
+    const code = page.getByLabel("Enter the code from your authenticator");
+    await expect(code).toHaveAttribute("type", "password");
+    await expect(page.getByRole("button", { name: "Show code" })).toBeVisible();
+    await scenario("disconnected");
+});
+
+test("a typed password is kept nowhere: not in a message, a log or the profile", async () => {
+    // A copy of its own, with a profile of its own, so the whole profile can
+    // be read once it has closed: a running app holds some of its files.
+    const profile = newProfile();
+    const other = await launchApp({
+        ...launchOptions,
+        args: launchArgs(),
+        env: { ...launchEnv, UBC_VPN_PROFILE: profile },
+    });
+    const printed: string[] = [];
+    for (const stream of [other.process().stdout, other.process().stderr]) {
+        stream?.on("data", (chunk: Buffer) => printed.push(chunk.toString("utf8")));
+    }
+    const secret = "Sentinel-pw-7Q2x-not-real";
+    // A control: something the page does keep, so the search below is shown
+    // to find what Chromium writes to the profile.
+    const kept = "Control-kept-9Fz1";
+    let sent: string[] = [];
+    try {
+        const shown = await other.firstWindow();
+        const logged: string[] = [];
+        shown.on("console", (message) => logged.push(message.text()));
+        await shown.waitForLoadState("domcontentloaded");
+        // Every message the main process sends the window, from here on: what
+        // it pushes, and every reply to a call the window makes.
+        const handlers = await other.evaluate(({ BrowserWindow, ipcMain }) => {
+            const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+            const recorded: string[] = [];
+            (globalThis as { sentToWindow?: string[] }).sentToWindow = recorded;
+            if (contents !== undefined) {
+                const send = contents.send.bind(contents);
+                contents.send = (channel: string, ...args: unknown[]) => {
+                    recorded.push(JSON.stringify([channel, ...args]));
+                    send(channel, ...args);
+                };
+            }
+            // Electron keeps each `ipcMain.handle` handler in this map. Each is
+            // wrapped, so what it answers is recorded on its way back.
+            type Handler = (event: unknown, ...args: unknown[]) => unknown;
+            const invoke = (ipcMain as unknown as { _invokeHandlers?: Map<string, Handler> })
+                ._invokeHandlers;
+            for (const [channel, handler] of invoke ?? []) {
+                invoke?.set(channel, async (event, ...args) => {
+                    const reply = await handler(event, ...args);
+                    recorded.push(JSON.stringify(["reply", channel, reply ?? null]));
+                    return reply;
+                });
+            }
+            return invoke?.size ?? 0;
+        });
+        // The replies are recorded: there are handlers, and they were wrapped.
+        expect(handlers).toBeGreaterThan(5);
+        await shown.evaluate(() => window.ubcVpn.demo?.setScenario("login-password"));
+        const field = shown.getByLabel("Password", { exact: true });
+        await field.fill(secret);
+        // Shown and hidden again on the way, as a user might.
+        await shown.getByRole("button", { name: "Show password" }).click();
+        await shown.getByRole("button", { name: "Hide password" }).click();
+        await field.press("Enter");
+        // Taken by the main process: the login moves on to the next question.
+        await expect(field).toHaveCount(0);
+        await expect(shown.getByLabel("Enter the code from your authenticator")).toBeVisible();
+        // Not in the page, now that it has been sent.
+        expect(await shown.content()).not.toContain(secret);
+        await shown.evaluate((value) => localStorage.setItem("e2e-control", value), kept);
+        // The spellchecker, which reads what is typed, is off for the session.
+        expect(
+            await other.evaluate(({ session }) => session.defaultSession.isSpellCheckerEnabled()),
+        ).toBe(false);
+        await other.evaluate(({ session }) => session.defaultSession.flushStorageData());
+        sent = await other.evaluate(
+            () => (globalThis as { sentToWindow?: string[] }).sentToWindow ?? [],
+        );
+        expect(logged.filter((line) => line.includes(secret))).toEqual([]);
+    } finally {
+        await other.close();
+    }
+
+    // Not in any message the window was sent, nor in anything printed.
+    expect(sent.length, "messages recorded").toBeGreaterThan(0);
+    // The answer's own call was among the replies recorded.
+    expect(sent.some((message) => message.startsWith('["reply","login:answer"'))).toBe(true);
+    expect(sent.filter((message) => message.includes(secret))).toEqual([]);
+    expect(printed.filter((line) => line.includes(secret))).toEqual([]);
+    // Nor anywhere in the app's profile, where Chromium would keep saved
+    // passwords, form entries or anything else, in UTF-8 or UTF-16.
+    const filesHolding = (text: string) => {
+        const needles = [Buffer.from(text, "utf8"), Buffer.from(text, "utf16le")];
+        return readdirSync(profile, { recursive: true, encoding: "utf8" }).filter((name) => {
+            const path = join(profile, name);
+            if (!statSync(path).isFile()) {
+                return false;
+            }
+            const bytes = readFileSync(path);
+            return needles.some((needle) => bytes.includes(needle));
+        });
+    };
+    expect(filesHolding(kept).length, "the search finds what is kept").toBeGreaterThan(0);
+    expect(filesHolding(secret)).toEqual([]);
+});
+
 test("the interface's process is confined", async () => {
     const seen = await app.evaluate(({ app: electronApp, BrowserWindow, Menu }) => {
         const contents = BrowserWindow.getAllWindows()[0]?.webContents;
@@ -548,7 +703,7 @@ test("log in, connect and disconnect, by keyboard", async () => {
     await page.keyboard.press("Enter");
     await expect(heading()).toHaveText("Logging in");
     await expect(heading()).toHaveText("Your password");
-    const password = page.getByLabel("Password");
+    const password = page.getByLabel("Password", { exact: true });
     await expect(password).toBeFocused();
     await expect(password).toHaveAttribute("type", "password");
     await expect(password).toHaveAttribute("autocomplete", "off");

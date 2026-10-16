@@ -366,6 +366,7 @@ function fakeElectron() {
         headersReceived: [] as Listener[],
         permissionRequest: [] as (Listener | null)[],
         permissionCheck: [] as (Listener | null)[],
+        spellChecker: [] as boolean[],
         appListeners: new Map<string, Listener>(),
     };
     const parts = {
@@ -385,6 +386,7 @@ function fakeElectron() {
                 recorded.permissionRequest.push(handler),
             setPermissionCheckHandler: (handler: Listener | null) =>
                 recorded.permissionCheck.push(handler),
+            setSpellCheckerEnabled: (enable: boolean) => recorded.spellChecker.push(enable),
         },
     } as unknown as SessionParts;
     return { parts, recorded };
@@ -418,6 +420,10 @@ describe("the session, as a built app sets it up", () => {
     it("loads the interface from the app's own files", () => {
         expect(entry).toBe("app://ui/index.html");
         expect(recorded.headersReceived).toEqual([]);
+    });
+
+    it("hands nothing typed to the spellchecker", () => {
+        expect(recorded.spellChecker).toEqual([false]);
     });
 
     it("serves app: requests through the checks above", async () => {
