@@ -174,7 +174,7 @@ These were settled on 2026-10-11, after the first version of this document, to r
 - macOS 13 or later on Apple silicon.
 - Ubuntu 22.04 or later and Debian 12 or later (`.deb`), and current Fedora (`.rpm`), on x64.
 
-Only IPv4 subnets are routed. IPv6 routes are refused, and the system's IPv6 setup is left untouched.
+Only IPv4 subnets are routed. IPv6 routes the user chooses are refused, and in split mode the system's IPv6 setup is left untouched. The one exception is full mode: the service adds the two halves `::/1` and `8000::/1` on the tunnel, to block IPv6 rather than carry it (see "Full tunnel").
 
 ### Files and where they live
 
@@ -226,13 +226,15 @@ A chosen subnet may contain the gateway itself; UBC's gateway sits inside a camp
 
 ### Full tunnel
 
+**Not available yet.** Until the service part of full tunnel lands (PR 3 of its plan, after the contract in #217 and the platform calls in 2a and 2b), the service refuses full mode on every OS with `route_refused`, "Full tunnel is not available in this version yet.": at `connect`, before anything is done, and on `set_tunnel`, where this refusal comes before `not_connected` and `busy`. Everything below is the agreed design that PR 3 implements.
+
 Split tunnel is the default and the reason this client exists. A user may instead send everything through the VPN: one global setting, `global.tunnel` in the settings file, `split` or `full`, shared by every profile. The policy file may forbid full mode (`"full_tunnel": "forbidden"`); left out, it is allowed. Full mode is not a route the user chooses: the rules above for routes still apply to the user's own subnets, and full mode is modelled and checked on its own.
 
 **What full mode does:**
 
 - **All IPv4 traffic goes through the tunnel.** The service adds `0.0.0.0/1` and `128.0.0.0/1` through the tunnel. It never touches the default route. The halves are more specific than any default route, so they win whatever its metric, and a default route renewed by DHCP changes nothing.
 - **IPv6 is blocked.** The service adds `::/1` and `8000::/1` through the tunnel, which has no IPv6 address, so an IPv6 connection fails at once and programs fall back to IPv4. Teredo and 6to4 cannot get round this: they carry IPv6 inside IPv4, and that IPv4 follows the halves. Where the tunnel adapter has no IPv6 at all, the halves cannot be added; then full mode is refused if any other interface has an IPv6 route other than link-local, and otherwise goes ahead without them, since nothing can leak.
-- **All DNS goes to UBC's DNS servers, through the tunnel.** On Windows a catch-all name-resolution rule (NRPT namespace `.`) names the tunnel's DNS servers, beside the split-DNS rules for the user's domains. It takes precedence over Windows' habit of asking every network's DNS server at once: queries go only to the tunnel's servers, over IPv4 and IPv6 alike. A single-label name is sent to UBC's servers with the local network's suffix added. The rules this product writes are volatile (that change to the Windows rules is in progress), so a crash or a restart cannot leave a dead `.` rule behind; the service also clears its rules when it starts.
+- **All DNS goes to UBC's DNS servers, through the tunnel.** On Windows a catch-all name-resolution rule (NRPT namespace `.`) names the tunnel's DNS servers, beside the split-DNS rules for the user's domains. It takes precedence over Windows' habit of asking every network's DNS server at once: queries go only to the tunnel's servers, over IPv4 and IPv6 alike. A single-label name is sent to UBC's servers with the local network's suffix added. The rules this product writes are volatile, so a crash or a restart cannot leave a dead `.` rule behind; the service also clears its rules when it starts.
 - **The local network stays reachable directly:** the network the physical interface is on and its router. Their routes are more specific than the halves. The gateway keeps its own route through the physical network, as in split mode.
 - **The user's own subnets and domains stay applied.** Full mode adds to them, so switching is only adding or removing the halves and the `.` rule.
 

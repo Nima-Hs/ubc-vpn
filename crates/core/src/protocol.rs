@@ -234,6 +234,13 @@ pub enum RequestBody {
     /// - **Failure while applying or verifying:** everything is torn down
     ///   and the state is `failed`, as for `update_routes`.
     /// - **Timing:** `busy` and `not_connected` as for `update_routes`.
+    ///
+    /// **Not available yet:** until the service part of full tunnel lands
+    /// (PR 3 of its plan), the service refuses `full` on every OS with
+    /// `route_refused`, "Full tunnel is not available in this version
+    /// yet.", before anything else, so before `not_connected` and `busy`.
+    /// A switch to `split` while connected is no change, since every
+    /// tunnel is split until then.
     SetTunnel(SetTunnelParams),
 }
 
@@ -307,6 +314,11 @@ pub struct ConnectParams {
     /// Split or full. Left out, it is split, as before there was a choice.
     /// Full is refused, as for [`RequestBody::SetTunnel`], when it cannot
     /// be had safely here.
+    ///
+    /// **Not available yet:** until the service part of full tunnel lands
+    /// (PR 3 of its plan), the service refuses `full` on every OS with
+    /// `route_refused`, "Full tunnel is not available in this version
+    /// yet.", after the routes are checked and before anything is done.
     #[serde(default)]
     pub tunnel: TunnelMode,
 }
