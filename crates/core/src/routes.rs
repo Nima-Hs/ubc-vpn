@@ -394,6 +394,9 @@ pub fn probe_address(
         let mut at = start.checked_add(1).filter(|next| *next <= end);
         while let Some(n) = at {
             let addr = Ipv4Addr::from(n);
+            // Stepping over a whole network is for speed only: the same
+            // address would be found one address at a time, but a `/9`
+            // network inside a `/8` subnet is millions of steps.
             if let Some(net) = local.iter().find(|net| net.contains_addr(addr)) {
                 at = u32::from(net.last())
                     .checked_add(1)
@@ -816,6 +819,20 @@ mod tests {
         );
         let wider = [net("10.0.0.0/22")];
         assert_eq!(check_against_local(&wider, GATEWAY.into(), &local), Ok(()));
+
+        // The gateway counts too: a subnet whose one address outside the
+        // local network is the gateway has nothing the tunnel would carry.
+        let own = Ipv4Addr::new(10, 9, 0, 0);
+        let local = LocalNetworks {
+            own_addresses: &[own],
+            on_link: &[net("10.9.0.0/32")],
+            next_hop: None,
+        };
+        let pair = net("10.9.0.0/31");
+        let gateway = Ipv4Addr::new(10, 9, 0, 1);
+        let checked = check_against_local(&[pair], gateway, &local);
+        assert_eq!(checked, Err(LocalConflict::CoveredByLocalNetworks(pair)));
+        assert_eq!(check_against_local(&[pair], GATEWAY.into(), &local), Ok(()));
     }
 
     // Security rule: an unprivileged client names the gateway's address. It
