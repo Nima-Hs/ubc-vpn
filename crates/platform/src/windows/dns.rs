@@ -11,8 +11,12 @@
 //!   documented way to see which rules its resolver took in, so a match
 //!   answers [`Verified::Unobservable`], as the contract asks; the CI test with a
 //!   DNS server of its own shows the effect.
-//! - **Survives** a crash and a restart of the machine, being in the
-//!   registry; the service's start-up clear removes it.
+//! - **Survives** a crash, being in the registry; the service's start-up
+//!   clear removes it. A restart of the machine removes it too: the keys
+//!   are volatile, so a rule never outlasts the machine's session even when
+//!   the service does not run again.
+//! - **Tests** use identifiers of their own (`TEST_RULES`), so no test can
+//!   touch the rules of a product in use on the same machine.
 
 use std::ptr::{null, null_mut};
 
@@ -23,8 +27,8 @@ use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_REGISTRY_K
 use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, REG_DWORD, REG_MULTI_SZ,
-    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    REG_OPTION_NON_VOLATILE, REG_OPTION_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
+    RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 
 use super::security::{Descriptor, os_error, sid_text, wide};
@@ -37,7 +41,7 @@ pub(super) const LOCAL: &str =
 pub(super) const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig";
 /// This product's rules. Never change them: a later version must find an
 /// earlier one's rules to remove them.
-pub(super) const RULES: [&str; 6] = [
+const PRODUCT_RULES: [&str; 6] = [
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B01}",
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B02}",
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B03}",
@@ -45,6 +49,23 @@ pub(super) const RULES: [&str; 6] = [
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B05}",
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B06}",
 ];
+/// The rules this crate's tests use instead, so that no test, even one run
+/// elevated on a machine where the product is in use, can change or delete
+/// the product's. CI checks that a release build contains none of them.
+#[cfg(test)]
+const TEST_RULES: [&str; 6] = [
+    "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E01}",
+    "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E02}",
+    "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E03}",
+    "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E04}",
+    "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E05}",
+    "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E06}",
+];
+/// The rules this build reads, writes and deletes.
+#[cfg(not(test))]
+const RULES: [&str; 6] = PRODUCT_RULES;
+#[cfg(test)]
+pub(super) const RULES: [&str; 6] = TEST_RULES;
 /// The most domains one rule holds.
 pub(super) const PER_RULE: usize = 50;
 /// "Use the given DNS servers for these names."
@@ -205,24 +226,36 @@ fn utf16_bytes(units: impl IntoIterator<Item = u16>) -> Vec<u8> {
 
 /// Writes one of our rules into a key made afresh, owned by Administrators:
 /// a key somebody else made first, and so owns, is deleted, not reused.
+///
+/// The key is volatile, so a restart of the machine removes it even if the
+/// service never runs again. The folder it goes in is made first, and not
+/// volatile: Windows would otherwise make it volatile with our key, and
+/// nobody could add a lasting rule of their own until the next restart.
 fn write_rule(id: &str, rule: &Rule) -> Result<()> {
     delete_rule(id)?;
-    write_rule_at(LOCAL, id, rule, Some("O:BA"))
+    create(LOCAL, REG_OPTION_NON_VOLATILE, KEY_READ, null())?;
+    write_rule_at(LOCAL, id, rule, Some("O:BA"), Lifetime::UntilRestart)
 }
 
-/// Writes a rule under `base`, which tests also use to play group policy
-/// and other programs. `owner`, as SDDL, sets the owner of a key it makes.
-pub(super) fn write_rule_at(base: &str, id: &str, rule: &Rule, owner: Option<&str>) -> Result<()> {
-    let path = wide(&format!(r"{base}\{id}"));
-    let descriptor = owner.map(Descriptor::parse).transpose()?;
-    let attributes = descriptor.as_ref().map(|descriptor| SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor.as_ptr(),
-        bInheritHandle: 0,
-    });
-    let attributes = attributes
-        .as_ref()
-        .map_or(null(), |attributes| attributes as *const _);
+/// How long a rule's key lasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Lifetime {
+    /// Until it is deleted: how tests play other programs' rules.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Lasting,
+    /// Until it is deleted or the machine restarts.
+    UntilRestart,
+}
+
+/// Opens the key at `path`, making it and any missing keys above it with
+/// `options` and `attributes` (which may be null).
+fn create(
+    path: &str,
+    options: u32,
+    access: u32,
+    attributes: *const SECURITY_ATTRIBUTES,
+) -> Result<Key> {
+    let path = wide(path);
     let mut key = null_mut();
     // SAFETY: the path is NUL-terminated; the security attributes, with the
     // descriptor they point to, outlive the call or are null; the class and
@@ -233,15 +266,45 @@ pub(super) fn write_rule_at(base: &str, id: &str, rule: &Rule, owner: Option<&st
             path.as_ptr(),
             0,
             null_mut(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_ALL_ACCESS,
+            options,
+            access,
             attributes,
             &mut key,
             null_mut(),
         )
     };
     checked(code)?;
-    let key = Key(key);
+    Ok(Key(key))
+}
+
+/// Writes a rule under `base`, which tests also use to play group policy
+/// and other programs. `owner`, as SDDL, sets the owner of a key it makes.
+pub(super) fn write_rule_at(
+    base: &str,
+    id: &str,
+    rule: &Rule,
+    owner: Option<&str>,
+    lifetime: Lifetime,
+) -> Result<()> {
+    let descriptor = owner.map(Descriptor::parse).transpose()?;
+    let attributes = descriptor.as_ref().map(|descriptor| SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.as_ptr(),
+        bInheritHandle: 0,
+    });
+    let attributes = attributes
+        .as_ref()
+        .map_or(null(), |attributes| attributes as *const _);
+    let options = match lifetime {
+        Lifetime::Lasting => REG_OPTION_NON_VOLATILE,
+        Lifetime::UntilRestart => REG_OPTION_VOLATILE,
+    };
+    let key = create(
+        &format!(r"{base}\{id}"),
+        options,
+        KEY_ALL_ACCESS,
+        attributes,
+    )?;
     let names = rule
         .names
         .iter()
@@ -491,11 +554,26 @@ mod tests {
     // change, and none repeats.
     #[test]
     fn the_rule_identifiers_never_change() {
-        assert_eq!(RULES[0], "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B01}");
-        let mut unique = RULES.to_vec();
+        assert_eq!(PRODUCT_RULES[0], "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B01}");
+        let mut unique = PRODUCT_RULES.to_vec();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), RULES.len());
+        assert_eq!(unique.len(), PRODUCT_RULES.len());
+    }
+
+    // Security rule: a test build writes and deletes only rules of its own,
+    // none of which is the product's, so a test cannot touch the rules of a
+    // product in use on the same machine.
+    #[test]
+    fn tests_use_rules_apart_from_the_products() {
+        assert_eq!(RULES, TEST_RULES);
+        for id in TEST_RULES {
+            assert!(!PRODUCT_RULES.contains(&id), "{id}");
+        }
+        let mut unique = TEST_RULES.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), TEST_RULES.len());
     }
 
     // Security rule: the DNS client uses the most specific rule, so another
