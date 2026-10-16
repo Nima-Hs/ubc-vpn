@@ -23,8 +23,8 @@ use ubc_vpn_engine::{
 };
 use ubc_vpn_platform::fake::{Fake, Op};
 use ubc_vpn_platform::{
-    Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns, Subscription,
-    Verified,
+    Dns, Ipv6Block, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns,
+    Subscription, Verified,
 };
 
 /// What a test has asked the spy to do, and what it has seen.
@@ -323,6 +323,26 @@ impl Routes for Faulty {
         self.reached(Op::VerifyRoute);
         self.fake.uses_interface(dest, interface)
     }
+
+    fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
+        self.reached(Op::AddFullTunnel);
+        self.fake.add_full_tunnel(tunnel)
+    }
+
+    fn remove_full_tunnel(&self, tunnel: &str) -> Result<()> {
+        self.reached(Op::RemoveFullTunnel);
+        self.fake.remove_full_tunnel(tunnel)
+    }
+
+    fn foreign_full_tunnel(&self, tunnel: &str) -> Result<bool> {
+        self.reached(Op::ForeignFullTunnel);
+        self.fake.foreign_full_tunnel(tunnel)
+    }
+
+    fn uses_interface_v6(&self, dest: std::net::Ipv6Addr, interface: &str) -> Verified {
+        self.reached(Op::VerifyRouteV6);
+        self.fake.uses_interface_v6(dest, interface)
+    }
 }
 
 impl Dns for Faulty {
@@ -339,6 +359,26 @@ impl Dns for Faulty {
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
         self.reached(Op::VerifyDns);
         self.fake.split_dns_matches(dns)
+    }
+
+    fn set_catch_all_dns(&self, resolvers: &[Ipv4Addr]) -> Result<()> {
+        self.reached(Op::SetCatchAllDns);
+        self.fake.set_catch_all_dns(resolvers)
+    }
+
+    fn clear_catch_all_dns(&self) -> Result<()> {
+        self.reached(Op::ClearCatchAllDns);
+        self.fake.clear_catch_all_dns()
+    }
+
+    fn catch_all_dns_matches(&self, resolvers: &[Ipv4Addr]) -> Verified {
+        self.reached(Op::VerifyCatchAllDns);
+        self.fake.catch_all_dns_matches(resolvers)
+    }
+
+    fn foreign_catch_all(&self) -> Result<bool> {
+        self.reached(Op::ForeignCatchAll);
+        self.fake.foreign_catch_all()
     }
 }
 

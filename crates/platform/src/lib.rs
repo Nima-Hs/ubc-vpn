@@ -36,7 +36,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -234,11 +234,50 @@ impl PhysicalNetwork {
     pub fn on_link(&self) -> &[Ipv4Net] {
         &self.on_link
     }
+
+    /// Whether the router stays reachable directly while every other address
+    /// goes through the tunnel, as full mode needs: there is no router, or
+    /// it is inside one of the [`on_link`](Self::on_link) networks, whose
+    /// routes are more specific than the halves
+    /// [`Routes::add_full_tunnel`] adds. A router outside all of them (a
+    /// `/32` or point-to-point address, or a router a DHCP classless route
+    /// names) would itself be routed into the tunnel, so full mode must be
+    /// refused on such a network.
+    pub fn router_is_on_link(&self) -> bool {
+        match self.next_hop {
+            None => true,
+            Some(router) => self.on_link.iter().any(|net| net.contains_addr(router)),
+        }
+    }
 }
 
-/// The routing table and the tunnel device's address. IPv4 only. IPv6 is
-/// left as it is: nothing here adds an IPv6 address or route, and nothing
-/// may let the OS add one on our behalf.
+/// What [`Routes::add_full_tunnel`] did about IPv6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipv6Block {
+    /// The IPv6 halves were added through the tunnel, which has no IPv6
+    /// address: every IPv6 connection now fails at once, and programs fall
+    /// back to IPv4.
+    Blocked,
+    /// The tunnel device has no IPv6 at all, so the IPv6 halves could not be
+    /// added; and no other interface had an IPv6 route other than
+    /// link-local, so there is no IPv6 to block. Nothing can leak. This is
+    /// not a refusal: the caller goes on.
+    NothingToBlock,
+}
+
+/// The four routes of full mode: the two halves of IPv4 and the two halves of
+/// IPv6. Each is more specific than any default route, so together they take
+/// every address a default route would, without touching one.
+pub const FULL_TUNNEL_V4: [&str; 2] = ["0.0.0.0/1", "128.0.0.0/1"];
+
+/// See [`FULL_TUNNEL_V4`].
+pub const FULL_TUNNEL_V6: [&str; 2] = ["::/1", "8000::/1"];
+
+/// The routing table and the tunnel device's address. IPv4 only, with one
+/// exception: IPv6 is left as it is, and nothing here adds an IPv6 address
+/// or route, nor may let the OS add one on our behalf, except the two
+/// blocking halves [`FULL_TUNNEL_V6`] that [`Routes::add_full_tunnel`] adds
+/// on the tunnel in full mode, which block IPv6 rather than carry it.
 ///
 /// # Which routes are ours
 ///
@@ -353,6 +392,55 @@ pub trait Routes: Send + Sync {
     /// Asks the OS which interface it would really use to reach `dest`, and
     /// whether that is `interface`.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified;
+
+    /// Full mode: routes every IPv4 address, and blocks every IPv6 address,
+    /// through the tunnel named `tunnel`. It adds [`FULL_TUNNEL_V4`] and
+    /// [`FULL_TUNNEL_V6`] on the tunnel with no next hop, and never touches
+    /// a default route. The tunnel has no IPv6 address, so the IPv6 halves
+    /// make IPv6 fail at once rather than leave by the physical network.
+    ///
+    /// Exclusive adds, journalled, as "Which routes are ours" says: a half
+    /// already routed through another interface or next hop, such as
+    /// another VPN's, fails with [`Error::AlreadyExists`]. The IPv4 halves
+    /// come first. On error some may have been added:
+    /// [`Routes::remove_full_tunnel`] or [`Routes::remove_all`] removes
+    /// them.
+    ///
+    /// When the tunnel device has no IPv6 at all, the IPv6 halves cannot be
+    /// added (on Windows the add fails with "not found"). Then:
+    ///
+    /// - if any other interface has an IPv6 route other than link-local
+    ///   (`fe80::/10`), IPv6 could leave by it: this fails with
+    ///   [`Error::Unsupported`], a refusal, having kept the IPv4 halves
+    ///   for the caller to remove;
+    /// - otherwise there is no IPv6 to leak, and this succeeds with
+    ///   [`Ipv6Block::NothingToBlock`], which is not a refusal.
+    ///
+    /// Otherwise it succeeds with [`Ipv6Block::Blocked`]. An OS that cannot
+    /// do this at all fails with [`Error::Unsupported`] and adds nothing.
+    fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block>;
+
+    /// Removes the four halves where this product added them, and nothing
+    /// else. Succeeds for any that are not there, and when the interface no
+    /// longer exists.
+    fn remove_full_tunnel(&self, tunnel: &str) -> Result<()>;
+
+    /// Whether a route to any of the four halves already goes through an
+    /// interface other than `tunnel`, or a next hop: somebody else, such as
+    /// another VPN, already sends all traffic somewhere, and full mode would
+    /// fight it. Read-only, for the service to refuse before it changes
+    /// anything. `Ok(false)` when there is none.
+    fn foreign_full_tunnel(&self, tunnel: &str) -> Result<bool>;
+
+    /// [`Routes::uses_interface`] for an IPv6 destination: which interface
+    /// the OS would use to reach `dest`, and whether that is `interface`.
+    ///
+    /// It is the longest-prefix match over the OS's IPv6 forwarding table,
+    /// not a question to the OS's own best-route lookup: on Windows that
+    /// lookup fails for a destination the IPv6 halves cover, since the
+    /// tunnel has no IPv6 source address. Answers `No` when no route
+    /// matches, and `Unknown` when the table cannot be read.
+    fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified;
 }
 
 /// The route protocol number Linux marks this product's routes with (see
@@ -437,6 +525,45 @@ pub trait Dns: Send + Sync {
     /// On every OS, rules from group policy, or rules that differ from
     /// `dns`, give `No`, and a read that fails gives `Unknown`.
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified;
+
+    /// Full mode: sends every name the OS resolves to `resolvers`, beside
+    /// the split DNS set with [`Dns::set_split_dns`], replacing whatever
+    /// catch-all this product set before. The resolvers are reached by
+    /// ordinary routing, so the caller routes them through the tunnel.
+    ///
+    /// On Windows it is one more name-resolution rule, for the namespace
+    /// `.`, under a key with an identifier of the product's own, volatile
+    /// like the others. It takes precedence over Windows asking every
+    /// network's resolver at once. A single-label name is sent with the
+    /// local network's suffix added. mDNS, LLMNR and NetBIOS names are not
+    /// DNS and are not affected.
+    ///
+    /// Fails with [`Error::Unsupported`], having changed nothing, where
+    /// [`Dns::set_split_dns`] would, and on an OS that cannot do this. Fails
+    /// with [`Error::AlreadyExists`], having changed nothing, when a rule
+    /// that is not this product's already takes every name (see
+    /// [`Dns::foreign_catch_all`]).
+    fn set_catch_all_dns(&self, resolvers: &[Ipv4Addr]) -> Result<()>;
+
+    /// Removes the catch-all this product set, and nothing else: the split
+    /// DNS stays. Succeeds when there is none. [`Dns::clear_split_dns`]
+    /// removes it too, so teardown and start-up need nothing more.
+    fn clear_catch_all_dns(&self) -> Result<()>;
+
+    /// Whether the catch-all this product set is in effect and sends every
+    /// name to exactly `resolvers`, read back from the OS, with the same
+    /// answers as [`Dns::split_dns_matches`]: on Windows `Unobservable` when
+    /// it reads back exactly and no rules from group policy exist, never
+    /// `Yes`. A rule that is not this product's and also takes every name
+    /// gives `No`.
+    fn catch_all_dns_matches(&self, resolvers: &[Ipv4Addr]) -> Verified;
+
+    /// Whether a rule that is not this product's already takes every name:
+    /// on Windows, a local name-resolution rule for the namespace `.`, such
+    /// as Tailscale's "override local DNS" or exit node sets. Read-only, for
+    /// the service to refuse full mode before it changes anything.
+    /// `Ok(false)` when there is none.
+    fn foreign_catch_all(&self) -> Result<bool>;
 }
 
 /// Something the OS reported about the machine's network.
@@ -1306,10 +1433,19 @@ mod tests {
             Native.remove_all(),
             Native.set_split_dns("tun0", &dns),
             Native.clear_split_dns(),
+            Native.remove_full_tunnel("tun0"),
+            Native.set_catch_all_dns(&[gateway]),
+            Native.clear_catch_all_dns(),
         ];
-        assert_eq!(results, [const { Err(Error::Unsupported) }; 8]);
+        assert_eq!(results, [const { Err(Error::Unsupported) }; 11]);
+        assert_eq!(Native.add_full_tunnel("tun0").err(), unsupported);
+        assert_eq!(Native.foreign_full_tunnel("tun0").err(), unsupported);
+        assert_eq!(Native.foreign_catch_all().err(), unsupported);
         assert_eq!(Native.uses_interface(gateway, "tun0"), Verified::Unknown);
+        let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        assert_eq!(Native.uses_interface_v6(v6, "tun0"), Verified::Unknown);
         assert_eq!(Native.split_dns_matches(&dns), Verified::Unknown);
+        assert_eq!(Native.catch_all_dns_matches(&[gateway]), Verified::Unknown);
         assert_eq!(Native.subscribe(&physical).err(), unsupported);
         assert_eq!(Native.listen("ubc-vpn-test").err(), unsupported);
         assert_eq!(Native.connect("ubc-vpn-test").err(), unsupported);
@@ -1346,6 +1482,26 @@ mod tests {
             // Split DNS is real: nothing of ours is set, and reading that
             // needs no rights.
             assert_eq!(native.dns.split_dns_matches(&dns), Verified::No);
+            // Full mode is not written for Windows yet: it is refused, and
+            // its checks fail closed. Removing it changes nothing.
+            let unsupported = Some(Error::Unsupported);
+            assert_eq!(
+                native.routes.add_full_tunnel("ubc-vpn-no-such0").err(),
+                unsupported
+            );
+            assert_eq!(
+                native.routes.foreign_full_tunnel("ubc-vpn-no-such0").err(),
+                unsupported
+            );
+            assert_eq!(native.dns.set_catch_all_dns(&[gateway]).err(), unsupported);
+            assert_eq!(native.dns.foreign_catch_all().err(), unsupported);
+            let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+            let routed = native.routes.uses_interface_v6(v6, "ubc-vpn-no-such0");
+            assert_eq!(routed, Verified::Unknown);
+            assert_eq!(
+                native.dns.catch_all_dns_matches(&[gateway]),
+                Verified::Unknown
+            );
             // Events are real: an interface that does not exist cannot be
             // watched.
             assert_eq!(

@@ -7,7 +7,7 @@
 //! channel lets a test choose who each caller is.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -17,9 +17,9 @@ use std::time::Duration;
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
-    Connection, Dns, Error, Listener, NetworkEvent, NetworkEvents, Paths, PhysicalNetwork,
-    Platform, RawConnection, Result, Routes, SplitDns, Subscription, Transport, UserId, Verified,
-    lock,
+    Connection, Dns, Error, FULL_TUNNEL_V4, Ipv6Block, Listener, NetworkEvent, NetworkEvents,
+    Paths, PhysicalNetwork, Platform, RawConnection, Result, Routes, SplitDns, Subscription,
+    Transport, UserId, Verified, lock,
 };
 
 /// The interface the fake reports as physical.
@@ -52,6 +52,22 @@ pub enum Op {
     ClearSplitDns,
     /// [`Dns::split_dns_matches`].
     VerifyDns,
+    /// [`Routes::add_full_tunnel`].
+    AddFullTunnel,
+    /// [`Routes::remove_full_tunnel`].
+    RemoveFullTunnel,
+    /// [`Routes::foreign_full_tunnel`].
+    ForeignFullTunnel,
+    /// [`Routes::uses_interface_v6`].
+    VerifyRouteV6,
+    /// [`Dns::set_catch_all_dns`].
+    SetCatchAllDns,
+    /// [`Dns::clear_catch_all_dns`].
+    ClearCatchAllDns,
+    /// [`Dns::catch_all_dns_matches`].
+    VerifyCatchAllDns,
+    /// [`Dns::foreign_catch_all`].
+    ForeignCatchAll,
     /// [`NetworkEvents::subscribe`]. Not recorded.
     Subscribe,
     /// [`Transport::listen`]. Not recorded.
@@ -74,7 +90,26 @@ pub struct Applied {
     pub tunnel_routes: Vec<(String, Ipv4Net)>,
     /// The split DNS in effect and the interface it was set on.
     pub split_dns: Option<(String, SplitDns)>,
+    /// Full mode's halves, when this product added them.
+    pub full_tunnel: Option<FullTunnel>,
+    /// The resolvers every name goes to, when this product set a catch-all.
+    pub catch_all_dns: Option<Vec<Ipv4Addr>>,
 }
+
+/// Full mode's halves as [`Routes::add_full_tunnel`] left them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullTunnel {
+    /// The tunnel they go through.
+    pub tunnel: String,
+    /// What was done about IPv6. `None` when only the IPv4 halves are there:
+    /// IPv6 could not be blocked and the add was refused, leaving them for
+    /// the caller to remove.
+    pub ipv6: Option<Ipv6Block>,
+}
+
+/// An IPv6 address on the fake machine's local network, for tests that ask
+/// where such an address goes.
+pub const LINK_LOCAL_V6: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
 
 /// One call to [`Routes::configure_tunnel`]: the device, the address and the
 /// largest packet size.
@@ -109,6 +144,14 @@ struct State {
     unobservable: HashSet<Op>,
     /// Destinations whose route check alone answers so.
     unobservable_routes: HashSet<Ipv4Addr>,
+    /// Whether the tunnel device has IPv6, so that IPv6 halves can be added
+    /// on it.
+    tunnel_ipv6: bool,
+    /// Whether the physical network has an IPv6 route other than
+    /// link-local, which IPv6 would leave by.
+    physical_ipv6: bool,
+    /// Whether a rule that is not the product's takes every name.
+    foreign_catch_all: bool,
 }
 
 impl Default for State {
@@ -130,6 +173,9 @@ impl Default for State {
             listeners: HashMap::new(),
             unobservable: HashSet::new(),
             unobservable_routes: HashSet::new(),
+            tunnel_ipv6: true,
+            physical_ipv6: true,
+            foreign_catch_all: false,
         }
     }
 }
@@ -166,16 +212,24 @@ fn host(addr: Ipv4Addr) -> Result<Ipv4Net> {
     Ipv4Net::new(addr, 32).map_err(|e| Error::Failed(e.to_string()))
 }
 
+/// The two IPv4 halves of full mode.
+fn v4_halves() -> [Ipv4Net; 2] {
+    FULL_TUNNEL_V4.map(|half| half.parse().expect("a network"))
+}
+
 impl State {
-    /// Every route on the fake machine as the OS would list it, the
+    /// Every IPv4 route on the fake machine as the OS would list it, the
     /// product's and anybody else's, as interface and destination.
     fn table(&self) -> Vec<(String, Ipv4Net)> {
         let gateway = self.applied.gateway_routes.iter();
         let gateway =
             gateway.filter_map(|(dest, via)| Some((via.interface.clone(), host(*dest).ok()?)));
         let tunnel = self.applied.tunnel_routes.iter().cloned();
+        let full = self.applied.full_tunnel.iter();
+        let halves = full.flat_map(|full| v4_halves().map(|half| (full.tunnel.clone(), half)));
         gateway
             .chain(tunnel)
+            .chain(halves)
             .chain(self.foreign.iter().cloned())
             .collect()
     }
@@ -348,17 +402,35 @@ impl Fake {
         self.state().foreign.clone()
     }
 
+    /// Whether the tunnel device has IPv6, so that [`Routes::add_full_tunnel`]
+    /// can add the IPv6 halves on it, and whether the physical network has an
+    /// IPv6 route other than link-local. Both are true until a test says
+    /// otherwise.
+    pub fn set_ipv6(&self, tunnel: bool, physical: bool) {
+        let mut state = self.state();
+        state.tunnel_ipv6 = tunnel;
+        state.physical_ipv6 = physical;
+    }
+
+    /// Plays a rule that is not the product's taking every name, such as
+    /// another VPN's, or takes it away.
+    pub fn set_foreign_catch_all(&self, present: bool) {
+        self.state().foreign_catch_all = present;
+    }
+
     /// The resolvers a lookup of `name` would go to now: the split DNS
-    /// resolvers for a chosen domain and the names under it, the machine's
-    /// usual one for every other name.
+    /// resolvers for a chosen domain and the names under it; for every other
+    /// name, the catch-all's resolvers when one is set, otherwise the
+    /// machine's usual one.
     pub fn resolvers_for(&self, name: &str) -> Vec<Ipv4Addr> {
         let state = self.state();
         let under = |domain: &String| {
             let above = name.strip_suffix(domain.as_str());
             above.is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
         };
-        match &state.applied.split_dns {
-            Some((_, dns)) if dns.domains.iter().any(under) => dns.resolvers.clone(),
+        match (&state.applied.split_dns, &state.applied.catch_all_dns) {
+            (Some((_, dns)), _) if dns.domains.iter().any(under) => dns.resolvers.clone(),
+            (_, Some(all)) => all.clone(),
             _ => vec![ROUTER],
         }
     }
@@ -540,13 +612,19 @@ impl Routes for Fake {
         for (name, subnet) in std::mem::take(&mut state.applied.tunnel_routes) {
             state.forget(&name, subnet);
         }
+        if let Some(full) = state.applied.full_tunnel.take() {
+            for half in v4_halves() {
+                state.forget(&full.tunnel, half);
+            }
+        }
         Ok(())
     }
 
     /// Picks a route as an OS does: the most specific one wins, so a host
     /// route beats any subnet, the networks the machine is on beat a wider
-    /// route that contains them, and everything else leaves by the physical
-    /// interface. Routes somebody else added count like the product's own.
+    /// route that contains them and the halves of full mode, and everything
+    /// else leaves by the physical interface. Routes somebody else added
+    /// count like the product's own.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
         let (state, outcome) = self.start(Op::VerifyRoute);
         if outcome.is_err() {
@@ -554,25 +632,99 @@ impl Routes for Fake {
         }
         let applied = &state.applied;
         let host = applied.gateway_routes.iter().find(|(d, _)| *d == dest);
+        // The machine's own networks are routes too: more specific than a
+        // wider chosen subnet and than the halves of full mode.
         let on_link = state.on_link.iter();
-        let local: Vec<_> = on_link
-            .map(|net| (PHYSICAL_INTERFACE.to_string(), *net))
-            .collect();
-        let subnets = applied
-            .tunnel_routes
+        let local = on_link.map(|net| (PHYSICAL_INTERFACE.to_string(), *net));
+        let table: Vec<_> = state.table().into_iter().chain(local).collect();
+        let narrowest = table
             .iter()
-            .chain(&state.foreign)
-            .chain(&local);
-        let narrowest = subnets
             .filter(|(_, subnet)| subnet.contains_addr(dest))
             .max_by_key(|(_, subnet)| subnet.prefix_len());
         let used = match (host, narrowest) {
             (Some((_, physical)), _) => physical.interface(),
-            (None, Some((tunnel, _))) => tunnel,
+            (None, Some((tunnel, _))) => tunnel.as_str(),
             (None, None) => PHYSICAL_INTERFACE,
         };
         match used == interface {
             true => state.route_confirmed(dest),
+            false => Verified::No,
+        }
+    }
+
+    /// Adds the IPv4 halves, then the IPv6 ones, as the contract says. A
+    /// half through another interface fails with [`Error::AlreadyExists`]
+    /// before anything is added; where an OS would have added the first
+    /// half, the fake adds none, which only makes less to remove.
+    fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
+        let (mut state, outcome) = self.start(Op::AddFullTunnel);
+        outcome?;
+        if state.absent.contains(tunnel) {
+            return Err(Error::NotFound);
+        }
+        let elsewhere = |half| matches!(state.route_to(half, tunnel), Present::Elsewhere);
+        if v4_halves().into_iter().any(elsewhere) {
+            return Err(Error::AlreadyExists);
+        }
+        let ipv6 = match (state.tunnel_ipv6, state.physical_ipv6) {
+            (true, _) => Some(Ipv6Block::Blocked),
+            (false, false) => Some(Ipv6Block::NothingToBlock),
+            (false, true) => None,
+        };
+        let full = FullTunnel {
+            tunnel: tunnel.to_string(),
+            ipv6,
+        };
+        state.applied.full_tunnel = Some(full);
+        ipv6.ok_or(Error::Unsupported)
+    }
+
+    fn remove_full_tunnel(&self, tunnel: &str) -> Result<()> {
+        let (mut state, outcome) = self.start(Op::RemoveFullTunnel);
+        outcome?;
+        let ours = state.applied.full_tunnel.as_ref();
+        if ours.is_some_and(|full| full.tunnel == tunnel) {
+            state.applied.full_tunnel = None;
+            for half in v4_halves() {
+                state.forget(tunnel, half);
+            }
+        }
+        Ok(())
+    }
+
+    fn foreign_full_tunnel(&self, tunnel: &str) -> Result<bool> {
+        let (state, outcome) = self.start(Op::ForeignFullTunnel);
+        outcome?;
+        let halves = v4_halves();
+        let foreign = state.foreign.iter();
+        Ok(foreign
+            .filter(|(name, _)| name != tunnel)
+            .any(|(_, dest)| halves.contains(dest)))
+    }
+
+    /// The fake's IPv6 table: link-local through the physical network, the
+    /// halves through the tunnel when they were added, and a default route
+    /// through the physical network when it has IPv6. The longest prefix
+    /// wins.
+    fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified {
+        let (state, outcome) = self.start(Op::VerifyRouteV6);
+        if outcome.is_err() {
+            return Verified::Unknown;
+        }
+        let link_local = dest.segments()[0] & 0xffc0 == 0xfe80;
+        let blocked = state
+            .applied
+            .full_tunnel
+            .as_ref()
+            .filter(|full| full.ipv6 == Some(Ipv6Block::Blocked));
+        let used = match (link_local, blocked) {
+            (true, _) => Some(PHYSICAL_INTERFACE),
+            (false, Some(full)) => Some(full.tunnel.as_str()),
+            (false, None) if state.physical_ipv6 => Some(PHYSICAL_INTERFACE),
+            (false, None) => None,
+        };
+        match used == Some(interface) {
+            true => state.confirmed(Op::VerifyRouteV6),
             false => Verified::No,
         }
     }
@@ -604,8 +756,12 @@ impl Dns for Fake {
         })
     }
 
+    /// Removes the catch-all too, as the contract says.
     fn clear_split_dns(&self) -> Result<()> {
-        self.run(Op::ClearSplitDns, |applied| applied.split_dns = None)
+        self.run(Op::ClearSplitDns, |applied| {
+            applied.split_dns = None;
+            applied.catch_all_dns = None;
+        })
     }
 
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
@@ -617,6 +773,39 @@ impl Dns for Fake {
             Some((_, set)) if set == dns => state.confirmed(Op::VerifyDns),
             _ => Verified::No,
         }
+    }
+
+    fn set_catch_all_dns(&self, resolvers: &[Ipv4Addr]) -> Result<()> {
+        let (mut state, outcome) = self.start(Op::SetCatchAllDns);
+        outcome?;
+        if state.foreign_catch_all {
+            return Err(Error::AlreadyExists);
+        }
+        state.applied.catch_all_dns = Some(resolvers.to_vec());
+        Ok(())
+    }
+
+    fn clear_catch_all_dns(&self) -> Result<()> {
+        self.run(Op::ClearCatchAllDns, |applied| applied.catch_all_dns = None)
+    }
+
+    fn catch_all_dns_matches(&self, resolvers: &[Ipv4Addr]) -> Verified {
+        let (state, outcome) = self.start(Op::VerifyCatchAllDns);
+        if outcome.is_err() {
+            return Verified::Unknown;
+        }
+        match &state.applied.catch_all_dns {
+            Some(set) if set == resolvers && !state.foreign_catch_all => {
+                state.confirmed(Op::VerifyCatchAllDns)
+            }
+            _ => Verified::No,
+        }
+    }
+
+    fn foreign_catch_all(&self) -> Result<bool> {
+        let (state, outcome) = self.start(Op::ForeignCatchAll);
+        outcome?;
+        Ok(state.foreign_catch_all)
     }
 }
 
@@ -816,6 +1005,149 @@ mod tests {
 
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
     const TUNNEL: &str = "fake-tun0";
+
+    fn net(text: &str) -> Ipv4Net {
+        text.parse().unwrap()
+    }
+
+    // Full mode sends every IPv4 address through the tunnel but the
+    // machine's own networks, their router and the gateway, which keep
+    // their more specific routes; IPv6 goes to the tunnel too, where it
+    // fails, but link-local stays. Removing the halves puts it all back,
+    // and nothing is left after a teardown.
+    #[test]
+    fn full_mode_takes_all_but_the_local_network() {
+        let fake = Fake::new();
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        assert!(physical.router_is_on_link());
+        fake.add_gateway_route(GATEWAY, &physical).unwrap();
+        fake.add_tunnel_routes(TUNNEL, &[net("10.255.0.0/16")])
+            .unwrap();
+        let elsewhere = Ipv4Addr::new(1, 0, 0, 1);
+        let high = Ipv4Addr::new(203, 0, 113, 1);
+        let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::No);
+        assert_eq!(
+            fake.uses_interface_v6(v6, PHYSICAL_INTERFACE),
+            Verified::Yes
+        );
+
+        assert_eq!(fake.add_full_tunnel(TUNNEL), Ok(Ipv6Block::Blocked));
+        for dest in [elsewhere, high, Ipv4Addr::new(10, 255, 0, 1)] {
+            assert_eq!(fake.uses_interface(dest, TUNNEL), Verified::Yes, "{dest}");
+        }
+        for dest in [GATEWAY, ROUTER, Ipv4Addr::new(192, 168, 0, 20)] {
+            let direct = fake.uses_interface(dest, PHYSICAL_INTERFACE);
+            assert_eq!(direct, Verified::Yes, "{dest}");
+        }
+        assert_eq!(fake.uses_interface_v6(v6, TUNNEL), Verified::Yes);
+        let local = fake.uses_interface_v6(LINK_LOCAL_V6, PHYSICAL_INTERFACE);
+        assert_eq!(local, Verified::Yes);
+
+        fake.remove_full_tunnel(TUNNEL).unwrap();
+        assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::No);
+        assert_eq!(fake.uses_interface_v6(v6, TUNNEL), Verified::No);
+        assert_eq!(fake.add_full_tunnel(TUNNEL), Ok(Ipv6Block::Blocked));
+        fake.remove_all().unwrap();
+        fake.clear_split_dns().unwrap();
+        assert_eq!(fake.applied(), Applied::default());
+    }
+
+    // Security rule: IPv6 is blocked in full mode, or there is none to
+    // block. A tunnel with no IPv6 on a machine whose network has IPv6 is a
+    // refusal, which keeps the IPv4 halves for the caller to remove; with no
+    // IPv6 anywhere it goes ahead, and says so.
+    #[test]
+    fn ipv6_is_blocked_or_absent_never_left_open() {
+        let fake = Fake::new();
+        fake.set_ipv6(false, true);
+        assert_eq!(fake.add_full_tunnel(TUNNEL), Err(Error::Unsupported));
+        let left = fake.applied().full_tunnel.unwrap();
+        assert_eq!(left.ipv6, None);
+        let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        assert_eq!(fake.uses_interface_v6(v6, TUNNEL), Verified::No);
+        fake.remove_full_tunnel(TUNNEL).unwrap();
+        assert_eq!(fake.applied().full_tunnel, None);
+
+        fake.set_ipv6(false, false);
+        assert_eq!(fake.add_full_tunnel(TUNNEL), Ok(Ipv6Block::NothingToBlock));
+        assert_eq!(fake.uses_interface_v6(v6, TUNNEL), Verified::No);
+        assert_eq!(fake.uses_interface_v6(v6, PHYSICAL_INTERFACE), Verified::No);
+    }
+
+    // Another program's halves are a conflict: it is seen before anything
+    // is changed, and an add over them fails, adding nothing.
+    #[test]
+    fn another_programs_halves_are_a_conflict() {
+        let fake = Fake::new();
+        assert_eq!(fake.foreign_full_tunnel(TUNNEL), Ok(false));
+        fake.add_foreign_route("other-vpn0", net("128.0.0.0/1"));
+        assert_eq!(fake.foreign_full_tunnel(TUNNEL), Ok(true));
+        assert_eq!(fake.add_full_tunnel(TUNNEL), Err(Error::AlreadyExists));
+        assert_eq!(fake.applied().full_tunnel, None);
+        // One the tunnel itself has is no conflict.
+        fake.remove_foreign_route("other-vpn0", net("128.0.0.0/1"));
+        fake.add_foreign_route(TUNNEL, net("0.0.0.0/1"));
+        assert_eq!(fake.foreign_full_tunnel(TUNNEL), Ok(false));
+    }
+
+    // The catch-all sends every name the split domains do not take to its
+    // resolvers. Another program's catch-all is a conflict, seen before and
+    // refused on set. Clearing split DNS clears the catch-all too.
+    #[test]
+    fn the_catch_all_takes_every_other_name() {
+        let fake = Fake::new();
+        let tunnel_dns = Ipv4Addr::new(10, 255, 0, 53);
+        let lab_dns = Ipv4Addr::new(10, 255, 1, 53);
+        let split = SplitDns {
+            resolvers: vec![lab_dns],
+            domains: vec!["lab.example".to_string()],
+        };
+        fake.set_split_dns(TUNNEL, &split).unwrap();
+        assert_eq!(fake.resolvers_for("www.example.org"), [ROUTER]);
+        assert_eq!(fake.catch_all_dns_matches(&[tunnel_dns]), Verified::No);
+
+        fake.set_catch_all_dns(&[tunnel_dns]).unwrap();
+        assert_eq!(fake.resolvers_for("www.example.org"), [tunnel_dns]);
+        assert_eq!(fake.resolvers_for("a.lab.example"), [lab_dns]);
+        assert_eq!(fake.catch_all_dns_matches(&[tunnel_dns]), Verified::Yes);
+        assert_eq!(fake.catch_all_dns_matches(&[lab_dns]), Verified::No);
+        fake.clear_catch_all_dns().unwrap();
+        assert_eq!(fake.resolvers_for("www.example.org"), [ROUTER]);
+        assert_eq!(fake.applied().split_dns.map(|(_, dns)| dns), Some(split));
+
+        fake.set_catch_all_dns(&[tunnel_dns]).unwrap();
+        fake.clear_split_dns().unwrap();
+        assert_eq!(fake.applied().catch_all_dns, None);
+
+        assert_eq!(fake.foreign_catch_all(), Ok(false));
+        fake.set_foreign_catch_all(true);
+        assert_eq!(fake.foreign_catch_all(), Ok(true));
+        assert_eq!(
+            fake.set_catch_all_dns(&[tunnel_dns]),
+            Err(Error::AlreadyExists)
+        );
+        assert_eq!(fake.applied().catch_all_dns, None);
+    }
+
+    // A router outside every network the machine is on would be routed into
+    // the tunnel by the halves, so full mode needs it on-link.
+    #[test]
+    fn the_router_must_be_on_a_local_network() {
+        let fake = Fake::new();
+        fake.set_local(&[OWN_ADDRESS], &[]);
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        assert!(!physical.router_is_on_link());
+        fake.set_local(&[OWN_ADDRESS], &[net("10.0.0.0/8"), net("192.168.0.0/24")]);
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        assert!(physical.router_is_on_link());
+        let direct = PhysicalNetwork {
+            next_hop: None,
+            on_link: Vec::new(),
+            ..physical
+        };
+        assert!(direct.router_is_on_link());
+    }
 
     fn user(name: &str) -> UserId {
         name.parse().unwrap()
@@ -1019,6 +1351,18 @@ mod tests {
             }
             fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
                 self.0.uses_interface(dest, interface)
+            }
+            fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
+                self.0.add_full_tunnel(tunnel)
+            }
+            fn remove_full_tunnel(&self, tunnel: &str) -> Result<()> {
+                self.0.remove_full_tunnel(tunnel)
+            }
+            fn foreign_full_tunnel(&self, tunnel: &str) -> Result<bool> {
+                self.0.foreign_full_tunnel(tunnel)
+            }
+            fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified {
+                self.0.uses_interface_v6(dest, interface)
             }
         }
         let fake = Fake::new();

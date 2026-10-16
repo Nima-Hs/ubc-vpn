@@ -2,13 +2,13 @@
 //! written yet: every operation fails with [`Error::Unsupported`], and every
 //! check answers [`Verified::Unknown`].
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{
-    Connection, Dns, Error, Listener, NetworkEvents, PhysicalNetwork, Result, Routes, SplitDns,
-    Subscription, Transport, Verified,
+    Connection, Dns, Error, Ipv6Block, Listener, NetworkEvents, PhysicalNetwork, Result, Routes,
+    SplitDns, Subscription, Transport, Verified,
 };
 
 // Windows implements every part now; only this crate's own tests use the
@@ -41,6 +41,18 @@ impl Routes for Native {
     fn uses_interface(&self, _dest: Ipv4Addr, _interface: &str) -> Verified {
         Verified::Unknown
     }
+    fn add_full_tunnel(&self, _tunnel: &str) -> Result<Ipv6Block> {
+        Err(Error::Unsupported)
+    }
+    fn remove_full_tunnel(&self, _tunnel: &str) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+    fn foreign_full_tunnel(&self, _tunnel: &str) -> Result<bool> {
+        Err(Error::Unsupported)
+    }
+    fn uses_interface_v6(&self, _dest: Ipv6Addr, _interface: &str) -> Verified {
+        Verified::Unknown
+    }
 }
 
 impl Dns for Native {
@@ -52,6 +64,18 @@ impl Dns for Native {
     }
     fn split_dns_matches(&self, _dns: &SplitDns) -> Verified {
         Verified::Unknown
+    }
+    fn set_catch_all_dns(&self, _resolvers: &[Ipv4Addr]) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+    fn clear_catch_all_dns(&self) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+    fn catch_all_dns_matches(&self, _resolvers: &[Ipv4Addr]) -> Verified {
+        Verified::Unknown
+    }
+    fn foreign_catch_all(&self) -> Result<bool> {
+        Err(Error::Unsupported)
     }
 }
 
