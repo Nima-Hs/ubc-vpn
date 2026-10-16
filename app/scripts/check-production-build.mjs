@@ -29,6 +29,12 @@ const markers = [
     "Copy report",
     "UBC VPN diagnostics report",
     "logs-new-run",
+    // The Settings screen, which no production build has yet (`__SETTINGS__`):
+    // its IPC, the fake's scenarios, and the screen's words.
+    "profiles:set-startup",
+    "settings-no-keyring",
+    "demo:login-item",
+    "Start UBC VPN when you sign in",
 ];
 
 if (!existsSync(out)) {

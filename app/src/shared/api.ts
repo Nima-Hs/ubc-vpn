@@ -2,6 +2,7 @@
 // the interface may call. Both sides import this file, so they cannot drift.
 
 import type { LogsApi } from "./logs";
+import type { LoginItemRecord, ProfilesApi } from "./profiles";
 import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
 import type { LoginErrorCode } from "./protocol/LoginErrorCode";
@@ -145,6 +146,8 @@ export interface VpnApi {
     closeWindow(): Promise<void>;
     /** Present only in builds that have the log screen. */
     readonly logs?: LogsApi;
+    /** Present only in builds that have the Settings screen. */
+    readonly profiles?: ProfilesApi;
     /** Present only in demo builds. */
     readonly demo?: DemoApi;
 }
@@ -153,6 +156,8 @@ export interface VpnApi {
 export interface DemoApi {
     listScenarios(): Promise<string[]>;
     setScenario(name: string): Promise<void>;
+    /** What the app would have asked the OS to start at sign-in, if anything yet. */
+    loginItem(): Promise<LoginItemRecord | null>;
 }
 
 declare global {

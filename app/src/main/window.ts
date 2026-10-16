@@ -31,6 +31,8 @@ export function createWindow(
     developmentBuild: boolean,
     /** Never show it; see `keepHidden`. */
     hidden = false,
+    /** Start with it put away, in the tray; see `startsInTray`. Shown later as usual. */
+    inTray = false,
 ): BrowserWindow {
     const mac = process.platform === "darwin";
     const window = new BrowserWindow({
@@ -55,7 +57,7 @@ export function createWindow(
         },
     });
     enableKeyboardZoom(window);
-    if (!hidden) {
+    if (!hidden && !inTray) {
         window.once("ready-to-show", () => window.show());
     }
     void window.loadURL(entryUrl);

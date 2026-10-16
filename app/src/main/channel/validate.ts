@@ -9,6 +9,9 @@ import type { ErrorCode } from "@shared/protocol/ErrorCode";
 import type { ErrorInfo } from "@shared/protocol/ErrorInfo";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import type { Outcome } from "@shared/protocol/Outcome";
+import type { ProfileFailureCode } from "@shared/protocol/ProfileFailureCode";
+import type { ProfilesView } from "@shared/protocol/ProfilesView";
+import type { ProfileView } from "@shared/protocol/ProfileView";
 import type { PromptKind } from "@shared/protocol/PromptKind";
 import type { ResponseBody } from "@shared/protocol/ResponseBody";
 import type { RouteList } from "@shared/protocol/RouteList";
@@ -20,6 +23,7 @@ import type { ServerMessage } from "@shared/protocol/ServerMessage";
 import type { SettingsFailure } from "@shared/protocol/SettingsFailure";
 import type { SettingsFailureCode } from "@shared/protocol/SettingsFailureCode";
 import type { SettingsView } from "@shared/protocol/SettingsView";
+import type { StartMode } from "@shared/protocol/StartMode";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
 
 // Typed against `ErrorCode`, so a code added to the protocol fails the type
@@ -295,5 +299,69 @@ export function isSettingsFailure(value: unknown): value is SettingsFailure {
         isObject(value) &&
         typeof value.error === "string" &&
         Object.hasOwn(SETTINGS_FAILURE_CODES, value.error)
+    );
+}
+
+const PROFILE_FAILURE_CODES: Record<ProfileFailureCode, true> = {
+    unknown_profile: true,
+    bad_name: true,
+    name_taken: true,
+    too_many_profiles: true,
+    last_profile: true,
+    bad_username: true,
+    id_taken: true,
+};
+
+const START_MODES: Record<StartMode, true> = { off: true, window: true, tray: true };
+
+/** A profile id: 32 lowercase hex digits, as `crates/core/src/profiles.rs` makes them. */
+export function isProfileId(value: unknown): value is string {
+    return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+}
+
+function isProfileView(value: unknown): value is ProfileView {
+    return (
+        isObject(value) &&
+        isProfileId(value.id) &&
+        typeof value.name === "string" &&
+        (value.username === null || typeof value.username === "string") &&
+        isRouteSet(value.routes) &&
+        typeof value.save_password === "boolean" &&
+        typeof value.password_saved === "boolean"
+    );
+}
+
+/** Whether a parsed line is the answer to a `profiles` command, `set-startup` or `password forget`. */
+export function isProfilesView(value: unknown): value is ProfilesView {
+    if (!isObject(value) || !isObject(value.global) || !Array.isArray(value.profiles)) {
+        return false;
+    }
+    const global = value.global;
+    const profiles: unknown[] = value.profiles;
+    return (
+        typeof global.start === "string" &&
+        Object.hasOwn(START_MODES, global.start) &&
+        typeof global.auto_connect === "boolean" &&
+        isProfileId(global.active_profile) &&
+        profiles.length > 0 &&
+        profiles.every(isProfileView) &&
+        // The active profile is one of them, and no id is there twice.
+        profiles.some((profile) => (profile as ProfileView).id === global.active_profile) &&
+        new Set(profiles.map((profile) => (profile as ProfileView).id)).size === profiles.length &&
+        (value.keyring === "available" || value.keyring === "unavailable") &&
+        typeof value.policy_readable === "boolean" &&
+        (value.allowed_routes === null || isStringArray(value.allowed_routes))
+    );
+}
+
+/** Whether a parsed line says a profiles command refused a change, or could not do its work. */
+export function isProfileFailure(
+    value: unknown,
+): value is { error: ProfileFailureCode | SettingsFailureCode } {
+    return (
+        isObject(value) &&
+        typeof value.error === "string" &&
+        (Object.hasOwn(PROFILE_FAILURE_CODES, value.error) ||
+            Object.hasOwn(SETTINGS_FAILURE_CODES, value.error))
     );
 }

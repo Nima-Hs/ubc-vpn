@@ -18,6 +18,11 @@ export default defineConfig(({ mode }) => {
         // Turning it on for production is one change, here, once the real
         // service can be asked.
         __LOGS__: JSON.stringify(mode === "demo"),
+        // The Settings screen: how the app starts, the saved password, and
+        // later the profiles. The client's commands for it (#208) are not on
+        // main yet, so only the demo build has it, against a fake, as for the
+        // log above. Turning it on is one change, here.
+        __SETTINGS__: JSON.stringify(mode === "demo"),
     };
     return {
         main: {

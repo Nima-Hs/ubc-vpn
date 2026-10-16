@@ -306,6 +306,7 @@ test("the window renders, locked down", async () => {
         require: typeof (globalThis as { require?: unknown }).require,
         process: typeof (globalThis as { process?: unknown }).process,
         api: Object.keys(window.ubcVpn).sort(),
+        profiles: Object.keys(window.ubcVpn.profiles ?? {}).sort(),
     }));
     expect(exposed.require).toBe("undefined");
     expect(exposed.process).toBe("undefined");
@@ -323,9 +324,12 @@ test("the window renders, locked down", async () => {
         "minimizeWindow",
         "onSnapshot",
         "platform",
+        "profiles",
         "retry",
         "saveRoutes",
     ]);
+    // The Settings screen's: none takes or returns a password.
+    expect(exposed.profiles).toEqual(["forgetPassword", "list", "setStartup"]);
 });
 
 test("a login answer is checked before the main process takes it", async () => {
@@ -504,6 +508,10 @@ test("another window cannot use the interface's functions", async () => {
                     copyReport: () => api.logs.copyReport(),
                     listScenarios: () => api.demo.listScenarios(),
                     setScenario: () => api.demo.setScenario("connected"),
+                    loginItem: () => api.demo.loginItem(),
+                    listProfiles: () => api.profiles.list(),
+                    setStartup: () => api.profiles.setStartup("off", false),
+                    forgetPassword: () => api.profiles.forgetPassword(null),
                 };
                 const out = {};
                 for (const [name, call] of Object.entries(calls)) {
@@ -532,6 +540,10 @@ test("another window cannot use the interface's functions", async () => {
         copyReport: "refused",
         listScenarios: "refused",
         setScenario: "refused",
+        loginItem: "refused",
+        listProfiles: "refused",
+        setStartup: "refused",
+        forgetPassword: "refused",
     });
     // The interface's own window is still served.
     expect(await page.evaluate(() => window.ubcVpn.getSnapshot())).toHaveProperty("state");
@@ -896,6 +908,13 @@ test("every state, photographed", async () => {
             await tab("Routes").click();
             await expect(heading()).toHaveText("Routes");
             if (name !== "routes-loading") {
+                await expect(page.getByText("Reading your settings…")).toHaveCount(0);
+            }
+        }
+        if (name.startsWith("settings")) {
+            await tab("Settings").click();
+            await expect(heading()).toHaveText("Settings");
+            if (name !== "settings-loading") {
                 await expect(page.getByText("Reading your settings…")).toHaveCount(0);
             }
         }
@@ -1347,6 +1366,139 @@ test("the taskbar button's state icons are files Electron can read", async () =>
         files.map((file) => join(folder, file)),
     );
     expect(empty).toEqual([]);
+});
+
+/** What the app would have asked the OS to start at sign-in. A demo build never asks. */
+const loginItem = () => page.evaluate(() => window.ubcVpn.demo?.loginItem() ?? null);
+
+test("settings: nothing starts at sign-in and nothing connects by itself, until asked", async () => {
+    await scenario("settings");
+    await tab("Settings").click();
+    await expect(heading()).toHaveText("Settings");
+    const startup = page.getByRole("group", { name: "Start UBC VPN when you sign in" });
+    await expect(startup.getByRole("radio", { name: "Don't start it" })).toBeChecked();
+    const autoConnect = page.getByRole("switch", { name: "Connect when UBC VPN starts" });
+    await expect(autoConnect).toHaveAttribute("aria-checked", "false");
+    // It says what turning it on costs.
+    await expect(autoConnect).toHaveAccessibleDescription(/one MFA request/);
+    // Nothing has been asked of the OS yet.
+    expect(await loginItem()).toBeNull();
+    await shoot("settings");
+    await tab("Connection").click();
+});
+
+test("settings: starting in the tray registers the app with --hidden", async () => {
+    test.skip(process.platform === "linux", "Linux has no start at sign-in yet");
+    await scenario("settings");
+    await tab("Settings").click();
+    const startup = page.getByRole("group", { name: "Start UBC VPN when you sign in" });
+    const tray = startup.getByRole("radio", { name: "Start it in the tray" });
+    // Clicked, not checked: the screen shows the choice once it is saved,
+    // the client's answer, not the click.
+    await tray.click();
+    await expect(tray).toBeChecked();
+    const expected =
+        process.platform === "darwin"
+            ? { openAtLogin: true, args: [] }
+            : { openAtLogin: true, args: ["--hidden"] };
+    await expect.poll(loginItem).toEqual(expected);
+    await shoot("settings-start-in-tray");
+
+    const window = startup.getByRole("radio", { name: "Start it and open the window" });
+    await window.click();
+    await expect(window).toBeChecked();
+    await expect.poll(loginItem).toEqual({ openAtLogin: true, args: [] });
+    const off = startup.getByRole("radio", { name: "Don't start it" });
+    await off.click();
+    await expect(off).toBeChecked();
+    await expect.poll(loginItem).toEqual({ openAtLogin: false, args: [] });
+
+    // Connecting by itself is saved with the startup choice, and changes nothing at sign-in.
+    const autoConnect = page.getByRole("switch", { name: "Connect when UBC VPN starts" });
+    await autoConnect.click();
+    await expect(autoConnect).toHaveAttribute("aria-checked", "true");
+    await expect.poll(loginItem).toEqual({ openAtLogin: false, args: [] });
+    await autoConnect.click();
+    await expect(autoConnect).toHaveAttribute("aria-checked", "false");
+    await tab("Connection").click();
+});
+
+test("settings: on Windows the tray choice becomes a Run entry with --hidden", async () => {
+    // It writes the user's Run key, so only on a CI machine, which is thrown
+    // away: never on someone's own computer.
+    test.skip(
+        !isCi(process.env) || process.platform !== "win32",
+        "writes the Run key: Windows CI runners only",
+    );
+    // The login item the app registers for "Start it in the tray"
+    // (`loginItemFor("tray", "win32")`, pinned in tests/startup.test.ts),
+    // given to Electron as an installed app gives it, then read back from
+    // the registry through Electron, and removed again.
+    const seen = await app.evaluate(({ app: electronApp }) => {
+        const item = { openAtLogin: true, args: ["--hidden"] };
+        electronApp.setLoginItemSettings(item);
+        const written = electronApp.getLoginItemSettings({ args: item.args });
+        electronApp.setLoginItemSettings({ openAtLogin: false, args: item.args });
+        const removed = electronApp.getLoginItemSettings({ args: item.args });
+        return {
+            program: process.execPath,
+            openAtLogin: written.openAtLogin,
+            entries: written.launchItems.map(({ path, args, scope, enabled }) => ({
+                path,
+                args,
+                scope,
+                enabled,
+            })),
+            removed: removed.openAtLogin,
+        };
+    });
+    expect(seen.openAtLogin).toBe(true);
+    expect(seen.entries).toContainEqual({
+        path: seen.program,
+        args: ["--hidden"],
+        scope: "user",
+        enabled: true,
+    });
+    expect(seen.removed).toBe(false);
+});
+
+test("settings: the saved password is forgotten only once the user says so", async () => {
+    await scenario("settings");
+    await tab("Settings").click();
+    await expect(page.getByText(/Your password is saved in/)).toBeVisible();
+    await page.getByRole("button", { name: "Forget saved password" }).click();
+    // It asks, and the question takes the keyboard.
+    const question = page.getByRole("alert");
+    await expect(question).toContainText("Forget your saved password?");
+    await expect(question.getByRole("button", { name: "Forget password" })).toBeFocused();
+    await shoot("settings-forget-ask");
+    // "Keep it" changes nothing.
+    await question.getByRole("button", { name: "Keep it" }).click();
+    await expect(page.getByText(/Your password is saved in/)).toBeVisible();
+    // Asked again, and confirmed.
+    await page.getByRole("button", { name: "Forget saved password" }).click();
+    await page.getByRole("alert").getByRole("button", { name: "Forget password" }).click();
+    await expect(page.getByText("No password is saved.", { exact: false })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Forget saved password" })).toHaveCount(0);
+    await tab("Connection").click();
+});
+
+test("settings: without a keyring, saving a password is not offered, and says why", async () => {
+    await scenario("settings-no-keyring");
+    await tab("Settings").click();
+    await expect(page.getByText(/no keyring UBC VPN can use/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Forget saved password" })).toHaveCount(0);
+    await scenario("settings-cannot-save");
+    await tab("Connection").click();
+    await tab("Settings").click();
+    const autoConnect = page.getByRole("switch", { name: "Connect when UBC VPN starts" });
+    await autoConnect.click();
+    // Refused: said plainly, and what is shown is still what is saved.
+    await expect(page.getByRole("alert")).toContainText("could not be saved");
+    await expect(autoConnect).toHaveAttribute("aria-checked", "false");
+    await shoot("settings-cannot-save");
+    await scenario("settings");
+    await tab("Connection").click();
 });
 
 test("the component gallery", async () => {
