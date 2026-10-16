@@ -475,9 +475,21 @@ fn the_catch_all_takes_every_other_name() {
     let catch_all = super::dns::CATCH_ALL;
     WinDns.set_split_dns(tunnel, &chosen()).unwrap();
     WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
-    std::thread::sleep(Duration::from_secs(2));
-    let split = resolvers_for(&asked, "host.suite.example");
-    let other = resolvers_for(&asked, "anything.example");
+    // The DNS client takes the two rules in a moment after they are
+    // written; ask until it has, for a while, and keep every answer.
+    let started = std::time::Instant::now();
+    let mut answers = Vec::new();
+    let (split, other) = loop {
+        let split = resolvers_for(&asked, "host.suite.example");
+        let other = resolvers_for(&asked, "anything.example");
+        answers.push((started.elapsed().as_millis(), split.clone(), other.clone()));
+        let settled = split == [SERVERS[0]] && other == [SERVERS[1]];
+        if settled || started.elapsed() > Duration::from_secs(15) {
+            break (split, other);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    println!("CATCH-ALL answers {answers:?}");
     assert_eq!(split, [SERVERS[0]]);
     assert_eq!(other, [SERVERS[1]]);
     assert_eq!(
