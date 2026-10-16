@@ -69,6 +69,7 @@
 //! clients outside such a sandbox.
 
 pub(crate) mod interrupt;
+pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
 mod tests;
@@ -189,18 +190,49 @@ fn check_folder(mode: Mode, folder: &Path, me: u32) -> Result<()> {
 }
 
 fn check_one(folder: &Path, owner: u32, forbidden: u32) -> Result<()> {
-    // Not followed: a link here could be pointed anywhere later.
-    let found = fs::symlink_metadata(folder)?;
-    let broken = if !found.is_dir() {
-        NOT_A_FOLDER
-    } else if found.uid() != owner {
-        WRONG_OWNER
-    } else if found.mode() & forbidden != 0 {
-        TOO_OPEN
-    } else {
-        return Ok(());
+    let broken = match check_entry(folder, Kind::Folder, owner, forbidden)? {
+        None => return Ok(()),
+        Some(Broken::Kind) => NOT_A_FOLDER,
+        Some(Broken::Owner) => WRONG_OWNER,
+        Some(Broken::Open) => TOO_OPEN,
     };
     Err(Error::Failed(broken.to_string()))
+}
+
+/// What a path must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Folder,
+    File,
+}
+
+/// How a path breaks the rule that only `owner` can change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Broken {
+    /// A link, or not the kind of thing it should be.
+    Kind,
+    Owner,
+    /// A permission bit in `forbidden` is set.
+    Open,
+}
+
+/// Checks one path against the rule, without following a link: a link could
+/// be pointed anywhere later. `None` means it keeps the rule.
+fn check_entry(path: &Path, kind: Kind, owner: u32, forbidden: u32) -> io::Result<Option<Broken>> {
+    let found = fs::symlink_metadata(path)?;
+    let right_kind = match kind {
+        Kind::Folder => found.is_dir(),
+        Kind::File => found.is_file(),
+    };
+    Ok(if !right_kind {
+        Some(Broken::Kind)
+    } else if found.uid() != owner {
+        Some(Broken::Owner)
+    } else if found.mode() & forbidden != 0 {
+        Some(Broken::Open)
+    } else {
+        None
+    })
 }
 
 /// A channel name is the socket's absolute path, short enough for a socket
