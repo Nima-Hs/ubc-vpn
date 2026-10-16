@@ -27,7 +27,9 @@ pub struct Settings {
 /// are fine, so files from older and newer versions both load. On the channel
 /// the same type is strict. An invalid subnet is still an error, because
 /// silently dropping a route the user chose would be worse than refusing.
-fn lenient_routes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RouteSet, D::Error> {
+pub(crate) fn lenient_routes<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RouteSet, D::Error> {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct Lenient {

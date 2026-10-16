@@ -370,13 +370,18 @@ pub fn replace_username(
     current: Option<&str>,
     username: Option<&str>,
 ) -> Result<String, SettingsFailureCode> {
-    let odd = |name: &str| {
-        name.trim().is_empty() || name.len() > MAX_USERNAME_BYTES || name.chars().any(misleads)
-    };
-    if username.is_some_and(odd) {
+    if username.is_some_and(|name| !usable_username(name)) {
         return Err(SettingsFailureCode::BadInput);
     }
     replace_field(current, "username", username.map(serde_json::Value::from))
+}
+
+/// Whether `name` is a username that may be saved: not empty or only
+/// spaces, no longer than [`MAX_USERNAME_BYTES`], and with no character
+/// that [`misleads`]. None is a name a person would type, and the last kind
+/// could be shown as a name it is not.
+pub fn usable_username(name: &str) -> bool {
+    !name.trim().is_empty() && name.len() <= MAX_USERNAME_BYTES && !name.chars().any(misleads)
 }
 
 /// The text of a settings file with one field set to `value`, or removed.
