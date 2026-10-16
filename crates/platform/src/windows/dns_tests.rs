@@ -474,45 +474,7 @@ fn the_catch_all_takes_every_other_name() {
     let _servers = SERVERS.map(|server| Server::start(server, asked.clone()));
     let catch_all = super::dns::CATCH_ALL;
     WinDns.set_split_dns(tunnel, &chosen()).unwrap();
-    // The split DNS alone, as the shared suite checks it.
-    let alone = resolvers_for(&asked, "host.suite.example");
-    println!("CATCH-ALL split alone {alone:?}");
-    let policy_key =
-        super::dns::read_rule_at(r"SOFTWARE\Policies\Microsoft\Windows NT", "DNSClient");
-    let script = "Test-Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient\\DnsPolicyConfig'; \
-                  Get-ChildItem 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Recurse -ErrorAction Continue | Select-Object -ExpandProperty Name; \
-                  Get-DnsClientNrptPolicy -Effective | Format-List Namespace,NameServers";
-    let shown = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .expect("powershell");
-    println!(
-        "CATCH-ALL policy key {policy_key:?}\n{}{}",
-        String::from_utf8_lossy(&shown.stdout),
-        String::from_utf8_lossy(&shown.stderr)
-    );
-    let removed = delete_rule_at(
-        r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
-        "DnsPolicyConfig",
-    );
-    std::thread::sleep(Duration::from_secs(2));
-    let after = resolvers_for(&asked, "host.suite.example");
-    println!("CATCH-ALL after removing the empty policy table {removed:?}: {after:?}");
     WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
-    let script = "Get-DnsClientNrptPolicy -Effective | Format-List Namespace,NameServers,QueryPolicy; \
-                  Get-ChildItem HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters\\DnsPolicyConfig | \
-                  ForEach-Object { $_.Name; Get-ItemProperty $_.PSPath | Format-List Name,GenericDNSServers,ConfigOptions,Version }; \
-                  Resolve-DnsName anything.example -DnsOnly -ErrorAction Continue 2>&1 | Out-String";
-    let shown = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .expect("powershell");
-    println!(
-        "CATCH-ALL table\n{}{}",
-        String::from_utf8_lossy(&shown.stdout),
-        String::from_utf8_lossy(&shown.stderr)
-    );
-    println!("CATCH-ALL asked so far {:?}", asked.lock().unwrap());
     // The DNS client takes the two rules in a moment after they are
     // written; ask until it has, for a while, and keep every answer.
     let started = std::time::Instant::now();
