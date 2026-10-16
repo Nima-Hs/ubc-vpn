@@ -392,7 +392,7 @@ pub(super) fn delete_rule_at(base: &str, id: &str) -> Result<()> {
 /// Whether group policy has a table of name resolution rules, which
 /// replaces the local ones. An empty table does too: while it exists,
 /// Windows takes in no local rule at all (seen on CI).
-fn policy_rules_exist() -> Result<bool> {
+pub(super) fn policy_rules_exist() -> Result<bool> {
     Ok(open(POLICY, KEY_READ)?.is_some())
 }
 

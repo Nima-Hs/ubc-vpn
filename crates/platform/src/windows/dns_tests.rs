@@ -125,8 +125,40 @@ fn resolvers_for(asked: &Asked, name: &str) -> Vec<Ipv4Addr> {
     SERVERS.into_iter().filter(served).collect()
 }
 
-/// Removes, however a test ends, every rule a DNS test may have written.
-struct DnsCleanup;
+/// Removes, however a test ends, every rule a DNS test may have written,
+/// and the group-policy table if the test made it.
+struct DnsCleanup {
+    /// Whether the group-policy table was there before the test. Then it is
+    /// the machine's, not the test's, and is never removed, even empty.
+    policy_table_was_there: bool,
+}
+
+impl DnsCleanup {
+    fn new() -> Self {
+        let there = super::dns::policy_rules_exist().expect("look for the policy table");
+        Self {
+            policy_table_was_there: there,
+        }
+    }
+
+    /// For a test that makes the group-policy table itself: the machine
+    /// must have none, so the test never takes the machine's for its own.
+    fn without_policy_table() -> Self {
+        let cleanup = Self::new();
+        assert!(
+            !cleanup.policy_table_was_there,
+            "this test needs a machine with no group-policy name resolution table"
+        );
+        cleanup
+    }
+
+    /// Removes the group-policy table if it is empty and the test made it.
+    fn remove_policy_table(&self) {
+        if !self.policy_table_was_there {
+            super::dns::delete_if_empty(POLICY).expect("remove the empty policy table");
+        }
+    }
+}
 
 const FOREIGN: &str = "{0D1E2F3A-4B5C-4D6E-8F70-81929A0B0C0D}";
 
@@ -136,9 +168,11 @@ impl Drop for DnsCleanup {
         let _ = delete_rule_at(POLICY, FOREIGN);
         let _ = delete_rule_at(LOCAL, FOREIGN);
         // A group-policy table left empty still makes Windows ignore every
-        // local rule, so the table a test made goes too. One with rules in
-        // it is not the tests', and stays.
-        let _ = super::dns::delete_if_empty(POLICY);
+        // local rule, so the table a test made goes too. One that was there
+        // before the test, or has rules in it, is not the test's, and stays.
+        if !self.policy_table_was_there {
+            let _ = super::dns::delete_if_empty(POLICY);
+        }
     }
 }
 
@@ -152,7 +186,7 @@ fn passes_the_shared_dns_suite_with_servers_of_its_own() {
     let dir = state_dir("dns");
     let _adapter = wintun.adapter(tunnel);
     let _routes = Cleanup(vec![dir]);
-    let _rules = DnsCleanup;
+    let _rules = DnsCleanup::new();
     for server in SERVERS {
         Outsider.add_address(tunnel, server);
     }
@@ -179,14 +213,20 @@ fn chosen() -> SplitDns {
 fn refuses_split_dns_while_group_policy_rules_exist() {
     let _turn = turn();
     let Some(_wintun) = wintun() else { return };
-    let _rules = DnsCleanup;
+    let rules = DnsCleanup::without_policy_table();
     let theirs = Rule {
         names: vec![".policy.example".to_string()],
         servers: "192.0.2.99".to_string(),
     };
+    let catch_all = [SERVERS[1]];
     write_rule_at(POLICY, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
     assert_eq!(WinDns.set_split_dns("", &chosen()), Err(Error::Unsupported));
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
+    assert_eq!(
+        WinDns.set_catch_all_dns(&catch_all),
+        Err(Error::Unsupported),
+        "catch-all under a policy table with rules"
+    );
     // The table is empty now, and still there.
     delete_rule_at(POLICY, FOREIGN).unwrap();
     assert_eq!(
@@ -194,15 +234,34 @@ fn refuses_split_dns_while_group_policy_rules_exist() {
         Err(Error::Unsupported),
         "set under an empty policy table"
     );
-    super::dns::delete_if_empty(POLICY).unwrap();
+    assert_eq!(
+        WinDns.set_catch_all_dns(&catch_all),
+        Err(Error::Unsupported),
+        "catch-all under an empty policy table"
+    );
+    let catch_all_key = super::dns::read_rule_at(LOCAL, super::dns::CATCH_ALL);
+    assert_eq!(catch_all_key, Ok(None), "a refused catch-all wrote nothing");
+    rules.remove_policy_table();
     WinDns
         .set_split_dns("", &chosen())
         .expect("set once the policy is gone");
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
+    WinDns
+        .set_catch_all_dns(&catch_all)
+        .expect("catch-all once the policy is gone");
+    assert_eq!(
+        WinDns.catch_all_dns_matches(&catch_all),
+        Verified::Unobservable
+    );
     // An empty table appearing after the rules were set: not in effect.
     write_rule_at(POLICY, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
     delete_rule_at(POLICY, FOREIGN).unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
+    assert_eq!(
+        WinDns.catch_all_dns_matches(&catch_all),
+        Verified::No,
+        "catch-all check under an empty policy table"
+    );
     ran("dns policy");
 }
 
@@ -217,7 +276,7 @@ fn an_empty_policy_table_hides_local_rules() {
     let dir = state_dir("empty-policy");
     let _adapter = wintun.adapter(tunnel);
     let _routes = Cleanup(vec![dir]);
-    let _rules = DnsCleanup;
+    let rules = DnsCleanup::without_policy_table();
     for server in SERVERS {
         Outsider.add_address(tunnel, server);
     }
@@ -242,7 +301,7 @@ fn an_empty_policy_table_hides_local_rules() {
     .unwrap();
     std::thread::sleep(Duration::from_secs(3));
     let hidden = resolvers_for(&asked, "host.suite.example");
-    super::dns::delete_if_empty(POLICY).unwrap();
+    rules.remove_policy_table();
     // The DNS client reads the rules again when the local ones change, not
     // when the policy table goes: the same rule written again, now with no
     // table.
@@ -306,7 +365,7 @@ fn until_effective(namespace: &str, wanted: bool) -> Option<Duration> {
 fn records_whether_the_effective_rule_table_follows_our_keys() {
     let _turn = turn();
     let Some(_wintun) = wintun() else { return };
-    let _rules = DnsCleanup;
+    let _rules = DnsCleanup::new();
     let namespace = ".suite.example";
     let before = effective_lists(namespace);
     WinDns.set_split_dns("", &chosen()).unwrap();
@@ -323,7 +382,7 @@ fn records_whether_the_effective_rule_table_follows_our_keys() {
 fn another_rule_for_our_domain_is_not_in_effect() {
     let _turn = turn();
     let Some(_wintun) = wintun() else { return };
-    let _rules = DnsCleanup;
+    let _rules = DnsCleanup::new();
     WinDns.set_split_dns("", &chosen()).unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
     let rule = |name: &str| Rule {
@@ -368,7 +427,7 @@ fn another_rule_for_our_domain_is_not_in_effect() {
 fn a_rule_key_another_owner_made_first_is_not_ours() {
     let _turn = turn();
     let Some(_wintun) = wintun() else { return };
-    let _rules = DnsCleanup;
+    let _rules = DnsCleanup::new();
     let ours = super::dns::rules(&chosen()).unwrap();
     let me = super::security::process_user().unwrap();
     let owner = format!("O:{me}");
@@ -425,7 +484,7 @@ fn our_rules_do_not_outlast_a_restart() {
     use windows_sys::Win32::Foundation::ERROR_CHILD_MUST_BE_VOLATILE;
     let _turn = turn();
     let Some(_wintun) = wintun() else { return };
-    let _rules = DnsCleanup;
+    let _rules = DnsCleanup::new();
     let mut many = chosen();
     many.domains = (0..60).map(|n| format!("d{n}.suite.example")).collect();
     let ours = super::dns::rules(&many).unwrap();
@@ -465,7 +524,7 @@ fn the_catch_all_takes_every_other_name() {
     let dir = state_dir("catch-all");
     let _adapter = wintun.adapter(tunnel);
     let _routes = Cleanup(vec![dir]);
-    let _rules = DnsCleanup;
+    let _rules = DnsCleanup::new();
     for server in SERVERS {
         Outsider.add_address(tunnel, server);
     }
