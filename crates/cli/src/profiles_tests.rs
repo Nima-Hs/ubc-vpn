@@ -29,6 +29,10 @@ impl Machine {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = std::env::temp_dir().join(format!("ubc-vpn-profiles-test-{unique:?}"));
+        // A process ID comes round again, and with it this name: whatever
+        // an earlier run left here goes first, or its settings would be
+        // read as this test's.
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("policy")).unwrap();
         let pin = format!("pin-sha256:{}=", "A".repeat(43));
         let policy = format!(r#"{{"gateway":"vpn.example.test","pins":["{pin}"]}}"#);
@@ -123,6 +127,12 @@ impl Machine {
             .find(|p| p.profile.name == name)
             .unwrap();
         made.profile.id.clone()
+    }
+}
+
+impl Drop for Machine {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -493,14 +503,14 @@ fn a_new_username_from_a_connect_forgets_the_old_ones_password() {
     let machine = Machine::new();
     let dir = machine.root.join("settings");
     crate::tests::settings_folder(&dir);
-    crate::settings::remember_username(&dir, None, Some("user@app")).unwrap();
+    crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("user@app")).unwrap();
     save_password(&ProfileId::first(), "user@app");
-    crate::settings::remember_username(&dir, None, Some("user@app")).unwrap();
+    crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("user@app")).unwrap();
     assert!(
         has_password(&ProfileId::first()),
         "the same username forgot it"
     );
-    crate::settings::remember_username(&dir, None, Some("other@app")).unwrap();
+    crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("other@app")).unwrap();
     assert!(!has_password(&ProfileId::first()), "a new username kept it");
 }
 

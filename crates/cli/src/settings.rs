@@ -265,14 +265,15 @@ pub(crate) fn write_profiles(
     save(dir, &profiles.to_text()).map_err(|_| SettingsFailureCode::Unwritable)
 }
 
-/// Saves `username` as the active profile's, or removes the saved one when
-/// it is `None`, changing nothing else. When the username changes, the
-/// profile's saved password is forgotten: it was the old username's.
-/// Nothing is saved that would leave `settings get` unable to show the
-/// file.
+/// Saves `username` as profile `id`'s, or removes the saved one when it is
+/// `None`, changing nothing else. When the username changes, the profile's
+/// saved password is forgotten: it was the old username's. Nothing is saved
+/// that would leave `settings get` unable to show the file, and nothing for
+/// a profile that is gone.
 pub(crate) fn remember_username(
     dir: &Path,
     policy: Option<&Policy>,
+    id: &ProfileId,
     username: Option<&str>,
 ) -> Result<(), SettingsFailureCode> {
     let _changing = change(dir)?;
@@ -281,10 +282,9 @@ pub(crate) fn remember_username(
         cleaned_passwords: mut forget,
         ..
     } = read_profiles(dir)?;
-    let active = profiles.global.active_profile.clone();
-    let password = profiles.update(&active, Some(username), None);
+    let password = profiles.update(id, Some(username), None);
     if password.map_err(|_| SettingsFailureCode::BadInput)? == Password::Forget {
-        forget.push(active);
+        forget.push(id.clone());
     }
     let too_long = |_| SettingsFailureCode::BadInput;
     encode(&SettingsView::new(profiles.v1_view(), policy)).map_err(too_long)?;

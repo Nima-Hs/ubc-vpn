@@ -1,0 +1,9 @@
+# Clippy's settings for the whole workspace. CI runs clippy with
+# `-D warnings`, so each of these fails the build.
+
+disallowed-methods = [
+  # The installed product's keyring, whatever the run. The client must pick
+  # the service name through `keys::chosen_service()`, so that `--dev` can
+  # never read or forget the installed product's saved passwords.
+  { path = "ubc_vpn_platform::secrets::native", reason = "use `keys::keyring()`, which keeps dev mode's passwords apart" },
+]

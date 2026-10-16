@@ -33,6 +33,9 @@ mod live;
 #[cfg(test)]
 mod live_tests;
 mod logs;
+mod passwords;
+#[cfg(test)]
+mod passwords_tests;
 mod profiles;
 #[cfg(test)]
 mod profiles_tests;
@@ -60,7 +63,7 @@ const HELP: &str = "\
 Usage: ubc-vpn <command>
 
 Commands:
-  connect [--json]  Log in and connect the VPN, using the saved routes
+  connect [--profile <id>] [--json]  Log in and connect the VPN with a profile
   disconnect        Disconnect the VPN
   status [--json]   Show whether the VPN is connected
   logs [--json] [--follow]  Show what the service has logged
@@ -92,6 +95,13 @@ Passwords are saved only in the OS keyring, never in the settings file.
 A profile's saved password is forgotten when the profile is deleted, when
 it stops saving it, when its username changes, and with password forget. A
 reset forgets every password UBC VPN saved.
+
+connect uses the active profile, or the one --profile names: its username,
+its routes, and its saved password, which is sent only for the username it
+was saved for. A typed password is saved once the connect has been accepted,
+when the profile saves its password. A saved password the gateway refuses is
+not sent again: it is forgotten, or, when a one-time code was also entered,
+kept but asked for by hand until a login settles it.
 
 connect asks for the password and the one-time code in the terminal. They are
 never taken from an argument, a variable or a file. Ctrl-C stops a
@@ -146,6 +156,43 @@ fn dev_flag<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
         return (true, rest);
     }
     (false, args)
+}
+
+/// A `connect` command line: with which profile, and whether for the app.
+#[derive(Debug, PartialEq, Eq)]
+struct Connecting {
+    /// The profile `--profile` names, or `None` for the active one.
+    profile: Option<ubc_vpn_core::profiles::ProfileId>,
+    /// Whether `--json` was given.
+    json: bool,
+}
+
+/// Reads `connect [--profile <id>] [--json]`, the options in either order,
+/// or `None` when the arguments are not that. An id that cannot be one is
+/// wrong usage.
+fn connect_args(args: &[&str]) -> Option<Connecting> {
+    let ["connect", rest @ ..] = args else {
+        return None;
+    };
+    let mut rest = rest;
+    let mut found = Connecting {
+        profile: None,
+        json: false,
+    };
+    loop {
+        match rest {
+            [] => return Some(found),
+            ["--json", more @ ..] if !found.json => {
+                found.json = true;
+                rest = more;
+            }
+            ["--profile", id, more @ ..] if found.profile.is_none() => {
+                found.profile = Some(id.parse().ok()?);
+                rest = more;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The platform for this run: the installed product's, or with `--dev` the
@@ -348,12 +395,13 @@ fn main() -> ExitCode {
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (dev, args) = dev_flag(&args);
+    let connecting = connect_args(args);
     // First, before anything starts a thread.
-    let logs_in = !dev && matches!(args, ["connect"] | ["connect", "--json"]);
+    let logs_in = !dev && connecting.is_some();
     let real = Real::load(logs_in);
     if let Some(why) = real.failure() {
-        return ExitCode::from(match args {
-            ["connect", "--json"] => connect_json::refuse(why, &mut out),
+        return ExitCode::from(match connecting {
+            Some(Connecting { json: true, .. }) => connect_json::refuse(why, &mut out),
             _ => say(&mut err, &format!("ubc-vpn: {why}"), FAILED),
         });
     }
@@ -381,19 +429,38 @@ fn main() -> ExitCode {
         let status = settings::run(command, &chosen, &mut input, &mut out, &mut err);
         return ExitCode::from(status);
     }
-    if args == ["connect", "--json"] {
+    if let Some(Connecting {
+        profile,
+        json: true,
+    }) = &connecting
+    {
         let engines = |policy: &Policy| login_engine(dev, policy, &real);
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
-        let status = connect_json::connect(&chosen, &engines, input, limits, &mut out, &mut err);
+        let status = connect_json::connect(
+            &chosen,
+            profile.as_ref(),
+            &engines,
+            input,
+            limits,
+            &mut out,
+            &mut err,
+        );
         return ExitCode::from(status);
     }
-    if args == ["connect"] {
+    if let Some(Connecting { profile, .. }) = &connecting {
         let engines = |policy: &Policy| login_engine(dev, policy, &real);
         let (mut ask, limits) = (terminal::Terminal::real(), client::Limits::default());
         let progress = watch_for_a_stop(dev, &mut err);
         let ended = connect::connect(
-            &chosen, &engines, &mut ask, &progress, limits, &mut out, &mut err,
+            &chosen,
+            profile.as_ref(),
+            &engines,
+            &mut ask,
+            &progress,
+            limits,
+            &mut out,
+            &mut err,
         );
         match ended {
             connect::Ended::Status(status) => return ExitCode::from(status),

@@ -29,6 +29,8 @@ impl Rig {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = std::env::temp_dir().join(format!("ubc-vpn-cli-test-{unique:?}"));
+        // Left by an earlier run whose process ID this one was given.
+        let _ = std::fs::remove_dir_all(&root);
         let fake = Fake::new();
         Self { fake, root }
     }
@@ -240,7 +242,8 @@ fn each_failure_has_its_own_exit_code_and_message() {
         "The bridge claims nothing itself",
         "never taken from an argument, a variable or a file",
         "is told to disconnect before the program ends.",
-        "connect [--json]  Log in and connect",
+        "connect [--profile <id>] [--json]  Log in and connect",
+        "which is sent only for the username it\nwas saved for",
         "A\ncancel line, or standard input closing, stops the login.",
         "bridge            Carry messages",
         "logs [--json] [--follow]  Show what the service has logged",

@@ -149,10 +149,10 @@ fn the_service_and_the_client_work_together() {
         status == 8 && last.contains(r#""code":"wrong_password""#),
         "{last}"
     );
-    // The gateway refused a login made with the saved username, so it is
-    // forgotten, and the next connect, further down, is asked for it again.
+    // The gateway refused the password, not the username: the saved
+    // username stays, and the next connect, further down, is not asked it.
     let (_, shown) = home.run(&["settings", "get", "--json"], "");
-    assert!(shown.contains(r#""username":null"#), "{shown}");
+    assert!(shown.contains(r#""username":"alice""#), "{shown}");
     assert_eq!(home.run(&["status"], ""), (0, "Disconnected".to_string()));
 
     // What someone helping the user reads afterwards: each step of an
@@ -213,7 +213,7 @@ fn the_service_and_the_client_work_together() {
     let opened = r#""text":"CSTP connected""#;
     // The two connects from before are there to begin with.
     let earlier = [log.until(opened), log.until(opened)];
-    let (status, _) = home.connect(&[Some(USERNAME), Some(PASSWORD), Some(CODE)]);
+    let (status, _) = home.connect(&[Some(PASSWORD), Some(CODE)]);
     assert_eq!(status, 0);
     bridge.until(&state("connected"));
     let new = log.until(opened);

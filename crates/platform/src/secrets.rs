@@ -338,6 +338,10 @@ impl Store for Native {
     }
 }
 
+/// What [`FakeSecrets::on_change`] calls.
+#[cfg(any(test, feature = "fake"))]
+pub type Hook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// A keyring in memory, for tests. Clones share one store.
 #[cfg(any(test, feature = "fake"))]
 #[derive(Clone, Default)]
@@ -350,6 +354,12 @@ struct FakeStore {
     unusable: bool,
     /// Writes and deletes of these accounts fail.
     failing: std::collections::BTreeSet<String>,
+    /// Deletes of these accounts fail; writes work.
+    failing_deletes: std::collections::BTreeSet<String>,
+    /// Writes of these accounts fail; deletes work.
+    failing_saves: std::collections::BTreeSet<String>,
+    /// Called with the account after every write and delete that worked.
+    on_change: Option<Hook>,
     /// Reading the index takes a moment, so that two changes at once
     /// overlap.
     slow_index: bool,
@@ -374,6 +384,33 @@ impl FakeSecrets {
             true => store.failing.insert(account.to_string()),
             false => store.failing.remove(account),
         };
+    }
+
+    /// Makes deleting `account` fail, or work again, while writing it
+    /// still works.
+    pub fn fail_deletes_of(&self, account: &str, failing: bool) {
+        let mut store = crate::lock(&self.0);
+        match failing {
+            true => store.failing_deletes.insert(account.to_string()),
+            false => store.failing_deletes.remove(account),
+        };
+    }
+
+    /// Makes writing `account` fail, or work again, while deleting it
+    /// still works.
+    pub fn fail_saves_to(&self, account: &str, failing: bool) {
+        let mut store = crate::lock(&self.0);
+        match failing {
+            true => store.failing_saves.insert(account.to_string()),
+            false => store.failing_saves.remove(account),
+        };
+    }
+
+    /// Has `hook` called with the account after every write and delete
+    /// that worked, or no longer with `None`: for a test to look at what
+    /// else holds at the moment of each change.
+    pub fn on_change(&self, hook: Option<Hook>) {
+        crate::lock(&self.0).on_change = hook;
     }
 
     /// Makes reading the index take a moment, so that changes overlap.
@@ -425,26 +462,39 @@ impl Store for FakeSecrets {
     }
 
     fn set(&self, account: &str, value: &str) -> Result<()> {
-        let mut store = crate::lock(&self.0);
-        if store.unusable {
-            return Err(Error::Unsupported);
+        let hook = {
+            let mut store = crate::lock(&self.0);
+            if store.unusable {
+                return Err(Error::Unsupported);
+            }
+            if store.failing.contains(account) || store.failing_saves.contains(account) {
+                return Err(failed());
+            }
+            store.entries.insert(account.to_string(), value.to_string());
+            store.on_change.clone()
+        };
+        // Called with the store let go, so the hook may use the keyring.
+        if let Some(hook) = hook {
+            hook(account);
         }
-        if store.failing.contains(account) {
-            return Err(failed());
-        }
-        store.entries.insert(account.to_string(), value.to_string());
         Ok(())
     }
 
     fn delete(&self, account: &str) -> Result<()> {
-        let mut store = crate::lock(&self.0);
-        if store.unusable {
-            return Err(Error::Unsupported);
+        let hook = {
+            let mut store = crate::lock(&self.0);
+            if store.unusable {
+                return Err(Error::Unsupported);
+            }
+            if store.failing.contains(account) || store.failing_deletes.contains(account) {
+                return Err(failed());
+            }
+            store.entries.remove(account);
+            store.on_change.clone()
+        };
+        if let Some(hook) = hook {
+            hook(account);
         }
-        if store.failing.contains(account) {
-            return Err(failed());
-        }
-        store.entries.remove(account);
         Ok(())
     }
 }

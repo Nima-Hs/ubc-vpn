@@ -30,6 +30,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use ubc_vpn_core::login::{AppMessage, CliMessage, LoginErrorCode};
+use ubc_vpn_core::profiles::ProfileId;
 use ubc_vpn_core::protocol::{MAX_LINE_BYTES, decode, encode};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_engine::{Cancel, Prompt};
@@ -56,8 +57,10 @@ enum Arrival {
 
 /// Runs `connect --json` and returns the exit status: 0 after `done`, and
 /// after an `error` the status `connect` gives for the same failure.
+/// `profile` is the one to connect with, or `None` for the active one.
 pub fn connect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    profile: Option<&ProfileId>,
     engines: Engines,
     input: impl BufRead + Send + 'static,
     limits: Limits,
@@ -82,7 +85,7 @@ pub fn connect(
     // to know when the request goes.
     let run = || {
         start(
-            platform, engines, &mut app, &cancel, limits, &Unwatched, err,
+            platform, profile, engines, &mut app, &cancel, limits, &Unwatched, err,
         )
     };
     let Ok(ended) = catch_unwind(AssertUnwindSafe(run)) else {
