@@ -133,10 +133,29 @@ fn dev_flag<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
 fn platform(dev: bool) -> ubc_vpn_platform::Result<Platform> {
     #[cfg(feature = "dev-mode")]
     if dev {
-        return Platform::native(Mode::Dev);
+        return Platform::native(Mode::Dev).map(test_channel);
     }
     let _ = dev;
-    Platform::native(Mode::Installed)
+    Platform::native(Mode::Installed).map(test_channel)
+}
+
+/// Names the channel a test of this program as a program talks to, so that
+/// no such test can ever reach the service installed on the machine it runs
+/// on. Read only in a debug build: a release build, which is what ships,
+/// talks to no channel but its own, whatever the environment says.
+#[cfg(debug_assertions)]
+const TEST_CHANNEL: &str = "UBC_VPN_TEST_CHANNEL";
+
+/// The platform with its channel replaced by the one `TEST_CHANNEL` names,
+/// in a debug build when it names one.
+fn test_channel(platform: Platform) -> Platform {
+    #[cfg(debug_assertions)]
+    if let Some(name) = std::env::var_os(TEST_CHANNEL).and_then(|name| name.into_string().ok()) {
+        let mut platform = platform;
+        platform.paths.channel_name = name;
+        return platform;
+    }
+    platform
 }
 
 const NO_ENGINE: &str = "This build has no VPN engine, so it cannot connect.";

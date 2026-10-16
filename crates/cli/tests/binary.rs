@@ -1,14 +1,52 @@
-//! The command-line client itself, run as a program. Only commands that
-//! talk to no service and read no input are run here.
+//! The command-line client itself, run as a program.
+//!
+//! Security rule: no test may ever reach the service installed on the
+//! machine it runs on. Every run here points the program at a channel that
+//! this run alone names and nobody serves, with `UBC_VPN_TEST_CHANNEL`. Only
+//! a debug build takes that, so in a release build a test that could reach a
+//! service runs only on CI, whose machines have no service installed.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const TEST_CHANNEL: &str = "UBC_VPN_TEST_CHANNEL";
+
+/// A channel name for this run alone, which nobody serves.
+fn unserved() -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    let id = std::process::id();
+    if cfg!(windows) {
+        format!("ubc-vpn-test-{id}-{n}")
+    } else {
+        format!("/tmp/ubc-vpn-test-{id}-{n}/service.sock")
+    }
+}
+
+/// Whether a test that could reach a service may run: always in a debug
+/// build, which takes the channel it is given; in a release build only on
+/// CI. Says why when it may not.
+fn may_reach_a_service() -> bool {
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
+        return true;
+    }
+    println!(
+        "SKIPPED: a release build cannot be pointed away from the installed service, \
+         so this runs on CI only"
+    );
+    false
+}
+
+/// The program, pointed at a channel nobody serves.
+fn program() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"));
+    command.env(TEST_CHANNEL, unserved());
+    command
+}
 
 /// Runs the program and returns its exit status and what it printed.
 fn run(args: &[&str]) -> (Option<i32>, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"))
-        .args(args)
-        .output()
-        .unwrap();
+    let output = program().args(args).output().unwrap();
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
     (
         output.status.code(),
@@ -77,10 +115,14 @@ fn a_profile_with_no_roaming_folder_has_default_settings() {
     use std::io::Write;
     use std::process::Stdio;
 
+    // Saving routes also offers them to a live connection.
+    if !may_reach_a_service() {
+        return;
+    }
     let profile = std::env::temp_dir().join(format!("ubc-vpn-cli-profile-{}", std::process::id()));
     std::fs::create_dir_all(&profile).unwrap();
     let settings = |command: &str, typed: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"))
+        let mut child = program()
             .args(["settings", command, "--json"])
             .env("USERPROFILE", &profile)
             .stdin(Stdio::piped())
@@ -115,11 +157,72 @@ fn a_profile_with_no_roaming_folder_has_default_settings() {
     );
     assert!(nothing_made, "get created something in the profile");
     assert_eq!(saved_status, Some(0), "{saved}");
+    // Nobody serves its channel, so there is no connection to change.
+    assert!(
+        saved.contains(r#""live":{"result":"next_connect"}"#),
+        "{saved}"
+    );
     assert!(
         written.is_ok_and(|text| text.contains("10.19.0.0/16")),
         "{file:?}"
     );
     assert!(after.contains("10.19.0.0/16"), "{after}");
+}
+
+// Security rule: a test's run of the program talks to the channel the test
+// names and to no other, so a service installed on the machine is never
+// reached. Here the test serves that channel itself: the program comes to
+// it, not to the installed service's channel.
+#[cfg(all(windows, debug_assertions, feature = "dev-mode"))]
+#[test]
+fn a_test_run_talks_to_the_channel_it_is_given() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let channel = unserved();
+    // Served as this user, as a dev-mode service serves its channel.
+    let platform = ubc_vpn_platform::Platform::native(ubc_vpn_platform::Mode::Dev).unwrap();
+    let listener = platform.transport.listen(&channel).unwrap();
+    let (came, arrived) = mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok((conn, _)) = listener.accept() {
+            let hello = conn.read_line().ok().flatten();
+            let _ = came.send(hello);
+        }
+    });
+    let settings = std::env::temp_dir().join(format!("ubc-vpn-cli-guard-{}", std::process::id()));
+    std::fs::create_dir_all(&settings).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"))
+        .args(["settings", "set-routes", "--json"])
+        .env(TEST_CHANNEL, &channel)
+        .env("USERPROFILE", &settings)
+        .env("HOME", &settings)
+        .env("XDG_CONFIG_HOME", &settings)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let typed = "{\"subnets\":[\"10.19.0.0/16\"],\"dns_domains\":[]}\n";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(typed.as_bytes())
+        .unwrap();
+    let hello = arrived.recv_timeout(Duration::from_secs(30));
+    let output = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&settings);
+    let saved = String::from_utf8_lossy(&output.stdout);
+    // It came here. (It then says nothing: this channel is not served by
+    // the service, which the program checks before it sends anything.)
+    assert!(
+        hello.is_ok(),
+        "the program never came to the channel it was given"
+    );
+    // So nothing was applied anywhere.
+    assert!(!saved.contains(r#""result":"applied""#), "{saved}");
 }
 
 /// A 64-bit Windows program, read for what its headers say about loading.

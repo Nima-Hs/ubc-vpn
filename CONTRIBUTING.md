@@ -147,6 +147,14 @@ UBC_VPN_SYSTEM_SERVICE=<absolute path of ubc-vpn-service> cargo test --locked -p
 
 The other drives the app's window as well; `app/README.md` has its command (`pnpm test:system`). Both are skipped, and say so, when the variables that name the programs are not set. `.github/workflows/system.yml` and `.github/workflows/app-system.yml` run them on all three OSes.
 
+### Tests never touch what is installed
+
+No test may reach the UBC VPN installed on the machine it runs on. That means its service, the user's settings, and the passwords saved in the OS keyring (Windows Credential Manager, macOS Keychain, Secret Service).
+- **Fakes:** tests use the platform fake, the fake keyring, and temporary folders of their own.
+- **The real client program:** a test that runs it points it at a channel that test alone names and nobody serves, with `UBC_VPN_TEST_CHANNEL`. Only a debug build reads that variable, so a release build always talks to its own channel. In a release test build, a test that could reach a service therefore runs only when `CI` is set, since CI machines have no UBC VPN installed.
+- **The system tests** use dev mode, with its own channel and folders.
+- **Real-keyring tests** run on CI only.
+
 ### Never ship it
 
 A program built with `dev-mode` must never be released or installed: it can be told to trust a pretend gateway and to apply no routes. A release builds each program by itself with `-p` and without the feature, and CI fails if the service or the client would be built with any feature that has `dev`, `fake` or `debug` in its name (`.github/workflows/ci.yml`).
