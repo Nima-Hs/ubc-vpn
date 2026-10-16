@@ -50,6 +50,7 @@ use ubc_vpn_core::routes::Ipv4Net;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod interrupt;
+#[cfg(feature = "secrets")]
 pub mod secrets;
 mod state_plain;
 #[cfg(any(test, feature = "fake"))]

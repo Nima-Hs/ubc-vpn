@@ -97,11 +97,28 @@ trait Store: Send + Sync {
 }
 
 /// [`Secrets`] over any [`Store`].
-struct Kept<S>(S);
+///
+/// Every change to the index is made under one lock, so two saves at once
+/// in this process cannot each rewrite it and drop the other's line. Two
+/// processes are kept apart by their caller: the command-line client
+/// changes saved passwords only while it holds the settings lock.
+struct Kept<S> {
+    store: S,
+    changing: std::sync::Mutex<()>,
+}
+
+impl<S: Store> Kept<S> {
+    fn new(store: S) -> Self {
+        Self {
+            store,
+            changing: std::sync::Mutex::new(()),
+        }
+    }
+}
 
 impl<S: Store> Kept<S> {
     fn index(&self) -> Result<Vec<String>> {
-        let Some(text) = self.0.get(INDEX)? else {
+        let Some(text) = self.store.get(INDEX)? else {
             return Ok(Vec::new());
         };
         // One account to a line.
@@ -111,15 +128,15 @@ impl<S: Store> Kept<S> {
 
     fn set_index(&self, accounts: &[String]) -> Result<()> {
         if accounts.is_empty() {
-            return self.0.delete(INDEX);
+            return self.store.delete(INDEX);
         }
-        self.0.set(INDEX, &accounts.join("\n"))
+        self.store.set(INDEX, &accounts.join("\n"))
     }
 }
 
 impl<S: Store> Secrets for Kept<S> {
     fn load(&self, account: &str) -> Result<Option<Saved>> {
-        let Some(text) = self.0.get(account)? else {
+        let Some(text) = self.store.get(account)? else {
             return Ok(None);
         };
         // An entry in another form is not one this product can trust.
@@ -131,16 +148,20 @@ impl<S: Store> Secrets for Kept<S> {
         if account == INDEX || account.is_empty() || account.contains(['\n', '\r']) {
             return Err(failed());
         }
+        let _changing = crate::lock(&self.changing);
+        // In the index first: an entry is never there without its line.
         let mut accounts = self.index()?;
         if !accounts.iter().any(|a| a == account) {
             accounts.push(account.to_string());
             self.set_index(&accounts)?;
         }
-        self.0.set(account, text.expose())
+        self.store.set(account, text.expose())
     }
 
     fn forget(&self, account: &str) -> Result<()> {
-        self.0.delete(account)?;
+        let _changing = crate::lock(&self.changing);
+        // The entry first: its line goes only once it is gone.
+        self.store.delete(account)?;
         let mut accounts = self.index()?;
         if accounts.iter().any(|a| a == account) {
             accounts.retain(|a| a != account);
@@ -150,12 +171,13 @@ impl<S: Store> Secrets for Kept<S> {
     }
 
     fn forget_all(&self) -> Result<()> {
+        let _changing = crate::lock(&self.changing);
         for account in self.index()? {
             if account != INDEX {
-                self.0.delete(&account)?;
+                self.store.delete(&account)?;
             }
         }
-        self.0.delete(INDEX)
+        self.store.delete(INDEX)
     }
 }
 
@@ -172,7 +194,7 @@ pub fn native() -> Arc<dyn Secrets> {
 /// The user's OS keyring under `service`. Tests on CI use a throwaway name
 /// of their own; nothing else does.
 pub fn under(service: &str) -> Arc<dyn Secrets> {
-    Arc::new(Kept(Native(service.to_string())))
+    Arc::new(Kept::new(Native(service.to_string())))
 }
 
 /// The OS keyring, through the `keyring` crate.
@@ -229,6 +251,11 @@ pub struct FakeSecrets(Arc<std::sync::Mutex<FakeStore>>);
 struct FakeStore {
     entries: std::collections::BTreeMap<String, String>,
     unusable: bool,
+    /// Writes and deletes of these accounts fail.
+    failing: std::collections::BTreeSet<String>,
+    /// Reading the index takes a moment, so that two changes at once
+    /// overlap.
+    slow_index: bool,
 }
 
 #[cfg(any(test, feature = "fake"))]
@@ -241,6 +268,20 @@ impl FakeSecrets {
     /// Makes the keyring one that cannot be used, or usable again.
     pub fn set_unusable(&self, unusable: bool) {
         crate::lock(&self.0).unusable = unusable;
+    }
+
+    /// Makes writing and deleting `account` fail, or work again.
+    pub fn fail_writes_to(&self, account: &str, failing: bool) {
+        let mut store = crate::lock(&self.0);
+        match failing {
+            true => store.failing.insert(account.to_string()),
+            false => store.failing.remove(account),
+        };
+    }
+
+    /// Makes reading the index take a moment, so that changes overlap.
+    pub fn slow_index(&self, slow: bool) {
+        crate::lock(&self.0).slow_index = slow;
     }
 
     /// Every account and what it holds, as stored, for tests to look at.
@@ -263,24 +304,36 @@ impl FakeSecrets {
 
     /// The keyring as [`Secrets`].
     pub fn secrets(&self) -> Arc<dyn Secrets> {
-        Arc::new(Kept(self.clone()))
+        Arc::new(Kept::new(self.clone()))
     }
 }
 
 #[cfg(any(test, feature = "fake"))]
 impl Store for FakeSecrets {
     fn get(&self, account: &str) -> Result<Option<Secret>> {
-        let store = crate::lock(&self.0);
-        if store.unusable {
-            return Err(Error::Unsupported);
+        let (read, slow) = {
+            let store = crate::lock(&self.0);
+            if store.unusable {
+                return Err(Error::Unsupported);
+            }
+            let read = store.entries.get(account).map(|v| Secret::new(v.clone()));
+            (read, account == INDEX && store.slow_index)
+        };
+        // What was read comes back a moment later, as from a slow keyring,
+        // so another change can read the same before this one writes.
+        if slow {
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        Ok(store.entries.get(account).map(|v| Secret::new(v.clone())))
+        Ok(read)
     }
 
     fn set(&self, account: &str, value: &str) -> Result<()> {
         let mut store = crate::lock(&self.0);
         if store.unusable {
             return Err(Error::Unsupported);
+        }
+        if store.failing.contains(account) {
+            return Err(failed());
         }
         store.entries.insert(account.to_string(), value.to_string());
         Ok(())
@@ -290,6 +343,9 @@ impl Store for FakeSecrets {
         let mut store = crate::lock(&self.0);
         if store.unusable {
             return Err(Error::Unsupported);
+        }
+        if store.failing.contains(account) {
+            return Err(failed());
         }
         store.entries.remove(account);
         Ok(())

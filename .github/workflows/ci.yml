@@ -71,9 +71,23 @@ jobs:
         env:
           UBC_VPN_REAL_KEYRING: "1"
         run: |
-          cargo test --locked -p ubc-vpn-platform --lib -- --exact \
+          cargo test --locked -p ubc-vpn-platform --features secrets --lib -- --exact \
             secrets::tests::the_real_keyring_saves_reads_and_forgets --nocapture | tee keyring.log
           grep -qx "RAN: real keyring" keyring.log
+      # The service runs as another account and never sees a password, so it
+      # must not link the keyring at all. Only the command-line client turns
+      # on the platform crate's `secrets` feature. Checked for every OS's
+      # target, with the service built by itself as a release builds it.
+      - name: The service links no keyring
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-unknown-linux-gnu; do
+            tree=$(cargo tree --locked -p ubc-vpn-service --target "$target" -e normal,build)
+            if grep -E 'keyring|zbus' <<<"$tree"; then
+              echo "The service would link the keyring for $target."
+              exit 1
+            fi
+          done
       # On every OS: a dev-mode service runs on that OS's real channel, so its
       # tests do different things on each. The CLI's dev mode is the other end
       # of that channel.

@@ -160,14 +160,102 @@ fn nothing_secret_shows() {
     );
 }
 
+fn index_of(fake: &FakeSecrets) -> Vec<String> {
+    let index = fake.entries().into_iter().find(|(a, _)| a == INDEX);
+    index.map_or_else(Vec::new, |(_, accounts)| {
+        accounts.lines().map(str::to_string).collect()
+    })
+}
+
+// Security rule: an account is in the index before its entry is written,
+// so an entry is never there without its line: when writing the entry
+// fails, the line is there all the same.
+#[test]
+fn the_index_line_is_written_before_the_entry() {
+    let fake = FakeSecrets::new();
+    let secrets = fake.secrets();
+    fake.fail_writes_to(PROFILE, true);
+    assert!(secrets.save(PROFILE, &saved("a@app", "made-up")).is_err());
+    assert_eq!(index_of(&fake), [PROFILE]);
+    assert!(secrets.load(PROFILE).unwrap().is_none());
+    // Forgetting all still clears it.
+    fake.fail_writes_to(PROFILE, false);
+    secrets.forget_all().unwrap();
+    assert_eq!(fake.entries(), []);
+}
+
+// Security rule: an account's line leaves the index only once its entry is
+// gone: when deleting the entry fails, the line stays, so the entry can
+// still be found and forgotten.
+#[test]
+fn the_index_line_goes_only_after_the_entry() {
+    let fake = FakeSecrets::new();
+    let secrets = fake.secrets();
+    secrets.save(PROFILE, &saved("a@app", "made-up")).unwrap();
+    fake.fail_writes_to(PROFILE, true);
+    assert!(secrets.forget(PROFILE).is_err());
+    assert_eq!(index_of(&fake), [PROFILE]);
+    assert!(secrets.load(PROFILE).unwrap().is_some());
+    fake.fail_writes_to(PROFILE, false);
+    secrets.forget(PROFILE).unwrap();
+    assert_eq!(fake.entries(), []);
+}
+
+// Two saves at once in one process: neither drops the other's line.
+#[test]
+fn saves_at_once_keep_every_line_of_the_index() {
+    let fake = FakeSecrets::new();
+    fake.slow_index(true);
+    let secrets = fake.secrets();
+    let accounts: Vec<String> = (0..8).map(|n| format!("{n:032x}")).collect();
+    std::thread::scope(|scope| {
+        for account in &accounts {
+            let secrets = secrets.clone();
+            scope.spawn(move || secrets.save(account, &saved("a@app", "made-up")).unwrap());
+        }
+    });
+    let mut index = index_of(&fake);
+    index.sort();
+    assert_eq!(index, accounts);
+}
+
+// Security rule: whatever the keyring says when it fails, what comes out
+// is fixed text, never the OS's own message, which can hold a name.
+#[test]
+fn keyring_errors_never_carry_the_os_message() {
+    let os = "the os said user.ece@app made-up-secret";
+    let failures = [
+        keyring::Error::PlatformFailure(Box::new(std::io::Error::other(os))),
+        keyring::Error::NoStorageAccess(Box::new(std::io::Error::other(os))),
+        keyring::Error::Invalid(os.to_string(), os.to_string()),
+        keyring::Error::TooLong(os.to_string(), 7),
+        keyring::Error::BadEncoding(os.as_bytes().to_vec()),
+        keyring::Error::NoEntry,
+    ];
+    for failure in failures {
+        let error = unusable(failure);
+        let said = format!("{error} {error:?}");
+        assert!(
+            !said.contains("made-up") && !said.contains("user.ece"),
+            "{said}"
+        );
+        match error {
+            Error::Unsupported => {}
+            Error::Failed(text) => assert_eq!(text, "the OS keyring could not be used"),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
 // The real OS keyring, under a throwaway service name: Credential Manager
 // on the Windows runner, the Keychain on the macOS runner. Only on CI, when
 // the workflow asks for it; never on anyone's own machine.
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn the_real_keyring_saves_reads_and_forgets() {
+    // Quietly, without the word the workflows look for: only the one CI
+    // step that asks for this test runs it.
     if std::env::var_os("CI").is_none() || std::env::var_os("UBC_VPN_REAL_KEYRING").is_none() {
-        println!("SKIPPED: the real keyring is used on CI only");
         return;
     }
     let service = format!("{SERVICE}.test-{}", std::process::id());
