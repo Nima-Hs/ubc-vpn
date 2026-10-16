@@ -61,6 +61,19 @@ jobs:
       - name: The engine's examples hold without the fake feature
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked -p ubc-vpn-engine --doc
+      # Saved passwords in the real OS keyring, under a throwaway service
+      # name: Credential Manager on Windows, the Keychain on macOS. This is
+      # the only place the real keyring is ever used by a test. The Linux
+      # Secret Service test is tracked in #198.
+      - name: The real keyring saves, reads and forgets
+        if: matrix.os != 'ubuntu-latest'
+        shell: bash
+        env:
+          UBC_VPN_REAL_KEYRING: "1"
+        run: |
+          cargo test --locked -p ubc-vpn-platform --lib -- --exact \
+            secrets::tests::the_real_keyring_saves_reads_and_forgets --nocapture | tee keyring.log
+          grep -qx "RAN: real keyring" keyring.log
       # On every OS: a dev-mode service runs on that OS's real channel, so its
       # tests do different things on each. The CLI's dev mode is the other end
       # of that channel.
