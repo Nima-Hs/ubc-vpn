@@ -70,10 +70,33 @@ mkdir -p "$stage/bin" "$stage/licenses/native"
 
 # The two programs, each built by itself and with the real engine only: a
 # release must never contain dev mode or the fakes (see ci.yml).
+#
+# Each is built on its own, with -p, and never with --workspace or both
+# packages in one command: Cargo then gives every package the features
+# any of them asks for, and the service would be built with the keyring
+# code only the client enables.
 for package in ubc-vpn-service ubc-vpn-cli; do
   UBC_VPN_NATIVE_DIR="$native" cargo build --locked --release -p "$package" --features real-engine
 done
-cp "$root/target/release/ubc-vpn-service.exe" "$root/target/release/ubc-vpn.exe" "$stage/bin/"
+service_exe="$root/target/release/ubc-vpn-service.exe"
+client_exe="$root/target/release/ubc-vpn.exe"
+
+# The service runs as SYSTEM and never touches a user's keyring: no
+# keyring code may be in it. Checked in the program that ships, by the
+# Credential Manager functions the keyring calls and the names of the
+# keyring crates. The client must hold them, or this check proves nothing.
+keyring_marks=(CredReadW CredWriteW CredDeleteW keyring zbus)
+for mark in "${keyring_marks[@]}"; do
+  if grep -q -a -F -- "$mark" "$service_exe"; then
+    echo "the service holds keyring code: $mark found in $service_exe" >&2
+    exit 1
+  fi
+done
+grep -q -a -F -- CredReadW "$client_exe" || {
+  echo "the client holds no keyring code, so the service check above proves nothing" >&2
+  exit 1
+}
+cp "$service_exe" "$client_exe" "$stage/bin/"
 
 cp "$native"/bin/*.dll "$stage/bin/"
 cp -R "$native/licenses/." "$stage/licenses/native/"
