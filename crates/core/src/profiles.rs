@@ -27,9 +27,10 @@
 //!   only ones with the fixed id; every other profile, a fresh one after a
 //!   reset included, has a random one ([`Profiles::fresh`]).
 //! - **A rule made stricter later never loses a file.** Only what breaks
-//!   the file's structure makes it unreadable: the version, the number of
-//!   profiles, an id that is not one, an id twice, or an active profile
-//!   that is not there. A name or a username that today's rules refuse is
+//!   the file's structure makes it unreadable: the version, no profiles at
+//!   all, an id that is not one, an id twice, or an active profile that is
+//!   not there. More than [`MAX_PROFILES`] are kept, and no more can be
+//!   made until there are fewer. A name or a username that today's rules refuse is
 //!   cleaned instead, and [`Read::cleaned`] says which, so the user can be
 //!   told once: a name loses the characters that mislead and is trimmed,
 //!   and becomes "Profile 2" or the like if nothing usable is left or it
@@ -196,8 +197,8 @@ pub struct Profiles {
     pub version: u32,
     /// What the profiles share.
     pub global: GlobalSettings,
-    /// At least one, at most [`MAX_PROFILES`], in the order the user made
-    /// them.
+    /// At least one, in the order the user made them. No more are made
+    /// once there are [`MAX_PROFILES`].
     pub profiles: Vec<Profile>,
     /// Fields this version does not know, kept as they are.
     #[serde(flatten)]
@@ -357,27 +358,33 @@ impl Profiles {
     /// Makes every name and username one that today's rules accept, and
     /// says what it changed.
     fn clean(&mut self) -> Vec<Cleaned> {
+        /// A name as today's rules would keep it, or empty when nothing of
+        /// it can be kept.
+        fn plain(name: &str) -> String {
+            let name: String = name.chars().filter(|c| !misleads(*c)).collect();
+            let name: String = name.trim().chars().take(MAX_NAME_CHARS).collect();
+            name.trim().to_string()
+        }
         let mut cleaned = Vec::new();
         // A name given to one that has none usable is free of every name in
-        // the file, so no name the user chose is taken by it.
-        let stored: HashSet<String> = self
+        // the file as it will be kept, so no name the user chose is taken
+        // by it.
+        let kept: HashSet<String> = self
             .profiles
             .iter()
-            .map(|p| p.name.to_lowercase())
+            .map(|p| plain(&p.name).to_lowercase())
             .collect();
         let mut taken = HashSet::new();
         for at in 0..self.profiles.len() {
             let profile = &mut self.profiles[at];
-            let plain: String = profile.name.chars().filter(|c| !misleads(*c)).collect();
-            let plain: String = plain.trim().chars().take(MAX_NAME_CHARS).collect();
-            let plain = plain.trim().to_string();
+            let plain = plain(&profile.name);
             let name = match !plain.is_empty() && !taken.contains(&plain.to_lowercase()) {
                 true => plain,
                 false => (at + 1..)
                     .map(|n| format!("Profile {n}"))
                     .find(|name| {
                         let name = name.to_lowercase();
-                        !taken.contains(&name) && !stored.contains(&name)
+                        !taken.contains(&name) && !kept.contains(&name)
                     })
                     .unwrap_or_default(),
             };
@@ -411,9 +418,8 @@ impl Profiles {
         if self.profiles.is_empty() {
             return Err(ProfileFailureCode::LastProfile);
         }
-        if self.profiles.len() > MAX_PROFILES {
-            return Err(ProfileFailureCode::TooManyProfiles);
-        }
+        // More than MAX_PROFILES is no reason to lose any: they are kept,
+        // and `create` refuses new ones.
         let mut ids = HashSet::new();
         if !self.profiles.iter().all(|p| ids.insert(&p.id)) {
             return Err(ProfileFailureCode::IdTaken);
