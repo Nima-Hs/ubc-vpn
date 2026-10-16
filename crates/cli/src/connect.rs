@@ -391,7 +391,15 @@ pub(crate) fn start(
                 // the gateway does not say which answer it refused.
                 LoginErrorCode::WrongPassword => {
                     if let Some(sent) = saved_password.as_ref().filter(|_| answers.sent_saved) {
-                        let _ = passwords::refused(dir, id, sent, answers.code_entered);
+                        let settled = passwords::refused(dir, id, sent, answers.code_entered);
+                        let said = match settled {
+                            Ok(passwords::Settled::Done) => None,
+                            Ok(passwords::Settled::SetAside) => Some(passwords::SET_ASIDE),
+                            Err(_) => Some(passwords::NOT_SET_ASIDE),
+                        };
+                        if let Some(said) = said {
+                            let _ = writeln!(err, "ubc-vpn: {said}");
+                        }
                     }
                 }
                 // Only the username can have been refused. A saved one is

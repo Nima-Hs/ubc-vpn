@@ -3,9 +3,12 @@
 //! and passwords are made up; no test here can reach the user's keyring
 //! (see `keys.rs`).
 
+use std::sync::{Arc, Mutex};
+
 use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::profiles::{ProfileId, Profiles};
 use ubc_vpn_core::redact::Secret;
+use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_engine::fake::{FakeEngine, Script};
 use ubc_vpn_platform::secrets::{FakeSecrets, Saved};
 
@@ -14,7 +17,7 @@ use crate::connect_tests::{
     CODE, PASSWORD, ROUTES, Scene, Typist, pin, returning, saved, settings_text,
 };
 use crate::interrupt::Progress;
-use crate::passwords::{NO_KEYRING, NOT_SAVED};
+use crate::passwords::{NO_KEYRING, NOT_SAVED, NOT_SET_ASIDE, SET_ASIDE};
 use crate::{FAILED, keys};
 
 /// A password nobody types, left in the keyring from before.
@@ -62,6 +65,15 @@ fn passwords_sent(scene: &Scene) -> Vec<String> {
         .iter()
         .filter(|(kind, _)| *kind == PromptKind::Password);
     passwords.map(|(_, p)| p.expose().to_string()).collect()
+}
+
+/// Whether the first profile saves its password, as the settings say.
+fn saves_its_password(scene: &Scene) -> bool {
+    let read = Profiles::read(Some(&settings_text(scene))).unwrap();
+    read.profiles
+        .profile(&ProfileId::first())
+        .unwrap()
+        .save_password
 }
 
 fn disconnect(scene: &Scene) {
@@ -358,6 +370,128 @@ fn a_refusal_settles_only_the_password_it_sent() {
         let kept = ("alice".to_string(), PASSWORD.to_string(), false);
         assert_eq!(entry(), Some(kept), "code entered: {code_entered}");
     }
+}
+
+// Security rule: a refused saved password is never sent again, even by a
+// keyring that will neither forget it nor mark it in doubt. The profile
+// stops saving its password, so the entry is not read again, and the user
+// is told. With a code entered or without.
+#[test]
+fn a_refused_password_the_keyring_will_not_settle_is_set_aside() {
+    for code in [false, true] {
+        let scene = if code {
+            saving()
+        } else {
+            saving_without_a_code()
+        };
+        let first = ProfileId::first();
+        put(&first, "alice", STALE, false);
+        keyring().fail_writes_to(first.as_str(), true);
+        let typed: &[Option<&str>] = if code { &[Some(CODE)] } else { &[] };
+        let (refused, _, err) = scene.connect(&mut Typist::typing(typed));
+        keyring().fail_writes_to(first.as_str(), false);
+        assert_eq!(refused, LOGIN_REFUSED, "code: {code}");
+        assert_eq!(err.matches(SET_ASIDE).count(), 1, "{err}");
+        assert!(!saves_its_password(&scene), "code: {code}");
+
+        let typed = if code {
+            &[Some(PASSWORD), Some(CODE)][..]
+        } else {
+            &[Some(PASSWORD)]
+        };
+        let mut typist = Typist::typing(typed);
+        assert_eq!(scene.connect(&mut typist).0, 0, "code: {code}");
+        assert_eq!(typist.asked[0], PromptKind::Password);
+        assert_eq!(passwords_sent(&scene), [STALE, PASSWORD], "code: {code}");
+        // Nothing more is saved for a profile that saves no password.
+        let left = ("alice".to_string(), STALE.to_string(), false);
+        assert_eq!(entry(), Some(left));
+        keyring().secrets().forget(first.as_str()).unwrap();
+    }
+}
+
+// With a code entered, a password the keyring will not mark in doubt is
+// forgotten instead, so it is not sent again either.
+#[test]
+fn a_refused_password_the_keyring_will_not_mark_is_forgotten() {
+    let scene = saving();
+    let first = ProfileId::first();
+    put(&first, "alice", PASSWORD, false);
+    keyring().fail_saves_to(first.as_str(), true);
+    let refused = scene.connect(&mut Typist::typing(&[Some("000000")]));
+    keyring().fail_saves_to(first.as_str(), false);
+    assert_eq!(refused.0, LOGIN_REFUSED);
+    assert!(!refused.2.contains(SET_ASIDE), "{}", refused.2);
+    assert!(!refused.2.contains(NOT_SET_ASIDE), "{}", refused.2);
+    assert_eq!(entry(), None);
+    assert!(saves_its_password(&scene));
+}
+
+// Security rule: a password is bound to its username letter for letter,
+// with only the case of ASCII letters let go. A Kelvin sign is not a `k`.
+#[test]
+fn usernames_are_the_same_only_letter_for_letter() {
+    use crate::passwords::same_username;
+    assert!(same_username("Alice.ECE@app", "alice.ece@app"));
+    assert!(same_username("zoë", "zoë"));
+    assert!(!same_username("\u{212A}en", "ken"));
+    assert!(!same_username("ZOË", "zoë"));
+    assert!(!same_username("alice", "alice2"));
+}
+
+/// Tries for the settings lock for a moment. `Err(Unwritable)` is "held by
+/// somebody else".
+fn tries(dir: &std::path::Path) -> Result<bool, SettingsFailureCode> {
+    let wait = std::time::Duration::from_millis(100);
+    crate::settings_lock::change_within(dir, wait).map(|changing| changing.unlocked())
+}
+
+// Security rule: every change a connect makes to the keyring is made while
+// it holds the settings lock, so a change from the app at the same moment
+// cannot be undone by it: at each one, somebody else trying for the lock
+// finds it held.
+#[test]
+fn the_settings_lock_is_held_at_every_keyring_change() {
+    let scene = saving();
+    let dir = scene.rig.root.join("settings");
+    let first = ProfileId::first();
+    let watching = |run: &dyn Fn()| {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (looked, at) = (seen.clone(), dir.clone());
+        let hook = move |account: &str| {
+            looked
+                .lock()
+                .unwrap()
+                .push((account.to_string(), tries(&at)));
+        };
+        keyring().on_change(Some(Arc::new(hook)));
+        run();
+        keyring().on_change(None);
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "nothing was changed");
+        for (account, found) in seen {
+            let held = Err(SettingsFailureCode::Unwritable);
+            assert_eq!(found, held, "{account} was changed without the lock");
+        }
+    };
+    let stale = Secret::new(STALE);
+
+    put(&first, "mallory", STALE, false);
+    watching(&|| crate::passwords::forget_unbound(&dir, &first).unwrap());
+    for code_entered in [false, true] {
+        put(&first, "alice", STALE, false);
+        watching(&|| {
+            let settled = crate::passwords::refused(&dir, &first, &stale, code_entered);
+            assert_eq!(settled, Ok(crate::passwords::Settled::Done));
+        });
+    }
+    watching(&|| {
+        let mut err = Vec::new();
+        crate::passwords::keep(&dir, &first, "alice", &Secret::new(PASSWORD), &mut err);
+        assert!(err.is_empty());
+    });
+    // And each let go when it was done.
+    assert_eq!(tries(&dir), Ok(false));
 }
 
 /// Settings with the first profile, as `settings`, and a second one, `Lab`,

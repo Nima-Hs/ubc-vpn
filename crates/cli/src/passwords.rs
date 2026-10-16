@@ -2,7 +2,7 @@
 //! it after the gateway has answered.
 //!
 //! - **Bound to its username.** A password is sent only for the username it
-//!   was saved for, compared without regard to case. One saved for another
+//!   was saved for, compared without regard to the case of ASCII letters. One saved for another
 //!   username, or for a profile that has none, is forgotten and the user is
 //!   asked.
 //! - **Never sent twice in a row after a refusal.** The gateway does not say
@@ -10,7 +10,9 @@
 //!   password can have been wrong, and it is forgotten at once. With a code
 //!   entered it may have been the code: the password is kept but marked in
 //!   doubt, and is not sent again. The user is asked, and a typed password
-//!   that then works replaces it.
+//!   that then works replaces it. A keyring that will do neither leaves
+//!   the entry as it was: the profile then stops saving its password, so
+//!   the entry is not read again, and the user is told.
 //! - **Saved only after it worked.** A typed password is saved after the
 //!   login succeeded and the service accepted the connect, and only when
 //!   the profile still asks for that, with the same username.
@@ -21,13 +23,13 @@
 use std::io::Write;
 use std::path::Path;
 
-use ubc_vpn_core::profiles::{Profile, ProfileId};
+use ubc_vpn_core::profiles::{Password, Profile, ProfileId};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_platform::secrets::Saved;
 
 use crate::keys;
-use crate::settings::read_profiles;
+use crate::settings::{self, read_profiles};
 use crate::settings_lock::change;
 
 /// What a user whose keyring cannot be used is told: the password is asked
@@ -39,13 +41,16 @@ pub(crate) const NO_KEYRING: &str = "The keyring cannot be used, so the password
 pub(crate) const NOT_SAVED: &str = "The password could not be saved in the keyring. \
                                     It will be asked for next time.";
 
-/// Whether `saved_for` is `username`, without regard to case.
+/// Whether `saved_for` is `username`, without regard to the case of ASCII
+/// letters. Anything else must be the same character: full Unicode case
+/// folding would take the Kelvin sign for a `k`, and a password saved for
+/// one name would be sent for another.
 pub(crate) fn same_username(username: &str, saved_for: &str) -> bool {
-    username.to_lowercase() == saved_for.to_lowercase()
+    username.eq_ignore_ascii_case(saved_for)
 }
 
 /// What a connect found in the keyring before logging in.
-pub(crate) struct Found {
+pub(crate) struct Lookup {
     /// The saved password it may send, if any.
     pub(crate) password: Option<Secret>,
     /// Whether a password that works may be saved afterwards: the profile
@@ -56,8 +61,8 @@ pub(crate) struct Found {
 /// What a connect with `profile` finds in the keyring. A profile that does
 /// not save its password never reaches it. Says on `err` when the keyring
 /// cannot be used.
-pub(crate) fn usable(dir: &Path, profile: &Profile, err: &mut dyn Write) -> Found {
-    let nothing = |may_save| Found {
+pub(crate) fn usable(dir: &Path, profile: &Profile, err: &mut dyn Write) -> Lookup {
+    let nothing = |may_save| Lookup {
         password: None,
         may_save,
     };
@@ -79,7 +84,7 @@ pub(crate) fn usable(dir: &Path, profile: &Profile, err: &mut dyn Write) -> Foun
         return nothing(true);
     }
     // In doubt: not sent again. The user is asked.
-    Found {
+    Lookup {
         password: (!saved.in_doubt).then_some(saved.password),
         may_save: true,
     }
@@ -106,21 +111,23 @@ pub(crate) fn forget_unbound(dir: &Path, id: &ProfileId) -> Result<(), SettingsF
 /// for `id`: forgotten when `code_entered` is false, marked in doubt when it
 /// is true. Only if it is still the one that was sent. Should the keyring
 /// not do the one, the other is tried, so that it is not sent again either
-/// way.
+/// way; should it do neither, the profile stops saving its password, so
+/// the entry is never read again ([`Settled::SetAside`]). An error means
+/// not even that could be done.
 pub(crate) fn refused(
     dir: &Path,
     id: &ProfileId,
     sent: &Secret,
     code_entered: bool,
-) -> Result<(), SettingsFailureCode> {
+) -> Result<Settled, SettingsFailureCode> {
     let _changing = change(dir)?;
     let keyring = keys::keyring();
     let Some(saved) = keyring.load(id.as_str()).ok().flatten() else {
-        return Ok(());
+        return Ok(Settled::Done);
     };
     if saved.password != *sent {
         // Replaced since by another connect: not this one's to settle.
-        return Ok(());
+        return Ok(Settled::Done);
     }
     let account = id.as_str();
     let doubted = Saved {
@@ -135,8 +142,48 @@ pub(crate) fn refused(
             .save(account, &doubted)
             .or_else(|_| keyring.forget(account)),
     };
-    settled.map_err(|_| SettingsFailureCode::Unwritable)
+    if settled.is_ok() {
+        return Ok(Settled::Done);
+    }
+    // The keyring would do neither, so the entry is as it was. The next
+    // connect must not read it: the profile stops saving its password,
+    // which `usable` looks at before it reaches the keyring.
+    let settings::Found {
+        mut profiles,
+        cleaned_passwords: mut forget,
+        ..
+    } = read_profiles(dir)?;
+    match profiles.update(id, None, Some(false)) {
+        Ok(Password::Forget) => forget.push(id.clone()),
+        Ok(Password::Keep) => {}
+        // Gone: no profile has the id, so none reads the entry.
+        Err(_) => return Ok(Settled::Done),
+    }
+    settings::write_profiles(dir, &profiles, &forget)?;
+    Ok(Settled::SetAside)
 }
+
+/// What became of a refused saved password.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Settled {
+    /// Forgotten or marked in doubt, as the rules say, or not this
+    /// connect's to settle.
+    Done,
+    /// The keyring would neither forget it nor mark it, so the profile
+    /// stopped saving its password and the entry is never read again.
+    SetAside,
+}
+
+/// What the user is told when a refused saved password was set aside.
+pub(crate) const SET_ASIDE: &str = "The saved password was refused, and the keyring would not \
+                                    remove it. Saving the password is now off for this profile, \
+                                    so it will not be sent again.";
+
+/// What the user is told when it could not even be set aside.
+pub(crate) const NOT_SET_ASIDE: &str = "The saved password was refused, and neither the keyring \
+                                        nor the settings could be changed. Turn off saving the \
+                                        password for this profile in the app, so it is not sent \
+                                        again.";
 
 /// After a login with a typed `password` succeeded and the service accepted
 /// the connect: saves it for `id`, replacing what was there, if the profile
