@@ -72,14 +72,16 @@ export function TextField({
             {reveal === undefined ? (
                 input
             ) : (
-                <div className="relative flex items-center">
+                <div className="relative">
                     {input}
+                    {/* Pinned to the field's middle: the button sits inside the
+                        tooltip's wrapper, so the row's alignment does not reach it. */}
                     <IconButton
                         label={reveal.label}
                         aria-controls={id}
                         onClick={reveal.onToggle}
                         tooltipSide="left"
-                        className="absolute end-1"
+                        className="absolute inset-y-0 end-1 my-auto"
                     >
                         {reveal.shown ? <EyeOff /> : <Eye />}
                     </IconButton>

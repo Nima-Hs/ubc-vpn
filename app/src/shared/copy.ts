@@ -340,11 +340,20 @@ export function describePrompt(prompt: Pick<LoginPrompt, "kind">): {
  * what pressing it does. `null` for a question whose answer is shown anyway.
  */
 export function describeReveal(kind: PromptKind, shown: boolean): { label: string } | null {
-    const thing = kind === "password" ? "password" : kind === "code" ? "code" : null;
-    if (thing === null) {
+    if (!isSecretKind(kind)) {
         return null;
     }
+    const thing = kind === "password" ? "password" : kind === "code" ? "code" : "answer";
     return { label: `${shown ? "Hide" : "Show"} ${thing}` };
+}
+
+/**
+ * Whether a question's answer is hidden as it is typed. Only the two kinds
+ * known to be plain are shown: a kind added later, or one the app does not
+ * know, is hidden until the user shows it.
+ */
+export function isSecretKind(kind: string): boolean {
+    return kind !== "username" && kind !== "text";
 }
 
 /** What can happen to a hidden answer that the user has shown. */

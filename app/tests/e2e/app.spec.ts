@@ -389,6 +389,19 @@ test("a password is hidden until shown, and hidden again when sent or the window
     await expect(field).toHaveAttribute("type", "password");
     const show = page.getByRole("button", { name: "Show password" });
     await expect(show).toBeVisible();
+    // The button sits inside the field, at its end and in its middle.
+    const fieldBox = await field.boundingBox();
+    const buttonBox = await show.boundingBox();
+    expect(fieldBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+    if (fieldBox !== null && buttonBox !== null) {
+        expect(buttonBox.y).toBeGreaterThanOrEqual(fieldBox.y);
+        expect(buttonBox.y + buttonBox.height).toBeLessThanOrEqual(fieldBox.y + fieldBox.height);
+        expect(buttonBox.x).toBeGreaterThanOrEqual(fieldBox.x);
+        expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(fieldBox.x + fieldBox.width);
+        const middle = (box: { y: number; height: number }) => box.y + box.height / 2;
+        expect(Math.abs(middle(buttonBox) - middle(fieldBox))).toBeLessThanOrEqual(1);
+    }
     // Nothing typed is offered to be kept or filled in.
     await expect(field).toHaveAttribute("autocomplete", "off");
     await expect(page.locator("form")).toHaveAttribute("autocomplete", "off");
@@ -443,8 +456,9 @@ test("a typed password is kept nowhere: not in a message, a log or the profile",
         const logged: string[] = [];
         shown.on("console", (message) => logged.push(message.text()));
         await shown.waitForLoadState("domcontentloaded");
-        // Every message the main process sends the window, from here on.
-        await other.evaluate(({ BrowserWindow }) => {
+        // Every message the main process sends the window, from here on: what
+        // it pushes, and every reply to a call the window makes.
+        const handlers = await other.evaluate(({ BrowserWindow, ipcMain }) => {
             const contents = BrowserWindow.getAllWindows()[0]?.webContents;
             const recorded: string[] = [];
             (globalThis as { sentToWindow?: string[] }).sentToWindow = recorded;
@@ -455,7 +469,22 @@ test("a typed password is kept nowhere: not in a message, a log or the profile",
                     send(channel, ...args);
                 };
             }
+            // Electron keeps each `ipcMain.handle` handler in this map. Each is
+            // wrapped, so what it answers is recorded on its way back.
+            type Handler = (event: unknown, ...args: unknown[]) => unknown;
+            const invoke = (ipcMain as unknown as { _invokeHandlers?: Map<string, Handler> })
+                ._invokeHandlers;
+            for (const [channel, handler] of invoke ?? []) {
+                invoke?.set(channel, async (event, ...args) => {
+                    const reply = await handler(event, ...args);
+                    recorded.push(JSON.stringify(["reply", channel, reply ?? null]));
+                    return reply;
+                });
+            }
+            return invoke?.size ?? 0;
         });
+        // The replies are recorded: there are handlers, and they were wrapped.
+        expect(handlers).toBeGreaterThan(5);
         await shown.evaluate(() => window.ubcVpn.demo?.setScenario("login-password"));
         const field = shown.getByLabel("Password", { exact: true });
         await field.fill(secret);
@@ -484,6 +513,8 @@ test("a typed password is kept nowhere: not in a message, a log or the profile",
 
     // Not in any message the window was sent, nor in anything printed.
     expect(sent.length, "messages recorded").toBeGreaterThan(0);
+    // The answer's own call was among the replies recorded.
+    expect(sent.some((message) => message.startsWith('["reply","login:answer"'))).toBe(true);
     expect(sent.filter((message) => message.includes(secret))).toEqual([]);
     expect(printed.filter((line) => line.includes(secret))).toEqual([]);
     // Nor anywhere in the app's profile, where Chromium would keep saved

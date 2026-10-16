@@ -3,6 +3,7 @@ import {
     describeLoginFailure,
     describePrompt,
     describeReveal,
+    isSecretKind,
     LOGIN_CANCELLING,
     LOGIN_WORKING,
     revealAfter,
@@ -85,7 +86,9 @@ function Prompt({ prompt }: { prompt: LoginPrompt }) {
                     ref={field}
                     label={prompt.label}
                     name={`login-${prompt.kind}`}
-                    type="text"
+                    // Hidden unless the kind is known to be plain; the
+                    // button can only show what is hidden this way.
+                    type={isSecretKind(prompt.kind) ? "password" : "text"}
                     {...(reveal !== null && {
                         reveal: {
                             shown,
