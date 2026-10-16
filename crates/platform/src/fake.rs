@@ -1095,6 +1095,39 @@ mod tests {
         assert_eq!(fake.full_tunnel_ipv6(TUNNEL), Err(Error::Unsupported));
     }
 
+    // A machine on a home network that also has virtual machines' host-only
+    // networks, none of them a UBC range: full mode keeps every one of them
+    // direct, their routers included, and takes everything else.
+    #[test]
+    fn full_mode_keeps_every_network_the_machine_is_on() {
+        let fake = Fake::new();
+        let home = net("192.168.0.0/24");
+        let host_only = [net("192.168.130.0/24"), net("192.168.140.0/24")];
+        let own = [
+            OWN_ADDRESS,
+            Ipv4Addr::new(192, 168, 130, 1),
+            Ipv4Addr::new(192, 168, 140, 1),
+        ];
+        fake.set_local(&own, &[home, host_only[0], host_only[1]]);
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        assert!(physical.router_is_on_link());
+        fake.add_gateway_route(GATEWAY, &physical).unwrap();
+        assert_eq!(fake.add_full_tunnel(TUNNEL), Ok(Ipv6Block::Blocked));
+        for dest in [
+            ROUTER,
+            Ipv4Addr::new(192, 168, 0, 200),
+            Ipv4Addr::new(192, 168, 130, 128),
+            Ipv4Addr::new(192, 168, 140, 254),
+            GATEWAY,
+        ] {
+            let direct = fake.uses_interface(dest, PHYSICAL_INTERFACE);
+            assert_eq!(direct, Verified::Yes, "{dest}");
+        }
+        for dest in [Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(8, 8, 8, 8)] {
+            assert_eq!(fake.uses_interface(dest, TUNNEL), Verified::Yes, "{dest}");
+        }
+    }
+
     // Another program's halves are a conflict: it is seen before anything
     // is changed, and an add over them fails, adding nothing.
     #[test]
