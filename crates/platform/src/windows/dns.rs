@@ -41,6 +41,7 @@ pub(super) const LOCAL: &str =
 pub(super) const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig";
 /// This product's rules. Never change them: a later version must find an
 /// earlier one's rules to remove them.
+#[cfg_attr(all(feature = "fake", not(test)), allow(dead_code))]
 const PRODUCT_RULES: [&str; 6] = [
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B01}",
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B02}",
@@ -49,10 +50,12 @@ const PRODUCT_RULES: [&str; 6] = [
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B05}",
     "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B06}",
 ];
-/// The rules this crate's tests use instead, so that no test, even one run
-/// elevated on a machine where the product is in use, can change or delete
-/// the product's. CI checks that a release build contains none of them.
-#[cfg(test)]
+/// The rules tests use instead, so that no test, even one run elevated on a
+/// machine where the product is in use, can change or delete the product's.
+/// They are chosen in this crate's tests and whenever the `fake` feature is
+/// on, which every other crate's tests enable and a release build never
+/// does. CI checks that the programs that ship contain none of them.
+#[cfg(any(test, feature = "fake"))]
 const TEST_RULES: [&str; 6] = [
     "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E01}",
     "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E02}",
@@ -62,9 +65,9 @@ const TEST_RULES: [&str; 6] = [
     "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E06}",
 ];
 /// The rules this build reads, writes and deletes.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "fake")))]
 const RULES: [&str; 6] = PRODUCT_RULES;
-#[cfg(test)]
+#[cfg(any(test, feature = "fake"))]
 pub(super) const RULES: [&str; 6] = TEST_RULES;
 /// The most domains one rule holds.
 pub(super) const PER_RULE: usize = 50;

@@ -141,12 +141,12 @@ jobs:
       # so that they cannot touch the product's. A build that ships must
       # hold only the product's, or it would write rules no later version
       # knows to remove. The service holds every product identifier, which
-      # shows the search can find them.
+      # shows the search can find them. Each program is built on its own, as
+      # it ships: built together, they would share each other's features.
       - name: The programs that ship hold none of the tests' DNS rule identifiers
         if: matrix.profile == 'release'
         shell: bash
         run: |
-          cargo build --locked --release -p ubc-vpn-service -p ubc-vpn-cli
           source=crates/platform/src/windows/dns.rs
           ids() { sed -n "/^const $1: /,/^];/p" "$source" | grep -o '{[0-9A-F-]*}'; }
           mapfile -t product < <(ids PRODUCT_RULES)
@@ -155,20 +155,25 @@ jobs:
             echo "Could not read the rule identifiers from $source."
             exit 1
           fi
+          # Holds none of the tests' identifiers.
+          check() {
+            for id in "${tests[@]}"; do
+              if grep -qaF "$id" "$1"; then
+                echo "$1 holds the tests' rule $id."
+                exit 1
+              fi
+            done
+          }
+          cargo build --locked --release -p ubc-vpn-service
           for id in "${product[@]}"; do
             if ! grep -qaF "$id" target/release/ubc-vpn-service.exe; then
               echo "The service does not hold the product's rule $id."
               exit 1
             fi
           done
-          for program in target/release/ubc-vpn-service.exe target/release/ubc-vpn.exe; do
-            for id in "${tests[@]}"; do
-              if grep -qaF "$id" "$program"; then
-                echo "$program holds the tests' rule $id."
-                exit 1
-              fi
-            done
-          done
+          check target/release/ubc-vpn-service.exe
+          cargo build --locked --release -p ubc-vpn-cli
+          check target/release/ubc-vpn.exe
       - name: The second user is gone
         if: always()
         shell: pwsh
