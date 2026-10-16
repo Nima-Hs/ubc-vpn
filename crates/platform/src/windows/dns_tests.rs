@@ -477,6 +477,27 @@ fn the_catch_all_takes_every_other_name() {
     // The split DNS alone, as the shared suite checks it.
     let alone = resolvers_for(&asked, "host.suite.example");
     println!("CATCH-ALL split alone {alone:?}");
+    let policy_key =
+        super::dns::read_rule_at(r"SOFTWARE\Policies\Microsoft\Windows NT", "DNSClient");
+    let script = "Test-Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient\\DnsPolicyConfig'; \
+                  Get-ChildItem 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient' -Recurse -ErrorAction Continue | Select-Object -ExpandProperty Name; \
+                  Get-DnsClientNrptPolicy -Effective | Format-List Namespace,NameServers";
+    let shown = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .expect("powershell");
+    println!(
+        "CATCH-ALL policy key {policy_key:?}\n{}{}",
+        String::from_utf8_lossy(&shown.stdout),
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let removed = delete_rule_at(
+        r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
+        "DnsPolicyConfig",
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let after = resolvers_for(&asked, "host.suite.example");
+    println!("CATCH-ALL after removing the empty policy table {removed:?}: {after:?}");
     WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
     let script = "Get-DnsClientNrptPolicy -Effective | Format-List Namespace,NameServers,QueryPolicy; \
                   Get-ChildItem HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Dnscache\\Parameters\\DnsPolicyConfig | \
