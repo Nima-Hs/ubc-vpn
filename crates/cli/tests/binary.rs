@@ -26,6 +26,7 @@ fn unserved() -> String {
 /// Whether a test that could reach a service may run: always in a debug
 /// build, which takes the channel it is given; in a release build only on
 /// CI. Says why when it may not.
+#[cfg(windows)]
 fn may_reach_a_service() -> bool {
     if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
         return true;
