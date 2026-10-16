@@ -207,8 +207,8 @@ fn refuses_split_dns_while_group_policy_rules_exist() {
 }
 
 // What Windows does with an empty group-policy table, which the rule above
-// relies on: local rules are not taken in while it exists, and are once it
-// has gone.
+// relies on: a local rule written while it exists is not taken in, and the
+// same rule written once it has gone is.
 #[test]
 fn an_empty_policy_table_hides_local_rules() {
     let _turn = turn();
@@ -243,6 +243,18 @@ fn an_empty_policy_table_hides_local_rules() {
     std::thread::sleep(Duration::from_secs(3));
     let hidden = resolvers_for(&asked, "host.suite.example");
     super::dns::delete_if_empty(POLICY).unwrap();
+    // The DNS client reads the rules again when the local ones change, not
+    // when the policy table goes: the same rule written again, now with no
+    // table.
+    delete_rule_at(LOCAL, super::dns::RULES[0]).unwrap();
+    write_rule_at(
+        LOCAL,
+        super::dns::RULES[0],
+        &ours[0],
+        None,
+        Lifetime::Lasting,
+    )
+    .unwrap();
     let started = std::time::Instant::now();
     let shown = loop {
         let shown = resolvers_for(&asked, "host.suite.example");
