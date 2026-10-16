@@ -54,7 +54,10 @@ fn only_a_change_to_the_watched_network_is_reported() {
     routes
         .add_tunnel_routes(tunnel, &["198.51.100.0/24".parse().unwrap()])
         .unwrap();
+    // Full mode's halves, the IPv6 ones too, are our own routes.
+    let full = routes.add_full_tunnel(tunnel);
     routes.remove_all().unwrap();
+    assert_eq!(full, Ok(crate::Ipv6Block::Blocked));
     assert_eq!(
         next(&events, quiet),
         None,
@@ -141,4 +144,46 @@ fn a_change_since_capture_is_reported_at_once() {
         Some(NetworkEvent::PhysicalChanged)
     );
     ran("events since capture");
+}
+
+// Security rule: a new way out for IPv6, on any interface, is reported, so
+// that in full mode the service decides again whether IPv6 can leak. Here
+// a route appears on an adapter other than the watched one.
+#[test]
+fn a_new_ipv6_route_anywhere_is_reported() {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        CreateIpForwardEntry2, DeleteIpForwardEntry2,
+    };
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let (wire, other) = ("ubc-vpn-v6watch0", "ubc-vpn-v6out0");
+    let dir = state_dir("events-v6");
+    let _watched = wintun.adapter(wire);
+    let _other = wintun.adapter(other);
+    let _cleanup = Cleanup(vec![dir.clone()]);
+    let routes = WinRoutes::unchecked(&dir);
+    routes
+        .configure_tunnel(wire, Ipv4Addr::new(198, 18, 3, 10), 1500)
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let physical = PhysicalNetwork {
+        interface: wire.to_string(),
+        next_hop: None,
+        own_addresses: vec![Ipv4Addr::new(198, 18, 3, 10)],
+        on_link: Vec::new(),
+    };
+    let events = WinEvents.subscribe(&physical).unwrap();
+    while next(&events, Duration::from_secs(2)).is_some() {}
+    let way_out = super::full_tunnel_tests::foreign_v6(
+        other,
+        std::net::Ipv6Addr::new(0x2001, 0xdb8, 0x2, 0, 0, 0, 0, 0),
+        48,
+    );
+    // SAFETY: the row is valid and initialised.
+    super::routes::checked(unsafe { CreateIpForwardEntry2(&way_out) }).expect("an IPv6 route");
+    let event = next(&events, Duration::from_secs(10));
+    // SAFETY: as above.
+    let _ = unsafe { DeleteIpForwardEntry2(&way_out) };
+    assert_eq!(event, Some(NetworkEvent::PhysicalChanged));
+    ran("events ipv6");
 }

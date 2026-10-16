@@ -127,7 +127,7 @@ jobs:
       - name: The elevated tests really ran
         shell: bash
         run: |
-          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row" "service manager" "service manager slow start" dns "dns policy" "dns policy empty" "dns foreign" "dns effective" "dns owner" "dns volatile" events "events late" "events since capture" "program folder" "program file" "program link" "program add" install "install unconfigured" "install while starting"; do
+          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row" "service manager" "service manager slow start" dns "dns policy" "dns policy empty" "dns foreign" "dns effective" "dns owner" "dns volatile" "dns catch all" "full tunnel" "full tunnel no ipv6" "full tunnel foreign" events "events late" "events since capture" "events ipv6" "program folder" "program file" "program link" "program add" install "install unconfigured" "install while starting"; do
             if ! grep -q "RAN: $test" test.log; then
               echo "The elevated test '$test' did not run."
               exit 1
@@ -148,10 +148,15 @@ jobs:
         shell: bash
         run: |
           source=crates/platform/src/windows/dns.rs
-          ids() { sed -n "/^const $1: /,/^];/p" "$source" | grep -o '{[0-9A-F-]*}'; }
-          mapfile -t product < <(ids PRODUCT_RULES)
-          mapfile -t tests < <(ids TEST_RULES)
-          if [ "${#product[@]}" -ne 6 ] || [ "${#tests[@]}" -ne 6 ]; then
+          # The identifiers in the constant named $1, from its first line to
+          # the line that ends it.
+          ids() {
+            awk -v name="$1" '$0 ~ "^const " name ": " { on = 1 } on { print } on && /;$/ { exit }' "$source" |
+              grep -o '{[0-9A-F-]*}'
+          }
+          mapfile -t product < <(ids PRODUCT_RULES; ids PRODUCT_CATCH_ALL)
+          mapfile -t tests < <(ids TEST_RULES; ids TEST_CATCH_ALL)
+          if [ "${#product[@]}" -ne 7 ] || [ "${#tests[@]}" -ne 7 ]; then
             echo "Could not read the rule identifiers from $source."
             exit 1
           fi

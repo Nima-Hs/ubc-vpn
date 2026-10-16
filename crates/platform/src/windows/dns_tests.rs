@@ -450,3 +450,74 @@ fn our_rules_do_not_outlast_a_restart() {
     write_rule_at(LOCAL, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
     ran("dns volatile");
 }
+
+// Full mode's catch-all, with the real DNS client: names under the split
+// domains still go to the split resolver, every other name to the
+// catch-all's. Another program's catch-all is reported and not fought, and
+// does not take the split names. Clearing the catch-all keeps the split
+// DNS; clearing the split DNS removes both.
+#[test]
+fn the_catch_all_takes_every_other_name() {
+    use windows_sys::Win32::Foundation::ERROR_CHILD_MUST_BE_VOLATILE;
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let tunnel = "ubc-vpn-all0";
+    let dir = state_dir("catch-all");
+    let _adapter = wintun.adapter(tunnel);
+    let _routes = Cleanup(vec![dir]);
+    let _rules = DnsCleanup;
+    for server in SERVERS {
+        Outsider.add_address(tunnel, server);
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let asked = Asked::default();
+    let _servers = SERVERS.map(|server| Server::start(server, asked.clone()));
+    let catch_all = super::dns::CATCH_ALL;
+    WinDns.set_split_dns(tunnel, &chosen()).unwrap();
+    WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let split = resolvers_for(&asked, "host.suite.example");
+    let other = resolvers_for(&asked, "anything.example");
+    assert_eq!(split, [SERVERS[0]]);
+    assert_eq!(other, [SERVERS[1]]);
+    assert_eq!(
+        WinDns.catch_all_dns_matches(&[SERVERS[1]]),
+        Verified::Unobservable
+    );
+    assert_eq!(WinDns.catch_all_dns_matches(&[SERVERS[0]]), Verified::No);
+    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
+    assert_eq!(WinDns.foreign_catch_all(), Ok(false));
+    assert_eq!(
+        lasting_child_of(&format!(r"{LOCAL}\{catch_all}")),
+        ERROR_CHILD_MUST_BE_VOLATILE
+    );
+
+    // Somebody else's catch-all.
+    let theirs = Rule {
+        names: vec![".".to_string()],
+        servers: "192.0.2.99".to_string(),
+    };
+    write_rule_at(LOCAL, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
+    let foreign = WinDns.foreign_catch_all();
+    let matches = WinDns.catch_all_dns_matches(&[SERVERS[1]]);
+    let split = WinDns.split_dns_matches(&chosen());
+    WinDns.clear_catch_all_dns().unwrap();
+    let set = WinDns.set_catch_all_dns(&[SERVERS[1]]);
+    delete_rule_at(LOCAL, FOREIGN).unwrap();
+    assert_eq!(foreign, Ok(true));
+    assert_eq!(matches, Verified::No);
+    assert_eq!(split, Verified::Unobservable);
+    assert_eq!(set, Err(Error::AlreadyExists));
+    assert_eq!(super::dns::read_rule_at(LOCAL, catch_all), Ok(None));
+
+    // Clearing the catch-all keeps the split DNS; clearing that removes both.
+    WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
+    WinDns.clear_catch_all_dns().unwrap();
+    assert_eq!(super::dns::read_rule_at(LOCAL, catch_all), Ok(None));
+    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
+    WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
+    WinDns.clear_split_dns().unwrap();
+    assert_eq!(super::dns::read_rule_at(LOCAL, catch_all), Ok(None));
+    assert_eq!(WinDns.catch_all_dns_matches(&[SERVERS[1]]), Verified::No);
+    ran("dns catch all");
+}

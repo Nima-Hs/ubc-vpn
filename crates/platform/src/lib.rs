@@ -1525,30 +1525,28 @@ mod tests {
             // Split DNS is real: nothing of ours is set, and reading that
             // needs no rights.
             assert_eq!(native.dns.split_dns_matches(&dns), Verified::No);
-            // Full mode is not written for Windows yet: it is refused, and
-            // its checks fail closed. Removing it changes nothing.
-            let unsupported = Some(Error::Unsupported);
+            // Full mode is real: a device that does not exist cannot take
+            // it, and the read-only checks need no rights. Nothing here
+            // writes anything.
             assert_eq!(
                 native.routes.add_full_tunnel("ubc-vpn-no-such0").err(),
-                unsupported
+                Some(Error::NotFound)
             );
             assert_eq!(
                 native.routes.full_tunnel_ipv6("ubc-vpn-no-such0").err(),
-                unsupported
+                Some(Error::NotFound)
             );
-            assert_eq!(
-                native.routes.foreign_full_tunnel("ubc-vpn-no-such0").err(),
-                unsupported
+            assert!(
+                native
+                    .routes
+                    .foreign_full_tunnel("ubc-vpn-no-such0")
+                    .is_ok()
             );
-            assert_eq!(native.dns.set_catch_all_dns(&[gateway]).err(), unsupported);
-            assert_eq!(native.dns.foreign_catch_all().err(), unsupported);
+            assert!(native.dns.foreign_catch_all().is_ok());
             let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
             let routed = native.routes.uses_interface_v6(v6, "ubc-vpn-no-such0");
-            assert_eq!(routed, Verified::Unknown);
-            assert_eq!(
-                native.dns.catch_all_dns_matches(&[gateway]),
-                Verified::Unknown
-            );
+            assert_eq!(routed, Verified::No);
+            assert_eq!(native.dns.catch_all_dns_matches(&[gateway]), Verified::No);
             // Events are real: an interface that does not exist cannot be
             // watched.
             assert_eq!(

@@ -16,9 +16,14 @@
 //!   clear removes it. A restart of the machine removes it too: the keys
 //!   are volatile, so a rule never outlasts the machine's session even when
 //!   the service does not run again.
-//! - **Tests** use identifiers of their own (`TEST_RULES`), so no test can
-//!   touch the rules of a product in use on the same machine.
+//! - **Full mode** adds one more rule of ours, under [`CATCH_ALL`], for the
+//!   namespace `.`: every name not under a split domain goes to its
+//!   resolvers. Another program's rule for `.` is reported, and not fought;
+//!   it takes none of the split names, which are more specific.
+//! - **Tests** use identifiers of their own (`TEST_RULES`, `TEST_CATCH_ALL`),
+//!   so no test can touch the rules of a product in use on the same machine.
 
+use std::net::Ipv4Addr;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -70,6 +75,18 @@ const TEST_RULES: [&str; 6] = [
 const RULES: [&str; 6] = PRODUCT_RULES;
 #[cfg(any(test, feature = "fake"))]
 pub(super) const RULES: [&str; 6] = TEST_RULES;
+/// This product's catch-all rule, for the namespace `.`, set in full mode.
+/// Never change it, like [`PRODUCT_RULES`].
+#[cfg_attr(all(feature = "fake", not(test)), allow(dead_code))]
+const PRODUCT_CATCH_ALL: &str = "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B07}";
+/// The catch-all tests use instead, chosen as `TEST_RULES` is.
+#[cfg(any(test, feature = "fake"))]
+const TEST_CATCH_ALL: &str = "{D3C2B1A0-9F8E-4D7C-B6A5-948372615E07}";
+/// The catch-all this build reads, writes and deletes.
+#[cfg(not(any(test, feature = "fake")))]
+const CATCH_ALL: &str = PRODUCT_CATCH_ALL;
+#[cfg(any(test, feature = "fake"))]
+pub(super) const CATCH_ALL: &str = TEST_CATCH_ALL;
 /// The most domains one rule holds.
 pub(super) const PER_RULE: usize = 50;
 /// "Use the given DNS servers for these names."
@@ -466,7 +483,7 @@ impl Dns for WinDns {
 
     fn clear_split_dns(&self) -> Result<()> {
         let mut failed = None;
-        for id in RULES {
+        for id in RULES.into_iter().chain([CATCH_ALL]) {
             if let Err(error) = delete_rule(id) {
                 failed = Some(error);
             }
@@ -494,29 +511,12 @@ impl Dns for WinDns {
             // a member of Network Configuration Operators could have made
             // the key first, and could change it.
             for id in &RULES[..expected.len()] {
-                let key = open(&format!(r"{LOCAL}\{id}"), KEY_READ)?;
-                if !key
-                    .as_ref()
-                    .map(owner)
-                    .transpose()?
-                    .is_some_and(|sid| TRUSTED.contains(&sid.as_str()))
-                {
+                if !trusted(id)? {
                     return Ok(Verified::No);
                 }
             }
             // Nobody else's rule may take any of our names.
-            let all = open(LOCAL, KEY_READ)?
-                .map(|key| subkeys(&key))
-                .transpose()?;
-            for id in all.unwrap_or_default() {
-                if RULES.contains(&id.as_str()) {
-                    continue;
-                }
-                let key = open(&format!(r"{LOCAL}\{id}"), KEY_READ)?;
-                let names = match key.map(|key| value(&key, "Name")).transpose()?.flatten() {
-                    Some((_, data)) => strings(&data),
-                    None => continue,
-                };
+            for (_, names) in others()? {
                 if names.iter().any(|name| takes_ours(name, &dns.domains)) {
                     return Ok(Verified::No);
                 }
@@ -528,23 +528,87 @@ impl Dns for WinDns {
         check().unwrap_or(Verified::Unknown)
     }
 
-    // Full mode is not written for Windows yet: the catch-all is refused,
-    // and none can have been set, so there is nothing to remove.
-    fn set_catch_all_dns(&self, _resolvers: &[std::net::Ipv4Addr]) -> Result<()> {
-        Err(Error::Unsupported)
+    fn set_catch_all_dns(&self, resolvers: &[Ipv4Addr]) -> Result<()> {
+        let rule = catch_all(resolvers)?;
+        if policy_rules_exist()? {
+            return Err(Error::Unsupported);
+        }
+        if self.foreign_catch_all()? {
+            return Err(Error::AlreadyExists);
+        }
+        write_rule(CATCH_ALL, &rule)
     }
 
     fn clear_catch_all_dns(&self) -> Result<()> {
-        Ok(())
+        delete_rule(CATCH_ALL)
     }
 
-    fn catch_all_dns_matches(&self, _resolvers: &[std::net::Ipv4Addr]) -> Verified {
-        Verified::Unknown
+    fn catch_all_dns_matches(&self, resolvers: &[Ipv4Addr]) -> Verified {
+        let check = || -> Result<Verified> {
+            let Ok(expected) = catch_all(resolvers) else {
+                return Ok(Verified::No);
+            };
+            if read_rule(CATCH_ALL)? != Some(expected)
+                || policy_rules_exist()?
+                || !trusted(CATCH_ALL)?
+                || self.foreign_catch_all()?
+            {
+                return Ok(Verified::No);
+            }
+            Ok(Verified::Unobservable)
+        };
+        check().unwrap_or(Verified::Unknown)
     }
 
     fn foreign_catch_all(&self) -> Result<bool> {
-        Err(Error::Unsupported)
+        let others = others()?;
+        Ok(others
+            .iter()
+            .any(|(_, names)| names.iter().any(|name| name.trim() == ".")))
     }
+}
+
+/// The catch-all rule for `resolvers`: the namespace `.`, which every name
+/// is under.
+fn catch_all(resolvers: &[Ipv4Addr]) -> Result<Rule> {
+    if resolvers.is_empty() {
+        return Err(Error::InvalidInput);
+    }
+    let servers = resolvers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    Ok(Rule {
+        names: vec![".".to_string()],
+        servers: servers.join(";"),
+    })
+}
+
+/// Whether our key `id` is owned by SYSTEM or Administrators. A member of
+/// Network Configuration Operators could have made the key first, and
+/// could change it.
+fn trusted(id: &str) -> Result<bool> {
+    let key = open(&format!(r"{LOCAL}\{id}"), KEY_READ)?;
+    let sid = key.as_ref().map(owner).transpose()?;
+    Ok(sid.is_some_and(|sid| TRUSTED.contains(&sid.as_str())))
+}
+
+/// Every local rule that is not ours, with the names it is for.
+fn others() -> Result<Vec<(String, Vec<String>)>> {
+    let all = open(LOCAL, KEY_READ)?
+        .map(|key| subkeys(&key))
+        .transpose()?;
+    let mut found = Vec::new();
+    for id in all.unwrap_or_default() {
+        if RULES.contains(&id.as_str()) || id == CATCH_ALL {
+            continue;
+        }
+        let key = open(&format!(r"{LOCAL}\{id}"), KEY_READ)?;
+        if let Some((_, data)) = key.map(|key| value(&key, "Name")).transpose()?.flatten() {
+            found.push((id, strings(&data)));
+        }
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -610,13 +674,37 @@ mod tests {
     #[test]
     fn tests_use_rules_apart_from_the_products() {
         assert_eq!(RULES, TEST_RULES);
-        for id in TEST_RULES {
-            assert!(!PRODUCT_RULES.contains(&id), "{id}");
+        assert_eq!(CATCH_ALL, TEST_CATCH_ALL);
+        let product: Vec<_> = PRODUCT_RULES
+            .into_iter()
+            .chain([PRODUCT_CATCH_ALL])
+            .collect();
+        let tests: Vec<_> = TEST_RULES.into_iter().chain([TEST_CATCH_ALL]).collect();
+        for id in &tests {
+            assert!(!product.contains(id), "{id}");
         }
-        let mut unique = TEST_RULES.to_vec();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), TEST_RULES.len());
+        for set in [product, tests] {
+            let mut unique = set.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), set.len());
+        }
+    }
+
+    #[test]
+    fn the_catch_all_identifier_never_changes() {
+        assert_eq!(PRODUCT_CATCH_ALL, "{6F3B1C2A-7E4D-4B19-9C55-0D1E2F3A4B07}");
+    }
+
+    // The catch-all is one rule for the namespace "." with every resolver;
+    // with no resolver it is refused, as it would send names nowhere.
+    #[test]
+    fn the_catch_all_takes_every_name_to_every_resolver() {
+        let resolvers = [Ipv4Addr::new(192, 0, 2, 53), Ipv4Addr::new(192, 0, 2, 54)];
+        let rule = catch_all(&resolvers).unwrap();
+        assert_eq!(rule.names, ["."]);
+        assert_eq!(rule.servers, "192.0.2.53;192.0.2.54");
+        assert_eq!(catch_all(&[]), Err(Error::InvalidInput));
     }
 
     // Security rule: the DNS client uses the most specific rule, so another
@@ -640,6 +728,9 @@ mod tests {
             "notsuite.example",
             ".suite.example.org",
             "xsuite.example",
+            // Another catch-all: our split names are more specific, so it
+            // takes none of them. It conflicts with our catch-all only.
+            ".",
         ] {
             assert!(!takes_ours(apart, &ours), "{apart}");
         }

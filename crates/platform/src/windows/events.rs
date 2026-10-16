@@ -9,7 +9,14 @@
 //!
 //! - the interface is gone, or no longer up;
 //! - its IPv4 addresses changed;
-//! - the router of its default route changed.
+//! - the router of its default route changed;
+//! - on any interface, an IPv6 route appeared or went that could take
+//!   traffic off the machine, such as a new IPv6 default route: in full
+//!   mode the service must decide again whether IPv6 can leak. Full mode's
+//!   own IPv6 halves, link-local, loopback and multicast routes, and the
+//!   host routes Windows keeps for the machine's own addresses do not count.
+//!
+//! IPv4 and IPv6 changes are both watched.
 //!
 //! The first look is compared with the captured [`PhysicalNetwork`], so a
 //! change between capture and subscribe is reported too.
@@ -41,7 +48,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     NotifyUnicastIpAddressChange,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
-use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 use windows_sys::Win32::System::Power::{
     DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, PowerRegisterSuspendResumeNotification,
     PowerUnregisterSuspendResumeNotification,
@@ -50,7 +57,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND,
 };
 
-use super::routes::{addr_of, address_table, checked, luid, route_table, row_dest, value};
+use super::routes::{
+    addr_of, address_table, checked, ipv6_paths, luid, route_table, row_dest, value,
+};
 use crate::{Error, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Subscription};
 
 /// What a connection relies on about the physical interface.
@@ -59,6 +68,9 @@ pub(super) struct Snapshot {
     pub(super) up: bool,
     pub(super) addresses: Vec<Ipv4Addr>,
     pub(super) routers: Vec<Ipv4Addr>,
+    /// Where IPv6 could go, on any interface (see [`ipv6_paths`]): in full
+    /// mode, a new way out for IPv6 must be checked again.
+    pub(super) ipv6: Vec<(u64, String, String)>,
 }
 
 /// The interface with `luid` as it is now. A missing interface is down,
@@ -92,6 +104,7 @@ pub(super) fn snapshot(luid: u64) -> Result<Snapshot> {
         up,
         addresses,
         routers,
+        ipv6: ipv6_paths()?,
     })
 }
 
@@ -227,16 +240,16 @@ fn register(id: usize) -> Result<Registrations> {
     // SAFETY: the callback has the documented signature, and its context is
     // a number, valid for ever.
     checked(unsafe {
-        NotifyIpInterfaceChange(AF_INET, Some(on_interface), context, false, &mut handle)
+        NotifyIpInterfaceChange(AF_UNSPEC, Some(on_interface), context, false, &mut handle)
     })?;
     done.network.push(handle);
     // SAFETY: as above.
     checked(unsafe {
-        NotifyUnicastIpAddressChange(AF_INET, Some(on_address), context, false, &mut handle)
+        NotifyUnicastIpAddressChange(AF_UNSPEC, Some(on_address), context, false, &mut handle)
     })?;
     done.network.push(handle);
     // SAFETY: as above.
-    checked(unsafe { NotifyRouteChange2(AF_INET, Some(on_route), context, false, &mut handle) })?;
+    checked(unsafe { NotifyRouteChange2(AF_UNSPEC, Some(on_route), context, false, &mut handle) })?;
     done.network.push(handle);
     let mut power = null_mut();
     let recipient: HANDLE = (&raw mut *done._power_parameters).cast();
@@ -369,6 +382,7 @@ mod tests {
             up: true,
             addresses: vec![Ipv4Addr::new(192, 168, 0, 10)],
             routers: vec![Ipv4Addr::new(192, 168, 0, 1)],
+            ipv6: Vec::new(),
         };
         assert!(!differs_from_capture(&same, &captured));
         let down = Snapshot {
