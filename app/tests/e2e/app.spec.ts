@@ -424,7 +424,7 @@ test("a typed password is kept nowhere: not in a message, a log or the profile",
     // A copy of its own, with a profile of its own, so the whole profile can
     // be read once it has closed: a running app holds some of its files.
     const profile = newProfile();
-    const other = await electron.launch({
+    const other = await launchApp({
         ...launchOptions,
         args: launchArgs(),
         env: { ...launchEnv, UBC_VPN_PROFILE: profile },
