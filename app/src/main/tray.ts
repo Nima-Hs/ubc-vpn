@@ -1,16 +1,17 @@
+import { join } from "node:path";
 import type { LinkState } from "@shared/api";
 import { describe } from "@shared/copy";
-import { type BrowserWindow, Menu, type NativeImage, nativeImage, Tray } from "electron";
+import { app, type BrowserWindow, Menu, type NativeImage, nativeImage, Tray } from "electron";
 import { appIcon } from "./icon/designs";
 import { encodePng } from "./icon/formats";
 import { draw } from "./icon/raster";
 import {
-    BUSY_FRAME_MS,
-    BUSY_FRAMES,
     COLOUR_PALETTE,
+    type StateIconPainter,
+    type StateIcons,
+    stateIconFile,
     TEMPLATE_PALETTE,
     type TrayKind,
-    taskbarBadgePng,
     trayIconPng,
     trayKind,
 } from "./tray-icon";
@@ -59,20 +60,60 @@ export function appImage(): NativeImage {
     return image;
 }
 
+/** Where the state icon files are: beside the app once installed, in build/ before. */
+function stateIconFolder(): string {
+    return app.isPackaged
+        ? join(process.resourcesPath, "state-icons")
+        : join(__dirname, "../../build/state-icons");
+}
+
+const windowImages = new Map<string, NativeImage>();
+
 /**
- * Shows the state on the window's taskbar button, as a small badge, while the
- * window is open. Windows only; elsewhere the tray says it.
+ * The state icon for a window: the tray's drawing, read from its `.ico`.
+ * From a file, Windows is handed each size it asks for exactly as drawn; an
+ * image made in memory gives it one size, which it would resize itself.
  */
-export function showStateOnTaskbar(window: BrowserWindow, state: LinkState): void {
-    if (process.platform !== "win32" || window.isDestroyed()) {
+export function windowStateImage(kind: TrayKind, frame: number): NativeImage {
+    const name = stateIconFile(kind, frame);
+    let image = windowImages.get(name);
+    if (image === undefined) {
+        image = nativeImage.createFromPath(join(stateIconFolder(), name));
+        windowImages.set(name, image);
+    }
+    return image;
+}
+
+/**
+ * Makes the window's taskbar button show the state icon, the same picture as
+ * the tray, stepping with it while working. Windows only. It follows while the
+ * window is shown; hidden or closed, it lets go, so nothing is stepped for a
+ * button that is not there. The program's own icon, on the Start menu and in
+ * the install folder, stays the app icon.
+ */
+export function followStateOnTaskbar(window: BrowserWindow, icons: StateIcons): void {
+    if (process.platform !== "win32") {
         return;
     }
-    const kind = trayKind(state);
-    const badge = taskbarBadgePng(kind, 32);
-    window.setOverlayIcon(
-        badge === null ? null : nativeImage.createFromBuffer(badge, { scaleFactor: 2 }),
-        badge === null ? "" : describe(state).title,
-    );
+    let stop: (() => void) | null = null;
+    const paint: StateIconPainter = (kind, frame) => {
+        if (!window.isDestroyed()) {
+            window.setIcon(windowStateImage(kind, frame));
+        }
+    };
+    const follow = () => {
+        stop ??= icons.add(paint);
+    };
+    const letGo = () => {
+        stop?.();
+        stop = null;
+    };
+    window.on("show", follow);
+    window.on("hide", letGo);
+    window.on("closed", letGo);
+    if (window.isVisible()) {
+        follow();
+    }
 }
 
 /**
@@ -80,12 +121,14 @@ export function showStateOnTaskbar(window: BrowserWindow, state: LinkState): voi
  * the state. Returns `null` if the icon could not be created. A desktop with
  * no tray does not always say so; see `closeHidesWindow`.
  *
- * While something is working the icon steps through a few pictures; it stops
- * as soon as the state settles. The pictures are drawn once and kept.
+ * The icon is painted by `icons`, which the taskbar button shares, so both
+ * show the same state and the same working frame. The pictures are drawn
+ * once and kept.
  */
 export function createTray(
     actions: TrayActions,
     initial: LinkState,
+    icons: StateIcons,
 ): { update(state: LinkState): void; destroy(): void } | null {
     let tray: Tray;
     try {
@@ -104,28 +147,10 @@ export function createTray(
         }
         return image;
     };
-    let shown: TrayKind | null = null;
-    let stepping: ReturnType<typeof setInterval> | undefined;
-    const showKind = (kind: TrayKind) => {
-        if (kind === shown) {
-            return;
-        }
-        shown = kind;
-        clearInterval(stepping);
-        stepping = undefined;
-        tray.setImage(imageFor(kind, 0));
-        if (kind === "busy") {
-            let frame = 0;
-            stepping = setInterval(() => {
-                frame = (frame + 1) % BUSY_FRAMES;
-                tray.setImage(imageFor("busy", frame));
-            }, BUSY_FRAME_MS);
-        }
-    };
+    const stopPainting = icons.add((kind, frame) => tray.setImage(imageFor(kind, frame)));
 
     const update = (state: LinkState) => {
         const copy = describe(state);
-        showKind(trayKind(state));
         tray.setToolTip(`UBC VPN: ${copy.title}`);
         const run = {
             connect: actions.connect,
@@ -163,7 +188,7 @@ export function createTray(
     return {
         update,
         destroy: () => {
-            clearInterval(stepping);
+            stopPainting();
             tray.destroy();
         },
     };

@@ -1332,6 +1332,29 @@ test("the icons the app draws outside its window, photographed", () => {
     }
 });
 
+test("the taskbar button's state icons are files Electron can read", async () => {
+    test.skip(process.platform !== "win32", "the taskbar follows the state on Windows only");
+    // The files the window takes its icon from on Windows, one per state and
+    // working frame. An unreadable one would leave the button blank.
+    const folder = resolve("build/state-icons");
+    const files = readdirSync(folder).sort();
+    expect(files).toEqual([
+        "attention.ico",
+        "busy-0.ico",
+        "busy-1.ico",
+        "busy-2.ico",
+        "off.ico",
+        "on.ico",
+        "problem.ico",
+    ]);
+    const empty = await app.evaluate(
+        ({ nativeImage }, paths) =>
+            paths.filter((path) => nativeImage.createFromPath(path).isEmpty()),
+        files.map((file) => join(folder, file)),
+    );
+    expect(empty).toEqual([]);
+});
+
 test("the component gallery", async () => {
     await page.getByRole("button", { name: "Parts" }).click();
     await expect(page.getByRole("heading", { name: "Buttons" })).toBeVisible();

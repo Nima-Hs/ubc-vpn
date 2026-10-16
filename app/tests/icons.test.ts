@@ -1,6 +1,7 @@
-// The app icon files in `build/` are drawn from the mark's description in
-// code (`src/main/icon`). This test draws them again and fails if a committed
-// file differs, so they can never go stale. `pnpm icons` writes them afresh.
+// The icon files in `build/` (the app icon, and the state icons the taskbar
+// button shows on Windows) are drawn from the mark's description in code
+// (`src/main/icon`). This test draws them again and fails if a committed file
+// differs, so they can never go stale. `pnpm icons` writes them afresh.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,6 +16,15 @@ import {
     type Square,
 } from "../src/main/icon/formats";
 import { draw } from "../src/main/icon/raster";
+import {
+    COLOUR_PALETTE,
+    drawTrayIcon,
+    drawWindowIcon,
+    STATE_PICTURES,
+    stateIconFile,
+    type TrayKind,
+    WINDOW_ICON_SIZES,
+} from "../src/main/tray-icon";
 
 const build = join(__dirname, "../build");
 const update = process.env.UPDATE_ICONS === "1";
@@ -30,7 +40,20 @@ function square(size: number): Square {
     return image;
 }
 
-const NAMES = ["icon.ico", "icon.icns", ...PNG_SIZES.map((size) => `icons/${size}x${size}.png`)];
+/** A state picture at one size: the tray's own drawing, as the taskbar button shows it. */
+function statePicture(kind: TrayKind, frame: number, size: number): Square {
+    return { size, pixels: drawWindowIcon(kind, size, frame) };
+}
+
+const stateFile = ({ kind, frame }: { kind: TrayKind; frame: number }) =>
+    `state-icons/${stateIconFile(kind, frame)}`;
+
+const NAMES = [
+    "icon.ico",
+    "icon.icns",
+    ...PNG_SIZES.map((size) => `icons/${size}x${size}.png`),
+    ...STATE_PICTURES.map(stateFile),
+];
 /** Drawing every size up to 1024 pixels, while other tests run beside it. */
 const SLOW = { timeout: 60_000 };
 
@@ -41,6 +64,14 @@ function expected(): Map<string, Buffer> {
     files.set("icon.icns", encodeIcns(ICNS_SIZES.map(square)));
     for (const size of PNG_SIZES) {
         files.set(`icons/${size}x${size}.png`, encodePng(square(size).pixels, size));
+    }
+    for (const picture of STATE_PICTURES) {
+        files.set(
+            stateFile(picture),
+            encodeIco(
+                WINDOW_ICON_SIZES.map((size) => statePicture(picture.kind, picture.frame, size)),
+            ),
+        );
     }
     return files;
 }
@@ -154,6 +185,40 @@ describe("the app icon files", () => {
             expect(same(png, square(size)), `icons/${size}x${size}.png`).toBe(true);
         }
     });
+
+    it.skipIf(update)(
+        "give the taskbar button the tray's own picture, for every state and frame",
+        SLOW,
+        () => {
+            for (const picture of STATE_PICTURES) {
+                const name = stateFile(picture);
+                const images = decodeIco(readFileSync(join(build, name)));
+                // Every size Windows asks for at 100%, 125%, 150% and 200%.
+                expect(
+                    images.map(({ size }) => size),
+                    name,
+                ).toEqual([...WINDOW_ICON_SIZES]);
+                for (const image of images) {
+                    // The very drawing the tray shows, in the tray's colours.
+                    const tray = {
+                        size: image.size,
+                        pixels: drawTrayIcon(
+                            picture.kind,
+                            COLOUR_PALETTE,
+                            image.size,
+                            picture.frame,
+                        ),
+                    };
+                    expect(same(image, tray), `${name} at ${image.size}`).toBe(true);
+                }
+            }
+            // One file per state, and one per working frame, each different.
+            const files = STATE_PICTURES.map((picture) =>
+                readFileSync(join(build, stateFile(picture))).toString("base64"),
+            );
+            expect(new Set(files).size).toBe(STATE_PICTURES.length);
+        },
+    );
 
     it("has every size Windows asks for, and fills each to its edges", () => {
         expect([...ICO_SIZES]).toEqual([16, 24, 32, 48, 64, 256]);
