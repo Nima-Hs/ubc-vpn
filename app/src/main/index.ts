@@ -219,11 +219,15 @@ async function start(): Promise<void> {
     // request instead.
     let profiles: ProfilesService | undefined;
     let onProfiles: (view: ProfilesView) => void = () => {};
+    // The profiles as last seen, for the profile a login is bound to.
+    let latestProfiles: ProfilesView | null = null;
+    controller.setProfileForLogin(() => latestProfiles?.global.active_profile ?? null);
     if (__SETTINGS__) {
         const { registerProfiles, watchProfiles } = await import("./profiles-ipc");
         profiles = watchProfiles(
             demoProfiles ?? new ProfilesRunner(settingsCommand(app, process)),
             (view) => {
+                latestProfiles = view;
                 if (!window.isDestroyed()) {
                     window.webContents.send(PROFILES_IPC.changed, view);
                 }
@@ -276,7 +280,7 @@ async function start(): Promise<void> {
     }
     controller.subscribe((snapshot) => {
         icons.show(trayKind(snapshot.state));
-        tray?.update(snapshot.state);
+        tray?.update(snapshot.state, snapshot.login.phase !== "idle");
     });
     // Put away at start, with nowhere to come back from, or on macOS with no
     // settings to say it belongs in the tray: shown after all.

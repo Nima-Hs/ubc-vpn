@@ -126,7 +126,8 @@ export function createTray(
     initial: LinkState,
     icons: StateIcons,
 ): {
-    update(state: LinkState): void;
+    /** The state, and whether a login is under way. */
+    update(state: LinkState, loggingIn?: boolean): void;
     /** The profiles as they now are, for the menu's list of them. */
     setProfiles(view: ProfilesView): void;
     destroy(): void;
@@ -152,12 +153,14 @@ export function createTray(
 
     let state = initial;
     let profiles: ProfilesView | null = null;
+    let loggingIn = false;
     const rebuild = () => {
         tray.setToolTip(`UBC VPN: ${describe(state).title}`);
-        tray.setContextMenu(Menu.buildFromTemplate(trayMenu(state, profiles, actions)));
+        tray.setContextMenu(Menu.buildFromTemplate(trayMenu(state, profiles, actions, loggingIn)));
     };
-    const update = (next: LinkState) => {
+    const update = (next: LinkState, nowLoggingIn = false) => {
         state = next;
+        loggingIn = nowLoggingIn;
         rebuild();
     };
 

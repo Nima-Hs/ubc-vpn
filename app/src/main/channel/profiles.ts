@@ -66,15 +66,29 @@ const shownRoutes = (routes: RouteSet): RouteSet => ({
     dns_domains: routes.dns_domains.map(marked),
 });
 
+/**
+ * The view the interface is given, built field by field from the ones it
+ * needs, and never by copying what the client sent. A field the client adds
+ * one day, a password among them, cannot reach the window: whether a
+ * password is saved is all that ever does.
+ */
 function shownView(view: ProfilesView): ProfilesView {
     return {
-        ...view,
+        global: {
+            start: view.global.start,
+            auto_connect: view.global.auto_connect,
+            active_profile: view.global.active_profile,
+        },
         profiles: view.profiles.map((profile) => ({
-            ...profile,
+            id: profile.id,
             name: shown(profile.name),
             username: profile.username === null ? null : shown(profile.username),
             routes: shownRoutes(profile.routes),
+            save_password: profile.save_password,
+            password_saved: profile.password_saved,
         })),
+        keyring: view.keyring,
+        policy_readable: view.policy_readable,
         allowed_routes: view.allowed_routes?.map(shown) ?? null,
     };
 }

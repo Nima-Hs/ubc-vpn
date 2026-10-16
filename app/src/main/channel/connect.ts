@@ -18,14 +18,31 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { LoginPrompt, LoginState } from "@shared/api";
 import type { AppMessage } from "@shared/protocol/AppMessage";
+import type { ProfileId } from "@shared/protocol/ProfileId";
 import { startClient } from "./bridge";
 import { encodeLine, LineDecoder } from "./framing";
-import { isCliMessage } from "./validate";
+import { isCliMessage, isProfileId } from "./validate";
+
+/**
+ * The client's arguments with `--profile <id>` after `connect`, so the login
+ * is for that profile from start to end, whichever profile is chosen while
+ * it runs. Unchanged for `null` (the active one) or an id that is not one.
+ */
+export function withProfile(args: readonly string[], profile: ProfileId | null): readonly string[] {
+    const at = args.indexOf("connect");
+    if (profile === null || !isProfileId(profile) || at < 0) {
+        return args;
+    }
+    return [...args.slice(0, at + 1), "--profile", profile, ...args.slice(at + 1)];
+}
 
 /** What the rest of the main process needs from a login, real or fake. */
 export interface LoginRunner {
-    /** Starts a login. Returns `false`, and does nothing, if one is under way. */
-    start(): boolean;
+    /**
+     * Starts a login, for `profile` or for the active profile when `null`.
+     * Returns `false`, and does nothing, if one is under way.
+     */
+    start(profile?: ProfileId | null): boolean;
     /**
      * Passes on the user's answer to the prompt with this `id`. Returns
      * `false`, and sends nothing, unless that prompt is the one waiting.
@@ -159,6 +176,8 @@ export class ConnectRunner implements LoginRunner {
     private onWoundUp: (() => void) | null = null;
     private readonly leaving = new Set<ChildProcessWithoutNullStreams>();
     /** When the client was last started, and the wait before the next start, if one is on. */
+    /** The profile the login under way is for, or `null` for the active one. */
+    private profile: ProfileId | null = null;
     private lastStartAt = Number.NEGATIVE_INFINITY;
     private startTimer: NodeJS.Timeout | null = null;
 
@@ -172,7 +191,7 @@ export class ConnectRunner implements LoginRunner {
         };
     }
 
-    start(): boolean {
+    start(profile: ProfileId | null = null): boolean {
         // One login at a time: a second would mean a second MFA request.
         // Nor does one start while the last is still being wound up.
         if (this.child !== null || this.startTimer !== null || this.settling) {
@@ -180,6 +199,7 @@ export class ConnectRunner implements LoginRunner {
         }
         // The user sees the login begin at once. The client itself is started
         // no sooner than the gap after the last one.
+        this.profile = profile;
         this.options.onState(WORKING);
         const wait = this.lastStartAt + this.options.minStartGapMs - Date.now();
         if (wait > 0) {
@@ -199,7 +219,7 @@ export class ConnectRunner implements LoginRunner {
         try {
             child = startClient(
                 this.options.command,
-                this.options.args,
+                withProfile(this.options.args, this.profile),
                 this.options.env,
                 this.options.dev,
             );

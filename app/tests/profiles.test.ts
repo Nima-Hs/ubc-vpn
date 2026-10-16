@@ -153,6 +153,28 @@ describe("the profiles commands", () => {
         await expect(first).resolves.toEqual({ ok: false, error: "unavailable" });
     });
 
+    it("gives the interface only the fields it needs, never a password", async () => {
+        const secret = "Sentinel-pw-profiles-not-real";
+        // A client that answered with more than the contract: a password at
+        // every level, and fields nobody asked for.
+        const extra = {
+            ...VIEW,
+            password: secret,
+            global: { ...VIEW.global, password: secret },
+            profiles: VIEW.profiles.map((profile) => ({
+                ...profile,
+                password: secret,
+                secret,
+                routes: { ...profile.routes, password: secret },
+            })),
+        };
+        const { runner } = client({ "profiles list": { line: extra } });
+        const result = await runner.list();
+        expect(result).toEqual({ ok: true, value: VIEW });
+        expect(JSON.stringify(result)).not.toContain(secret);
+        expect(JSON.stringify(result)).not.toContain('password":"');
+    });
+
     it("cleans text from the settings file before the interface sees it", async () => {
         const tricky: ProfilesView = {
             ...VIEW,

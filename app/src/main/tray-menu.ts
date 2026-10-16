@@ -2,7 +2,7 @@
 // it holds in each state can be tested on its own.
 
 import type { LinkState } from "@shared/api";
-import { describe, profileSwitchNote, TRAY_PROFILE } from "@shared/copy";
+import { describe, profileSwitchNote, TRAY_PROFILE, TRAY_PROFILE_DURING_LOGIN } from "@shared/copy";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 
@@ -30,12 +30,15 @@ export interface TrayMenuItem {
  * The menu: where things stand, the window, the one action, the profiles
  * when there is more than one to choose from, and Quit. A profile chosen
  * while connected or connecting is used by the next connect, and the
- * submenu says so.
+ * submenu says so. While a login is under way the profiles cannot be
+ * changed: the login is for the profile it started with, and the submenu
+ * says so.
  */
 export function trayMenu(
     state: LinkState,
     profiles: ProfilesView | null,
     actions: TrayActions,
+    loggingIn = false,
 ): TrayMenuItem[] {
     const copy = describe(state);
     const run = {
@@ -43,7 +46,8 @@ export function trayMenu(
         disconnect: actions.disconnect,
         retry: actions.retry,
     };
-    const note = profiles === null ? null : profileSwitchNote(state);
+    const note =
+        profiles === null ? null : loggingIn ? TRAY_PROFILE_DURING_LOGIN : profileSwitchNote(state);
     return [
         { label: copy.title, enabled: false },
         { type: "separator" },
@@ -70,6 +74,7 @@ export function trayMenu(
                               label: profile.name,
                               type: "radio" as const,
                               checked: profile.id === profiles.global.active_profile,
+                              enabled: !loggingIn,
                               click: () => actions.switchProfile(profile.id),
                           })),
                       ],
