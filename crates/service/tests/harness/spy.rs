@@ -421,4 +421,8 @@ impl NetworkEvents for Faulty {
         };
         Ok(Subscription::new(receiver, stop))
     }
+
+    fn reports_ipv6_changes(&self) -> bool {
+        self.fake.reports_ipv6_changes()
+    }
 }

@@ -256,7 +256,9 @@ impl PhysicalNetwork {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ipv6Block {
     /// The IPv6 halves go through the tunnel, which has no IPv6 address:
-    /// every IPv6 connection fails at once, and programs fall back to IPv4.
+    /// every IPv6 connection that no more specific route takes elsewhere
+    /// (such as the local network's own link-local and on-link prefixes)
+    /// fails at once, and programs fall back to IPv4.
     Blocked,
     /// The tunnel device has no IPv6 at all, so the IPv6 halves cannot be
     /// added; and there is no IPv6 leak path (see
@@ -423,11 +425,14 @@ pub trait Routes: Send + Sync {
     /// fails closed when a leak path has appeared.
     fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block>;
 
-    /// Full mode: routes every IPv4 address, and blocks every IPv6 address,
-    /// through the tunnel named `tunnel`. It adds [`FULL_TUNNEL_V4`] and
+    /// Full mode: routes every IPv4 address, and blocks IPv6, through the
+    /// tunnel named `tunnel`. It adds [`FULL_TUNNEL_V4`] and
     /// [`FULL_TUNNEL_V6`] on the tunnel with no next hop, and never touches
     /// a default route. The tunnel has no IPv6 address, so the IPv6 halves
-    /// make IPv6 fail at once rather than leave by the physical network.
+    /// make every IPv6 connection that no more specific route takes
+    /// elsewhere fail at once, rather than leave by the physical network.
+    /// More specific routes still win, as for IPv4: the local network's
+    /// link-local and on-link prefixes, and any other interface's.
     ///
     /// It first decides about IPv6 exactly as [`Routes::full_tunnel_ipv6`]
     /// does, and on a refusal fails with [`Error::Unsupported`] having added
@@ -631,6 +636,12 @@ pub trait NetworkEvents: Send + Sync {
     /// change. Windows sends it from the same notifications it already
     /// watches (routes and addresses) for IPv6 as well as IPv4.
     fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription>;
+
+    /// Whether a [`Subscription`] here sends [`NetworkEvent::Ipv6Changed`].
+    /// Full mode may be had only where it does: without it, "nothing to
+    /// block" could go stale unseen. An implementation answers `true` only
+    /// once it watches IPv6 routes and addresses.
+    fn reports_ipv6_changes(&self) -> bool;
 }
 
 /// The events of one subscription. Dropping it ends the subscription at

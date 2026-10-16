@@ -15,8 +15,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+pub use ubc_vpn_core::protocol::SetTunnelParams;
 pub use ubc_vpn_core::protocol::{ErrorCode, RequestBody, ResponseBody};
-pub use ubc_vpn_core::state::ConnState;
+pub use ubc_vpn_core::state::{ConnState, TunnelMode};
 pub use ubc_vpn_platform::fake::{Fake, Op};
 pub use ubc_vpn_platform::{Connection, Error, NetworkEvent, StateDir, UserId};
 
@@ -73,6 +74,65 @@ pub fn connect(cookie: &str, addr: [u8; 4], subnets: &[&str], domains: &[&str]) 
 pub fn good() -> RequestBody {
     let subnets = ["10.255.0.0/24", "192.0.2.0/24"];
     connect(COOKIE, GATEWAY, &subnets, &["dept.example.test"])
+}
+
+/// `connect`, asking for full mode.
+pub fn full(subnets: &[&str], domains: &[&str]) -> RequestBody {
+    let RequestBody::Connect(params) = connect(COOKIE, GATEWAY, subnets, domains) else {
+        unreachable!()
+    };
+    let tunnel = TunnelMode::Full;
+    RequestBody::Connect(ConnectParams { tunnel, ..params })
+}
+
+/// `good()` in full mode.
+pub fn good_full() -> RequestBody {
+    let RequestBody::Connect(params) = good() else {
+        unreachable!()
+    };
+    let tunnel = TunnelMode::Full;
+    RequestBody::Connect(ConnectParams { tunnel, ..params })
+}
+
+/// A switch of the live tunnel to `mode`.
+pub fn set_tunnel(mode: TunnelMode) -> RequestBody {
+    RequestBody::SetTunnel(SetTunnelParams { mode })
+}
+
+/// The router of [`home_network`].
+pub const HOME_ROUTER: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
+
+/// A typical home machine as the fake plays it: a private home network,
+/// 10.200.0.0/24 behind its own router, on the physical adapter, and two
+/// host-only networks of a virtual machine program, 172.31.130.0/24 and
+/// 172.31.140.0/24, each on an adapter of its own. No global IPv6.
+pub fn home_network(fake: &Fake) {
+    let own = [
+        Ipv4Addr::new(10, 200, 0, 10),
+        Ipv4Addr::new(172, 31, 130, 1),
+        Ipv4Addr::new(172, 31, 140, 1),
+    ];
+    fake.set_router(HOME_ROUTER);
+    fake.set_local(&own, &["10.200.0.0/24".parse().unwrap()]);
+    fake.add_adapter_network("fake-host1", "172.31.130.0/24".parse().unwrap());
+    fake.add_adapter_network("fake-host2", "172.31.140.0/24".parse().unwrap());
+    fake.set_ipv6(true, false);
+}
+
+/// The DNS domain `good()` chooses.
+pub fn chosen_domain() -> String {
+    let RequestBody::Connect(params) = good() else {
+        unreachable!()
+    };
+    params.routes.dns_domains[0].clone()
+}
+
+/// The mode of a connected state.
+pub fn mode_of(state: &ConnState) -> TunnelMode {
+    match state {
+        ConnState::Connected { tunnel } => tunnel.mode,
+        other => panic!("not connected: {other:?}"),
+    }
 }
 
 /// A service on fakes, with its files in a folder of its own.

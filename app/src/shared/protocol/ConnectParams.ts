@@ -35,11 +35,12 @@ routes: RouteSet,
 /**
  * Split or full. Left out, it is split, as before there was a choice.
  * Full is refused, as for [`RequestBody::SetTunnel`], when it cannot
- * be had safely here.
- *
- * **Not available yet:** until the service part of full tunnel lands
- * (PR 3 of its plan), the service refuses `full` on every OS with
- * `route_refused`, "Full tunnel is not available in this version
- * yet.", after the routes are checked and before anything is done.
+ * be had safely here. A refusal for the policy or the operating system
+ * is the answer to the request, with nothing done. The others are a
+ * `failed` state with `route_refused`: for the network, before the
+ * gateway is contacted; for the tunnel, and for a gateway that
+ * assigned no DNS server, once the tunnel is open and before anything
+ * is applied. A DNS server that cannot be used is `engine_failed`, as
+ * in split mode.
  */
 tunnel: TunnelMode, };

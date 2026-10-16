@@ -341,6 +341,12 @@ impl NetworkEvents for WinEvents {
         );
         Ok(Subscription::new(receiver, ending))
     }
+
+    // The notifications are registered for IPv4 only: `Ipv6Changed` is not
+    // sent yet, so full mode must not be had here until it is.
+    fn reports_ipv6_changes(&self) -> bool {
+        false
+    }
 }
 
 /// What dropping a [`Subscription`] ends, in this order: the registrations,

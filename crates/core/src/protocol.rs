@@ -227,20 +227,16 @@ pub enum RequestBody {
     ///   mode cannot be had safely here: the policy forbids it, the gateway
     ///   assigned no usable DNS server, another program already routes all
     ///   traffic or resolves all names, the router is not on the local
-    ///   network, or this operating system cannot do it. Nothing is changed
-    ///   and the connection is kept as it was.
+    ///   network, IPv6 could leave by another network, or this operating
+    ///   system cannot do it, which includes reporting IPv6 changes. Nothing
+    ///   is changed and the connection is kept as it was. A refusal for the
+    ///   policy or the operating system comes before `not_connected` and
+    ///   `busy`; the others need the connection.
     /// - **No change:** the mode the tunnel already has is answered at once
     ///   with `status`, the connection as it is.
     /// - **Failure while applying or verifying:** everything is torn down
     ///   and the state is `failed`, as for `update_routes`.
     /// - **Timing:** `busy` and `not_connected` as for `update_routes`.
-    ///
-    /// **Not available yet:** until the service part of full tunnel lands
-    /// (PR 3 of its plan), the service refuses `full` on every OS with
-    /// `route_refused`, "Full tunnel is not available in this version
-    /// yet.", before anything else, so before `not_connected` and `busy`.
-    /// A switch to `split` while connected is no change, since every
-    /// tunnel is split until then.
     SetTunnel(SetTunnelParams),
 }
 
@@ -313,12 +309,13 @@ pub struct ConnectParams {
     pub routes: RouteSet,
     /// Split or full. Left out, it is split, as before there was a choice.
     /// Full is refused, as for [`RequestBody::SetTunnel`], when it cannot
-    /// be had safely here.
-    ///
-    /// **Not available yet:** until the service part of full tunnel lands
-    /// (PR 3 of its plan), the service refuses `full` on every OS with
-    /// `route_refused`, "Full tunnel is not available in this version
-    /// yet.", after the routes are checked and before anything is done.
+    /// be had safely here. A refusal for the policy or the operating system
+    /// is the answer to the request, with nothing done. The others are a
+    /// `failed` state with `route_refused`: for the network, before the
+    /// gateway is contacted; for the tunnel, and for a gateway that
+    /// assigned no DNS server, once the tunnel is open and before anything
+    /// is applied. A DNS server that cannot be used is `engine_failed`, as
+    /// in split mode.
     #[serde(default)]
     pub tunnel: TunnelMode,
 }

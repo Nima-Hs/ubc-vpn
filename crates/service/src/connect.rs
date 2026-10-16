@@ -9,10 +9,13 @@ use ubc_vpn_core::routes::{Ipv4Net, LocalConflict, LocalNetworks, check_against_
 use ubc_vpn_core::state::{TunnelInfo, TunnelMode};
 use ubc_vpn_engine::{Assigned, Cancel, Session, TunnelError};
 
-use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns, TUNNEL_MTU};
+use ubc_vpn_platform::{Error, Ipv6Block, PhysicalNetwork, SplitDns, TUNNEL_MTU};
 
+use crate::full;
 use crate::session::Machine;
-use crate::verify::{Confirmed, DNS_UNCONFIRMED, Expected, verify};
+use crate::verify::{
+    CATCH_ALL_UNCONFIRMED, Confirmed, DNS_UNCONFIRMED, Expected, verify, verify_full,
+};
 use crate::words::counted;
 
 /// Why setup stopped: the code for the client and a sentence for the user,
@@ -31,8 +34,9 @@ impl Machine {
             cookie,
             gateway_addr,
             routes: chosen,
-            ..
+            tunnel: mode,
         } = params;
+        let full = mode == TunnelMode::Full;
         let os =
             |what: &'static str| move |e: Error| (ErrorCode::Internal, format!("{what}: {e}."));
         // The gateway is the policy's. The request names only an address.
@@ -51,9 +55,15 @@ impl Machine {
             next_hop: physical.next_hop(),
         };
         check_against_local(&chosen.subnets, gateway_addr, &local).map_err(refused_here)?;
+        // What full mode needs of this network, also before the gateway is
+        // contacted. The rest needs the tunnel.
+        if full {
+            let refused = full::refuse_here(&physical, &*self.dns);
+            refused.map_err(|why| (ErrorCode::RouteRefused, why))?;
+        }
         // Watched from before the tunnel exists, so no change is missed; a
         // change during setup ends the connection as soon as it is up.
-        self.watch_network(&physical)?;
+        self.watch_network(&physical, full)?;
 
         let (ended, events) = mpsc::channel();
         let session = Session {
@@ -97,8 +107,9 @@ impl Machine {
         }
         // What the gateway assigned is judged before anything is applied.
         check_assigned(&assigned, gateway_addr, &physical)?;
-        // Split DNS only when the user chose domains.
-        let servers = match chosen.dns_domains.is_empty() {
+        // DNS servers only for split DNS, when the user chose domains, and
+        // for full mode, which sends every name to them.
+        let servers = match chosen.dns_domains.is_empty() && !full {
             true => Vec::new(),
             false => dns_servers(&assigned.dns, gateway_addr, &physical)?,
         };
@@ -107,6 +118,11 @@ impl Machine {
             (ErrorCode::EngineFailed, why)
         };
         check_against_local(&servers, gateway_addr, &local).map_err(unusable)?;
+        // What full mode needs of the tunnel, before anything is applied.
+        if full {
+            let refused = full::refuse_on(&assigned.interface, &servers, &*self.routes);
+            refused.map_err(|why| (ErrorCode::RouteRefused, why))?;
+        }
         // The engine created the device and set nothing on it. Its address
         // is set as a single host: the netmask the gateway assigned is never
         // used, since an on-link network on the device would route a subnet
@@ -140,22 +156,21 @@ impl Machine {
         let routed = self.routes.add_tunnel_routes(tunnel, &routes);
         routed.map_err(os("The tunnel routes could not be added"))?;
 
+        // Full mode's halves go in once the tunnel's own routes are there.
+        // Its catch-all goes in beside split DNS.
+        if full {
+            self.add_halves(tunnel)?;
+        }
         if let Some(dns) = &dns {
+            self.applied.split_rules = dns.domains.clone();
             let set = self.dns.set_split_dns(tunnel, dns);
             set.map_err(os("Split DNS could not be set"))?;
         }
+        if full {
+            self.set_catch_all()?;
+        }
 
-        let servers: Vec<Ipv4Addr> = self.applied.dns_servers.iter().map(Ipv4Net::addr).collect();
-        let expected = Expected {
-            tunnel,
-            physical: &physical,
-            gateway: gateway_addr,
-            subnets: &chosen.subnets,
-            dns: dns.as_ref(),
-            dns_servers: &servers,
-        };
-        let verified = verify(&*self.routes, &*self.dns, &expected);
-        let confirmed = verified.map_err(|why| (ErrorCode::VerificationFailed, why))?;
+        let checked = self.check_applied(|_| Ok(()))?;
         // Counted, not listed: a long list would not fit in one line, and
         // how many is what someone helping the user asks first.
         let dns_servers = routes.len() - chosen.subnets.len();
@@ -163,25 +178,150 @@ impl Machine {
             0 => "no split DNS".to_string(),
             domains => format!("split DNS for {}", counted(domains, "domain")),
         };
+        let full = match self.applied.ipv6 {
+            None => "",
+            Some(Ipv6Block::Blocked) => ", full tunnel with IPv6 blocked",
+            Some(Ipv6Block::NothingToBlock) => ", full tunnel with no IPv6 to block",
+        };
         let line = format!(
-            "routes and DNS applied and checked: {}, {}, {split}",
+            "routes and DNS applied and checked: {}, {}, {split}{full}",
             counted(chosen.subnets.len(), "subnet route"),
             counted(dns_servers, "DNS server route"),
         );
         self.logs.at(LogLevel::Info, &line);
-        if confirmed == Confirmed::DnsUnobservable {
-            self.logs.warn(DNS_UNCONFIRMED);
-        }
-        Ok(TunnelInfo {
+        self.say_unconfirmed(checked, false);
+        let lost = || (ErrorCode::Internal, "The connection is not up.".to_string());
+        self.tunnel_info().ok_or_else(lost)
+    }
+
+    /// What the tunnel carries now, from what was applied, or nothing when
+    /// no tunnel is open.
+    pub(crate) fn tunnel_info(&self) -> Option<TunnelInfo> {
+        let applied = &self.applied;
+        let assigned = applied.tunnel.as_ref()?.assigned();
+        Some(TunnelInfo {
             interface: assigned.interface.clone(),
             address: assigned.address.to_string(),
-            subnets: chosen.subnets,
-            dns_domains: chosen.dns_domains,
-            // Full mode is refused before anything is done, until the
-            // service can apply it.
-            mode: TunnelMode::Split,
+            subnets: applied.subnets.clone(),
+            dns_domains: applied.dns_domains.clone(),
+            mode: match applied.full {
+                true => TunnelMode::Full,
+                false => TunnelMode::Split,
+            },
         })
     }
+
+    /// Routes the gateway's DNS servers through the tunnel, unless they are
+    /// already: split DNS and full mode's catch-all name them. A connection
+    /// made with no DNS domains, in split mode, has not routed them. They
+    /// are judged as at connect, and recorded before they are added.
+    pub(crate) fn route_dns_servers(&mut self) -> Result<(), Failure> {
+        if !self.applied.dns_servers.is_empty() {
+            return Ok(());
+        }
+        let lost = || (ErrorCode::Internal, "The connection is not up.".to_string());
+        let tunnel = self.applied.tunnel.as_ref().ok_or_else(lost)?;
+        let assigned = tunnel.assigned().clone();
+        let physical = self.applied.physical.clone().ok_or_else(lost)?;
+        let gateway = self.applied.gateway_route.ok_or_else(lost)?;
+        let servers = dns_servers(&assigned.dns, gateway, &physical)?;
+        let local = LocalNetworks {
+            own_addresses: physical.own_addresses(),
+            on_link: physical.on_link(),
+            next_hop: physical.next_hop(),
+        };
+        let unusable = |conflict| {
+            let why = format!("The gateway assigned a DNS server that cannot be used: {conflict}.");
+            (ErrorCode::EngineFailed, why)
+        };
+        check_against_local(&servers, gateway, &local).map_err(unusable)?;
+        // Known before they are added, so teardown removes them.
+        self.applied.routes.extend(&servers);
+        self.applied.dns_servers.clone_from(&servers);
+        let routed = self.routes.add_tunnel_routes(&assigned.interface, &servers);
+        routed.map_err(|e| {
+            let why = format!("The DNS server routes could not be added: {e}.");
+            (ErrorCode::Internal, why)
+        })
+    }
+
+    /// Checks everything applied for the connection, as it is meant to be
+    /// now: what [`verify`] checks, then in full mode what [`verify_full`]
+    /// checks, then `also`. The DNS servers routed through the tunnel are
+    /// handed to every check, so that none takes a server's own host route
+    /// for a subnet's.
+    pub(crate) fn check_applied(
+        &self,
+        also: impl FnOnce(&Expected) -> Result<(), String>,
+    ) -> Result<Checked, Failure> {
+        let lost = || (ErrorCode::Internal, "The connection is not up.".to_string());
+        let applied = &self.applied;
+        let tunnel = applied.tunnel.as_ref().ok_or_else(lost)?;
+        let physical = applied.physical.as_ref().ok_or_else(lost)?;
+        let gateway = applied.gateway_route.ok_or_else(lost)?;
+        let servers: Vec<Ipv4Addr> = applied.dns_servers.iter().map(Ipv4Net::addr).collect();
+        let dns = (!applied.split_rules.is_empty()).then(|| SplitDns {
+            resolvers: servers.clone(),
+            domains: applied.split_rules.clone(),
+        });
+        let expected = Expected {
+            tunnel: &tunnel.assigned().interface,
+            physical,
+            gateway,
+            subnets: &applied.subnets,
+            dns: dns.as_ref(),
+            dns_servers: &servers,
+        };
+        let failed = |why| (ErrorCode::VerificationFailed, why);
+        let split = verify(&*self.routes, &*self.dns, &expected).map_err(failed)?;
+        let catch_all = match applied.ipv6 {
+            Some(ipv6) => {
+                let checked = verify_full(&*self.routes, &*self.dns, &expected, ipv6);
+                Some(checked.map_err(failed)?)
+            }
+            None => None,
+        };
+        also(&expected).map_err(failed)?;
+        Ok(Checked { split, catch_all })
+    }
+
+    /// Says which DNS rules read back exactly but could not be confirmed in
+    /// use. After a change while connected (`changed`), under the repeat
+    /// rule: a change costs the client nothing, so changes asked for again
+    /// and again must not fill the log.
+    pub(crate) fn say_unconfirmed(&self, checked: Checked, changed: bool) {
+        let lines = [
+            (checked.split, SPLIT_AFTER_CHANGE, DNS_UNCONFIRMED),
+            (
+                checked.catch_all.unwrap_or(Confirmed::Fully),
+                CATCH_ALL_AFTER_CHANGE,
+                CATCH_ALL_UNCONFIRMED,
+            ),
+        ];
+        for (confirmed, about, line) in lines {
+            match (confirmed, changed) {
+                (Confirmed::Fully, _) => {}
+                (Confirmed::DnsUnobservable, true) => {
+                    self.logs.at_about(LogLevel::Warn, about, line);
+                }
+                (Confirmed::DnsUnobservable, false) => self.logs.warn(line),
+            }
+        }
+    }
+}
+
+/// What the lines about DNS rules that cannot be confirmed after a change
+/// while connected are about, for the repeat rule.
+const SPLIT_AFTER_CHANGE: &str = "split DNS after a change while connected";
+const CATCH_ALL_AFTER_CHANGE: &str = "DNS for every name after a change while connected";
+
+/// How far the checks of a connection could confirm it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Checked {
+    /// Split DNS.
+    pub(crate) split: Confirmed,
+    /// Full mode's catch-all, in full mode.
+    pub(crate) catch_all: Option<Confirmed>,
 }
 
 /// Why a connect cannot go ahead on the network the machine is on. A gateway

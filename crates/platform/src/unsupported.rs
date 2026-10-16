@@ -86,6 +86,9 @@ impl NetworkEvents for Native {
     fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Subscription> {
         Err(Error::Unsupported)
     }
+    fn reports_ipv6_changes(&self) -> bool {
+        false
+    }
 }
 
 impl Transport for Native {
