@@ -41,6 +41,9 @@ impl Routes for Native {
     fn uses_interface(&self, _dest: Ipv4Addr, _interface: &str) -> Verified {
         Verified::Unknown
     }
+    fn full_tunnel_ipv6(&self, _tunnel: &str) -> Result<Ipv6Block> {
+        Err(Error::Unsupported)
+    }
     fn add_full_tunnel(&self, _tunnel: &str) -> Result<Ipv6Block> {
         Err(Error::Unsupported)
     }

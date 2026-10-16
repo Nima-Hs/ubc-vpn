@@ -324,6 +324,11 @@ impl Routes for Faulty {
         self.fake.uses_interface(dest, interface)
     }
 
+    fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block> {
+        self.reached(Op::FullTunnelIpv6);
+        self.fake.full_tunnel_ipv6(tunnel)
+    }
+
     fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
         self.reached(Op::AddFullTunnel);
         self.fake.add_full_tunnel(tunnel)

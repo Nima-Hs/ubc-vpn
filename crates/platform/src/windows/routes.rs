@@ -500,6 +500,10 @@ impl Routes for WinRoutes {
 
     // Full mode is not written for Windows yet: it is refused, and nothing
     // of it can have been added, so there is nothing to remove.
+    fn full_tunnel_ipv6(&self, _tunnel: &str) -> Result<Ipv6Block> {
+        Err(Error::Unsupported)
+    }
+
     fn add_full_tunnel(&self, _tunnel: &str) -> Result<Ipv6Block> {
         Err(Error::Unsupported)
     }

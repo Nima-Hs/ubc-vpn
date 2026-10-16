@@ -58,6 +58,8 @@ pub enum Op {
     RemoveFullTunnel,
     /// [`Routes::foreign_full_tunnel`].
     ForeignFullTunnel,
+    /// [`Routes::full_tunnel_ipv6`].
+    FullTunnelIpv6,
     /// [`Routes::uses_interface_v6`].
     VerifyRouteV6,
     /// [`Dns::set_catch_all_dns`].
@@ -101,10 +103,8 @@ pub struct Applied {
 pub struct FullTunnel {
     /// The tunnel they go through.
     pub tunnel: String,
-    /// What was done about IPv6. `None` when only the IPv4 halves are there:
-    /// IPv6 could not be blocked and the add was refused, leaving them for
-    /// the caller to remove.
-    pub ipv6: Option<Ipv6Block>,
+    /// What was done about IPv6.
+    pub ipv6: Ipv6Block,
 }
 
 /// An IPv6 address on the fake machine's local network, for tests that ask
@@ -232,6 +232,17 @@ impl State {
             .chain(halves)
             .chain(self.foreign.iter().cloned())
             .collect()
+    }
+
+    /// What full mode can do about IPv6 here, as the contract says: block it
+    /// when the tunnel takes IPv6, nothing to block when there is no leak
+    /// path either, and a refusal otherwise.
+    fn ipv6_decision(&self) -> Result<Ipv6Block> {
+        match (self.tunnel_ipv6, self.physical_ipv6) {
+            (true, _) => Ok(Ipv6Block::Blocked),
+            (false, false) => Ok(Ipv6Block::NothingToBlock),
+            (false, true) => Err(Error::Unsupported),
+        }
     }
 
     fn route_to(&self, net: Ipv4Net, interface: &str) -> Present {
@@ -403,9 +414,10 @@ impl Fake {
     }
 
     /// Whether the tunnel device has IPv6, so that [`Routes::add_full_tunnel`]
-    /// can add the IPv6 halves on it, and whether the physical network has an
-    /// IPv6 route other than link-local. Both are true until a test says
-    /// otherwise.
+    /// can add the IPv6 halves on it, and whether the machine has an IPv6
+    /// leak path (see [`Routes::full_tunnel_ipv6`]), played by the physical
+    /// network's IPv6 default route. Both are true until a test says
+    /// otherwise. Tell a subscriber with [`NetworkEvent::Ipv6Changed`].
     pub fn set_ipv6(&self, tunnel: bool, physical: bool) {
         let mut state = self.state();
         state.tunnel_ipv6 = tunnel;
@@ -652,31 +664,34 @@ impl Routes for Fake {
         }
     }
 
-    /// Adds the IPv4 halves, then the IPv6 ones, as the contract says. A
-    /// half through another interface fails with [`Error::AlreadyExists`]
-    /// before anything is added; where an OS would have added the first
-    /// half, the fake adds none, which only makes less to remove.
+    fn full_tunnel_ipv6(&self, _tunnel: &str) -> Result<Ipv6Block> {
+        let (state, outcome) = self.start(Op::FullTunnelIpv6);
+        outcome?;
+        state.ipv6_decision()
+    }
+
+    /// Decides about IPv6 first, as the contract says, and refuses having
+    /// added nothing. Then adds the halves. A half through another
+    /// interface fails with [`Error::AlreadyExists`] before anything is
+    /// added; where an OS would have added the first half, the fake adds
+    /// none, which only makes less to remove.
     fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
         let (mut state, outcome) = self.start(Op::AddFullTunnel);
         outcome?;
         if state.absent.contains(tunnel) {
             return Err(Error::NotFound);
         }
+        let ipv6 = state.ipv6_decision()?;
         let elsewhere = |half| matches!(state.route_to(half, tunnel), Present::Elsewhere);
         if v4_halves().into_iter().any(elsewhere) {
             return Err(Error::AlreadyExists);
         }
-        let ipv6 = match (state.tunnel_ipv6, state.physical_ipv6) {
-            (true, _) => Some(Ipv6Block::Blocked),
-            (false, false) => Some(Ipv6Block::NothingToBlock),
-            (false, true) => None,
-        };
         let full = FullTunnel {
             tunnel: tunnel.to_string(),
             ipv6,
         };
         state.applied.full_tunnel = Some(full);
-        ipv6.ok_or(Error::Unsupported)
+        Ok(ipv6)
     }
 
     fn remove_full_tunnel(&self, tunnel: &str) -> Result<()> {
@@ -716,7 +731,7 @@ impl Routes for Fake {
             .applied
             .full_tunnel
             .as_ref()
-            .filter(|full| full.ipv6 == Some(Ipv6Block::Blocked));
+            .filter(|full| full.ipv6 == Ipv6Block::Blocked);
         let used = match (link_local, blocked) {
             (true, _) => Some(PHYSICAL_INTERFACE),
             (false, Some(full)) => Some(full.tunnel.as_str()),
@@ -1054,25 +1069,30 @@ mod tests {
     }
 
     // Security rule: IPv6 is blocked in full mode, or there is none to
-    // block. A tunnel with no IPv6 on a machine whose network has IPv6 is a
-    // refusal, which keeps the IPv4 halves for the caller to remove; with no
-    // IPv6 anywhere it goes ahead, and says so.
+    // block. What can be done is read first, so a refusal (a tunnel with no
+    // IPv6 on a machine with an IPv6 leak path) comes before anything is
+    // added; with no IPv6 anywhere it goes ahead, and says so.
     #[test]
     fn ipv6_is_blocked_or_absent_never_left_open() {
         let fake = Fake::new();
+        assert_eq!(fake.full_tunnel_ipv6(TUNNEL), Ok(Ipv6Block::Blocked));
         fake.set_ipv6(false, true);
+        assert_eq!(fake.full_tunnel_ipv6(TUNNEL), Err(Error::Unsupported));
         assert_eq!(fake.add_full_tunnel(TUNNEL), Err(Error::Unsupported));
-        let left = fake.applied().full_tunnel.unwrap();
-        assert_eq!(left.ipv6, None);
+        assert_eq!(fake.applied().full_tunnel, None, "added before refusing");
         let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
-        assert_eq!(fake.uses_interface_v6(v6, TUNNEL), Verified::No);
-        fake.remove_full_tunnel(TUNNEL).unwrap();
-        assert_eq!(fake.applied().full_tunnel, None);
+        let elsewhere = Ipv4Addr::new(1, 0, 0, 1);
+        assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::No);
 
         fake.set_ipv6(false, false);
+        assert_eq!(fake.full_tunnel_ipv6(TUNNEL), Ok(Ipv6Block::NothingToBlock));
         assert_eq!(fake.add_full_tunnel(TUNNEL), Ok(Ipv6Block::NothingToBlock));
+        assert_eq!(fake.uses_interface(elsewhere, TUNNEL), Verified::Yes);
         assert_eq!(fake.uses_interface_v6(v6, TUNNEL), Verified::No);
         assert_eq!(fake.uses_interface_v6(v6, PHYSICAL_INTERFACE), Verified::No);
+        // A snapshot: when a leak path appears later, the check says so.
+        fake.set_ipv6(false, true);
+        assert_eq!(fake.full_tunnel_ipv6(TUNNEL), Err(Error::Unsupported));
     }
 
     // Another program's halves are a conflict: it is seen before anything
@@ -1351,6 +1371,9 @@ mod tests {
             }
             fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
                 self.0.uses_interface(dest, interface)
+            }
+            fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block> {
+                self.0.full_tunnel_ipv6(tunnel)
             }
             fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
                 self.0.add_full_tunnel(tunnel)

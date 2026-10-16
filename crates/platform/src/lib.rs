@@ -251,17 +251,18 @@ impl PhysicalNetwork {
     }
 }
 
-/// What [`Routes::add_full_tunnel`] did about IPv6.
+/// What full mode does about IPv6: see [`Routes::full_tunnel_ipv6`] and
+/// [`Routes::add_full_tunnel`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ipv6Block {
-    /// The IPv6 halves were added through the tunnel, which has no IPv6
-    /// address: every IPv6 connection now fails at once, and programs fall
-    /// back to IPv4.
+    /// The IPv6 halves go through the tunnel, which has no IPv6 address:
+    /// every IPv6 connection fails at once, and programs fall back to IPv4.
     Blocked,
-    /// The tunnel device has no IPv6 at all, so the IPv6 halves could not be
-    /// added; and no other interface had an IPv6 route other than
-    /// link-local, so there is no IPv6 to block. Nothing can leak. This is
-    /// not a refusal: the caller goes on.
+    /// The tunnel device has no IPv6 at all, so the IPv6 halves cannot be
+    /// added; and there is no IPv6 leak path (see
+    /// [`Routes::full_tunnel_ipv6`]), so there is no IPv6 to block. Nothing
+    /// can leak, as of when it was read. This is not a refusal: the caller
+    /// goes on, and checks again at every [`NetworkEvent::Ipv6Changed`].
     NothingToBlock,
 }
 
@@ -316,6 +317,13 @@ pub const FULL_TUNNEL_V6: [&str; 2] = ["::/1", "8000::/1"];
 /// the time the machine was started, and rows from another start are
 /// discarded without removing anything: routes do not outlive a restart, and
 /// an identical one found later is somebody else's.
+///
+/// Full mode's IPv6 halves are journalled like the rest, in rows of their
+/// own. A version from before full mode cannot read those rows, so a
+/// downgrade in the same boot as a full-mode connection would find its
+/// journal unreadable and refuse to remove anything. That is accepted
+/// before the first release; later, the journal's form must say which rows
+/// a version may skip.
 ///
 /// One case is accepted: a crash between writing a row and adding the route,
 /// followed in the same boot by somebody else adding the identical route,
@@ -393,31 +401,48 @@ pub trait Routes: Send + Sync {
     /// whether that is `interface`.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified;
 
+    /// What full mode can do about IPv6 on this machine now, read-only, for
+    /// the service to refuse before it changes anything, as with
+    /// [`Routes::foreign_full_tunnel`]:
+    ///
+    /// - [`Ipv6Block::Blocked`]: the tunnel device takes IPv6 routes, so the
+    ///   IPv6 halves can block IPv6.
+    /// - [`Ipv6Block::NothingToBlock`]: the tunnel device has no IPv6 (on
+    ///   Windows, IPv6 is not bound to the adapter), and there is no IPv6
+    ///   leak path, so there is nothing to block.
+    /// - `Err(`[`Error::Unsupported`]`)`, a refusal: the tunnel device has no
+    ///   IPv6, and there is an IPv6 leak path that could not be blocked.
+    ///
+    /// **An IPv6 leak path** is any unicast IPv6 route on an interface other
+    /// than the tunnel, whether that interface is up or down (a down one may
+    /// come up), except `fe80::/10` (link-local), `::1/128` (loopback) and
+    /// `ff00::/8` (multicast). Teredo's `2001::/32` counts like any other.
+    ///
+    /// [`Ipv6Block::NothingToBlock`] is a snapshot. In full mode the
+    /// service checks again at every [`NetworkEvent::Ipv6Changed`], and
+    /// fails closed when a leak path has appeared.
+    fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block>;
+
     /// Full mode: routes every IPv4 address, and blocks every IPv6 address,
     /// through the tunnel named `tunnel`. It adds [`FULL_TUNNEL_V4`] and
     /// [`FULL_TUNNEL_V6`] on the tunnel with no next hop, and never touches
     /// a default route. The tunnel has no IPv6 address, so the IPv6 halves
     /// make IPv6 fail at once rather than leave by the physical network.
     ///
+    /// It first decides about IPv6 exactly as [`Routes::full_tunnel_ipv6`]
+    /// does, and on a refusal fails with [`Error::Unsupported`] having added
+    /// nothing. With [`Ipv6Block::NothingToBlock`] it adds the IPv4 halves
+    /// only.
+    ///
     /// Exclusive adds, journalled, as "Which routes are ours" says: a half
     /// already routed through another interface or next hop, such as
     /// another VPN's, fails with [`Error::AlreadyExists`]. The IPv4 halves
-    /// come first. On error some may have been added:
-    /// [`Routes::remove_full_tunnel`] or [`Routes::remove_all`] removes
-    /// them.
+    /// come first. On an error after the IPv6 decision some may have been
+    /// added: [`Routes::remove_full_tunnel`] or [`Routes::remove_all`]
+    /// removes them.
     ///
-    /// When the tunnel device has no IPv6 at all, the IPv6 halves cannot be
-    /// added (on Windows the add fails with "not found"). Then:
-    ///
-    /// - if any other interface has an IPv6 route other than link-local
-    ///   (`fe80::/10`), IPv6 could leave by it: this fails with
-    ///   [`Error::Unsupported`], a refusal, having kept the IPv4 halves
-    ///   for the caller to remove;
-    /// - otherwise there is no IPv6 to leak, and this succeeds with
-    ///   [`Ipv6Block::NothingToBlock`], which is not a refusal.
-    ///
-    /// Otherwise it succeeds with [`Ipv6Block::Blocked`]. An OS that cannot
-    /// do this at all fails with [`Error::Unsupported`] and adds nothing.
+    /// Answers what was done about IPv6. An OS that cannot do this at all
+    /// fails with [`Error::Unsupported`] and adds nothing.
     fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block>;
 
     /// Removes the four halves where this product added them, and nothing
@@ -438,8 +463,12 @@ pub trait Routes: Send + Sync {
     /// It is the longest-prefix match over the OS's IPv6 forwarding table,
     /// not a question to the OS's own best-route lookup: on Windows that
     /// lookup fails for a destination the IPv6 halves cover, since the
-    /// tunnel has no IPv6 source address. Answers `No` when no route
-    /// matches, and `Unknown` when the table cannot be read.
+    /// tunnel has no IPv6 source address.
+    ///
+    /// It fails closed on a tie: `Yes` only when every route of the longest
+    /// matching prefix length goes through `interface`. `No` when any of
+    /// them goes elsewhere, or when no route matches. `Unknown` when the
+    /// table cannot be read.
     fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified;
 }
 
@@ -578,6 +607,13 @@ pub enum NetworkEvent {
     Sleeping,
     /// The system woke up. Best effort, like [`NetworkEvent::Sleeping`].
     Woke,
+    /// An IPv6 route or address changed on some interface other than the
+    /// tunnel, whatever the physical network: one may now be an IPv6 leak
+    /// path (see [`Routes::full_tunnel_ipv6`]). In full mode with
+    /// [`Ipv6Block::NothingToBlock`], the service checks again, and fails
+    /// closed when there is one. It may be sent when nothing that matters
+    /// changed: the check decides.
+    Ipv6Changed,
 }
 
 /// Notifications pushed by the OS. There is no way to poll.
@@ -588,6 +624,12 @@ pub trait NetworkEvents: Send + Sync {
     /// [`NetworkEvent::PhysicalChanged`] is sent only for a change to
     /// `watching` itself. It is never sent for a route this product added or
     /// removed, nor for anything that happens to the tunnel interface.
+    ///
+    /// [`NetworkEvent::Ipv6Changed`] is sent for an IPv6 route or address
+    /// added, changed or removed on any interface but the tunnel, so that
+    /// full mode's "nothing to block" is never older than the last such
+    /// change. Windows sends it from the same notifications it already
+    /// watches (routes and addresses) for IPv6 as well as IPv4.
     fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription>;
 }
 
@@ -1439,6 +1481,7 @@ mod tests {
         ];
         assert_eq!(results, [const { Err(Error::Unsupported) }; 11]);
         assert_eq!(Native.add_full_tunnel("tun0").err(), unsupported);
+        assert_eq!(Native.full_tunnel_ipv6("tun0").err(), unsupported);
         assert_eq!(Native.foreign_full_tunnel("tun0").err(), unsupported);
         assert_eq!(Native.foreign_catch_all().err(), unsupported);
         assert_eq!(Native.uses_interface(gateway, "tun0"), Verified::Unknown);
@@ -1487,6 +1530,10 @@ mod tests {
             let unsupported = Some(Error::Unsupported);
             assert_eq!(
                 native.routes.add_full_tunnel("ubc-vpn-no-such0").err(),
+                unsupported
+            );
+            assert_eq!(
+                native.routes.full_tunnel_ipv6("ubc-vpn-no-such0").err(),
                 unsupported
             );
             assert_eq!(
