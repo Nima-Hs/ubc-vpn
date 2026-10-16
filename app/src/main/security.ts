@@ -278,7 +278,10 @@ export interface SessionParts {
     protocol: Pick<Protocol, "handle">;
     session: Pick<
         Session,
-        "webRequest" | "setPermissionRequestHandler" | "setPermissionCheckHandler"
+        | "webRequest"
+        | "setPermissionRequestHandler"
+        | "setPermissionCheckHandler"
+        | "setSpellCheckerEnabled"
     >;
 }
 
@@ -319,6 +322,14 @@ export function secureSession(
         callback(false);
     });
     session.setPermissionCheckHandler(() => false);
+
+    // Nothing typed is kept or looked at. Electron has no password manager
+    // and no form autofill to turn off (they are Chrome's, not Chromium's
+    // content layer), and every field says `autocomplete="off"`. The
+    // spellchecker, which reads what is typed, is off for the whole session
+    // as well as for the window. The end-to-end test types a password and
+    // then searches the profile for it.
+    session.setSpellCheckerEnabled(false);
 
     app.on("web-contents-created", (_event, contents) => confineContents(contents, entry));
 

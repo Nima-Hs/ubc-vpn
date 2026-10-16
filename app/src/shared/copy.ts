@@ -335,6 +335,30 @@ export function describePrompt(prompt: Pick<LoginPrompt, "kind">): {
     return { ...PROMPTS[prompt.kind], submit: "Continue" };
 }
 
+/**
+ * The button that shows or hides what is typed in a hidden answer, named for
+ * what pressing it does. `null` for a question whose answer is shown anyway.
+ */
+export function describeReveal(kind: PromptKind, shown: boolean): { label: string } | null {
+    const thing = kind === "password" ? "password" : kind === "code" ? "code" : null;
+    if (thing === null) {
+        return null;
+    }
+    return { label: `${shown ? "Hide" : "Show"} ${thing}` };
+}
+
+/** What can happen to a hidden answer that the user has shown. */
+export type RevealEvent = "toggle" | "submit" | "blur";
+
+/**
+ * Whether a hidden answer is shown after `event`. It starts hidden; only the
+ * button shows it, and sending it or leaving the window hides it again, so it
+ * is never left on screen for someone else to read.
+ */
+export function revealAfter(shown: boolean, event: RevealEvent): boolean {
+    return event === "toggle" ? !shown : false;
+}
+
 const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
     wrong_password: {
         title: "Login refused",
