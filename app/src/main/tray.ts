@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { LinkState } from "@shared/api";
 import { describe } from "@shared/copy";
+import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import { app, type BrowserWindow, Menu, type NativeImage, nativeImage, Tray } from "electron";
 import { appIcon } from "./icon/designs";
 import { encodePng } from "./icon/formats";
@@ -15,14 +16,9 @@ import {
     trayIconPng,
     trayKind,
 } from "./tray-icon";
+import { type TrayActions, trayMenu } from "./tray-menu";
 
-export interface TrayActions {
-    showWindow(): void;
-    connect(): void;
-    disconnect(): void;
-    retry(): void;
-    quit(): void;
-}
+export type { TrayActions } from "./tray-menu";
 
 const mac = process.platform === "darwin";
 
@@ -129,7 +125,12 @@ export function createTray(
     actions: TrayActions,
     initial: LinkState,
     icons: StateIcons,
-): { update(state: LinkState): void; destroy(): void } | null {
+): {
+    update(state: LinkState): void;
+    /** The profiles as they now are, for the menu's list of them. */
+    setProfiles(view: ProfilesView): void;
+    destroy(): void;
+} | null {
     let tray: Tray;
     try {
         tray = new Tray(trayImage(trayKind(initial)));
@@ -149,32 +150,15 @@ export function createTray(
     };
     const stopPainting = icons.add((kind, frame) => tray.setImage(imageFor(kind, frame)));
 
-    const update = (state: LinkState) => {
-        const copy = describe(state);
-        tray.setToolTip(`UBC VPN: ${copy.title}`);
-        const run = {
-            connect: actions.connect,
-            disconnect: actions.disconnect,
-            retry: actions.retry,
-        };
-        tray.setContextMenu(
-            Menu.buildFromTemplate([
-                { label: copy.title, enabled: false },
-                { type: "separator" },
-                { label: "Show UBC VPN", click: actions.showWindow },
-                ...(copy.action === null
-                    ? []
-                    : [
-                          {
-                              label: copy.action.label,
-                              enabled: !copy.working,
-                              click: run[copy.action.kind],
-                          },
-                      ]),
-                { type: "separator" },
-                { label: "Quit UBC VPN", click: actions.quit },
-            ]),
-        );
+    let state = initial;
+    let profiles: ProfilesView | null = null;
+    const rebuild = () => {
+        tray.setToolTip(`UBC VPN: ${describe(state).title}`);
+        tray.setContextMenu(Menu.buildFromTemplate(trayMenu(state, profiles, actions)));
+    };
+    const update = (next: LinkState) => {
+        state = next;
+        rebuild();
     };
 
     // On Windows and Linux a click brings the window forward; macOS opens the
@@ -187,6 +171,10 @@ export function createTray(
     update(initial);
     return {
         update,
+        setProfiles: (view) => {
+            profiles = view;
+            rebuild();
+        },
         destroy: () => {
             stopPainting();
             tray.destroy();

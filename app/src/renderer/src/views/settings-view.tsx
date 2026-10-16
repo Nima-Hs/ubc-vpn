@@ -3,73 +3,53 @@ import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { StartMode } from "@shared/protocol/StartMode";
 import { describeProfilesError, SETTINGS, whereKept } from "@shared/settings-copy";
 import { KeyRound } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { ProfileList } from "@/components/profile-list";
 import { Button } from "@/components/ui/button";
 import { ChoiceList } from "@/components/ui/choice-list";
 import { Confirm } from "@/components/ui/confirm";
 import { Panel } from "@/components/ui/panel";
 import { Switch } from "@/components/ui/switch";
 import { Heading, Subheading, Text } from "@/components/ui/text";
+import { useProfiles } from "@/lib/profiles";
 import { api } from "@/lib/store";
-
-type Held =
-    | { state: "loading" }
-    | { state: "failed"; error: ProfilesError }
-    | { state: "ready"; view: ProfilesView };
 
 const START_ORDER: readonly StartMode[] = ["off", "window", "tray"];
 
 /**
- * The Settings screen: how UBC VPN starts, whether it connects by itself,
- * and the saved password. Every change is saved at once by the command-line
- * client; the screen shows what it saved, never what it hoped to.
+ * The Settings screen: the profiles, how UBC VPN starts, whether it connects
+ * by itself, and the saved password. Every change is saved at once by the
+ * command-line client; the screen shows what it saved, never what it hoped
+ * to, as the main process tells it after every change.
  */
 export default function SettingsView() {
-    const [held, setHeld] = useState<Held>({ state: "loading" });
-    const [attempt, setAttempt] = useState(0);
+    const { held, reload } = useProfiles();
     /** A change under way, so nothing else is pressed meanwhile. */
     const [busy, setBusy] = useState(false);
-    /** Why the last change was not made, when it was not. */
+    /** Why the last change was not made, when it was not and is not said elsewhere. */
     const [refused, setRefused] = useState<ProfilesError | null>(null);
     /** The question before a saved password is forgotten. */
     const [asking, setAsking] = useState(false);
     /** Said once a saved password is forgotten. */
     const [forgotten, setForgotten] = useState(false);
 
-    useEffect(() => {
-        const profiles = api.profiles;
-        if (profiles === undefined) {
-            return;
-        }
-        let current = true;
-        setHeld({ state: "loading" });
-        void profiles.list().then((result) => {
-            if (current) {
-                setHeld(
-                    result.ok
-                        ? { state: "ready", view: result.value }
-                        : { state: "failed", error: result.error },
-                );
-            }
-        });
-        return () => {
-            current = false;
-        };
-    }, [attempt]);
-
-    const change = async (call: () => Promise<ProfilesResult> | undefined) => {
+    /** Runs a change and gives back why it was refused, or `null` once it is saved. */
+    const attempt = async (
+        call: () => Promise<ProfilesResult> | undefined,
+    ): Promise<ProfilesError | null> => {
         setBusy(true);
         setRefused(null);
         setForgotten(false);
         const result = (await call()) ?? { ok: false, error: "unavailable" };
         setBusy(false);
+        return result.ok ? null : result.error;
+    };
+    /** A change whose refusal is said at the foot of the screen. */
+    const change = async (call: () => Promise<ProfilesResult> | undefined) => {
+        const error = await attempt(call);
         setAsking(false);
-        if (result.ok) {
-            setHeld({ state: "ready", view: result.value });
-        } else {
-            setRefused(result.error);
-        }
-        return result.ok;
+        setRefused(error);
+        return error === null;
     };
 
     return (
@@ -91,11 +71,15 @@ export default function SettingsView() {
                         <Text>{describeProfilesError(held.error, "read")}</Text>
                     </Panel>
                     <div className="flex">
-                        <Button size="sm" onClick={() => setAttempt((before) => before + 1)}>
+                        <Button size="sm" onClick={reload}>
                             {SETTINGS.tryAgain}
                         </Button>
                     </div>
                 </div>
+            )}
+
+            {held.state === "ready" && (
+                <ProfileList view={held.view} busy={busy} change={attempt} />
             )}
 
             {held.state === "ready" && (

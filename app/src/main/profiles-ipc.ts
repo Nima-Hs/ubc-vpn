@@ -2,16 +2,53 @@
 // checked (`profiles-checks.ts`) before anything else happens. Only in builds
 // that have the Settings screen: see `__SETTINGS__`.
 
-import { PROFILES_IPC } from "@shared/profiles";
+import { PROFILES_IPC, type ProfilesResult } from "@shared/profiles";
+import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { BrowserWindow } from "electron";
 import type { ProfilesService } from "./channel/profiles";
 import { handleFromInterface } from "./ipc";
-import { takeProfile, takeStartup } from "./profiles-checks";
+import {
+    takeId,
+    takeName,
+    takeProfile,
+    takeRename,
+    takeStartup,
+    takeUpdate,
+} from "./profiles-checks";
 import { type LoginItem, loginItemFor } from "./startup";
 
 /** Where the choice of starting at sign-in goes: the OS, or a record of it. */
 export interface LoginItems {
     apply(item: LoginItem): void;
+}
+
+/**
+ * The profiles service, telling `onView` every view it answers with, so
+ * the window and the tray menu always show the profiles as they are, after
+ * a change made in either.
+ */
+export function watchProfiles(
+    profiles: ProfilesService,
+    onView: (view: ProfilesView) => void,
+): ProfilesService {
+    const tell = async (result: Promise<ProfilesResult>): Promise<ProfilesResult> => {
+        const answer = await result;
+        if (answer.ok) {
+            onView(answer.value);
+        }
+        return answer;
+    };
+    return {
+        list: () => tell(profiles.list()),
+        setStartup: (start, autoConnect) => tell(profiles.setStartup(start, autoConnect)),
+        forgetPassword: (id) => tell(profiles.forgetPassword(id)),
+        create: (name) => tell(profiles.create(name)),
+        rename: (id, name) => tell(profiles.rename(id, name)),
+        update: (id, change) => tell(profiles.update(id, change)),
+        remove: (id) => tell(profiles.remove(id)),
+        switchTo: (id) => tell(profiles.switchTo(id)),
+        stop: () => profiles.stop(),
+    };
 }
 
 export function registerProfiles(
@@ -33,5 +70,20 @@ export function registerProfiles(
     });
     handleFromInterface(window, devServerUrl, PROFILES_IPC.forgetPassword, (...args) =>
         profiles.forgetPassword(takeProfile(args)),
+    );
+    handleFromInterface(window, devServerUrl, PROFILES_IPC.create, (...args) =>
+        profiles.create(takeName(args)),
+    );
+    handleFromInterface(window, devServerUrl, PROFILES_IPC.rename, (...args) =>
+        profiles.rename(...takeRename(args)),
+    );
+    handleFromInterface(window, devServerUrl, PROFILES_IPC.update, (...args) =>
+        profiles.update(...takeUpdate(args)),
+    );
+    handleFromInterface(window, devServerUrl, PROFILES_IPC.remove, (...args) =>
+        profiles.remove(takeId(args)),
+    );
+    handleFromInterface(window, devServerUrl, PROFILES_IPC.switchTo, (...args) =>
+        profiles.switchTo(takeId(args)),
     );
 }

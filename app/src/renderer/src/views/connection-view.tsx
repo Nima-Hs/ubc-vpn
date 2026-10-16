@@ -6,6 +6,7 @@ import {
     loginHasScreen,
 } from "@shared/copy";
 import { useEffect, useRef } from "react";
+import { ProfileSwitcher } from "@/components/profile-switcher";
 import { TunnelDetails } from "@/components/tunnel-details";
 import { TunnelDiagram } from "@/components/tunnel-diagram";
 import { Button } from "@/components/ui/button";
@@ -70,6 +71,9 @@ export function ConnectionView() {
                 </div>
                 <Text tone="secondary">{copy.body}</Text>
             </section>
+
+            {/* Which profile Connect uses, when there is more than one. */}
+            <ProfileSwitcher />
 
             {/* Read out, politely, whenever the state or the notice changes. */}
             <p role="status" className="sr-only">

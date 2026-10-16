@@ -9,6 +9,7 @@ import {
     revealAfter,
 } from "@shared/copy";
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import { SavePasswordChoice } from "@/components/save-password-choice";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
@@ -102,6 +103,8 @@ function Prompt({ prompt }: { prompt: LoginPrompt }) {
                     onInput={(event) => setEmpty(event.currentTarget.value === "")}
                     className="shrink-0"
                 />
+                {/* Whether the profile in use keeps its password, after this login works. */}
+                {prompt.kind === "password" && <SavePasswordChoice />}
             </div>
 
             <div className="flex shrink-0 flex-col gap-2">

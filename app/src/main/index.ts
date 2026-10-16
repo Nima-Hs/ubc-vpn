@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { DEMO_IPC, type LinkState } from "@shared/api";
-import { DEMO_PROFILES_IPC } from "@shared/profiles";
+import { DEMO_PROFILES_IPC, PROFILES_IPC } from "@shared/profiles";
+import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import { app, type BrowserWindow, clipboard, Menu, protocol, session } from "electron";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
 import { ProfilesRunner, type ProfilesService } from "./channel/profiles";
@@ -211,13 +212,24 @@ async function start(): Promise<void> {
         });
     }
     registerDemo?.(window);
-    // The Settings screen, asking the command-line client (#208); a demo
-    // build asks its fake instead. Only an installed app ever asks the OS to
-    // start it at sign-in; anything else records the request instead.
+    // The Settings screen and the profiles. Every view of the profiles that a
+    // change answers with goes to the window and to the tray menu, so both
+    // show them as they are, whichever made the change. Only an installed
+    // app ever asks the OS to start it at sign-in; anything else records the
+    // request instead.
     let profiles: ProfilesService | undefined;
+    let onProfiles: (view: ProfilesView) => void = () => {};
     if (__SETTINGS__) {
-        profiles = demoProfiles ?? new ProfilesRunner(settingsCommand(app, process));
-        const { registerProfiles } = await import("./profiles-ipc");
+        const { registerProfiles, watchProfiles } = await import("./profiles-ipc");
+        profiles = watchProfiles(
+            demoProfiles ?? new ProfilesRunner(settingsCommand(app, process)),
+            (view) => {
+                if (!window.isDestroyed()) {
+                    window.webContents.send(PROFILES_IPC.changed, view);
+                }
+                onProfiles(view);
+            },
+        );
         registerProfiles(window, devServerUrl, profiles, loginItems, process.platform);
     }
 
@@ -250,10 +262,13 @@ async function start(): Promise<void> {
                   disconnect: () => void controller.disconnect().then(showIfNotice),
                   retry: () => controller.retry(),
                   quit,
+                  // The tray's profile list: the same change as Settings makes.
+                  switchProfile: (id) => void profiles?.switchTo(id),
               },
               controller.getSnapshot().state,
               icons,
           );
+    onProfiles = (view) => tray?.setProfiles(view);
     function showIfNotice(): void {
         if (controller.getSnapshot().notice !== null) {
             show();
