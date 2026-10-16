@@ -66,6 +66,27 @@ impl Rig {
 
 /// Makes a settings folder as this program would: on Unix for the user
 /// alone, whatever the umask of whoever runs the tests.
+/// A settings file's text as the settings were before profiles: the active
+/// profile's username (when it has one), routes and `save_password` (when
+/// set), beside the file's other top-level fields. So a test of what a
+/// command keeps and changes reads the same whichever version wrote it.
+pub(crate) fn as_v1(text: &str) -> serde_json::Value {
+    let profiles = ubc_vpn_core::profiles::Profiles::read(Some(text))
+        .expect("readable settings")
+        .profiles;
+    let active = profiles.v1_view();
+    let mut v1 = profiles.other.clone();
+    if let Some(name) = active.username {
+        v1.insert("username".to_string(), name.into());
+    }
+    let routes = serde_json::to_value(&active.routes).unwrap();
+    v1.insert("routes".to_string(), routes);
+    if active.save_password {
+        v1.insert("save_password".to_string(), true.into());
+    }
+    serde_json::Value::Object(v1)
+}
+
 pub(crate) fn settings_folder(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).unwrap();
     #[cfg(unix)]

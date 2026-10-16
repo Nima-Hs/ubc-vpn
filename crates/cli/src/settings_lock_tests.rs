@@ -41,7 +41,7 @@ impl Folder {
     }
 
     fn value(&self) -> serde_json::Value {
-        serde_json::from_str(&self.text()).unwrap()
+        crate::tests::as_v1(&self.text())
     }
 
     /// Runs a settings command here, on this thread.
