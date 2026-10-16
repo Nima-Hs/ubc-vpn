@@ -609,16 +609,16 @@ impl Routes for WinRoutes {
             Err(Error::NotFound) => None,
             Err(error) => return Err(error),
         };
-        let (v4_halves, v6_halves) = halves();
         let mut table = routes_of(AF_INET)?;
         table.extend(routes_of(AF_INET6)?);
-        Ok(table.iter().any(|route| {
-            let half = prefix_of(route)
-                .is_some_and(|dest| v4_halves.contains(&dest) || v6_halves.contains(&dest));
-            let ours = Some(value(&route.InterfaceLuid)) == tunnel
-                && ip_of(&route.NextHop).is_some_and(|hop| hop.is_unspecified());
-            half && !ours
-        }))
+        let table: Vec<_> = table
+            .iter()
+            .filter_map(|route| {
+                let hop = ip_of(&route.NextHop)?;
+                Some((prefix_of(route)?, value(&route.InterfaceLuid), hop))
+            })
+            .collect();
+        Ok(foreign_halves(&table, tunnel))
     }
 
     fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified {
@@ -658,6 +658,20 @@ fn longest_match_through(table: &[(Prefix, u64)], dest: IpAddr, wanted: u64) -> 
         true => Verified::Yes,
         false => Verified::No,
     }
+}
+
+/// Whether `table` (destination, interface, next hop) has a half of full
+/// mode that is not ours on the tunnel `tunnel`: exactly `0.0.0.0/1`,
+/// `128.0.0.0/1`, `::/1` or `8000::/1`, through another interface or
+/// through a next hop. Any other route, such as a virtual adapter's own
+/// network, is not one, however it is configured.
+fn foreign_halves(table: &[(Prefix, u64, IpAddr)], tunnel: Option<u64>) -> bool {
+    let (v4_halves, v6_halves) = halves();
+    table.iter().any(|(dest, luid, hop)| {
+        let half = v4_halves.contains(dest) || v6_halves.contains(dest);
+        let ours = Some(*luid) == tunnel && hop.is_unspecified();
+        half && !ours
+    })
 }
 
 /// The halves of full mode, IPv4 and IPv6.
@@ -701,10 +715,20 @@ fn has_ipv6(luid: u64) -> Result<bool> {
 /// (`ff00::/8`), which every interface with IPv6 has and none carries
 /// traffic away. Teredo's `2001::/32` counts.
 fn leak_path(tunnel: u64) -> Result<bool> {
-    Ok(routes_of(AF_INET6)?.iter().any(|route| {
-        let dest = prefix_of(route);
-        value(&route.InterfaceLuid) != tunnel && dest.is_some_and(could_leak)
-    }))
+    let table: Vec<_> = routes_of(AF_INET6)?
+        .iter()
+        .filter_map(|route| Some((prefix_of(route)?, value(&route.InterfaceLuid))))
+        .collect();
+    Ok(leaks(&table, tunnel))
+}
+
+/// Whether `table` (destination, interface) has a route IPv6 could leave
+/// by on an interface other than `tunnel` ([`could_leak`]). An IPv4 route
+/// is never one.
+fn leaks(table: &[(Prefix, u64)], tunnel: u64) -> bool {
+    table
+        .iter()
+        .any(|(dest, luid)| *luid != tunnel && could_leak(*dest))
 }
 
 /// Every IPv6 route that could be a leak path ([`could_leak`]), on any
@@ -731,6 +755,24 @@ pub(super) fn ipv6_paths() -> Result<Vec<(u64, String, String)>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// Every IPv6 address on the machine that is not link-local, loopback or
+/// multicast, as (interface, address), sorted. Watched beside
+/// [`ipv6_paths`], so a new address is noticed even before, or without,
+/// the host route Windows keeps for it.
+pub(super) fn ipv6_addresses() -> Result<Vec<(u64, Ipv6Addr)>> {
+    let mut found: Vec<_> = addresses_of(AF_INET6)?
+        .iter()
+        .filter_map(|row| match ip_of(&row.Address)? {
+            IpAddr::V6(addr) => Some((value(&row.InterfaceLuid), addr)),
+            IpAddr::V4(_) => None,
+        })
+        .filter(|(_, addr)| Prefix::v6(*addr, 128).is_some_and(could_leak))
+        .collect();
+    found.sort();
+    found.dedup();
+    Ok(found)
 }
 
 /// Whether an IPv6 route to `dest` could carry traffic off the machine:
@@ -823,6 +865,62 @@ mod tests {
             assert!(could_leak(prefix(leaks)), "{leaks}");
         }
         assert!(!could_leak(prefix("0.0.0.0/0")));
+    }
+
+    // A machine with two virtual host-only adapters and a physical network
+    // (made-up ranges). The adapters' IPv4 on-link routes are not another
+    // program's full mode, and IPv4 routes never count as a way out for
+    // IPv6. An IPv6 unicast route on any interface but the tunnel does, as
+    // do another interface's halves.
+    #[test]
+    fn virtual_adapters_networks_are_not_halves_but_their_ipv6_routes_leak() {
+        let (tunnel, wire, host_a, host_b) = (7, 9, 11, 12);
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let on_link = |text: &str, luid| (prefix(text), luid, ip("0.0.0.0"));
+        let host_only = [
+            on_link("172.31.130.0/24", host_a),
+            on_link("172.31.130.1/32", host_a),
+            on_link("172.31.130.255/32", host_a),
+            on_link("172.31.140.0/24", host_b),
+            on_link("172.31.140.1/32", host_b),
+            on_link("172.31.140.255/32", host_b),
+            on_link("224.0.0.0/4", host_a),
+            on_link("255.255.255.255/32", host_b),
+            (prefix("0.0.0.0/0"), wire, ip("198.51.100.1")),
+            on_link("198.51.100.0/24", wire),
+            (prefix("fe80::/64"), host_a, ip("::")),
+            (prefix("ff00::/8"), host_b, ip("::")),
+        ];
+        let mut table = host_only.to_vec();
+        assert!(!foreign_halves(&table, Some(tunnel)));
+        assert!(!foreign_halves(&table, None));
+        // Ours, on the tunnel with no next hop, are not foreign.
+        for half in FULL_TUNNEL_V4.into_iter().chain(FULL_TUNNEL_V6) {
+            let any = if half.contains(':') { "::" } else { "0.0.0.0" };
+            table.push((prefix(half), tunnel, ip(any)));
+        }
+        assert!(!foreign_halves(&table, Some(tunnel)));
+        assert!(
+            foreign_halves(&table, Some(99)),
+            "the same halves elsewhere"
+        );
+        // A half on a host-only adapter, or ours given a next hop, is.
+        let elsewhere = [on_link("128.0.0.0/1", host_a)];
+        assert!(foreign_halves(&elsewhere, Some(tunnel)));
+        let via = [(prefix("::/1"), tunnel, ip("fe80::1"))];
+        assert!(foreign_halves(&via, Some(tunnel)));
+
+        let v6 = |table: &[(Prefix, u64, IpAddr)]| -> Vec<(Prefix, u64)> {
+            table.iter().map(|(dest, luid, _)| (*dest, *luid)).collect()
+        };
+        assert!(!leaks(&v6(&host_only), tunnel), "IPv4 is not an IPv6 leak");
+        let global = [(prefix("2001:db8:a::/64"), host_a)];
+        assert!(leaks(&global, tunnel), "a host-only adapter's IPv6 network");
+        let unique_local = [(prefix("fd00:b::1/128"), host_b)];
+        assert!(leaks(&unique_local, tunnel));
+        // The tunnel's own IPv6 routes are not a way out past it.
+        let own = [(prefix("2001:db8::/64"), tunnel), (prefix("::/1"), tunnel)];
+        assert!(!leaks(&own, tunnel));
     }
 
     // Security rule: an IPv6 destination counts as going through an

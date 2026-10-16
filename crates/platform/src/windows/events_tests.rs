@@ -146,13 +146,48 @@ fn a_change_since_capture_is_reported_at_once() {
     ran("events since capture");
 }
 
-// Security rule: a new way out for IPv6, on any interface, is reported, so
-// that in full mode the service decides again whether IPv6 can leak. Here
-// a route appears on an adapter other than the watched one.
+/// A global IPv6 address on `interface`, as another program would add it.
+fn ipv6_address(
+    interface: &str,
+    address: std::net::Ipv6Addr,
+) -> windows_sys::Win32::NetworkManagement::IpHelper::MIB_UNICASTIPADDRESS_ROW {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        InitializeUnicastIpAddressEntry, MIB_UNICASTIPADDRESS_ROW,
+    };
+    use windows_sys::Win32::Networking::WinSock::IpDadStatePreferred;
+    // SAFETY: plain data for which all zeroes is valid; then initialised.
+    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
+    // SAFETY: the pointer is to a valid row.
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.InterfaceLuid.Value = super::routes::luid(interface).expect("the interface");
+    row.Address = super::routes::v6(address);
+    row.OnLinkPrefixLength = 64;
+    row.DadState = IpDadStatePreferred;
+    row
+}
+
+/// The first event within `wait` that is not "physical changed", which a
+/// change on another adapter may bring as well, harmlessly.
+fn next_ipv6(events: &Subscription, wait: Duration) -> Option<NetworkEvent> {
+    let started = std::time::Instant::now();
+    while let Some(left) = wait.checked_sub(started.elapsed()) {
+        match next(events, left)? {
+            NetworkEvent::PhysicalChanged => continue,
+            event => return Some(event),
+        }
+    }
+    None
+}
+
+// Security rule: a new way out for IPv6, on any interface but the tunnel, is
+// reported, so that in full mode the service decides again whether IPv6 can
+// leak. Here, on an adapter other than the watched one, a global route
+// appears and goes, then a global address does.
 #[test]
 fn a_new_ipv6_route_anywhere_is_reported() {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        CreateIpForwardEntry2, DeleteIpForwardEntry2,
+        CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2,
+        DeleteUnicastIpAddressEntry,
     };
     let _turn = turn();
     let Some(wintun) = wintun() else { return };
@@ -179,11 +214,37 @@ fn a_new_ipv6_route_anywhere_is_reported() {
         std::net::Ipv6Addr::new(0x2001, 0xdb8, 0x2, 0, 0, 0, 0, 0),
         48,
     );
+    let wait = Duration::from_secs(10);
     // SAFETY: the row is valid and initialised.
     super::routes::checked(unsafe { CreateIpForwardEntry2(&way_out) }).expect("an IPv6 route");
-    let event = next(&events, Duration::from_secs(10));
+    let added = next_ipv6(&events, wait);
+    while next(&events, Duration::from_secs(2)).is_some() {}
     // SAFETY: as above.
-    let _ = unsafe { DeleteIpForwardEntry2(&way_out) };
-    assert_eq!(event, Some(NetworkEvent::Ipv6Changed));
+    let removing = super::routes::checked(unsafe { DeleteIpForwardEntry2(&way_out) });
+    let removed = next_ipv6(&events, wait);
+    assert_eq!(added, Some(NetworkEvent::Ipv6Changed), "a route appeared");
+    assert_eq!(removing, Ok(()));
+    assert_eq!(removed, Some(NetworkEvent::Ipv6Changed), "a route went");
+    while next(&events, Duration::from_secs(2)).is_some() {}
+
+    let address = ipv6_address(
+        other,
+        std::net::Ipv6Addr::new(0x2001, 0xdb8, 0x3, 0, 0, 0, 0, 0x10),
+    );
+    // SAFETY: the row is valid and initialised.
+    super::routes::checked(unsafe { CreateUnicastIpAddressEntry(&address) })
+        .expect("an IPv6 address");
+    let added = next_ipv6(&events, wait);
+    while next(&events, Duration::from_secs(2)).is_some() {}
+    // SAFETY: as above.
+    let removing = super::routes::checked(unsafe { DeleteUnicastIpAddressEntry(&address) });
+    let removed = next_ipv6(&events, wait);
+    assert_eq!(
+        added,
+        Some(NetworkEvent::Ipv6Changed),
+        "an address appeared"
+    );
+    assert_eq!(removing, Ok(()));
+    assert_eq!(removed, Some(NetworkEvent::Ipv6Changed), "an address went");
     ran("events ipv6");
 }

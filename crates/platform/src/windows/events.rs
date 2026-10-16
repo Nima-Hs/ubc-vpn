@@ -14,12 +14,15 @@
 //! IPv4 and IPv6 changes are both watched. The worker sends `Ipv6Changed`
 //! when, on any interface, an IPv6 route that could be a leak path appeared,
 //! changed or went: in full mode the service decides again whether IPv6 can
-//! leak. An IPv6 address comes with routes of its own, so its changes show
-//! there. Full mode's own IPv6 halves, and link-local, loopback and
-//! multicast routes, do not count.
+//! leak, and also when an IPv6 address appeared or went. Full mode's own
+//! IPv6 halves, and link-local, loopback and multicast routes and
+//! addresses, do not count. The tunnel's are not told apart: an event too
+//! many only makes the service check again.
 //!
 //! The first look is compared with the captured [`PhysicalNetwork`], so a
-//! change between capture and subscribe is reported too.
+//! change between capture and subscribe is reported too. Once Windows is
+//! asked for notifications, the worker looks once more, so a change between
+//! the first look and the registration is not missed either.
 //!
 //! Routes this product adds are never among these: the gateway's host route
 //! is not a default route, and tunnel routes are on the tunnel. So no event
@@ -35,7 +38,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -58,7 +61,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::routes::{
-    addr_of, address_table, checked, ipv6_paths, luid, route_table, row_dest, value,
+    addr_of, address_table, checked, ipv6_addresses, ipv6_paths, luid, route_table, row_dest, value,
 };
 use crate::{Error, NetworkEvent, NetworkEvents, PhysicalNetwork, Result, Subscription};
 
@@ -71,6 +74,9 @@ pub(super) struct Snapshot {
     /// Where IPv6 could go, on any interface (see [`ipv6_paths`]): in full
     /// mode, a new way out for IPv6 must be checked again.
     pub(super) ipv6: Vec<(u64, String, String)>,
+    /// The IPv6 addresses, on any interface, that are not link-local,
+    /// loopback or multicast (see [`ipv6_addresses`]).
+    pub(super) ipv6_addresses: Vec<(u64, Ipv6Addr)>,
 }
 
 /// The interface with `luid` as it is now. A missing interface is down,
@@ -105,6 +111,7 @@ pub(super) fn snapshot(luid: u64) -> Result<Snapshot> {
         addresses,
         routers,
         ipv6: ipv6_paths()?,
+        ipv6_addresses: ipv6_addresses()?,
     })
 }
 
@@ -133,7 +140,7 @@ pub(super) fn changes(before: &Snapshot, now: &Snapshot) -> Vec<NetworkEvent> {
     if physical {
         events.push(NetworkEvent::PhysicalChanged);
     }
-    if before.ipv6 != now.ipv6 {
+    if (&before.ipv6, &before.ipv6_addresses) != (&now.ipv6, &now.ipv6_addresses) {
         events.push(NetworkEvent::Ipv6Changed);
     }
     events
@@ -289,6 +296,10 @@ impl NetworkEvents for WinEvents {
         if changed_since_capture {
             let _ = waker.send(Wake::Network);
         }
+        // One more look, which the worker takes only once it runs, after the
+        // registrations: a change between the first look and them is then
+        // reported, not missed.
+        let _ = waker.send(Wake::Network);
         subscribers().get_or_insert_default().insert(id, waker);
         // Dropped on a failure below, which removes the entry again.
         let mut ending = Ending {
@@ -400,6 +411,7 @@ mod tests {
             addresses: vec![Ipv4Addr::new(192, 168, 0, 10)],
             routers: vec![Ipv4Addr::new(192, 168, 0, 1)],
             ipv6: Vec::new(),
+            ipv6_addresses: Vec::new(),
         };
         assert!(!differs_from_capture(&same, &captured));
         let down = Snapshot {
@@ -429,6 +441,7 @@ mod tests {
             addresses: vec![Ipv4Addr::new(192, 168, 0, 10)],
             routers: vec![Ipv4Addr::new(192, 168, 0, 1)],
             ipv6: Vec::new(),
+            ipv6_addresses: Vec::new(),
         };
         let way_out = vec![(7, "::/0".to_string(), "fe80::1".to_string())];
         let ipv6 = Snapshot {
@@ -444,8 +457,14 @@ mod tests {
             ipv6: way_out,
             ..before.clone()
         };
+        let address = Snapshot {
+            ipv6_addresses: vec![(7, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7))],
+            ..before.clone()
+        };
         assert_eq!(changes(&before, &before), []);
         assert_eq!(changes(&before, &ipv6), [NetworkEvent::Ipv6Changed]);
+        assert_eq!(changes(&before, &address), [NetworkEvent::Ipv6Changed]);
+        assert_eq!(changes(&address, &before), [NetworkEvent::Ipv6Changed]);
         assert_eq!(changes(&ipv6, &before), [NetworkEvent::Ipv6Changed]);
         assert_eq!(changes(&before, &down), [NetworkEvent::PhysicalChanged]);
         assert_eq!(
