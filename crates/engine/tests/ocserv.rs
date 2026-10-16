@@ -99,6 +99,7 @@ fn gateway(endpoint: SocketAddrV4, pin: &str) -> Gateway {
         gateway: HOST.to_string(),
         pins: vec![Pin::try_from(pin.to_string()).expect("a full pin")],
         allowed_routes: None,
+        full_tunnel: Default::default(),
     };
     Gateway::for_test(&policy, endpoint).expect("a valid policy and a local endpoint")
 }
