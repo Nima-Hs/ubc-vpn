@@ -18,8 +18,8 @@ import {
     registerAppScheme,
     secureSession,
 } from "./security";
-import { appImage, createTray, showStateOnTaskbar } from "./tray";
-import { closeHidesWindow, connectFromTray } from "./tray-icon";
+import { appImage, createTray, followStateOnTaskbar } from "./tray";
+import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray-icon";
 import { createWindow, keepHidden, showWindow } from "./window";
 
 // First of all, before the profile is read or anything is written to it.
@@ -177,6 +177,12 @@ async function start(): Promise<void> {
         }
     };
 
+    // The state icon, which the tray and the taskbar button share: one state,
+    // one working frame, one timer.
+    const icons = createStateIcons();
+    icons.show(trayKind(controller.getSnapshot().state));
+    followStateOnTaskbar(window, icons);
+
     // Kept off the screen for a test run, the tray icon included. Without a
     // tray, closing the window quits, as on a desktop that has none.
     const tray = hidden
@@ -191,6 +197,7 @@ async function start(): Promise<void> {
                   quit,
               },
               controller.getSnapshot().state,
+              icons,
           );
     function showIfNotice(): void {
         if (controller.getSnapshot().notice !== null) {
@@ -198,10 +205,9 @@ async function start(): Promise<void> {
         }
     }
     controller.subscribe((snapshot) => {
+        icons.show(trayKind(snapshot.state));
         tray?.update(snapshot.state);
-        showStateOnTaskbar(window, snapshot.state);
     });
-    showStateOnTaskbar(window, controller.getSnapshot().state);
 
     // Closing the window leaves the app running in the tray, but only where
     // there is a way back to a hidden window. Elsewhere closing quits.
@@ -225,7 +231,10 @@ async function start(): Promise<void> {
     app.on("second-instance", show);
     app.on("activate", show);
     app.on("window-all-closed", () => app.quit());
-    app.on("will-quit", () => stopForQuit(controller, settings, tray));
+    app.on("will-quit", () => {
+        stopForQuit(controller, settings, tray);
+        icons.dispose();
+    });
 
     // If the interface's process dies, start it again, but not in a loop.
     let restarts = 0;

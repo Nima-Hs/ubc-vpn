@@ -78,6 +78,11 @@ win:
       to: licenses
     - from: stage/policy.json
       to: policy.json
+    # The state icons the taskbar button shows while the window is open: the
+    # tray's own pictures, drawn by `pnpm icons` and checked by
+    # tests/icons.test.ts. Read from files so Windows gets each size exactly.
+    - from: build/state-icons
+      to: state-icons
   target:
     - target: nsis
       arch: [x64]

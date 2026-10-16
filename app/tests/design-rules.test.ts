@@ -5,19 +5,24 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { appIcon, COLOURS, taskbarBadge } from "../src/main/icon/designs";
+import { appIcon, COLOURS } from "../src/main/icon/designs";
 import { draw } from "../src/main/icon/raster";
 import {
+    BUSY_FRAME_MS,
     BUSY_FRAMES,
     COLOUR_PALETTE,
     closeHidesWindow,
     connectFromTray,
+    createStateIcons,
     drawTrayIcon,
+    drawWindowIcon,
+    STATE_PICTURES,
+    stateIconFile,
     TEMPLATE_PALETTE,
     TRAY_KINDS,
     type TrayKind,
-    taskbarBadgePng,
     trayIconPng,
+    WINDOW_ICON_SIZES,
 } from "../src/main/tray-icon";
 
 const renderer = join(__dirname, "../src/renderer/src");
@@ -218,17 +223,120 @@ describe("the tray icon", () => {
     });
 });
 
-describe("the taskbar badge", () => {
-    it("is shown for every state but off, each in its own shape and colour", () => {
-        expect(taskbarBadgePng("off", 16)).toBeNull();
-        const badges = TRAY_KINDS.filter((kind) => kind !== "off");
-        const shapes = badges.map((kind) => {
-            const pixels = draw(taskbarBadge(kind as Exclude<TrayKind, "off">), 32);
-            const used = solidColours(pixels);
-            expect(used.has(COLOUR_PALETTE[kind as Exclude<TrayKind, "off">].join(","))).toBe(true);
-            return [...pixels].filter((_, at) => at % 4 === 3).join(",");
-        });
-        expect(new Set(shapes).size).toBe(badges.length);
+describe("the state icon, shared by the tray and the taskbar button", () => {
+    /** Timers the test steps by hand. */
+    function fakeTimers() {
+        const running = new Set<number>();
+        let next = 0;
+        let step: (() => void) | undefined;
+        return {
+            timers: {
+                set: (callback: () => void, ms: number) => {
+                    expect(ms).toBe(BUSY_FRAME_MS);
+                    step = callback;
+                    running.add(++next);
+                    return next;
+                },
+                clear: (timer: unknown) => {
+                    running.delete(timer as number);
+                },
+            },
+            tick: () => step?.(),
+            running: () => running.size,
+        };
+    }
+
+    it("is the tray's own drawing on the taskbar, for every state and frame", () => {
+        // Every size, 256 included, is compared with the files Windows reads
+        // in tests/icons.test.ts; here, the sizes of the taskbar button.
+        for (const { kind, frame } of STATE_PICTURES) {
+            for (const size of [32, 40, 48, 64]) {
+                expect(drawWindowIcon(kind, size, frame)).toEqual(
+                    drawTrayIcon(kind, COLOUR_PALETTE, size, frame),
+                );
+            }
+        }
+        expect(STATE_PICTURES).toHaveLength(TRAY_KINDS.length - 1 + BUSY_FRAMES);
+    });
+
+    it("paints every place with the same state and the same working frame", () => {
+        const clock = fakeTimers();
+        const icons = createStateIcons(clock.timers);
+        const tray: string[] = [];
+        const taskbar: string[] = [];
+        icons.add((kind, frame) => tray.push(`${kind}-${frame}`));
+        icons.show("busy");
+        icons.add((kind, frame) => taskbar.push(`${kind}-${frame}`));
+        clock.tick();
+        clock.tick();
+        clock.tick();
+        expect(tray).toEqual(["busy-0", "busy-1", "busy-2", "busy-0"]);
+        expect(taskbar).toEqual(["busy-0", "busy-1", "busy-2", "busy-0"]);
+        // One timer for both.
+        expect(clock.running()).toBe(1);
+    });
+
+    it("steps only while working, and stops when the state settles", () => {
+        const clock = fakeTimers();
+        const icons = createStateIcons(clock.timers);
+        const painted: string[] = [];
+        icons.add((kind, frame) => painted.push(`${kind}-${frame}`));
+        icons.show("off");
+        expect(icons.stepping).toBe(false);
+        icons.show("busy");
+        expect(icons.stepping).toBe(true);
+        clock.tick();
+        icons.show("on");
+        expect(icons.stepping).toBe(false);
+        expect(clock.running()).toBe(0);
+        expect(painted).toEqual(["off-0", "busy-0", "busy-1", "on-0"]);
+        // Working again starts from the first frame.
+        icons.show("busy");
+        expect(painted.at(-1)).toBe("busy-0");
+        // The same state again changes nothing.
+        icons.show("busy");
+        expect(clock.running()).toBe(1);
+    });
+
+    it("stops when nothing is left to paint, the window closed and no tray", () => {
+        const clock = fakeTimers();
+        const icons = createStateIcons(clock.timers);
+        icons.show("busy");
+        // Nothing to paint yet: no timer.
+        expect(icons.stepping).toBe(false);
+        const letGo = icons.add(() => {});
+        expect(icons.stepping).toBe(true);
+        letGo();
+        expect(icons.stepping).toBe(false);
+        expect(clock.running()).toBe(0);
+    });
+
+    it("stops for good when the app quits", () => {
+        const clock = fakeTimers();
+        const icons = createStateIcons(clock.timers);
+        const painted: string[] = [];
+        icons.add((kind) => painted.push(kind));
+        icons.show("busy");
+        icons.dispose();
+        expect(clock.running()).toBe(0);
+        icons.show("on");
+        icons.add(() => painted.push("late"));
+        expect(painted).toEqual(["busy"]);
+        expect(icons.stepping).toBe(false);
+    });
+
+    it("names one file per state and per working frame", () => {
+        const names = STATE_PICTURES.map(({ kind, frame }) => stateIconFile(kind, frame));
+        expect(names).toEqual([
+            "off.ico",
+            "busy-0.ico",
+            "busy-1.ico",
+            "busy-2.ico",
+            "on.ico",
+            "attention.ico",
+            "problem.ico",
+        ]);
+        expect([...WINDOW_ICON_SIZES]).toEqual([16, 20, 24, 32, 40, 48, 64, 256]);
     });
 });
 

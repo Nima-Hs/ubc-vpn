@@ -153,6 +153,14 @@ export const COLOUR_PALETTE: TrayPalette = {
 export const BUSY_FRAMES = 3;
 export const BUSY_FRAME_MS = 280;
 
+/** Every picture the state icon can show: each state, and each working frame. */
+export const STATE_PICTURES: readonly { kind: TrayKind; frame: number }[] = TRAY_KINDS.flatMap(
+    (kind): { kind: TrayKind; frame: number }[] =>
+        kind === "busy"
+            ? Array.from({ length: BUSY_FRAMES }, (_, frame) => ({ kind, frame }))
+            : [{ kind, frame: 0 }],
+);
+
 /**
  * The tunnel in two dashes, a third of a step further along in each frame.
  * The round caps reach into the gaps, so the gaps are long enough to stay
@@ -219,53 +227,5 @@ export function trayIcon(kind: TrayKind, palette: TrayPalette, frame = 0): Drawi
         box: MARK_BOX,
         layers,
         ...(palette.rim !== null && { rim: { colour: palette.rim, width: 1, alpha: 0.85 } }),
-    };
-}
-
-// The taskbar badge ---------------------------------------------------------
-
-/**
- * The small badge Windows lays over the app's taskbar button, while the
- * window is open: the state, in the tray's colour and a shape of its own.
- * Off shows none.
- */
-export function taskbarBadge(kind: Exclude<TrayKind, "off">): Drawing {
-    const middle = MARK_BOX / 2;
-    const shapes: Record<typeof kind, Shape> = {
-        on: { kind: "disc", cx: middle, cy: middle, r: 6.2 },
-        busy: { kind: "ring", cx: middle, cy: middle, r: 5, width: 2.8 },
-        attention: {
-            kind: "polygon",
-            points: [
-                [8, 1.4],
-                [14.8, 13.8],
-                [1.2, 13.8],
-            ],
-        },
-        problem: {
-            kind: "polygon",
-            points: [
-                [8, 1.2],
-                [14.8, 8],
-                [8, 14.8],
-                [1.2, 8],
-            ],
-        },
-    };
-    return {
-        box: MARK_BOX,
-        layers: [
-            // The ring is filled dark, so the icon under it does not show through.
-            ...(kind === "busy"
-                ? [
-                      {
-                          shape: { kind: "disc", cx: middle, cy: middle, r: 5 } as const,
-                          colour: COLOURS.bg,
-                      },
-                  ]
-                : []),
-            { shape: shapes[kind], colour: COLOUR_PALETTE[kind] },
-        ],
-        rim: { colour: COLOURS.bg, width: 1, alpha: 0.85 },
     };
 }

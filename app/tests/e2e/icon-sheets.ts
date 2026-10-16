@@ -1,19 +1,17 @@
 // Pictures of the icons the app draws outside its window, for the screenshots
 // a run keeps: the app icon at the sizes Windows uses, the tray icon in every
-// state, and the taskbar badge on the app icon. Each on a dark and a light
-// taskbar, at real size and enlarged with hard pixel edges.
+// state, and the taskbar button, which shows the tray's picture. Each on a
+// dark and a light taskbar, at real size and, where small, enlarged with hard
+// pixel edges.
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
     appIcon,
-    BUSY_FRAMES,
     COLOUR_PALETTE,
     ICO_SIZES,
+    STATE_PICTURES,
     TEMPLATE_PALETTE,
-    TRAY_KINDS,
-    type TrayKind,
-    taskbarBadge,
     trayIcon,
 } from "../../src/main/icon/designs";
 import { encodePng } from "../../src/main/icon/formats";
@@ -115,11 +113,7 @@ function appIconSheet(path: string): void {
  * one-colour macOS image on a light bar; each at 16 pixels, then enlarged.
  */
 function traySheet(path: string): void {
-    const rows = TRAY_KINDS.flatMap((kind): { kind: TrayKind; frame: number }[] =>
-        kind === "busy"
-            ? Array.from({ length: BUSY_FRAMES }, (_, frame) => ({ kind, frame }))
-            : [{ kind, frame: 0 }],
-    );
+    const rows = STATE_PICTURES;
     const zoom = 6;
     const cell = 16 + GAP + 16 * zoom + 2 * GAP;
     const columns = [
@@ -142,23 +136,27 @@ function traySheet(path: string): void {
     sheet.save(path);
 }
 
-/** The taskbar button: the app icon at 32 with each state's badge at its lower right, enlarged. */
+/**
+ * The taskbar button on Windows: the tray's own picture for each state and
+ * working frame (one row each), at the size Windows takes for the button at
+ * 100%, 125%, 150% and 200% scaling (32, 40, 48 and 64 pixels), on a dark
+ * taskbar and then a light one.
+ */
 function taskbarSheet(path: string): void {
-    const kinds = TRAY_KINDS.filter((kind) => kind !== "off");
-    const zoom = 4;
-    const cell = 32 * zoom + GAP;
-    const band = 32 * zoom + 2 * GAP;
-    const sheet = new Sheet(GAP + (kinds.length + 1) * cell, 2 * band);
-    [DARK, LIGHT].forEach((background, index) => {
-        const top = index * band;
-        sheet.fill(0, top, sheet.width, band, background);
-        // First the button with no badge, as when not connected.
-        sheet.put(appIcon(32), 32, GAP, top + GAP, zoom);
-        kinds.forEach((kind, at) => {
-            const left = GAP + (at + 1) * cell;
-            sheet.put(appIcon(32), 32, left, top + GAP, zoom);
-            const badge = taskbarBadge(kind as Exclude<typeof kind, "off">);
-            sheet.put(badge, 16, left + 16 * zoom, top + GAP + 16 * zoom, zoom);
+    const sizes = [32, 40, 48, 64];
+    const bandWidth = sizes.reduce((sum, size) => sum + size + GAP, GAP);
+    const rowHeight = 64 + GAP;
+    const sheet = new Sheet(2 * bandWidth, STATE_PICTURES.length * rowHeight + GAP);
+    [DARK, LIGHT].forEach((background, band) => {
+        const left = band * bandWidth;
+        sheet.fill(left, 0, bandWidth, sheet.height, background);
+        STATE_PICTURES.forEach(({ kind, frame }, row) => {
+            const top = GAP + row * rowHeight;
+            let x = left + GAP;
+            for (const size of sizes) {
+                sheet.put(trayIcon(kind, COLOUR_PALETTE, frame), size, x, top + 64 - size);
+                x += size + GAP;
+            }
         });
     });
     sheet.save(path);
