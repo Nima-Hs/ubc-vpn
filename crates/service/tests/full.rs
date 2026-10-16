@@ -51,6 +51,12 @@ fn at(calls: &[Op], op: Op) -> usize {
     found.unwrap_or_else(|| panic!("{op:?} never called: {calls:?}"))
 }
 
+/// Makes the read `op`, one of full mode's checks, fail with an error that
+/// says nothing about the answer.
+fn unreadable_op(rig: &Rig, op: Op) {
+    rig.fake.set_failure(op, Some(Error::NotFound));
+}
+
 /// The calls that only read.
 fn reads_only(calls: &[Op]) -> bool {
     calls.iter().all(|call| {
@@ -215,11 +221,13 @@ fn each_reason_full_mode_cannot_be_had_refuses_the_connect() {
         assert!(rig.spy.opens().is_empty(), "{case}");
     }
 
-    // Refused by the worker. The first two before the gateway is
+    // Refused by the worker. The first three before the gateway is
     // contacted, the rest once the tunnel is open and before anything is
-    // applied to it.
+    // applied to it. A check that could not be made refuses too: "could
+    // not tell" is not "no".
     type Setup = fn(&Rig);
-    let cases: [(&str, Setup, bool, &str); 6] = [
+    let unreadable = "could not be checked";
+    let cases: [(&str, Setup, bool, &str); 9] = [
         (
             "router",
             |rig| {
@@ -236,10 +244,28 @@ fn each_reason_full_mode_cannot_be_had_refuses_the_connect() {
             "already resolves all names",
         ),
         (
+            "catch-all unreadable",
+            |rig| unreadable_op(rig, Op::ForeignCatchAll),
+            false,
+            unreadable,
+        ),
+        (
             "halves",
             |rig| rig.fake.add_foreign_route("other0", net("0.0.0.0/1")),
             true,
             "already sends all traffic",
+        ),
+        (
+            "halves unreadable",
+            |rig| unreadable_op(rig, Op::ForeignFullTunnel),
+            true,
+            unreadable,
+        ),
+        (
+            "ipv6 unreadable",
+            |rig| unreadable_op(rig, Op::FullTunnelIpv6),
+            true,
+            unreadable,
         ),
         ("no dns server", |_| {}, true, "no DNS server"),
         (
@@ -386,7 +412,7 @@ fn a_switch_needs_a_connection() {
 #[test]
 fn a_refused_switch_leaves_the_connection_as_it_was() {
     type Setup = fn(&Rig);
-    let cases: [(&str, Setup); 5] = [
+    let cases: [(&str, Setup); 9] = [
         ("halves", |rig| {
             rig.fake.add_foreign_route("other0", net("128.0.0.0/1"))
         }),
@@ -396,12 +422,26 @@ fn a_refused_switch_leaves_the_connection_as_it_was() {
             rig.fake.set_reports_ipv6_changes(false)
         }),
         ("no dns server", |_| {}),
+        // Not judged at connect: split mode with no domains has no use for
+        // the DNS server. Full mode sends every name to it.
+        ("dns server on the home network", |_| {}),
+        ("catch-all unreadable", |rig| {
+            unreadable_op(rig, Op::ForeignCatchAll)
+        }),
+        ("halves unreadable", |rig| {
+            unreadable_op(rig, Op::ForeignFullTunnel)
+        }),
+        ("ipv6 unreadable", |rig| {
+            unreadable_op(rig, Op::FullTunnelIpv6)
+        }),
     ];
     for (case, setup) in cases {
-        let rig = Rig::scripted(policy('A', ""), |script| {
-            if case == "no dns server" {
-                script.assigned.dns.clear();
+        let rig = Rig::scripted(policy('A', ""), |script| match case {
+            "no dns server" => script.assigned.dns.clear(),
+            "dns server on the home network" => {
+                script.assigned.dns = vec![Ipv4Addr::new(10, 200, 0, 53)];
             }
+            _ => {}
         });
         let mut rig = rig;
         rig.start().unwrap();
@@ -600,6 +640,24 @@ fn an_ipv6_leak_path_that_appears_in_full_mode_fails_closed() {
         "{state:?}"
     );
     assert!(message_of(&state).contains("IPv6"), "{state:?}");
+    assert!(rig.is_clean());
+}
+
+// Security rule: an IPv6 change whose check fails with a read error closes
+// the connection too. "Could not tell" is not "nothing to block".
+#[test]
+fn an_ipv6_change_that_cannot_be_checked_fails_closed() {
+    let (rig, mut alice) = home_rig();
+    rig.fake.set_ipv6(false, false);
+    let state = alice.connect_ends(good_full());
+    assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+    unreadable_op(&rig, Op::FullTunnelIpv6);
+    assert!(rig.os.send_to(0, NetworkEvent::Ipv6Changed));
+    let state = alice.state();
+    assert!(
+        failed_with(&state, ErrorCode::VerificationFailed),
+        "{state:?}"
+    );
     assert!(rig.is_clean());
 }
 

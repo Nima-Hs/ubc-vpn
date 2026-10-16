@@ -1501,6 +1501,8 @@ mod tests {
         assert_eq!(Native.split_dns_matches(&dns), Verified::Unknown);
         assert_eq!(Native.catch_all_dns_matches(&[gateway]), Verified::Unknown);
         assert_eq!(Native.subscribe(&physical).err(), unsupported);
+        // Full mode is refused where IPv6 changes cannot be watched.
+        assert!(!Native.reports_ipv6_changes());
         assert_eq!(Native.listen("ubc-vpn-test").err(), unsupported);
         assert_eq!(Native.connect("ubc-vpn-test").err(), unsupported);
     }
