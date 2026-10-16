@@ -5,7 +5,7 @@
 
 use std::net::Ipv4Addr;
 
-use ubc_vpn_core::routes::Ipv4Net;
+use ubc_vpn_core::routes::{Ipv4Net, probe_address};
 use ubc_vpn_platform::{Dns, PhysicalNetwork, Routes, SplitDns, Verified};
 
 /// What must be true before a connection is reported as connected.
@@ -16,15 +16,23 @@ pub(crate) struct Expected<'a> {
     pub(crate) subnets: &'a [Ipv4Net],
     /// `None` when the user chose no DNS domains, so none was set.
     pub(crate) dns: Option<&'a SplitDns>,
+    /// The DNS servers with a host route through the tunnel, whether or
+    /// not split DNS is set now.
+    pub(crate) dns_servers: &'a [Ipv4Addr],
 }
 
-/// An address inside `subnet` to test with. Not the gateway's, which is
-/// deliberately routed outside the tunnel.
-fn probe(subnet: &Ipv4Net, gateway: Ipv4Addr) -> Option<Ipv4Addr> {
-    let base = u32::from(subnet.addr());
-    let candidates = [1, 2, 0].map(|n| Ipv4Addr::from(base.wrapping_add(n)));
-    let usable = |addr: &Ipv4Addr| subnet.contains_addr(*addr) && *addr != gateway;
-    candidates.into_iter().find(usable)
+/// An address inside `subnet` to test its route with: one the route itself
+/// decides. Not in a network the machine is on, whose route is more
+/// specific; not the gateway's, which is routed outside the tunnel; and a
+/// DNS server's, which has a host route of its own, only when nothing else
+/// is left. See [`probe_address`].
+fn probe(
+    subnet: &Ipv4Net,
+    physical: &PhysicalNetwork,
+    gateway: Ipv4Addr,
+    dns_servers: &[Ipv4Addr],
+) -> Option<Ipv4Addr> {
+    probe_address(subnet, physical.on_link(), &[gateway], dns_servers)
 }
 
 /// What the log says when split DNS was set but the OS cannot show whether
@@ -51,7 +59,12 @@ pub(crate) fn verify(
 ) -> Result<Confirmed, String> {
     let through = |addr, interface| routes.uses_interface(addr, interface) == Verified::Yes;
     for subnet in expected.subnets {
-        let inside = probe(subnet, expected.gateway);
+        let inside = probe(
+            subnet,
+            expected.physical,
+            expected.gateway,
+            expected.dns_servers,
+        );
         if !inside.is_some_and(|addr| through(addr, expected.tunnel)) {
             return Err(format!("{subnet} is not routed through the tunnel."));
         }
@@ -87,13 +100,14 @@ pub(crate) fn verify(
 /// network the tunnel still carries is not what the user chose.
 pub(crate) fn verify_dropped(
     routes: &dyn Routes,
-    tunnel: &str,
-    gateway: Ipv4Addr,
+    expected: &Expected,
     dropped: &[Ipv4Net],
     remaining: &[Ipv4Net],
 ) -> Result<(), String> {
+    let (tunnel, gateway) = (expected.tunnel, expected.gateway);
     for subnet in dropped {
-        let Some(inside) = probe(subnet, gateway) else {
+        let probed = probe(subnet, expected.physical, gateway, expected.dns_servers);
+        let Some(inside) = probed else {
             continue;
         };
         if remaining.iter().any(|kept| kept.contains_addr(inside)) {
@@ -145,6 +159,7 @@ mod tests {
             gateway: GATEWAY,
             subnets: &subnets,
             dns: Some(&split),
+            dns_servers: &split.resolvers,
         };
         verify(&fake, &fake, &expected)
     }
@@ -220,9 +235,45 @@ mod tests {
     fn a_subnet_is_never_tested_with_the_gateway_address() {
         let net = |s: &str| s.parse::<Ipv4Net>().unwrap();
         let addr = |d| Some(Ipv4Addr::new(192, 0, 2, d));
-        assert_eq!(probe(&net("192.0.2.0/24"), GATEWAY), addr(2));
-        assert_eq!(probe(&net("192.0.2.0/24"), Ipv4Addr::LOCALHOST), addr(1));
-        assert_eq!(probe(&net("192.0.2.9/32"), GATEWAY), addr(9));
-        assert_eq!(probe(&net("192.0.2.1/32"), GATEWAY), None);
+        let physical = Fake::new().capture_physical(GATEWAY).unwrap();
+        let probe = |subnet: &str, gateway| probe(&net(subnet), &physical, gateway, &[]);
+        assert_eq!(probe("192.0.2.0/24", GATEWAY), addr(2));
+        assert_eq!(probe("192.0.2.0/24", Ipv4Addr::LOCALHOST), addr(1));
+        assert_eq!(probe("192.0.2.9/32", GATEWAY), addr(9));
+        assert_eq!(probe("192.0.2.1/32", GATEWAY), None);
+    }
+
+    // The issue's case: a chosen subnet wider than the network the machine
+    // is on was tested at an address inside that network, whose own route is
+    // more specific and leads to the local network. The subnet is tested
+    // outside it, so it is confirmed through the tunnel; and a DNS server,
+    // whose host route goes through the tunnel whatever the subnet does, is
+    // not the address it is tested with.
+    #[test]
+    fn a_subnet_is_tested_outside_the_local_network() {
+        let fake = Fake::new();
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        fake.add_gateway_route(GATEWAY, &physical).unwrap();
+        let wide = "192.168.0.0/16".parse::<Ipv4Net>().unwrap();
+        fake.add_tunnel_routes(TUNNEL, &[wide]).unwrap();
+        let inside = probe(&wide, &physical, GATEWAY, &[]).unwrap();
+        assert_eq!(inside, Ipv4Addr::new(192, 168, 1, 0));
+        assert_eq!(fake.uses_interface(inside, TUNNEL), Verified::Yes);
+        let lan = Ipv4Addr::new(192, 168, 0, 1);
+        assert_eq!(fake.uses_interface(lan, TUNNEL), Verified::No);
+        let expected = Expected {
+            tunnel: TUNNEL,
+            physical: &physical,
+            gateway: GATEWAY,
+            subnets: &[wide],
+            dns: None,
+            dns_servers: &[],
+        };
+        assert_eq!(verify(&fake, &fake, &expected), Ok(Confirmed::Fully));
+
+        let dns = Ipv4Addr::new(10, 255, 0, 1);
+        let small = "10.255.0.0/24".parse::<Ipv4Net>().unwrap();
+        let tested = probe(&small, &physical, GATEWAY, &[dns]);
+        assert_eq!(tested, Some(Ipv4Addr::new(10, 255, 0, 2)));
     }
 }

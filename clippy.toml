@@ -5,5 +5,7 @@ disallowed-methods = [
   # The installed product's keyring, whatever the run. The client must pick
   # the service name through `keys::chosen_service()`, so that `--dev` can
   # never read or forget the installed product's saved passwords.
-  { path = "ubc_vpn_platform::secrets::native", reason = "use `keys::keyring()`, which keeps dev mode's passwords apart" },
+  # `allow-invalid`: crates built without the platform crate's `secrets`
+  # feature cannot see the function, and would warn.
+  { path = "ubc_vpn_platform::secrets::native", reason = "use `keys::keyring()`, which keeps dev mode's passwords apart", allow-invalid = true },
 ]

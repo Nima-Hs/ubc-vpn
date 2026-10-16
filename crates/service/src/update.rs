@@ -8,6 +8,8 @@
 //! from [`Applied`](crate::session::Applied), never from the system. The
 //! routes to the gateway's DNS servers stay until the connection ends.
 
+use std::net::Ipv4Addr;
+
 use ubc_vpn_core::protocol::{ErrorCode, LogLevel};
 use ubc_vpn_core::routes::{Ipv4Net, LocalNetworks, RouteSet, check_against_local};
 use ubc_vpn_core::state::TunnelInfo;
@@ -112,17 +114,19 @@ impl Machine {
         self.applied.subnets.clone_from(&chosen.subnets);
 
         // 4. Everything as it now should be, and the dropped ones gone.
+        let servers: Vec<Ipv4Addr> = self.applied.dns_servers.iter().map(Ipv4Net::addr).collect();
         let expected = Expected {
             tunnel: interface,
             physical: &physical,
             gateway,
             subnets: &chosen.subnets,
             dns: dns.as_ref(),
+            dns_servers: &servers,
         };
         let verified = verify(&*self.routes, &*self.dns, &expected);
         let confirmed = verified.map_err(|why| (ErrorCode::VerificationFailed, why))?;
         let remaining = &self.applied.routes;
-        let gone = verify_dropped(&*self.routes, interface, gateway, &dropped, remaining);
+        let gone = verify_dropped(&*self.routes, &expected, &dropped, remaining);
         gone.map_err(|why| (ErrorCode::VerificationFailed, why))?;
 
         // Under the repeat rule, in one form whatever the change: a change

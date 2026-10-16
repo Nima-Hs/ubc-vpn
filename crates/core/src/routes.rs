@@ -95,6 +95,11 @@ impl Ipv4Net {
         u32::from(ip) & Self::mask(self.prefix_len) == u32::from(self.addr)
     }
 
+    /// The last address inside this network.
+    pub fn last(&self) -> Ipv4Addr {
+        Ipv4Addr::from(u32::from(self.addr) | !Self::mask(self.prefix_len))
+    }
+
     /// Whether `other` lies entirely inside this network.
     pub fn contains(&self, other: &Ipv4Net) -> bool {
         self.prefix_len <= other.prefix_len && self.contains_addr(other.addr)
@@ -268,6 +273,11 @@ pub enum LocalConflict {
     /// The route is the gateway's own address, which is routed through the
     /// physical network, never the tunnel.
     IsGateway(Ipv4Net),
+    /// Every address of the route is in a network the machine is directly
+    /// on, or is the gateway: the more specific local routes would take all
+    /// of it, so the tunnel would carry none of it, and that could not be
+    /// checked.
+    CoveredByLocalNetworks(Ipv4Net),
 }
 
 impl fmt::Display for LocalConflict {
@@ -285,6 +295,10 @@ impl fmt::Display for LocalConflict {
             Self::IsGateway(net) => {
                 write!(f, "{net} is the gateway itself, which cannot be tunnelled")
             }
+            Self::CoveredByLocalNetworks(net) => write!(
+                f,
+                "all of {net} is in networks this computer is on, so none of it would go through the tunnel"
+            ),
         }
     }
 }
@@ -302,7 +316,9 @@ impl std::error::Error for LocalConflict {}
 ///   from the network they are really on.
 /// - A subnet wider than an on-link network is accepted. The local network
 ///   stays the more specific route, so `10.0.0.0/8` works from a home network
-///   that is `10.0.0.0/24`.
+///   that is `10.0.0.0/24`. It is checked at an address outside the local
+///   networks ([`probe_address`]). A subnet that local networks cover
+///   entirely between them is refused: the tunnel would carry none of it.
 /// - A subnet that contains the router is refused unless an on-link network
 ///   also contains it. That network is then the more specific of the two (a
 ///   wider one would have refused the subnet already), so the router stays
@@ -327,6 +343,11 @@ pub fn check_against_local(
         if let Some(on_link) = local.on_link.iter().find(|net| net.contains(subnet)) {
             return Err(LocalConflict::InsideLocalNetwork(*subnet, *on_link));
         }
+        // Several local networks, none wider than the subnet, may still
+        // cover all of it between them.
+        if probe_address(subnet, local.on_link, &[gateway], &[]).is_none() {
+            return Err(LocalConflict::CoveredByLocalNetworks(*subnet));
+        }
         if let Some(router) = local.next_hop
             && subnet.contains_addr(router)
             && !local.on_link.iter().any(|net| net.contains_addr(router))
@@ -335,6 +356,59 @@ pub fn check_against_local(
         }
     }
     Ok(())
+}
+
+/// An address inside `subnet` that shows whether the route for `subnet` is
+/// the one the operating system uses, or `None` when there is none.
+///
+/// A route is tested by asking which way one address inside it goes. The
+/// address must be one the route itself decides:
+///
+/// - **Never in `local`,** the networks the machine is directly on. Their
+///   routes are more specific than a subnet wider than them, so an address
+///   in one goes to the local network whatever the subnet's route says.
+/// - **Never one of `never`,** such as the gateway, which has a host route
+///   of its own through the physical network.
+/// - **Rather not one of `rather_not`,** such as the DNS servers, whose host
+///   routes go through the tunnel whatever the subnet's route says. One of
+///   them is taken only when nothing else is left.
+///
+/// The first address after the network's own is preferred, then the next
+/// ones, then the network's own address.
+pub fn probe_address(
+    subnet: &Ipv4Net,
+    local: &[Ipv4Net],
+    never: &[Ipv4Addr],
+    rather_not: &[Ipv4Addr],
+) -> Option<Ipv4Addr> {
+    let usable = |addr: Ipv4Addr| {
+        subnet.contains_addr(addr)
+            && !never.contains(&addr)
+            && !local.iter().any(|net| net.contains_addr(addr))
+    };
+    let first = |avoid: &[Ipv4Addr]| {
+        let start = u32::from(subnet.addr());
+        let end = u32::from(subnet.last());
+        // Every address skipped is one of `avoid` or `never`, or a step
+        // over a whole local network, so this ends after a few steps.
+        let mut at = start.checked_add(1).filter(|next| *next <= end);
+        while let Some(n) = at {
+            let addr = Ipv4Addr::from(n);
+            if let Some(net) = local.iter().find(|net| net.contains_addr(addr)) {
+                at = u32::from(net.last())
+                    .checked_add(1)
+                    .filter(|next| *next <= end);
+                continue;
+            }
+            if usable(addr) && !avoid.contains(&addr) {
+                return Some(addr);
+            }
+            at = n.checked_add(1).filter(|next| *next <= end);
+        }
+        let own = subnet.addr();
+        (usable(own) && !avoid.contains(&own)).then_some(own)
+    };
+    first(rather_not).or_else(|| first(&[]))
 }
 
 /// A plain lower-case host name: at least two dot-separated labels of
@@ -676,6 +750,72 @@ mod tests {
         );
         assert_eq!(checked("198.51.100.0/24", GATEWAY), Ok(()));
         assert_eq!(checked("198.51.100.2/32", GATEWAY), Ok(()));
+    }
+
+    // A route is checked at an address the route itself decides: outside
+    // every local network, whose routes are more specific, never the
+    // gateway's, and the DNS servers' only when nothing else is left.
+    #[test]
+    fn a_route_is_probed_where_it_decides() {
+        let ip = |text: &str| text.parse::<Ipv4Addr>().unwrap();
+        let home = [net("192.168.0.0/24")];
+        // The issue's case: a route wider than the home network was probed
+        // at 192.168.0.1, inside it, which the local network takes.
+        let wide = net("192.168.0.0/16");
+        assert_eq!(
+            probe_address(&wide, &home, &[], &[]),
+            Some(ip("192.168.1.0"))
+        );
+        assert_eq!(probe_address(&wide, &[], &[], &[]), Some(ip("192.168.0.1")));
+        // Several local networks are stepped over, as is the gateway.
+        let lans = [net("10.0.0.0/24"), net("10.0.1.0/24")];
+        let gateway = ip("10.0.2.0");
+        let wide = net("10.0.0.0/16");
+        assert_eq!(
+            probe_address(&wide, &lans, &[gateway], &[]),
+            Some(ip("10.0.2.1"))
+        );
+        // A DNS server is taken only when nothing else is left.
+        let dns = ip("10.255.0.1");
+        let tiny = net("10.255.0.0/31");
+        assert_eq!(
+            probe_address(&tiny, &[], &[], &[dns]),
+            Some(ip("10.255.0.0"))
+        );
+        let host = net("10.255.0.1/32");
+        assert_eq!(probe_address(&host, &[], &[], &[dns]), Some(dns));
+        assert_eq!(probe_address(&host, &[], &[dns], &[]), None);
+        // Nothing outside the local networks: no probe.
+        let covered = net("10.0.0.0/23");
+        assert_eq!(probe_address(&covered, &lans, &[], &[]), None);
+        let edge = net("255.255.255.0/24");
+        let last = [net("255.255.255.0/25")];
+        assert_eq!(
+            probe_address(&edge, &last, &[], &[]),
+            Some(ip("255.255.255.128"))
+        );
+    }
+
+    // A route that local networks cover between them, none of them wider,
+    // would carry nothing through the tunnel: it is refused, with a reason.
+    #[test]
+    fn refuses_a_route_the_local_networks_cover_between_them() {
+        let local = LocalNetworks {
+            own_addresses: &[Ipv4Addr::new(10, 0, 0, 7)],
+            on_link: &[net("10.0.0.0/24"), net("10.0.1.0/24")],
+            next_hop: Some(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        let covered = net("10.0.0.0/23");
+        let checked = check_against_local(&[covered], GATEWAY.into(), &local);
+        assert_eq!(checked, Err(LocalConflict::CoveredByLocalNetworks(covered)));
+        assert!(
+            checked
+                .unwrap_err()
+                .to_string()
+                .contains("none of it would go")
+        );
+        let wider = [net("10.0.0.0/22")];
+        assert_eq!(check_against_local(&wider, GATEWAY.into(), &local), Ok(()));
     }
 
     // Security rule: an unprivileged client names the gateway's address. It
