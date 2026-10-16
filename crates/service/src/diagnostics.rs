@@ -109,6 +109,7 @@ mod tests {
             gateway: format!("vpn.\u{1b}{}", "é".repeat(40_000)),
             pins: Vec::new(),
             allowed_routes: None,
+            full_tunnel: Default::default(),
         };
         let about = About::new(&Ok(policy));
         let hub = Hub::new(None);

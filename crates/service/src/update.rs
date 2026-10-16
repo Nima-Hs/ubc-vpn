@@ -10,7 +10,7 @@
 
 use ubc_vpn_core::protocol::{ErrorCode, LogLevel};
 use ubc_vpn_core::routes::{Ipv4Net, LocalNetworks, RouteSet, check_against_local};
-use ubc_vpn_core::state::TunnelInfo;
+use ubc_vpn_core::state::{TunnelInfo, TunnelMode};
 use ubc_vpn_platform::{Error, SplitDns};
 
 use crate::connect::{Failure, dns_servers};
@@ -138,6 +138,7 @@ impl Machine {
             address: assigned.address.to_string(),
             subnets: chosen.subnets,
             dns_domains: chosen.dns_domains,
+            mode: TunnelMode::Split,
         })
     }
 }

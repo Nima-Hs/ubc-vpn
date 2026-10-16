@@ -13,6 +13,7 @@ const GLOBAL: GlobalSettings = {
     start: "off",
     auto_connect: false,
     active_profile: "0123456789abcdef0123456789abcdef",
+    tunnel: "split",
 };
 
 describe("starting when the user signs in", () => {

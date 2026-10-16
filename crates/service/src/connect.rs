@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::net::Ipv4Addr;
 use ubc_vpn_core::protocol::{CERTIFICATE_CHANGED, ConnectParams, ErrorCode, LogLevel};
 use ubc_vpn_core::routes::{Ipv4Net, LocalConflict, LocalNetworks, check_against_local};
-use ubc_vpn_core::state::TunnelInfo;
+use ubc_vpn_core::state::{TunnelInfo, TunnelMode};
 use ubc_vpn_engine::{Assigned, Cancel, Session, TunnelError};
 
 use ubc_vpn_platform::{Error, PhysicalNetwork, SplitDns, TUNNEL_MTU};
@@ -31,6 +31,7 @@ impl Machine {
             cookie,
             gateway_addr,
             routes: chosen,
+            ..
         } = params;
         let os =
             |what: &'static str| move |e: Error| (ErrorCode::Internal, format!("{what}: {e}."));
@@ -174,6 +175,9 @@ impl Machine {
             address: assigned.address.to_string(),
             subnets: chosen.subnets,
             dns_domains: chosen.dns_domains,
+            // Full mode is refused before anything is done, until the
+            // service can apply it.
+            mode: TunnelMode::Split,
         })
     }
 }

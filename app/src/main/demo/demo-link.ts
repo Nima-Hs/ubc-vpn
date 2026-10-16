@@ -12,6 +12,7 @@ import { LinkStore, type ServiceLink } from "../link";
 // `.example` never resolves: none of this is a real network.
 const TUNNEL: TunnelInfo = {
     interface: "utun4",
+    mode: "split",
     address: "198.51.100.42",
     subnets: ["203.0.113.0/24", "198.51.100.0/24"],
     dns_domains: ["campus.example", "lab.campus.example"],
@@ -19,6 +20,7 @@ const TUNNEL: TunnelInfo = {
 
 const CROWDED_TUNNEL: TunnelInfo = {
     interface: "a-tunnel-device-with-an-unusually-long-name-0",
+    mode: "split",
     address: "198.51.100.254",
     subnets: Array.from({ length: 256 }, (_, i) => `203.0.113.${i}/32`),
     dns_domains: [
@@ -35,6 +37,7 @@ const CROWDED_TUNNEL: TunnelInfo = {
  */
 const PIECES_TUNNEL: TunnelInfo = {
     interface: "utun4",
+    mode: "split",
     address: "198.51.100.42",
     subnets: [
         "198.51.100.0/24",

@@ -78,6 +78,7 @@ function shownView(view: ProfilesView): ProfilesView {
             start: view.global.start,
             auto_connect: view.global.auto_connect,
             active_profile: view.global.active_profile,
+            tunnel: view.global.tunnel,
         },
         profiles: view.profiles.map((profile) => ({
             id: profile.id,

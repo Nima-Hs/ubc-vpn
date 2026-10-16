@@ -94,11 +94,11 @@ use serde::{Deserialize, Serialize};
 use crate::redact::Secret;
 use crate::routes::{Ipv4Net, RouteSet};
 use crate::settings_cli::misleads;
-use crate::state::ConnState;
+use crate::state::{ConnState, TunnelMode};
 
 /// Bumped whenever the wire format changes in a way an older peer could not
 /// understand. A client and a service with different versions refuse to talk.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The longest line either side accepts, newline included. The service drops a
 /// connection that sends more.
@@ -214,6 +214,36 @@ pub enum RequestBody {
     ///   come before the no-change answer: a request that would change
     ///   nothing is still `busy` while something else is in progress.
     UpdateRoutes(RouteSet),
+    /// Switch the live tunnel between split and full, in place, without
+    /// reconnecting. Only the command-line client sends this, with the mode
+    /// it has just saved in the user's settings; the bridge refuses it from
+    /// the app.
+    ///
+    /// Its answers follow `update_routes` exactly:
+    ///
+    /// - **Success:** `accepted`, then the usual state event: `connected`
+    ///   with a [`TunnelInfo`](crate::state::TunnelInfo) in the new mode.
+    /// - **Refusal:** `route_refused`, with a message saying why, when full
+    ///   mode cannot be had safely here: the policy forbids it, the gateway
+    ///   assigned no usable DNS server, another program already routes all
+    ///   traffic or resolves all names, the router is not on the local
+    ///   network, or this operating system cannot do it. Nothing is changed
+    ///   and the connection is kept as it was.
+    /// - **No change:** the mode the tunnel already has is answered at once
+    ///   with `status`, the connection as it is.
+    /// - **Failure while applying or verifying:** everything is torn down
+    ///   and the state is `failed`, as for `update_routes`.
+    /// - **Timing:** `busy` and `not_connected` as for `update_routes`.
+    SetTunnel(SetTunnelParams),
+}
+
+/// The mode to switch the live tunnel to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct SetTunnelParams {
+    /// Split or full.
+    pub mode: TunnelMode,
 }
 
 /// Where to read the log from.
@@ -274,6 +304,11 @@ pub struct ConnectParams {
     pub gateway_addr: Ipv4Addr,
     /// The subnets and DNS domains to send through the tunnel.
     pub routes: RouteSet,
+    /// Split or full. Left out, it is split, as before there was a choice.
+    /// Full is refused, as for [`RequestBody::SetTunnel`], when it cannot
+    /// be had safely here.
+    #[serde(default)]
+    pub tunnel: TunnelMode,
 }
 
 /// Whether an address could be a VPN gateway at all.
@@ -841,6 +876,7 @@ mod tests {
                     subnets: vec!["142.103.0.0/16".parse::<Ipv4Net>().unwrap()],
                     dns_domains: vec!["ece.ubc.ca".to_string()],
                 },
+                tunnel: TunnelMode::Split,
             }),
         }
     }
@@ -849,17 +885,102 @@ mod tests {
     fn request_wire_format_is_stable() {
         // If the snapshot below has to change, so does this number: an older
         // peer could no longer read the message.
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
         let line = encode(&connect()).unwrap();
         assert_eq!(
             line,
             concat!(
                 r#"{"id":7,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","gateway_addr":"192.0.2.1","#,
-                r#""routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]}}}}"#,
+                r#""routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]},"tunnel":"split"}}}"#,
                 "\n"
             )
         );
         assert_eq!(decode::<Request>(&line).unwrap(), connect());
+    }
+
+    // Version 5: a connect says split or full, and left out it is split, as
+    // before there was a choice. Only those two words are taken.
+    #[test]
+    fn a_connect_says_its_tunnel_mode() {
+        let without = concat!(
+            r#"{"id":7,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","gateway_addr":"192.0.2.1","#,
+            r#""routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]}}}}"#
+        );
+        assert_eq!(decode::<Request>(without).unwrap(), connect());
+        let full = without.replace(r#"]}}}}"#, r#"]},"tunnel":"full"}}}"#);
+        let Request {
+            body: RequestBody::Connect(params),
+            ..
+        } = decode::<Request>(&full).unwrap()
+        else {
+            panic!("{full}")
+        };
+        assert_eq!(params.tunnel, TunnelMode::Full);
+        let other = without.replace(r#"]}}}}"#, r#"]},"tunnel":"everything"}}}"#);
+        assert!(decode::<Request>(&other).is_err());
+    }
+
+    // Version 5: the live tunnel can be switched between split and full,
+    // with nothing else in the request.
+    #[test]
+    fn set_tunnel_has_a_stable_wire_format() {
+        let switch = Request {
+            id: 11,
+            body: RequestBody::SetTunnel(SetTunnelParams {
+                mode: TunnelMode::Full,
+            }),
+        };
+        let line = encode(&switch).unwrap();
+        assert_eq!(
+            line,
+            "{\"id\":11,\"body\":{\"method\":\"set_tunnel\",\"params\":{\"mode\":\"full\"}}}\n"
+        );
+        assert_eq!(decode::<Request>(&line).unwrap(), switch);
+        let smuggled = [
+            r#"{"id":11,"body":{"method":"set_tunnel","params":{"mode":"full","subnets":["0.0.0.0/1"]}}}"#,
+            r#"{"id":11,"body":{"method":"set_tunnel","params":{}}}"#,
+            r#"{"id":11,"body":{"method":"set_tunnel"}}"#,
+        ];
+        for line in smuggled {
+            assert!(decode::<Request>(line).is_err(), "{line}");
+        }
+    }
+
+    // The mode of a live tunnel is in every `connected` state, for the app to
+    // show, and is always there.
+    #[test]
+    fn a_connected_state_says_its_mode() {
+        let state = ConnState::Connected {
+            tunnel: crate::state::TunnelInfo {
+                interface: "tun0".to_string(),
+                address: "10.255.0.2".to_string(),
+                subnets: vec![],
+                dns_domains: vec![],
+                mode: TunnelMode::Full,
+            },
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert_eq!(
+            json,
+            r#"{"state":"connected","tunnel":{"interface":"tun0","address":"10.255.0.2","subnets":[],"dns_domains":[],"mode":"full"}}"#
+        );
+        assert_eq!(serde_json::from_str::<ConnState>(&json).unwrap(), state);
+        let without = json.replace(r#","mode":"full""#, "");
+        assert!(serde_json::from_str::<ConnState>(&without).is_err());
+    }
+
+    // A peer that speaks version 4 knows nothing of `set_tunnel` or of a
+    // tunnel's mode. It is told to update in the handshake.
+    #[test]
+    fn a_version_4_peer_is_told_to_update() {
+        let older = r#"{"protocol_version":4,"client":"cli","client_version":"0.1.0"}"#;
+        assert_eq!(peek_protocol_version(older), Ok(4));
+        let reply = HelloReply {
+            protocol_version: 4,
+            service_version: "0.1.0".to_string(),
+            owner_claimed: true,
+        };
+        assert!(!reply.is_compatible());
     }
 
     #[test]
@@ -984,6 +1105,7 @@ mod tests {
                 cookie: Secret::new("x".repeat(MAX_LINE_BYTES)),
                 gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
                 routes: RouteSet::default(),
+                tunnel: TunnelMode::Split,
             }),
         };
         assert!(matches!(encode(&big_cookie), Err(FrameError::TooLong)));
@@ -1287,6 +1409,7 @@ mod tests {
             address: "10.255.0.2".to_string(),
             subnets: Vec::new(),
             dns_domains: Vec::new(),
+            mode: TunnelMode::Split,
         };
         let (code, message) = (ErrorCode::Internal, String::new());
         let kinds = [

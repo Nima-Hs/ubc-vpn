@@ -25,6 +25,7 @@ import type { SettingsFailureCode } from "@shared/protocol/SettingsFailureCode";
 import type { SettingsView } from "@shared/protocol/SettingsView";
 import type { StartMode } from "@shared/protocol/StartMode";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
+import type { TunnelMode } from "@shared/protocol/TunnelMode";
 
 // Typed against `ErrorCode`, so a code added to the protocol fails the type
 // check here until it is listed.
@@ -65,13 +66,21 @@ function isErrorCode(value: unknown): value is ErrorCode {
     return typeof value === "string" && Object.hasOwn(ERROR_CODES, value);
 }
 
+const TUNNEL_MODES: Record<TunnelMode, true> = { split: true, full: true };
+
+/** Whether a value is one of the two tunnel modes, and nothing else. */
+export function isTunnelMode(value: unknown): value is TunnelMode {
+    return typeof value === "string" && Object.hasOwn(TUNNEL_MODES, value);
+}
+
 function isTunnelInfo(value: unknown): value is TunnelInfo {
     return (
         isObject(value) &&
         typeof value.interface === "string" &&
         typeof value.address === "string" &&
         isStringArray(value.subnets) &&
-        isStringArray(value.dns_domains)
+        isStringArray(value.dns_domains) &&
+        isTunnelMode(value.mode)
     );
 }
 
@@ -344,6 +353,7 @@ export function isProfilesView(value: unknown): value is ProfilesView {
         Object.hasOwn(START_MODES, global.start) &&
         typeof global.auto_connect === "boolean" &&
         isProfileId(global.active_profile) &&
+        isTunnelMode(global.tunnel) &&
         profiles.length > 0 &&
         profiles.every(isProfileView) &&
         // The active profile is one of them, and no id is there twice.

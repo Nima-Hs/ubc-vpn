@@ -36,6 +36,7 @@ fn policy(host: &str, pins: &[Pin]) -> Policy {
         gateway: host.to_string(),
         pins: pins.to_vec(),
         allowed_routes: None,
+        full_tunnel: Default::default(),
     }
 }
 

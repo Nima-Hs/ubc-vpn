@@ -93,10 +93,15 @@ function isStrings(value) {
 }
 
 function isConnectParams(params) {
+    // `tunnel` may be left out, and is then split, as the service reads it.
+    const keys = Object.keys(params ?? {})
+        .sort()
+        .join();
     return (
         typeof params === "object" &&
         params !== null &&
-        Object.keys(params).sort().join() === "cookie,gateway_addr,routes" &&
+        (keys === "cookie,gateway_addr,routes" || keys === "cookie,gateway_addr,routes,tunnel") &&
+        (params.tunnel === undefined || params.tunnel === "split" || params.tunnel === "full") &&
         typeof params.cookie === "string" &&
         /^\d{1,3}(\.\d{1,3}){3}$/.test(params.gateway_addr) &&
         typeof params.routes === "object" &&

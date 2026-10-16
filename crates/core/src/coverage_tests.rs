@@ -26,6 +26,7 @@ fn tunnel(subnets: &[&str], domains: &[&str]) -> TunnelInfo {
         address: "10.255.250.2".to_string(),
         subnets: subnets.iter().map(|s| net(s)).collect(),
         dns_domains: domains.iter().map(ToString::to_string).collect(),
+        mode: crate::state::TunnelMode::Split,
     }
 }
 

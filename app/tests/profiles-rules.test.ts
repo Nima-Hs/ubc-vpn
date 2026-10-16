@@ -128,6 +128,7 @@ describe("the tray menu", () => {
                 state: "connected",
                 tunnel: {
                     interface: "utun4",
+                    mode: "split",
                     address: "198.51.100.42",
                     subnets: [],
                     dns_domains: [],

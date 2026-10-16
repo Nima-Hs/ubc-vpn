@@ -6,6 +6,7 @@ import { trayKind } from "../src/main/tray-icon";
 
 const TUNNEL = {
     interface: "utun4",
+    mode: "split" as const,
     address: "198.51.100.42",
     subnets: ["203.0.113.0/24", "198.51.100.0/24"],
     dns_domains: ["campus.example"],

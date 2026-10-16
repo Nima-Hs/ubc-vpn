@@ -1,10 +1,10 @@
 # Architecture
 
-Status: agreed design, 2026-10-11, kept up to date as the code is built. The app, the command-line client and the service exist and talk to each other in development mode; the real VPN engine, routes and DNS are not connected yet.
+Status: agreed design, 2026-10-11, kept up to date as the code is built. The app, the command-line client and the service exist and talk to each other. Routes and DNS are applied on Windows; on macOS and Linux they are not yet, and connecting there fails with a reason.
 
 ## What we are building
 
-A desktop VPN client for UBC's myVPN (a Cisco gateway that speaks the AnyConnect protocol) that does split tunnelling: only the UBC subnets the user chooses go through the VPN, and everything else stays on the normal connection. UBC's official client sends all traffic through the tunnel and cannot be configured otherwise.
+A desktop VPN client for UBC's myVPN (a Cisco gateway that speaks the AnyConnect protocol) that does split tunnelling: only the UBC subnets the user chooses go through the VPN, and everything else stays on the normal connection. UBC's official client sends all traffic through the tunnel and cannot be configured otherwise. Sending everything through the tunnel is still available here, as an option (see "Full tunnel").
 
 It is an open-source app with a GUI, installed from a release file, for Windows, macOS and Linux.
 
@@ -224,6 +224,47 @@ A refused route fails the connection with a clear reason. Nothing is applied par
 
 A chosen subnet may contain the gateway itself; UBC's gateway sits inside a campus range users will want. So that traffic to the gateway never loops into its own tunnel, the service first adds a route for the one address the tunnel is connected to, through the physical network, and keeps it there for the life of the connection. It decides which network is physical when the tunnel is created and never re-derives it from a table that already contains the tunnel. When the physical network changes, the tunnel is no longer usable: the service tears everything down and reconnects from a clean state.
 
+### Full tunnel
+
+Split tunnel is the default and the reason this client exists. A user may instead send everything through the VPN: one global setting, `global.tunnel` in the settings file, `split` or `full`, shared by every profile. The policy file may forbid full mode (`"full_tunnel": "forbidden"`); left out, it is allowed. Full mode is not a route the user chooses: the rules above for routes still apply to the user's own subnets, and full mode is modelled and checked on its own.
+
+**What full mode does:**
+
+- **All IPv4 traffic goes through the tunnel.** The service adds `0.0.0.0/1` and `128.0.0.0/1` through the tunnel. It never touches the default route. The halves are more specific than any default route, so they win whatever its metric, and a default route renewed by DHCP changes nothing.
+- **IPv6 is blocked.** The service adds `::/1` and `8000::/1` through the tunnel, which has no IPv6 address, so an IPv6 connection fails at once and programs fall back to IPv4. Teredo and 6to4 cannot get round this: they carry IPv6 inside IPv4, and that IPv4 follows the halves. Where the tunnel adapter has no IPv6 at all, the halves cannot be added; then full mode is refused if any other interface has an IPv6 route other than link-local, and otherwise goes ahead without them, since nothing can leak.
+- **All DNS goes to UBC's DNS servers, through the tunnel.** On Windows a catch-all name-resolution rule (NRPT namespace `.`) names the tunnel's DNS servers, beside the split-DNS rules for the user's domains. It takes precedence over Windows' habit of asking every network's DNS server at once: queries go only to the tunnel's servers, over IPv4 and IPv6 alike. A single-label name is sent to UBC's servers with the local network's suffix added. The rules this product writes are volatile (that change to the Windows rules is in progress), so a crash or a restart cannot leave a dead `.` rule behind; the service also clears its rules when it starts.
+- **The local network stays reachable directly:** the network the physical interface is on and its router. Their routes are more specific than the halves. The gateway keeps its own route through the physical network, as in split mode.
+- **The user's own subnets and domains stay applied.** Full mode adds to them, so switching is only adding or removing the halves and the `.` rule.
+
+**What it refuses**, before anything is changed, with a reason the user can read:
+
+- the policy forbids it;
+- the gateway assigned no DNS server the service can use, so DNS could not go to UBC;
+- another program already sends all traffic somewhere, such as another VPN's own `/1` halves, or already resolves all names, such as a foreign `.` rule from Tailscale's "override local DNS" or exit node;
+- the router is not inside a network the physical interface is on, such as with a `/32` or point-to-point address, or a router given by DHCP option 121, so it could not be kept reachable directly;
+- the operating system cannot do it. Only Windows can, for now.
+
+**What it cannot do**, said to the user:
+
+- **Programs that resolve names themselves,** such as a browser using DNS over HTTPS or a program with its own resolver, are not sent to UBC's DNS servers. Their traffic still goes through the tunnel, so nothing leaks onto the local network.
+- **Names only the local network knows** (`.lan`, `.home`) and captive portals do not resolve. mDNS, LLMNR and NetBIOS names still work: they never go to a DNS server.
+- **More specific routes of other interfaces still win.** Examples are a second network adapter, a virtual switch for virtual machines, or Tailscale's `100.64.0.0/10`. Traffic to them goes there, not through the tunnel.
+
+**Checks.** Every one must answer yes, or the connection fails closed:
+
+- an address in each IPv4 half, outside the user's subnets and the local network, uses the tunnel;
+- an address in each IPv6 half uses the tunnel, unless IPv6 was found absent as above;
+- the gateway, the router and the local network do not use the tunnel;
+- the DNS rules read back exactly. Windows cannot show which server a query really went to, so DNS answers "cannot be observed" there, as for split DNS; issue #214 is the end-to-end test of it.
+
+**Switching while connected** goes the way of a live route change, with `set_tunnel`, and never reconnects:
+
+- **To full:** add the halves, then the `.` rule, then check.
+- **To split:** remove the `.` rule, then the halves, then check that addresses outside the user's subnets no longer use the tunnel.
+- **Failing closed:** a step or a check that fails closes the connection and removes everything, as for a route change.
+- **What the user sees:** the VPN never drops, UBC traffic is never interrupted, and nothing leaks, but connections to non-UBC sites may reset on a switch. A connection that was open to such a site starts sending its packets another way, from another address.
+- **The bridge** refuses `set_tunnel` from the app, as it refuses `update_routes`. The mode comes from the user's saved setting, which `ubc-vpn settings set-tunnel` saves and then applies.
+
 ### Who the owner is
 
 The owner is the only user the service takes commands from.
@@ -256,7 +297,7 @@ Newline-delimited JSON, one message per line. The service drops a connection tha
 
 ### The log the owner can read
 
-The service keeps its recent log lines in memory and the owner can read them, for the app's log view and for a report to paste into a bug report. The shapes are in `crates/core/src/protocol.rs` (protocol version 3).
+The service keeps its recent log lines in memory and the owner can read them, for the app's log view and for a report to paste into a bug report. The shapes are in `crates/core/src/protocol.rs` (protocol version 5).
 
 - **What is kept:** 500 lines from the service and the engine, and 100 lines that the client hands over from a login, in a space of their own so a client cannot push the service's lines out. Nothing is written to disk.
 - **Before a line is kept:** the service removes any character that could mislead when shown, then every secret it holds at that moment, then everything from a word such as `cookie`, `pass` or `session` to the end of the line, which it replaces with `[redacted]`. A line that is empty or too long after the first step is replaced whole by a marker, not shortened to fit. Debug-level lines are never kept. Only the exact form of a secret is found; one that is split or encoded is not.
@@ -270,7 +311,7 @@ If the service cannot resume a session, during reconnect or otherwise, it report
 
 ### DNS on Linux
 
-v0.1.0 supports systemd-resolved only. The packages declare it as a dependency, since Debian does not install it by default. The `.rpm` names `systemd-resolved`. The `.deb` names `systemd-resolved | systemd (<< 251.3-2~)`, because on Ubuntu 22.04 it is part of systemd and no separate package exists. Where it is not running, connecting fails with a message that says so.
+Not built yet: the service refuses routes and DNS on Linux for now. The plan for v0.1.0 is systemd-resolved only. The packages declare it as a dependency, since Debian does not install it by default. The `.rpm` names `systemd-resolved`. The `.deb` names `systemd-resolved | systemd (<< 251.3-2~)`, because on Ubuntu 22.04 it is part of systemd and no separate package exists. Where it is not running, connecting fails with a message that says so.
 
 ### Licences outside Cargo
 

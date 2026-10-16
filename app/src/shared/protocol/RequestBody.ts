@@ -3,9 +3,10 @@ import type { AddLogParams } from "./AddLogParams";
 import type { ConnectParams } from "./ConnectParams";
 import type { LogsParams } from "./LogsParams";
 import type { RouteSet } from "./RouteSet";
+import type { SetTunnelParams } from "./SetTunnelParams";
 import type { WatchLogsParams } from "./WatchLogsParams";
 
 /**
  * What a client can ask for.
  */
-export type RequestBody = { "method": "claim" } | { "method": "status" } | { "method": "connect", "params": ConnectParams } | { "method": "disconnect" } | { "method": "logs", "params": LogsParams } | { "method": "watch_logs", "params": WatchLogsParams } | { "method": "diagnostics" } | { "method": "add_log", "params": AddLogParams } | { "method": "update_routes", "params": RouteSet };
+export type RequestBody = { "method": "claim" } | { "method": "status" } | { "method": "connect", "params": ConnectParams } | { "method": "disconnect" } | { "method": "logs", "params": LogsParams } | { "method": "watch_logs", "params": WatchLogsParams } | { "method": "diagnostics" } | { "method": "add_log", "params": AddLogParams } | { "method": "update_routes", "params": RouteSet } | { "method": "set_tunnel", "params": SetTunnelParams };

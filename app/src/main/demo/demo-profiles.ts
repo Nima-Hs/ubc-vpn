@@ -44,7 +44,7 @@ const lab = (): ProfileView => ({
 
 function fresh(): ProfilesView {
     return {
-        global: { start: "off", auto_connect: false, active_profile: CAMPUS },
+        global: { start: "off", auto_connect: false, active_profile: CAMPUS, tunnel: "split" },
         profiles: [campus()],
         keyring: "available",
         policy_readable: true,

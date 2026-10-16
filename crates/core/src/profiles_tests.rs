@@ -128,8 +128,38 @@ fn version_2_has_a_stable_shape() {
     let compact: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
         compact.to_string(),
-        r#"{"global":{"active_profile":"00000000000000000000000000000001","auto_connect":false,"start":"off"},"profiles":[{"id":"00000000000000000000000000000001","name":"UBC VPN","routes":{"dns_domains":[],"subnets":[]},"save_password":false,"username":null}],"version":2}"#
+        r#"{"global":{"active_profile":"00000000000000000000000000000001","auto_connect":false,"start":"off","tunnel":"split"},"profiles":[{"id":"00000000000000000000000000000001","name":"UBC VPN","routes":{"dns_domains":[],"subnets":[]},"save_password":false,"username":null}],"version":2}"#
     );
+}
+
+// One tunnel mode for every profile, split unless set. A file from before
+// there was a choice, or with a word this version does not know, reads as
+// split, the narrower: never as full.
+#[test]
+fn the_tunnel_mode_is_global_and_split_unless_set() {
+    let mut profiles = two();
+    assert_eq!(profiles.global.tunnel, TunnelMode::Split);
+    profiles.set_tunnel(TunnelMode::Full);
+    let saved: Value = serde_json::from_str(&profiles.to_text()).unwrap();
+    assert_eq!(saved["global"]["tunnel"], "full");
+    let read = Profiles::read(Some(&profiles.to_text())).unwrap().profiles;
+    assert_eq!(read.global.tunnel, TunnelMode::Full);
+
+    for odd in [
+        Value::Null,
+        Value::from("everything"),
+        Value::from(true),
+        Value::from("Full"),
+    ] {
+        let mut file = saved.clone();
+        file["global"]["tunnel"] = odd.clone();
+        let read = Profiles::read(Some(&file.to_string())).unwrap().profiles;
+        assert_eq!(read.global.tunnel, TunnelMode::Split, "{odd}");
+    }
+    let mut file = saved.clone();
+    file["global"].as_object_mut().unwrap().remove("tunnel");
+    let read = Profiles::read(Some(&file.to_string())).unwrap().profiles;
+    assert_eq!(read.global.tunnel, TunnelMode::Split);
 }
 
 // What a newer version stored is kept, wherever it is.

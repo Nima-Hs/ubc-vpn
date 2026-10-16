@@ -439,6 +439,7 @@ mod tests {
             gateway: "vpn.example.test".to_string(),
             pins: pins.iter().map(pin).collect(),
             allowed_routes: None,
+            full_tunnel: Default::default(),
         };
         Gateway::from_policy(&policy).expect("a valid policy")
     }
