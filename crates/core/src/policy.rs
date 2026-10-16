@@ -206,7 +206,7 @@ mod tests {
             "-oProxyCommand",
             "localhost",
             "MyVPN.ubc.ca",
-            "142.103.1.1",
+            "198.19.1.1",
         ] {
             assert_eq!(
                 policy(bad, &[GOOD_PIN]).validate(),

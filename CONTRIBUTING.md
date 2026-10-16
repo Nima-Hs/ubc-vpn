@@ -105,7 +105,7 @@ It says it is running and stays in the foreground. One user can run one dev-mode
 
 ```sh
 target/debug/ubc-vpn --dev status
-echo '{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}' | target/debug/ubc-vpn --dev settings set-routes --json
+echo '{"subnets":["10.255.0.0/24"],"dns_domains":["dept.example.test"]}' | target/debug/ubc-vpn --dev settings set-routes --json
 target/debug/ubc-vpn --dev settings get --json
 target/debug/ubc-vpn --dev connect
 target/debug/ubc-vpn --dev status

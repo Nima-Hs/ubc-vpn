@@ -22,15 +22,15 @@ fn a_password_in_doubt_reads_back_in_doubt() {
     let secrets = fake.secrets();
     let doubted = Saved {
         in_doubt: true,
-        ..saved("user.ece@app", "made-up-pass")
+        ..saved("user.dept@app", "made-up-pass")
     };
     secrets.save(PROFILE, &doubted).unwrap();
     let back = secrets.load(PROFILE).unwrap().unwrap();
     assert!(back.in_doubt);
     assert_eq!(back.password.expose(), "made-up-pass");
-    assert_eq!(back.username, "user.ece@app");
+    assert_eq!(back.username, "user.dept@app");
     secrets
-        .save(PROFILE, &saved("user.ece@app", "made-up-pass"))
+        .save(PROFILE, &saved("user.dept@app", "made-up-pass"))
         .unwrap();
     assert!(!secrets.load(PROFILE).unwrap().unwrap().in_doubt);
 }
@@ -100,14 +100,14 @@ fn a_password_is_saved_with_its_username_and_read_back() {
     let secrets = fake.secrets();
     assert!(secrets.load(PROFILE).unwrap().is_none());
     secrets
-        .save(PROFILE, &saved("user.ece@app", "made-up-pass\nword"))
+        .save(PROFILE, &saved("user.dept@app", "made-up-pass\nword"))
         .unwrap();
     let back = secrets.load(PROFILE).unwrap().unwrap();
-    assert_eq!(back.username, "user.ece@app");
+    assert_eq!(back.username, "user.dept@app");
     assert_eq!(back.password.expose(), "made-up-pass\nword");
     // Saved again, it replaces what was there.
     secrets
-        .save(PROFILE, &saved("user.ece@app", "another-made-up"))
+        .save(PROFILE, &saved("user.dept@app", "another-made-up"))
         .unwrap();
     let back = secrets.load(PROFILE).unwrap().unwrap();
     assert_eq!(back.password.expose(), "another-made-up");
@@ -220,10 +220,10 @@ fn a_keyring_that_cannot_be_used_says_so() {
 // printed of a saved password, nor in the index.
 #[test]
 fn nothing_secret_shows() {
-    let secret = saved("user.ece@app", "made-up-pass-0001");
+    let secret = saved("user.dept@app", "made-up-pass-0001");
     let shown = format!("{secret:?}");
     assert!(
-        !shown.contains("made-up") && !shown.contains("user.ece"),
+        !shown.contains("made-up") && !shown.contains("user.dept"),
         "{shown}"
     );
     let fake = FakeSecrets::new();
@@ -235,7 +235,7 @@ fn nothing_secret_shows() {
         .unwrap()
         .1;
     assert!(
-        !index.contains("made-up") && !index.contains("user.ece"),
+        !index.contains("made-up") && !index.contains("user.dept"),
         "{index}"
     );
 }
@@ -303,7 +303,7 @@ fn saves_at_once_keep_every_line_of_the_index() {
 // is fixed text, never the OS's own message, which can hold a name.
 #[test]
 fn keyring_errors_never_carry_the_os_message() {
-    let os = "the os said user.ece@app made-up-secret";
+    let os = "the os said user.dept@app made-up-secret";
     let failures = [
         keyring::Error::PlatformFailure(Box::new(std::io::Error::other(os))),
         keyring::Error::NoStorageAccess(Box::new(std::io::Error::other(os))),
@@ -316,7 +316,7 @@ fn keyring_errors_never_carry_the_os_message() {
         let error = unusable(failure);
         let said = format!("{error} {error:?}");
         assert!(
-            !said.contains("made-up") && !said.contains("user.ece"),
+            !said.contains("made-up") && !said.contains("user.dept"),
             "{said}"
         );
         match error {
@@ -342,13 +342,13 @@ fn the_real_keyring_saves_reads_and_forgets() {
     let secrets = under(&service);
     secrets.forget_all().unwrap();
     secrets
-        .save(PROFILE, &saved("user.ece@app", "made-up-pass-0001"))
+        .save(PROFILE, &saved("user.dept@app", "made-up-pass-0001"))
         .unwrap();
     secrets
         .save(OTHER, &saved("other@app", "made-up-pass-0002"))
         .unwrap();
     let back = secrets.load(PROFILE).unwrap().unwrap();
-    assert_eq!(back.username, "user.ece@app");
+    assert_eq!(back.username, "user.dept@app");
     assert_eq!(back.password.expose(), "made-up-pass-0001");
     secrets.forget(PROFILE).unwrap();
     assert!(secrets.load(PROFILE).unwrap().is_none());

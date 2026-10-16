@@ -416,10 +416,10 @@ fn every_state_is_printed_exactly() {
         address: "10.255.0.2".to_string(),
         subnets: vec![
             "10.19.0.0/16".parse().unwrap(),
-            "142.103.0.0/16".parse().unwrap(),
+            "198.19.0.0/16".parse().unwrap(),
         ],
         dns_domains: vec![
-            "ece.example.test".to_string(),
+            "dept.example.test".to_string(),
             "cs.example.test".to_string(),
         ],
         mode: ubc_vpn_core::state::TunnelMode::Split,
@@ -460,9 +460,9 @@ fn every_state_is_printed_exactly() {
         ),
         (
             ConnState::Connected { tunnel },
-            "Connected (utun4 as 10.255.0.2)\n  Subnets: 10.19.0.0/16, 142.103.0.0/16\n  \
-             DNS domains: ece.example.test, cs.example.test\n",
-            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test","cs.example.test"],"mode":"split"}}"#,
+            "Connected (utun4 as 10.255.0.2)\n  Subnets: 10.19.0.0/16, 198.19.0.0/16\n  \
+             DNS domains: dept.example.test, cs.example.test\n",
+            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","198.19.0.0/16"],"dns_domains":["dept.example.test","cs.example.test"],"mode":"split"}}"#,
         ),
     ];
     for (state, words, json) in states {

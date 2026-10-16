@@ -163,7 +163,7 @@ mod tests {
         let subnets = ["192.0.2.0/24", "10.255.0.0/24"].map(|s| s.parse::<Ipv4Net>().unwrap());
         let mut split = SplitDns {
             resolvers: vec![Ipv4Addr::new(10, 255, 0, 53)],
-            domains: vec!["ece.example.test".to_string()],
+            domains: vec!["dept.example.test".to_string()],
         };
         let physical = fake.capture_physical(GATEWAY).unwrap();
         if skip != "gateway route" {

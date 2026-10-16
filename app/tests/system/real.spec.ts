@@ -63,7 +63,7 @@ const WRONG_PASSWORD = "wrong-password-0000";
 /** What the pretend gateway issues. The app must never see it. */
 const COOKIE = "Zq7-made-up-0123456789";
 const SUBNET = "10.255.0.0/24";
-const DOMAIN = "ece.example.test";
+const DOMAIN = "dept.example.test";
 
 const windows = process.platform === "win32";
 const screenshotDir = resolve(process.env.SCREENSHOT_DIR ?? "test-results/system-screens");

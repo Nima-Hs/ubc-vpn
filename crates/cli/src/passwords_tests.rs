@@ -146,7 +146,7 @@ fn nothing_is_saved_from_a_connect_that_did_not_start() {
     }
     // The login is good, and the service refuses the connect: the policy it
     // read when it started does not allow routes the policy file now does.
-    let narrow = r#","allowed_routes":["142.103.0.0/16"]"#;
+    let narrow = r#","allowed_routes":["198.19.0.0/16"]"#;
     let settings = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
     let scene = Scene::new(Some(&settings), narrow);
     let open = format!(
@@ -283,7 +283,7 @@ fn a_username_to_check_takes_its_saved_password_with_it() {
     put(&ProfileId::first(), "alice", PASSWORD, false);
     let mut script = Script::new(pin());
     script.form.truncate(1);
-    script.form[0].1 = Secret::new("alice.ece@app");
+    script.form[0].1 = Secret::new("alice.dept@app");
     scene.gateway = FakeEngine::new(script);
     assert_eq!(scene.connect(&mut Typist::default()).0, LOGIN_REFUSED);
     assert!(saved(&scene).get("username").is_none());
@@ -507,7 +507,7 @@ fn a_refusal_without_the_lock_says_nothing_was_tried() {
 #[test]
 fn usernames_are_the_same_only_letter_for_letter() {
     use crate::passwords::same_username;
-    assert!(same_username("Alice.ECE@app", "alice.ece@app"));
+    assert!(same_username("Alice.DEPT@app", "alice.dept@app"));
     assert!(same_username("zoë", "zoë"));
     assert!(!same_username("\u{212A}en", "ken"));
     assert!(!same_username("ZOË", "zoë"));

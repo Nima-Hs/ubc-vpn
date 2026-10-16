@@ -372,7 +372,7 @@ fn the_request_is_marked_as_sent_before_it_leaves() {
     };
     // The policy the service read when it started does not allow routes
     // that the policy file now does.
-    let narrow = r#","allowed_routes":["142.103.0.0/16"]"#;
+    let narrow = r#","allowed_routes":["198.19.0.0/16"]"#;
     let settings = format!(r#"{{"username":"alice",{ROUTES}}}"#);
     let scene = Scene::new(Some(&settings), narrow);
     let open = format!(

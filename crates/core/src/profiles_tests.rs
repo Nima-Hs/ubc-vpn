@@ -90,18 +90,18 @@ fn fresh_settings_have_the_id_they_are_given() {
 // refuse is kept as it was: dropping a route the user chose would be worse.
 #[test]
 fn version_1_settings_become_one_profile_and_lose_nothing() {
-    let v1 = r#"{"username":"user.ece@app","save_password":true,"theme":"dark",
-        "routes":{"subnets":["10.255.0.0/16","10.0.0.0/7"],"dns_domains":["ece.example.test"]}}"#;
+    let v1 = r#"{"username":"user.dept@app","save_password":true,"theme":"dark",
+        "routes":{"subnets":["10.255.0.0/16","10.0.0.0/7"],"dns_domains":["dept.example.test"]}}"#;
     let read = Profiles::read(Some(v1)).unwrap().profiles;
     assert_eq!(read.profiles.len(), 1);
     let profile = read.active();
     assert_eq!(profile.id, ProfileId::first());
     assert_eq!(profile.name, FIRST_PROFILE_NAME);
-    assert_eq!(profile.username.as_deref(), Some("user.ece@app"));
+    assert_eq!(profile.username.as_deref(), Some("user.dept@app"));
     assert!(profile.save_password);
     assert_eq!(
         profile.routes,
-        routes(&["10.255.0.0/16", "10.0.0.0/7"], &["ece.example.test"])
+        routes(&["10.255.0.0/16", "10.0.0.0/7"], &["dept.example.test"])
     );
     assert_eq!(read.other.get("theme"), Some(&Value::from("dark")));
     // The same id every time it is read, until it is saved.
@@ -206,7 +206,7 @@ fn names_and_usernames_today_refuses_are_cleaned_not_fatal() {
     assert_eq!(editable.check(), Ok(()));
 
     // A v1 username with a newline: cleared, and its password forgotten.
-    let v1 = r#"{"username":"user.ece@app\nsudo","save_password":true,
+    let v1 = r#"{"username":"user.dept@app\nsudo","save_password":true,
         "routes":{"subnets":["10.255.0.0/16"],"dns_domains":[]}}"#;
     let read = Profiles::read(Some(v1)).unwrap();
     let first = read.profiles.active();
@@ -220,7 +220,7 @@ fn names_and_usernames_today_refuses_are_cleaned_not_fatal() {
     let forget: Vec<_> = read.passwords_to_forget().collect();
     assert_eq!(forget, [&ProfileId::first()]);
     let mut editable = read.profiles;
-    let username = Some(Some("user.ece@app"));
+    let username = Some(Some("user.dept@app"));
     assert_eq!(
         editable.update(&ProfileId::first(), username, None),
         Ok(Password::Forget)
@@ -360,8 +360,8 @@ fn more_profiles_than_the_limit_are_kept() {
 fn names_are_trimmed_short_and_plain() {
     assert_eq!(check_name("  Lab  "), Ok("Lab".to_string()));
     assert_eq!(
-        check_name("Département ECE"),
-        Ok("Département ECE".to_string())
+        check_name("Département Physique"),
+        Ok("Département Physique".to_string())
     );
     assert_eq!(
         check_name(&"x".repeat(MAX_NAME_CHARS)).map(|n| n.len()),

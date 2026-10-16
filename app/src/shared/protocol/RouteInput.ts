@@ -5,10 +5,10 @@
  */
 export type RouteInput = { 
 /**
- * Subnets such as `142.103.0.0/16`.
+ * Subnets such as `198.19.0.0/16`.
  */
 subnets: Array<string>, 
 /**
- * DNS domains such as `ece.ubc.ca`.
+ * DNS domains such as `dept.ubc.ca`.
  */
 dns_domains: Array<string>, };

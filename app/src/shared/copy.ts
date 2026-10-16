@@ -400,7 +400,7 @@ const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
     // made up.
     check_username: {
         title: "Check your username",
-        body: "UBC did not take the login. Check your username: it is your CWL username, your department and the way to confirm, as CWL.dept@method, for example user.ece@app.",
+        body: "UBC did not take the login. Check your username: it is your CWL username, your department and the way to confirm, as CWL.dept@method, for example jdoe.dept@app.",
         retry: true,
     },
     pin_mismatch: FAILURES.pin_mismatch,

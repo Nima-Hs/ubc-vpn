@@ -9,6 +9,6 @@ export type RouteSet = {
  */
 subnets: Array<string>, 
 /**
- * DNS domains resolved through the tunnel, such as `ece.ubc.ca`.
+ * DNS domains resolved through the tunnel, such as `dept.ubc.ca`.
  */
 dns_domains: Array<string>, };

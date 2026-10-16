@@ -13,9 +13,9 @@ use crate::tests::Rig;
 use crate::{FAILED, NOT_OWNER, USAGE};
 
 /// The saved routes are `10.255.0.0/24` and the DNS domain
-/// `ece.example.test` (see `connect_tests.rs`). These hosts are made up.
+/// `dept.example.test` (see `connect_tests.rs`). These hosts are made up.
 const OUTSIDE: &str = "ssh.elsewhere.example";
-const INSIDE: &str = "build.ece.example.test";
+const INSIDE: &str = "build.dept.example.test";
 
 /// What the stand-in resolver answers, and what it was asked.
 struct Names {
@@ -97,10 +97,13 @@ fn a_host_inside_the_routes_is_covered_and_goes_through_the_tunnel() {
     assert_eq!((status, err.as_str()), (0, ""));
     let report: HostCoverage = decode(out.trim_end()).unwrap();
     assert!(report.covered);
-    assert_eq!(report.saved_dns_domain.as_deref(), Some("ece.example.test"));
+    assert_eq!(
+        report.saved_dns_domain.as_deref(),
+        Some("dept.example.test")
+    );
     assert_eq!(
         report.tunnel_dns_domain.as_deref(),
-        Some("ece.example.test")
+        Some("dept.example.test")
     );
     let network = Some("10.255.0.0/24".parse().unwrap());
     assert_eq!(report.addresses[0].saved_network, network);
@@ -110,7 +113,7 @@ fn a_host_inside_the_routes_is_covered_and_goes_through_the_tunnel() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines[1],
-        "DNS: under the saved domain ece.example.test, looked up through the tunnel while connected"
+        "DNS: under the saved domain dept.example.test, looked up through the tunnel while connected"
     );
     assert_eq!(
         lines[3],

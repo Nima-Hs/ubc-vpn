@@ -29,7 +29,7 @@ fn assert_fresh(text: &str) {
 }
 
 const GOOD: &str =
-    r#"{"subnets":["10.19.0.0/16","142.103.0.0/16"],"dns_domains":["ece.example.test"]}"#;
+    r#"{"subnets":["10.19.0.0/16","198.19.0.0/16"],"dns_domains":["dept.example.test"]}"#;
 
 /// One user's machine: a policy folder and a settings folder, both empty.
 struct Machine {
@@ -163,7 +163,7 @@ fn with_no_settings_file_get_gives_defaults_and_set_creates_it() {
         panic!("{saved:?}");
     };
     assert_eq!(machine.view().settings.routes, routes);
-    assert_eq!(routes.dns_domains, ["ece.example.test"]);
+    assert_eq!(routes.dns_domains, ["dept.example.test"]);
     assert!(!machine.root.join("settings/settings.json.tmp").exists());
     // No service here, so no connection: the routes are for the next one.
     assert_eq!(live, Some(LiveRoutes::NextConnect));
@@ -295,12 +295,12 @@ fn an_unreadable_settings_file_is_refused_and_left_alone() {
 #[test]
 fn the_policy_limits_routes_only_when_it_can_be_read() {
     let machine = Machine::new();
-    machine.policy(r#","allowed_routes":["142.103.0.0/16"]"#);
+    machine.policy(r#","allowed_routes":["198.19.0.0/16"]"#);
     let view = machine.view();
     assert!(view.policy_readable);
     assert_eq!(
         view.allowed_routes,
-        Some(vec!["142.103.0.0/16".parse().unwrap()])
+        Some(vec!["198.19.0.0/16".parse().unwrap()])
     );
     for command in [Command::CheckRoutes, Command::SetRoutes] {
         let found = problems(machine.routes(command, GOOD));
@@ -313,7 +313,7 @@ fn the_policy_limits_routes_only_when_it_can_be_read() {
     assert!(!machine.settings_file().exists());
 
     // No pins, not JSON, and no file at all.
-    let no_pins = r#"{"gateway":"vpn.example.test","pins":[],"allowed_routes":["142.103.0.0/16"]}"#;
+    let no_pins = r#"{"gateway":"vpn.example.test","pins":[],"allowed_routes":["198.19.0.0/16"]}"#;
     for invalid in [Some(no_pins), Some("{"), None] {
         let machine = Machine::new();
         if let Some(text) = invalid {
