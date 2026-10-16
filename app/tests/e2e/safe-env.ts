@@ -22,13 +22,21 @@ export function leadsToRealClient(name: string): boolean {
 }
 
 /**
+ * Whether this is a CI machine: `CI` exactly `true`, as GitHub Actions sets
+ * it. Any other value, `1` or `false` included, counts as someone's computer.
+ */
+export function isCi(env: Record<string, string | undefined>): boolean {
+    return env.CI === "true";
+}
+
+/**
  * `env` without anything that could lead a launched app to a real client or
- * service, unless it is CI's. Never changes `env` itself.
+ * service, unless this is CI. Never changes `env` itself.
  */
 export function launchEnvironment(
     env: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
-    if (env.CI) {
+    if (isCi(env)) {
         return { ...env };
     }
     return Object.fromEntries(Object.entries(env).filter(([name]) => !leadsToRealClient(name)));

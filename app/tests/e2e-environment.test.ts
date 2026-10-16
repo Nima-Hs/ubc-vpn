@@ -5,7 +5,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { launchEnvironment, leadsToRealClient } from "./e2e/safe-env";
+import { isCi, launchEnvironment, leadsToRealClient } from "./e2e/safe-env";
 
 const OWNER_SHELL = {
     PATH: "/usr/bin",
@@ -47,24 +47,46 @@ describe("the environment end-to-end tests give the apps they launch", () => {
         });
     });
 
+    it("counts only CI=true as CI", () => {
+        expect(isCi({ CI: "true" })).toBe(true);
+        for (const value of ["1", "TRUE", "yes", "false", "", undefined]) {
+            expect(isCi({ CI: value }), String(value)).toBe(false);
+            expect(launchEnvironment({ ...OWNER_SHELL, CI: value })).not.toHaveProperty(
+                "UBC_VPN_CLI",
+            );
+        }
+    });
+
     it("does not change the environment it is given", () => {
         const env = { ...OWNER_SHELL };
         launchEnvironment(env);
         expect(env).toEqual(OWNER_SHELL);
     });
 
-    it("is how every end-to-end test builds an app's environment", () => {
+    it("is the only way an end-to-end test starts an app", () => {
         const folder = join(__dirname, "e2e");
-        const specs = readdirSync(folder).filter((file) => file.endsWith(".spec.ts"));
+        const files = readdirSync(folder).filter((file) => file.endsWith(".ts"));
+        const specs = files.filter((file) => file.endsWith(".spec.ts"));
         expect(specs.length).toBeGreaterThan(1);
+        // Starting something, or handing on the runner's environment whole.
+        const starts =
+            /\belectron\.launch\b|\b_electron\b|\bspawn(Sync)?\(|\bexec(File)?(Sync)?\(|\bfork\(/;
+        const handsOn = /\.\.\.process\.env\b|env:\s*process\.env\b/;
+        for (const file of files) {
+            const text = readFileSync(join(folder, file), "utf8");
+            if (file === "launch.ts") {
+                // The one place: it starts from the filtered environment.
+                expect(text).toMatch(/launchEnvironment\(process\.env\)/);
+                expect(text).not.toMatch(handsOn);
+                continue;
+            }
+            expect(text, `${file} starts something itself`).not.toMatch(starts);
+            expect(text, `${file} hands on the environment`).not.toMatch(handsOn);
+        }
+        // Every spec that starts an app does it through launch.ts.
         for (const spec of specs) {
             const text = readFileSync(join(folder, spec), "utf8");
-            // The test runner's own environment is never handed on whole.
-            expect(text, spec).not.toMatch(/\.\.\.process\.env\b/);
-            expect(text, spec).not.toMatch(/env:\s*process\.env\b/);
-            if (/electron\.launch|spawn\(/.test(text)) {
-                expect(text, spec).toMatch(/launchEnvironment\(process\.env\)/);
-            }
+            expect(text, spec).toMatch(/from "\.\/launch"/);
         }
     });
 });

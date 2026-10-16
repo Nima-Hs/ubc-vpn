@@ -45,11 +45,11 @@ pnpm icons           # draws the app icon files in build/ again, after the mark 
 
 The end-to-end tests keep the app's window off the screen when run on your own computer, so they do not open windows over your work: they set `UBC_VPN_TEST_HIDDEN=1`, which an app that is not installed honours by never showing its window and making no tray icon, and an installed app ignores. In CI the window and the tray icon are shown, so the few tests about showing, hiding and closing to the tray run there and are skipped locally.
 
-On your own computer they also never reach a real client, the installed service, your settings or your saved password: the apps they launch do not inherit `UBC_VPN_CLI`, `UBC_VPN_DEV` or any `UBC_VPN_SYSTEM_*` variable from your shell ([`tests/e2e/safe-env.ts`](tests/e2e/safe-env.ts)). A test that needs one sets it itself. On CI nothing is removed.
+On your own computer they also never reach a real client, the installed service, your settings or your saved password: the apps they launch do not inherit `UBC_VPN_CLI`, `UBC_VPN_DEV` or any `UBC_VPN_SYSTEM_*` variable from your shell. Every app they start goes through [`tests/e2e/launch.ts`](tests/e2e/launch.ts), which filters the environment ([`tests/e2e/safe-env.ts`](tests/e2e/safe-env.ts)), and a unit test fails if a spec starts one any other way. A test that needs one of those variables sets it itself. Only `CI=true` counts as CI, and there nothing is removed.
 
 The end-to-end test saves a screenshot of every state to `test-results/screens`, or to `SCREENSHOT_DIR` if that is set. On Linux without a display, run it under `xvfb-run`.
 
-`pnpm test:system` is the one test with no stand-in in it ([`tests/system/real.spec.ts`](tests/system/real.spec.ts)). It starts `ubc-vpn-service --dev`, starts the production build of the app with `UBC_VPN_DEV=1`, and drives the window: the service is found and claimed, routes are checked and saved, a login is answered, the connection comes up and goes down, a login is cancelled, a wrong password is refused. Build the two programs first and name them:
+`pnpm test:system` is the one test with no stand-in in it ([`tests/system/real.spec.ts`](tests/system/real.spec.ts)). It starts `ubc-vpn-service --dev`, starts the production build of the app with `UBC_VPN_DEV=1`, and drives the window: the service is found and claimed, routes are checked and saved, a login is answered, the connection comes up and goes down, a login is cancelled, a wrong password is refused. On CI the workflow builds the two programs and names them, as here:
 
 ```sh
 cargo build --locked -p ubc-vpn-service --features dev-mode
@@ -57,7 +57,7 @@ cargo build --locked -p ubc-vpn-cli --features dev-mode
 UBC_VPN_SYSTEM_SERVICE=../target/debug/ubc-vpn-service UBC_VPN_SYSTEM_CLI=../target/debug/ubc-vpn pnpm test:system
 ```
 
-Without the two variables it is skipped and says so. Everything it starts gets a home of its own in one temporary folder, which it removes; it never touches an installed UBC VPN. On Windows it stops at once if a dev-mode service of yours is already running, because the dev channel there is named after the user. Its screenshots go to `test-results/system-screens`, or to `SCREENSHOT_DIR`.
+It runs on CI only: where `CI` is not set it is skipped and says why, because it starts real programs and a real channel, and someone's own computer may have a UBC VPN installed and in use. The app system workflow (`.github/workflows/app-system.yml`) runs it. Without the two variables it is skipped too, and says so. Everything it starts gets a home of its own in one temporary folder, which it removes; it never touches an installed UBC VPN. On Windows it stops at once if a dev-mode service of yours is already running, because the dev channel there is named after the user. Its screenshots go to `test-results/system-screens`, or to `SCREENSHOT_DIR`.
 
 ## How it is built
 
