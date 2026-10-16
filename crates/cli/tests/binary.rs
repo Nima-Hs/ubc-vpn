@@ -26,7 +26,6 @@ fn unserved() -> String {
 /// Whether a test that could reach a service may run: always in a debug
 /// build, which takes the channel it is given; in a release build only on
 /// CI. Says why when it may not.
-#[cfg(windows)]
 fn may_reach_a_service() -> bool {
     if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
         return true;
@@ -43,6 +42,36 @@ fn program() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ubc-vpn"));
     command.env(TEST_CHANNEL, unserved());
     command
+}
+
+// Security rule: every run of the program here names a channel of its own,
+// so the helper cannot quietly lose it.
+#[test]
+fn every_run_names_its_own_channel() {
+    let named = |command: &Command| {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == TEST_CHANNEL)
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    };
+    let (one, two) = (named(&program()), named(&program()));
+    assert!(
+        one.as_deref().is_some_and(|name| !name.is_empty()),
+        "{one:?}"
+    );
+    assert_ne!(one, two, "each run names a channel of its own");
+}
+
+// Security rule: a release build, which is what ships, cannot be pointed
+// at another channel: it does not even hold the name of the variable that
+// would do it.
+#[cfg(not(debug_assertions))]
+#[test]
+fn a_release_build_knows_no_test_channel() {
+    let program = std::fs::read(env!("CARGO_BIN_EXE_ubc-vpn")).unwrap();
+    let name = TEST_CHANNEL.as_bytes();
+    let found = program.windows(name.len()).any(|bytes| bytes == name);
+    assert!(!found, "a release build holds {TEST_CHANNEL}");
 }
 
 /// Runs the program and returns its exit status and what it printed.
@@ -97,6 +126,10 @@ fn connect_outside_a_terminal_asks_nothing() {
 // input is empty, which it must survive.
 #[test]
 fn connect_for_the_app_ends_with_one_error_line() {
+    // A connect asks the service before it asks the user anything.
+    if !may_reach_a_service() {
+        return;
+    }
     let (status, out, _) = run(&["connect", "--json"]);
     assert!(!matches!(status, Some(0 | 2)), "{status:?}");
     assert_eq!(out.lines().count(), 1, "{out}");
@@ -182,6 +215,8 @@ fn a_test_run_talks_to_the_channel_it_is_given() {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    // Every run through the helper names its channel.
+    every_run_names_its_own_channel();
     let channel = unserved();
     // Served as this user, as a dev-mode service serves its channel.
     let platform = ubc_vpn_platform::Platform::native(ubc_vpn_platform::Mode::Dev).unwrap();

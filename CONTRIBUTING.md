@@ -151,7 +151,7 @@ The other drives the app's window as well; `app/README.md` has its command (`pnp
 
 No test may reach the UBC VPN installed on the machine it runs on. That means its service, the user's settings, and the passwords saved in the OS keyring (Windows Credential Manager, macOS Keychain, Secret Service).
 - **Fakes:** tests use the platform fake, the fake keyring, and temporary folders of their own.
-- **The real client program:** a test that runs it points it at a channel that test alone names and nobody serves, with `UBC_VPN_TEST_CHANNEL`. Only a debug build reads that variable, so a release build always talks to its own channel. In a release test build, a test that could reach a service therefore runs only when `CI` is set, since CI machines have no UBC VPN installed.
+- **The real client program:** a test that runs it points it at a channel that test alone names and nobody serves, with `UBC_VPN_TEST_CHANNEL`. Only a debug build reads that variable, so a release build always talks to its own channel. In a release test build, a test that could reach a service therefore runs only when `CI` is set, since CI machines have no UBC VPN installed. **Never set `CI` on your own machine when you run tests with `--release`:** that would let them reach the service you have installed.
 - **The system tests** use dev mode, with its own channel and folders.
 - **Real-keyring tests** run on CI only.
 
