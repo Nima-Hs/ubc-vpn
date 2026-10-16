@@ -9,14 +9,14 @@
 //!
 //! - the interface is gone, or no longer up;
 //! - its IPv4 addresses changed;
-//! - the router of its default route changed;
-//! - on any interface, an IPv6 route appeared or went that could take
-//!   traffic off the machine, such as a new IPv6 default route: in full
-//!   mode the service must decide again whether IPv6 can leak. Full mode's
-//!   own IPv6 halves, link-local, loopback and multicast routes, and the
-//!   host routes Windows keeps for the machine's own addresses do not count.
+//! - the router of its default route changed.
 //!
-//! IPv4 and IPv6 changes are both watched.
+//! IPv4 and IPv6 changes are both watched. The worker sends `Ipv6Changed`
+//! when, on any interface, an IPv6 route that could be a leak path appeared,
+//! changed or went: in full mode the service decides again whether IPv6 can
+//! leak. An IPv6 address comes with routes of its own, so its changes show
+//! there. Full mode's own IPv6 halves, and link-local, loopback and
+//! multicast routes, do not count.
 //!
 //! The first look is compared with the captured [`PhysicalNetwork`], so a
 //! change between capture and subscribe is reported too.
@@ -122,6 +122,21 @@ pub(super) fn differs_from_capture(now: &Snapshot, captured: &PhysicalNetwork) -
         .next_hop
         .is_some_and(|hop| !now.routers.contains(&hop));
     !now.up || new_address || router_moved
+}
+
+/// The events for a change from `before` to `now`: `PhysicalChanged` for
+/// the watched interface, `Ipv6Changed` for where IPv6 could go.
+pub(super) fn changes(before: &Snapshot, now: &Snapshot) -> Vec<NetworkEvent> {
+    let physical =
+        (before.up, &before.addresses, &before.routers) != (now.up, &now.addresses, &now.routers);
+    let mut events = Vec::new();
+    if physical {
+        events.push(NetworkEvent::PhysicalChanged);
+    }
+    if before.ipv6 != now.ipv6 {
+        events.push(NetworkEvent::Ipv6Changed);
+    }
+    events
 }
 
 /// What a notification tells the worker.
@@ -288,20 +303,22 @@ impl NetworkEvents for WinEvents {
         // the only sender of `woken`.
         let worker = move || {
             for wake in woken {
-                let event = match wake {
-                    Wake::Power(event) => event,
-                    Wake::Network if std::mem::take(&mut first) => NetworkEvent::PhysicalChanged,
+                let sent = match wake {
+                    Wake::Power(event) => vec![event],
+                    Wake::Network if std::mem::take(&mut first) => {
+                        vec![NetworkEvent::PhysicalChanged]
+                    }
                     Wake::Network => match snapshot(watched) {
-                        Ok(now) if now == last => continue,
                         Ok(now) => {
+                            let changes = changes(&last, &now);
                             last = now;
-                            NetworkEvent::PhysicalChanged
+                            changes
                         }
                         // Could not look: say so the safe way.
-                        Err(_) => NetworkEvent::PhysicalChanged,
+                        Err(_) => vec![NetworkEvent::PhysicalChanged, NetworkEvent::Ipv6Changed],
                     },
                 };
-                if events.send(event).is_err() {
+                if sent.into_iter().any(|event| events.send(event).is_err()) {
                     break;
                 }
             }
@@ -400,6 +417,41 @@ mod tests {
         for changed in [down, moved, new_router] {
             assert!(differs_from_capture(&changed, &captured), "{changed:?}");
         }
+    }
+
+    // A change to the watched interface is "physical changed"; a change to
+    // where IPv6 could go, on any interface, is "IPv6 changed"; both can
+    // come at once, and no change sends nothing.
+    #[test]
+    fn each_kind_of_change_has_its_own_event() {
+        let before = Snapshot {
+            up: true,
+            addresses: vec![Ipv4Addr::new(192, 168, 0, 10)],
+            routers: vec![Ipv4Addr::new(192, 168, 0, 1)],
+            ipv6: Vec::new(),
+        };
+        let way_out = vec![(7, "::/0".to_string(), "fe80::1".to_string())];
+        let ipv6 = Snapshot {
+            ipv6: way_out.clone(),
+            ..before.clone()
+        };
+        let down = Snapshot {
+            up: false,
+            ..before.clone()
+        };
+        let both = Snapshot {
+            up: false,
+            ipv6: way_out,
+            ..before.clone()
+        };
+        assert_eq!(changes(&before, &before), []);
+        assert_eq!(changes(&before, &ipv6), [NetworkEvent::Ipv6Changed]);
+        assert_eq!(changes(&ipv6, &before), [NetworkEvent::Ipv6Changed]);
+        assert_eq!(changes(&before, &down), [NetworkEvent::PhysicalChanged]);
+        assert_eq!(
+            changes(&before, &both),
+            [NetworkEvent::PhysicalChanged, NetworkEvent::Ipv6Changed]
+        );
     }
 
     // Registering needs no rights, and dropping a subscription cancels its

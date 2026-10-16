@@ -707,18 +707,17 @@ fn leak_path(tunnel: u64) -> Result<bool> {
     }))
 }
 
-/// The IPv6 networks the machine could reach other than through full mode's
-/// halves: every route that [`could_leak`], as (interface, destination,
-/// next hop), sorted. Host routes (`/128`) are left out: Windows adds one
-/// for each of the machine's own addresses, and those change all the time
-/// with temporary addresses, without changing where IPv6 can go.
+/// Every IPv6 route that could be a leak path ([`could_leak`]), on any
+/// interface, but full mode's own halves, as (interface, destination, next
+/// hop), sorted. Windows keeps a host route for each of the machine's own
+/// addresses, so an address added or removed changes this too.
 pub(super) fn ipv6_paths() -> Result<Vec<(u64, String, String)>> {
     let (_, v6_halves) = halves();
     let mut paths: Vec<_> = routes_of(AF_INET6)?
         .iter()
         .filter_map(|route| {
             let dest = prefix_of(route)?;
-            let wanted = could_leak(dest) && dest.len() < 128 && !v6_halves.contains(&dest);
+            let wanted = could_leak(dest) && !v6_halves.contains(&dest);
             let hop = ip_of(&route.NextHop)?;
             wanted.then(|| {
                 (

@@ -184,6 +184,6 @@ fn a_new_ipv6_route_anywhere_is_reported() {
     let event = next(&events, Duration::from_secs(10));
     // SAFETY: as above.
     let _ = unsafe { DeleteIpForwardEntry2(&way_out) };
-    assert_eq!(event, Some(NetworkEvent::PhysicalChanged));
+    assert_eq!(event, Some(NetworkEvent::Ipv6Changed));
     ran("events ipv6");
 }

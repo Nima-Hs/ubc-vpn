@@ -157,17 +157,25 @@ fn full_mode_without_ipv6_on_the_tunnel_is_refused_only_where_ipv6_could_leak() 
     routes
         .configure_tunnel(tunnel, Ipv4Addr::new(198, 18, 0, 3), 1400)
         .unwrap();
+    assert_eq!(routes.full_tunnel_ipv6(tunnel), Ok(Ipv6Block::Blocked));
     bind_ipv6(tunnel, false);
+    // The runner has no IPv6 beyond link-local.
+    assert_eq!(
+        routes.full_tunnel_ipv6(tunnel),
+        Ok(Ipv6Block::NothingToBlock)
+    );
     let leak = foreign_v6(other, Ipv6Addr::new(0x2001, 0xdb8, 0x1, 0, 0, 0, 0, 0), 48);
     // SAFETY: the row is valid and initialised.
     checked(unsafe { CreateIpForwardEntry2(&leak) }).expect("a route IPv6 could leave by");
 
     step("refused with a way out for IPv6");
+    let decided = routes.full_tunnel_ipv6(tunnel);
     let refused = routes.add_full_tunnel(tunnel);
     let added = through(&routes, "1.1.1.1", tunnel);
     let journal = std::fs::read_to_string(dir.join("routes.journal")).unwrap_or_default();
     // SAFETY: as above.
     checked(unsafe { DeleteIpForwardEntry2(&leak) }).expect("remove the route");
+    assert_eq!(decided, Err(Error::Unsupported));
     assert_eq!(refused, Err(Error::Unsupported));
     assert_eq!(added, Verified::No, "a half was added before the refusal");
     assert!(!journal.contains("0.0.0.0/1"), "{journal}");
