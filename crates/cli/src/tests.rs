@@ -29,6 +29,8 @@ impl Rig {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = std::env::temp_dir().join(format!("ubc-vpn-cli-test-{unique:?}"));
+        // Left by an earlier run whose process ID this one was given.
+        let _ = std::fs::remove_dir_all(&root);
         let fake = Fake::new();
         Self { fake, root }
     }

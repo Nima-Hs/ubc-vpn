@@ -29,6 +29,10 @@ impl Machine {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = (std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
         let root = std::env::temp_dir().join(format!("ubc-vpn-profiles-test-{unique:?}"));
+        // A process ID comes round again, and with it this name: whatever
+        // an earlier run left here goes first, or its settings would be
+        // read as this test's.
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("policy")).unwrap();
         let pin = format!("pin-sha256:{}=", "A".repeat(43));
         let policy = format!(r#"{{"gateway":"vpn.example.test","pins":["{pin}"]}}"#);
@@ -123,6 +127,12 @@ impl Machine {
             .find(|p| p.profile.name == name)
             .unwrap();
         made.profile.id.clone()
+    }
+}
+
+impl Drop for Machine {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
