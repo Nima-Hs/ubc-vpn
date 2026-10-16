@@ -49,6 +49,72 @@ export const SETTINGS = {
     },
 } as const;
 
+export const PROFILES = {
+    heading: "Profiles",
+    body: "Each profile has its own username, routes and saved password. Connect uses the one in use.",
+    inUse: "In use",
+    noUsername: "No username yet",
+    use: (name: string) => `Use ${name}`,
+    edit: (name: string) => `Edit ${name}`,
+    done: "Done",
+    name: "Name",
+    rename: "Rename",
+    username: "CWL username",
+    usernameHint:
+        "As you type it at UBC's login, for example name@app. Changing it forgets the saved password.",
+    saveUsername: "Save username",
+    savePassword: "Save password",
+    savePasswordHint: (where: string) =>
+        `Kept in ${where} after a login that works, so Connect asks only for MFA.`,
+    delete: "Delete profile",
+    deleteAsk: (name: string) =>
+        `Delete “${name}”? Its username, routes and saved password are deleted too.`,
+    deleteYes: "Delete profile",
+    deleteNo: "Keep it",
+    lastOne: "The only profile can't be deleted.",
+    add: "Add profile",
+    newName: "New profile's name",
+    newNameHint: "Up to 64 characters, different from your other profiles.",
+    routesNote: "Routes are on the Routes screen, for the profile in use.",
+    switcher: "Profile",
+    nextConnect: "Takes effect the next time you connect.",
+} as const;
+
+/** "Save password" beside the password question. */
+export const LOGIN_SAVE = {
+    label: "Save password",
+    hint: (where: string) =>
+        `Saved in ${where} once this login works. Next time, Connect asks only for MFA.`,
+} as const;
+
+/** Why a change to a profile was refused, said beside what was changed. */
+export function describeProfileRefusal(
+    error: ProfilesError,
+    /** Whether the keyring can be used at all, for saying why saving stays off. */
+    keyring: "available" | "unavailable" = "available",
+): string {
+    switch (error) {
+        case "keyring_not_cleared":
+            // Turning saving back on is refused while an old saved password
+            // that was set aside could not be removed.
+            return keyring === "unavailable"
+                ? "The keyring can't be used, so saving stays off."
+                : "UBC VPN couldn't remove the old saved password, so saving stays off.";
+        case "bad_name":
+            return "Use a name of 1 to 64 characters, without line breaks or hidden characters.";
+        case "name_taken":
+            return "Another profile has that name. Choose a different one.";
+        case "too_many_profiles":
+            return "You have 32 profiles, the most there can be. Delete one to add another.";
+        case "last_profile":
+            return PROFILES.lastOne;
+        case "bad_username":
+            return "Use your CWL username as you type it at UBC's login, with no spaces.";
+        default:
+            return describeProfilesError(error, "change");
+    }
+}
+
 /** Where the OS keeps a saved password, as the user knows it. */
 export function whereKept(platform: string): string {
     switch (platform) {
@@ -85,7 +151,7 @@ export function describeProfilesError(error: ProfilesError, doing: "read" | "cha
         case "bad_username":
         case "id_taken":
         case "keyring_not_cleared":
-            // Not something this screen sends yet; said plainly if it happens.
+            // Said by `describeProfileRefusal` where it can happen; plainly here.
             return "The change was not made. Try again.";
     }
 }

@@ -6,6 +6,7 @@ import { DEMO_IPC, IPC, type Snapshot, type VpnApi } from "@shared/api";
 import { LOGS_IPC, type LogUpdate } from "@shared/logs";
 import { DEMO_PROFILES_IPC, PROFILES_IPC } from "@shared/profiles";
 import type { ProfileId } from "@shared/protocol/ProfileId";
+import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { StartMode } from "@shared/protocol/StartMode";
 import { contextBridge, ipcRenderer } from "electron";
 
@@ -54,6 +55,22 @@ const api: VpnApi = {
                 ipcRenderer.invoke(PROFILES_IPC.setStartup, start, autoConnect),
             forgetPassword: (id: ProfileId | null) =>
                 ipcRenderer.invoke(PROFILES_IPC.forgetPassword, id),
+            create: (name: string) => ipcRenderer.invoke(PROFILES_IPC.create, name),
+            rename: (id: ProfileId, name: string) =>
+                ipcRenderer.invoke(PROFILES_IPC.rename, id, name),
+            update: (
+                id: ProfileId,
+                change: { username?: string | null; save_password?: boolean },
+            ) => ipcRenderer.invoke(PROFILES_IPC.update, id, change),
+            remove: (id: ProfileId) => ipcRenderer.invoke(PROFILES_IPC.remove, id),
+            switchTo: (id: ProfileId) => ipcRenderer.invoke(PROFILES_IPC.switchTo, id),
+            onChange: (listener: (view: ProfilesView) => void) => {
+                const handler = (_event: unknown, view: ProfilesView) => listener(view);
+                ipcRenderer.on(PROFILES_IPC.changed, handler);
+                return () => {
+                    ipcRenderer.off(PROFILES_IPC.changed, handler);
+                };
+            },
         },
     }),
     ...(__DEMO__ && {

@@ -28,13 +28,39 @@ export interface ProfilesApi {
     setStartup(start: StartMode, autoConnect: boolean): Promise<ProfilesResult>;
     /** Forgets a profile's saved password; the active profile's when `id` is `null`. */
     forgetPassword(id: ProfileId | null): Promise<ProfilesResult>;
+    /** A new profile with this name and nothing else yet. */
+    create(name: string): Promise<ProfilesResult>;
+    rename(id: ProfileId, name: string): Promise<ProfilesResult>;
+    /** Changes the username, whether the password is saved, or both. Either forgets a saved password. */
+    update(
+        id: ProfileId,
+        change: { username?: string | null; save_password?: boolean },
+    ): Promise<ProfilesResult>;
+    /** Deletes a profile, and its saved password. The last one cannot be deleted. */
+    remove(id: ProfileId): Promise<ProfilesResult>;
+    /** Makes a profile the one the next connect uses. */
+    switchTo(id: ProfileId): Promise<ProfilesResult>;
+    /** Calls `listener` whenever the profiles change, here or from the tray. */
+    onChange(listener: (view: ProfilesView) => void): () => void;
 }
 
 export const PROFILES_IPC = {
     list: "profiles:list",
     setStartup: "profiles:set-startup",
     forgetPassword: "profiles:forget-password",
+    create: "profiles:create",
+    rename: "profiles:rename",
+    update: "profiles:update",
+    remove: "profiles:delete",
+    switchTo: "profiles:switch",
+    /** From the main process: the profiles as they now are. */
+    changed: "profiles:changed",
 } as const;
+
+/** The most profiles a user may have; the client refuses more (`too_many_profiles`). */
+export const MAX_PROFILES = 32;
+/** The longest a profile's name may be, in characters; the client refuses longer (`bad_name`). */
+export const MAX_NAME_CHARS = 64;
 
 export const START_MODES: readonly StartMode[] = ["off", "window", "tray"];
 

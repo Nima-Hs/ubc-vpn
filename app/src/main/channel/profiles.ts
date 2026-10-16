@@ -25,8 +25,23 @@ export interface ProfilesService {
     list(): Promise<ProfilesResult>;
     setStartup(start: StartMode, autoConnect: boolean): Promise<ProfilesResult>;
     forgetPassword(id: ProfileId | null): Promise<ProfilesResult>;
+    /** A new profile with this name and nothing else: no username, no routes, no saved password. */
+    create(name: string): Promise<ProfilesResult>;
+    rename(id: ProfileId, name: string): Promise<ProfilesResult>;
+    /** Changes the username, whether the password is saved, or both. Either change forgets a saved password. */
+    update(id: ProfileId, change: ProfileChange): Promise<ProfilesResult>;
+    /** Deletes a profile and forgets its saved password. The last one cannot be deleted. */
+    remove(id: ProfileId): Promise<ProfilesResult>;
+    /** Makes a profile the one the next connect uses. */
+    switchTo(id: ProfileId): Promise<ProfilesResult>;
     /** Ends every client still running, for when the app quits. */
     stop(): void;
+}
+
+/** What `profiles update` may change. A field left out is not changed. */
+export interface ProfileChange {
+    username?: string | null;
+    save_password?: boolean;
 }
 
 /** Each command, as its fixed arguments. */
@@ -34,6 +49,11 @@ export const PROFILES_ARGS = {
     list: ["profiles", "list", "--json"],
     setStartup: ["settings", "set-startup", "--json"],
     forgetPassword: ["password", "forget", "--json"],
+    create: ["profiles", "create", "--json"],
+    rename: ["profiles", "rename", "--json"],
+    update: ["profiles", "update", "--json"],
+    remove: ["profiles", "delete", "--json"],
+    switchTo: ["profiles", "switch", "--json"],
 } as const;
 
 const UNAVAILABLE = { ok: false, error: "unavailable" } as const;
@@ -46,15 +66,29 @@ const shownRoutes = (routes: RouteSet): RouteSet => ({
     dns_domains: routes.dns_domains.map(marked),
 });
 
+/**
+ * The view the interface is given, built field by field from the ones it
+ * needs, and never by copying what the client sent. A field the client adds
+ * one day, a password among them, cannot reach the window: whether a
+ * password is saved is all that ever does.
+ */
 function shownView(view: ProfilesView): ProfilesView {
     return {
-        ...view,
+        global: {
+            start: view.global.start,
+            auto_connect: view.global.auto_connect,
+            active_profile: view.global.active_profile,
+        },
         profiles: view.profiles.map((profile) => ({
-            ...profile,
+            id: profile.id,
             name: shown(profile.name),
             username: profile.username === null ? null : shown(profile.username),
             routes: shownRoutes(profile.routes),
+            save_password: profile.save_password,
+            password_saved: profile.password_saved,
         })),
+        keyring: view.keyring,
+        policy_readable: view.policy_readable,
         allowed_routes: view.allowed_routes?.map(shown) ?? null,
     };
 }
@@ -85,6 +119,45 @@ export class ProfilesRunner implements ProfilesService {
             return Promise.resolve({ ok: false, error: "bad_input" });
         }
         return this.change(PROFILES_ARGS.forgetPassword, { id });
+    }
+
+    async create(name: string): Promise<ProfilesResult> {
+        const input = { name, username: null, routes: null, save_password: false };
+        const first = await this.change(PROFILES_ARGS.create, input);
+        // The id the client drew was taken: asked again, it draws another.
+        if (!first.ok && first.error === "id_taken") {
+            return this.change(PROFILES_ARGS.create, input);
+        }
+        return first;
+    }
+
+    rename(id: ProfileId, name: string): Promise<ProfilesResult> {
+        return this.withId(id, () => this.change(PROFILES_ARGS.rename, { id, name }));
+    }
+
+    update(id: ProfileId, change: ProfileChange): Promise<ProfilesResult> {
+        // Only the two fields the contract names, whatever else was passed.
+        const input: Record<string, unknown> = { id };
+        if (change.username !== undefined) {
+            input.username = change.username;
+        }
+        if (change.save_password !== undefined) {
+            input.save_password = change.save_password;
+        }
+        return this.withId(id, () => this.change(PROFILES_ARGS.update, input));
+    }
+
+    remove(id: ProfileId): Promise<ProfilesResult> {
+        return this.withId(id, () => this.change(PROFILES_ARGS.remove, { id }));
+    }
+
+    switchTo(id: ProfileId): Promise<ProfilesResult> {
+        return this.withId(id, () => this.change(PROFILES_ARGS.switchTo, { id }));
+    }
+
+    /** Runs `then` only for an id that is one; anything else starts nothing. */
+    private withId(id: ProfileId, then: () => Promise<ProfilesResult>): Promise<ProfilesResult> {
+        return isProfileId(id) ? then() : Promise.resolve({ ok: false, error: "bad_input" });
     }
 
     stop(): void {

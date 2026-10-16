@@ -7,9 +7,9 @@ type TextFieldProps = Omit<ComponentProps<"input">, "id" | "aria-invalid" | "ari
     /** Always shown: a placeholder is an example, not a label. */
     label: string;
     /** Says what to enter, before the user has to guess. */
-    hint?: string;
+    hint?: string | undefined;
     /** Says how to fix what was entered. Replaces the hint while present. */
-    error?: string;
+    error?: string | undefined;
     /** Keeps the label for screen readers only, for a field in a list that names it. */
     hideLabel?: boolean;
     /** Sets the value in the fixed-width face, for addresses. */

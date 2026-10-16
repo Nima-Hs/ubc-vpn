@@ -1,4 +1,5 @@
 import type { ActionResult, LoginState, Snapshot } from "@shared/api";
+import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { LoginRunner } from "./channel/connect";
 import type { ServiceLink } from "./link";
 
@@ -21,6 +22,10 @@ export class Controller {
     private readonly loginRunner: LoginRunner | null;
     private closeHides = false;
     private login: LoginState = { phase: "idle" };
+    /** The profile the login under way is for, while there is one. */
+    private loginProfile: ProfileId | null = null;
+    /** Which profile a login started now is for: the active one, as the app knows it. */
+    private profileForLogin: () => ProfileId | null = () => null;
 
     /**
      * Without `login`, pressing Connect explains that this build cannot log
@@ -36,6 +41,7 @@ export class Controller {
             state: link.getState(),
             notice: null,
             login: this.login,
+            loginProfile: null,
             closeHides: false,
             development,
         };
@@ -44,8 +50,16 @@ export class Controller {
         this.loginRunner =
             login?.((state) => {
                 this.login = state;
+                if (state.phase === "idle") {
+                    this.loginProfile = null;
+                }
                 this.publish({ state: this.link.getState(), notice: null });
             }) ?? null;
+    }
+
+    /** Where a login started from now on learns which profile it is for. */
+    setProfileForLogin(profile: () => ProfileId | null): void {
+        this.profileForLogin = profile;
     }
 
     getSnapshot(): Snapshot {
@@ -63,7 +77,12 @@ export class Controller {
             return this.run(() => this.link.connect());
         }
         // One at a time: a second press while a login is under way does nothing.
-        this.loginRunner.start();
+        // The login is bound to the profile in use now, whatever is chosen while it runs.
+        const profile = this.profileForLogin();
+        if (this.loginRunner.start(profile)) {
+            this.loginProfile = profile;
+            this.publish({ state: this.link.getState(), notice: null });
+        }
         return Promise.resolve();
     }
 
@@ -123,6 +142,7 @@ export class Controller {
             state: next.state,
             notice: next.notice,
             login: this.login,
+            loginProfile: this.login.phase === "idle" ? null : this.loginProfile,
             closeHides: this.closeHides,
             development: this.development,
         };

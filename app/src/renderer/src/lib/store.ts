@@ -8,6 +8,7 @@ export const useSnapshot = create<Snapshot>(() => ({
     state: { link: "starting" },
     notice: null,
     login: { phase: "idle" },
+    loginProfile: null,
     closeHides: false,
     development: false,
 }));

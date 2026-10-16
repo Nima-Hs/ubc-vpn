@@ -6,6 +6,7 @@ import type { LoginItemRecord, ProfilesApi } from "./profiles";
 import type { ConnState } from "./protocol/ConnState";
 import type { ErrorCode } from "./protocol/ErrorCode";
 import type { LoginErrorCode } from "./protocol/LoginErrorCode";
+import type { ProfileId } from "./protocol/ProfileId";
 import type { PromptKind } from "./protocol/PromptKind";
 import type { RouteInput } from "./protocol/RouteInput";
 import type { RoutesReply } from "./protocol/RoutesReply";
@@ -104,6 +105,12 @@ export interface Snapshot {
     notice: ActionError | null;
     /** The login under way, if any. */
     login: LoginState;
+    /**
+     * The profile the login under way is for, fixed when it started, or
+     * `null` when there is no login or it is for the active profile as the
+     * client reads it.
+     */
+    loginProfile: ProfileId | null;
     /**
      * Whether closing the window hides it and leaves the app in the tray.
      * Where there is no tray to come back from, closing quits instead.

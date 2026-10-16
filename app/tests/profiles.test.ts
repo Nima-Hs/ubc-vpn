@@ -153,6 +153,28 @@ describe("the profiles commands", () => {
         await expect(first).resolves.toEqual({ ok: false, error: "unavailable" });
     });
 
+    it("gives the interface only the fields it needs, never a password", async () => {
+        const secret = "Sentinel-pw-profiles-not-real";
+        // A client that answered with more than the contract: a password at
+        // every level, and fields nobody asked for.
+        const extra = {
+            ...VIEW,
+            password: secret,
+            global: { ...VIEW.global, password: secret },
+            profiles: VIEW.profiles.map((profile) => ({
+                ...profile,
+                password: secret,
+                secret,
+                routes: { ...profile.routes, password: secret },
+            })),
+        };
+        const { runner } = client({ "profiles list": { line: extra } });
+        const result = await runner.list();
+        expect(result).toEqual({ ok: true, value: VIEW });
+        expect(JSON.stringify(result)).not.toContain(secret);
+        expect(JSON.stringify(result)).not.toContain('password":"');
+    });
+
     it("cleans text from the settings file before the interface sees it", async () => {
         const tricky: ProfilesView = {
             ...VIEW,
@@ -207,5 +229,79 @@ describe("what the Settings screen may ask the main process", () => {
         for (const args of refused) {
             expect(() => takeProfile(args), JSON.stringify(args)).toThrow("refused");
         }
+    });
+});
+
+describe("the commands that change profiles", () => {
+    const inputs = (lines: string[]) =>
+        lines.filter((line) => line.startsWith("input:")).map((line) => JSON.parse(line.slice(6)));
+
+    it("send exactly what the contract names", async () => {
+        const { runner, received } = client({
+            "profiles create": { line: VIEW },
+            "profiles rename": { line: VIEW },
+            "profiles update": { line: VIEW },
+            "profiles delete": { line: VIEW },
+            "profiles switch": { line: VIEW },
+        });
+        await runner.create("Lab");
+        await runner.rename(OTHER, "Lab 2");
+        await runner.update(OTHER, { username: "someone.lab@app" });
+        await runner.update(OTHER, { save_password: false });
+        // Anything else passed in is left behind.
+        await runner.update(OTHER, {
+            username: null,
+            ...({ password: "not-sent" } as object),
+        });
+        await runner.remove(OTHER);
+        await runner.switchTo(OTHER);
+        expect(inputs(received())).toEqual([
+            { name: "Lab", username: null, routes: null, save_password: false },
+            { id: OTHER, name: "Lab 2" },
+            { id: OTHER, username: "someone.lab@app" },
+            { id: OTHER, save_password: false },
+            { id: OTHER, username: null },
+            { id: OTHER },
+            { id: OTHER },
+        ]);
+        expect(received().filter((line) => line.startsWith("args:"))).toEqual(
+            [
+                PROFILES_ARGS.create,
+                PROFILES_ARGS.rename,
+                PROFILES_ARGS.update,
+                PROFILES_ARGS.update,
+                PROFILES_ARGS.update,
+                PROFILES_ARGS.remove,
+                PROFILES_ARGS.switchTo,
+            ].map((args) => `args:${JSON.stringify(args)}`),
+        );
+    });
+
+    it("asks once more when the id the client drew was taken, and only once", async () => {
+        const { runner, received } = client({
+            "profiles create": { line: { error: "id_taken" }, exit: 1 },
+        });
+        await expect(runner.create("Lab")).resolves.toEqual({ ok: false, error: "id_taken" });
+        expect(inputs(received())).toHaveLength(2);
+    });
+
+    it("passes on the rules' refusals", async () => {
+        for (const error of ["bad_name", "name_taken", "too_many_profiles", "last_profile"]) {
+            const { runner } = client({ "profiles delete": { line: { error }, exit: 1 } });
+            await expect(runner.remove(OTHER)).resolves.toEqual({ ok: false, error });
+        }
+    });
+
+    it("starts nothing for an id that is not one", async () => {
+        const { runner, received } = client({ "profiles switch": { line: VIEW } });
+        for (const call of [
+            () => runner.switchTo("x"),
+            () => runner.remove("../etc"),
+            () => runner.rename("", "Lab"),
+            () => runner.update(ID.toUpperCase(), { username: null }),
+        ]) {
+            await expect(call()).resolves.toEqual({ ok: false, error: "bad_input" });
+        }
+        expect(received()).toEqual([]);
     });
 });
