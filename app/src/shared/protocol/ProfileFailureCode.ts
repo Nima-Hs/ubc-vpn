@@ -3,4 +3,4 @@
 /**
  * Why a change to the profiles was refused. Nothing was changed.
  */
-export type ProfileFailureCode = "unknown_profile" | "bad_name" | "name_taken" | "too_many_profiles" | "last_profile" | "bad_username" | "id_taken";
+export type ProfileFailureCode = "unknown_profile" | "bad_name" | "name_taken" | "too_many_profiles" | "last_profile" | "bad_username" | "id_taken" | "keyring_not_cleared";

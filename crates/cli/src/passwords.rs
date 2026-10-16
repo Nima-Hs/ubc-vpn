@@ -112,15 +112,17 @@ pub(crate) fn forget_unbound(dir: &Path, id: &ProfileId) -> Result<(), SettingsF
 /// is true. Only if it is still the one that was sent. Should the keyring
 /// not do the one, the other is tried, so that it is not sent again either
 /// way; should it do neither, the profile stops saving its password, so
-/// the entry is never read again ([`Settled::SetAside`]). An error means
-/// not even that could be done.
+/// the entry is never read again ([`Settled::SetAside`]). An error says
+/// what could not be done.
 pub(crate) fn refused(
     dir: &Path,
     id: &ProfileId,
     sent: &Secret,
     code_entered: bool,
-) -> Result<Settled, SettingsFailureCode> {
-    let _changing = change(dir)?;
+) -> Result<Settled, Unsettled> {
+    // Without the lock nothing is tried, the keyring included.
+    let _changing = change(dir).map_err(|_| Unsettled::Untried)?;
+    let stuck = |_| Unsettled::Stuck;
     let keyring = keys::keyring();
     let Some(saved) = keyring.load(id.as_str()).ok().flatten() else {
         return Ok(Settled::Done);
@@ -152,16 +154,33 @@ pub(crate) fn refused(
         mut profiles,
         cleaned_passwords: mut forget,
         ..
-    } = read_profiles(dir)?;
+    } = read_profiles(dir).map_err(stuck)?;
     match profiles.update(id, None, Some(false)) {
         Ok(Password::Forget) => forget.push(id.clone()),
         Ok(Password::Keep) => {}
         // Gone: no profile has the id, so none reads the entry.
         Err(_) => return Ok(Settled::Done),
     }
-    settings::write_profiles(dir, &profiles, &forget)?;
+    settings::write_profiles(dir, &profiles, &forget).map_err(stuck)?;
     Ok(Settled::SetAside)
 }
+
+/// Why a refused saved password could not be settled. Either way it is
+/// still there as it was, and could be sent again.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Unsettled {
+    /// The settings lock could not be had, so nothing was tried.
+    Untried,
+    /// The keyring would neither forget it nor mark it, and the settings
+    /// could not be changed to stop saving it either.
+    Stuck,
+}
+
+/// What the user is told when nothing could be tried.
+pub(crate) const UNTRIED: &str = "The saved password was refused, and could not be removed: \
+                                  the settings were in use by another change, or cannot be \
+                                  used. Forget the saved password in the app before you \
+                                  connect again, or it may be sent again.";
 
 /// What became of a refused saved password.
 #[derive(Debug, PartialEq, Eq)]
@@ -179,7 +198,8 @@ pub(crate) const SET_ASIDE: &str = "The saved password was refused, and the keyr
                                     remove it. Saving the password is now off for this profile, \
                                     so it will not be sent again.";
 
-/// What the user is told when it could not even be set aside.
+/// What the user is told when the keyring and the settings were tried and
+/// neither could be changed.
 pub(crate) const NOT_SET_ASIDE: &str = "The saved password was refused, and neither the keyring \
                                         nor the settings could be changed. Turn off saving the \
                                         password for this profile in the app, so it is not sent \

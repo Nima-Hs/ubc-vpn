@@ -395,7 +395,8 @@ pub(crate) fn start(
                         let said = match settled {
                             Ok(passwords::Settled::Done) => None,
                             Ok(passwords::Settled::SetAside) => Some(passwords::SET_ASIDE),
-                            Err(_) => Some(passwords::NOT_SET_ASIDE),
+                            Err(passwords::Unsettled::Untried) => Some(passwords::UNTRIED),
+                            Err(passwords::Unsettled::Stuck) => Some(passwords::NOT_SET_ASIDE),
                         };
                         if let Some(said) = said {
                             let _ = writeln!(err, "ubc-vpn: {said}");

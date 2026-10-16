@@ -17,7 +17,7 @@ use crate::connect_tests::{
     CODE, PASSWORD, ROUTES, Scene, Typist, pin, returning, saved, settings_text,
 };
 use crate::interrupt::Progress;
-use crate::passwords::{NO_KEYRING, NOT_SAVED, NOT_SET_ASIDE, SET_ASIDE};
+use crate::passwords::{NO_KEYRING, NOT_SAVED, NOT_SET_ASIDE, SET_ASIDE, UNTRIED};
 use crate::{FAILED, keys};
 
 /// A password nobody types, left in the keyring from before.
@@ -425,6 +425,81 @@ fn a_refused_password_the_keyring_will_not_mark_is_forgotten() {
     assert!(!refused.2.contains(NOT_SET_ASIDE), "{}", refused.2);
     assert_eq!(entry(), None);
     assert!(saves_its_password(&scene));
+}
+
+/// Runs `profiles update --json` with `input` in `scene`; returns the exit
+/// status and the line.
+fn update(scene: &Scene, input: &str) -> (u8, String) {
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = crate::profiles::run(
+        crate::profiles::Command::Update,
+        &platform,
+        &mut input.as_bytes(),
+        &mut out,
+        &mut err,
+    );
+    (status, String::from_utf8(out).unwrap())
+}
+
+// Security rule: a password set aside because the keyring would not let it
+// go is still there. Turning saving back on removes it first, so it is
+// never sent; when it cannot be removed, saving stays off and the user is
+// told why.
+#[test]
+fn turning_saving_back_on_first_removes_a_set_aside_password() {
+    let scene = saving_without_a_code();
+    let first = ProfileId::first();
+    put(&first, "alice", STALE, false);
+    keyring().fail_writes_to(first.as_str(), true);
+    let (refused, _, err) = scene.connect(&mut Typist::default());
+    assert_eq!(refused, LOGIN_REFUSED);
+    assert!(err.contains(SET_ASIDE), "{err}");
+    assert!(!saves_its_password(&scene));
+    let on = format!(r#"{{"id":"{}","save_password":true}}"#, first.as_str());
+
+    // The keyring still will not let it go: saving stays off.
+    let before = settings_text(&scene);
+    let (status, line) = update(&scene, &on);
+    assert_eq!(
+        (status, line.as_str()),
+        (1, "{\"error\":\"keyring_not_cleared\"}\n")
+    );
+    assert_eq!(settings_text(&scene), before);
+    keyring().fail_writes_to(first.as_str(), false);
+
+    // Now it will: it goes, and saving is on again.
+    let (status, line) = update(&scene, &on);
+    assert_eq!(status, 0, "{line}");
+    assert!(saves_its_password(&scene));
+    assert_eq!(entry(), None);
+    let mut typist = Typist::typing(&[Some(PASSWORD)]);
+    assert_eq!(scene.connect(&mut typist).0, 0);
+    assert_eq!(typist.asked, [PromptKind::Password]);
+    assert_eq!(passwords_sent(&scene), [STALE, PASSWORD]);
+
+    // Already on, it is left alone: only turning it on clears.
+    let (status, _) = update(&scene, &on);
+    assert_eq!(status, 0);
+    let kept = ("alice".to_string(), PASSWORD.to_string(), false);
+    assert_eq!(entry(), Some(kept));
+}
+
+// A refusal that cannot have the settings lock tries nothing, and says so:
+// the password is as it was, and the user is told to forget it.
+#[test]
+fn a_refusal_without_the_lock_says_nothing_was_tried() {
+    let scene = saving_without_a_code();
+    let first = ProfileId::first();
+    put(&first, "alice", STALE, false);
+    let held = crate::settings_lock::change(&scene.rig.root.join("settings")).unwrap();
+    let (refused, _, err) = scene.connect(&mut Typist::default());
+    drop(held);
+    assert_eq!(refused, LOGIN_REFUSED);
+    assert_eq!(err.matches(UNTRIED).count(), 1, "{err}");
+    assert!(!err.contains(NOT_SET_ASIDE), "{err}");
+    let left = ("alice".to_string(), STALE.to_string(), false);
+    assert_eq!(entry(), Some(left));
 }
 
 // Security rule: a password is bound to its username letter for letter,
