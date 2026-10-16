@@ -505,6 +505,24 @@ impl Dns for WinDns {
         };
         check().unwrap_or(Verified::Unknown)
     }
+
+    // Full mode is not written for Windows yet: the catch-all is refused,
+    // and none can have been set, so there is nothing to remove.
+    fn set_catch_all_dns(&self, _resolvers: &[std::net::Ipv4Addr]) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+
+    fn clear_catch_all_dns(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn catch_all_dns_matches(&self, _resolvers: &[std::net::Ipv4Addr]) -> Verified {
+        Verified::Unknown
+    }
+
+    fn foreign_catch_all(&self) -> Result<bool> {
+        Err(Error::Unsupported)
+    }
 }
 
 #[cfg(test)]

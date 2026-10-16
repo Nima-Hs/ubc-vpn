@@ -8,7 +8,7 @@
 //! side and refuses only an identical one, so every add first reads the table
 //! and fails with `AlreadyExists` when the destination is routed elsewhere.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 #[cfg(test)]
 use std::path::Path;
 use std::ptr::{null, null_mut};
@@ -36,7 +36,9 @@ use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
 use super::journal::{Boot, Journal, Row, Store};
 use super::security::{os_error, wide};
-use crate::{Error, Mode, Paths, PhysicalNetwork, Result, Routes, TUNNEL_MTU, Verified, lock};
+use crate::{
+    Error, Ipv6Block, Mode, Paths, PhysicalNetwork, Result, Routes, TUNNEL_MTU, Verified, lock,
+};
 
 pub(super) fn v4(addr: Ipv4Addr) -> SOCKADDR_INET {
     // SAFETY: SOCKADDR_INET is a plain union for which all zeroes is valid.
@@ -494,6 +496,28 @@ impl Routes for WinRoutes {
             true => Verified::Yes,
             false => Verified::No,
         }
+    }
+
+    // Full mode is not written for Windows yet: it is refused, and nothing
+    // of it can have been added, so there is nothing to remove.
+    fn full_tunnel_ipv6(&self, _tunnel: &str) -> Result<Ipv6Block> {
+        Err(Error::Unsupported)
+    }
+
+    fn add_full_tunnel(&self, _tunnel: &str) -> Result<Ipv6Block> {
+        Err(Error::Unsupported)
+    }
+
+    fn remove_full_tunnel(&self, _tunnel: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn foreign_full_tunnel(&self, _tunnel: &str) -> Result<bool> {
+        Err(Error::Unsupported)
+    }
+
+    fn uses_interface_v6(&self, _dest: Ipv6Addr, _interface: &str) -> Verified {
+        Verified::Unknown
     }
 }
 
