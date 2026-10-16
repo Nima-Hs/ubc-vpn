@@ -544,7 +544,8 @@ impl Routes for Fake {
     }
 
     /// Picks a route as an OS does: the most specific one wins, so a host
-    /// route beats any subnet, and everything else leaves by the physical
+    /// route beats any subnet, the networks the machine is on beat a wider
+    /// route that contains them, and everything else leaves by the physical
     /// interface. Routes somebody else added count like the product's own.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
         let (state, outcome) = self.start(Op::VerifyRoute);
@@ -553,7 +554,15 @@ impl Routes for Fake {
         }
         let applied = &state.applied;
         let host = applied.gateway_routes.iter().find(|(d, _)| *d == dest);
-        let subnets = applied.tunnel_routes.iter().chain(&state.foreign);
+        let on_link = state.on_link.iter();
+        let local: Vec<_> = on_link
+            .map(|net| (PHYSICAL_INTERFACE.to_string(), *net))
+            .collect();
+        let subnets = applied
+            .tunnel_routes
+            .iter()
+            .chain(&state.foreign)
+            .chain(&local);
         let narrowest = subnets
             .filter(|(_, subnet)| subnet.contains_addr(dest))
             .max_by_key(|(_, subnet)| subnet.prefix_len());

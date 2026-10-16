@@ -145,12 +145,14 @@ impl Machine {
             set.map_err(os("Split DNS could not be set"))?;
         }
 
+        let servers: Vec<Ipv4Addr> = self.applied.dns_servers.iter().map(Ipv4Net::addr).collect();
         let expected = Expected {
             tunnel,
             physical: &physical,
             gateway: gateway_addr,
             subnets: &chosen.subnets,
             dns: dns.as_ref(),
+            dns_servers: &servers,
         };
         let verified = verify(&*self.routes, &*self.dns, &expected);
         let confirmed = verified.map_err(|why| (ErrorCode::VerificationFailed, why))?;

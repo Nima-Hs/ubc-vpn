@@ -218,9 +218,12 @@ The user chooses the subnets, but the service does not apply them blindly. It re
 - any IPv6 route;
 - any route that touches a loopback, link-local, multicast or reserved range;
 - more than 256 subnets or 256 DNS domains;
-- anything outside the policy's allow-list, when the policy has one.
+- anything outside the policy's allow-list, when the policy has one;
+- a route the networks the machine is directly on cover entirely between them: their routes are more specific, so the tunnel would carry none of it.
 
 A refused route fails the connection with a clear reason. Nothing is applied partially.
+
+Each route is checked, after it is applied, at an address it alone decides: outside every network the machine is directly on (their routes are more specific, so `10.0.0.0/8` from a home network on `10.0.0.0/24` is checked at an address outside the home network), never the gateway's, and a DNS server's only when nothing else is left.
 
 A chosen subnet may contain the gateway itself; UBC's gateway sits inside a campus range users will want. So that traffic to the gateway never loops into its own tunnel, the service first adds a route for the one address the tunnel is connected to, through the physical network, and keeps it there for the life of the connection. It decides which network is physical when the tunnel is created and never re-derives it from a table that already contains the tunnel. When the physical network changes, the tunnel is no longer usable: the service tears everything down and reconnects from a clean state.
 
