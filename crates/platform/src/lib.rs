@@ -412,8 +412,8 @@ pub trait Dns: Send + Sync {
     /// when nothing is set, so teardown calls it unconditionally.
     ///
     /// The service must call it at start-up on every OS, before anything
-    /// else: a rule can outlive the process that set it, and on Windows a
-    /// restart of the machine too. What it removes is: on Windows, the keys
+    /// else: a rule can outlive the process that set it. (On Windows a
+    /// restart of the machine removes it.) What it removes is: on Windows, the keys
     /// with the product's identifiers; on macOS, the product's resolver
     /// entry; on Linux, the settings it put on the tunnel's link.
     fn clear_split_dns(&self) -> Result<()>;

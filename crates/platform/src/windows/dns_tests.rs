@@ -14,7 +14,7 @@ use windows_sys::Win32::NetworkManagement::Dns::{
     DnsQuery_W,
 };
 
-use super::dns::{LOCAL, POLICY, Rule, WinDns, delete_rule_at, write_rule_at};
+use super::dns::{LOCAL, Lifetime, POLICY, Rule, WinDns, delete_rule_at, write_rule_at};
 use super::routes_tests::{Cleanup, Outsider, ran, state_dir, turn, wintun};
 use super::security::wide;
 use crate::suite::{self, Foreign};
@@ -178,7 +178,7 @@ fn refuses_split_dns_while_group_policy_rules_exist() {
         names: vec![".policy.example".to_string()],
         servers: "192.0.2.99".to_string(),
     };
-    write_rule_at(POLICY, FOREIGN, &theirs, None).unwrap();
+    write_rule_at(POLICY, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
     assert_eq!(WinDns.set_split_dns("", &chosen()), Err(Error::Unsupported));
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
     delete_rule_at(POLICY, FOREIGN).unwrap();
@@ -252,12 +252,12 @@ fn another_rule_for_our_domain_is_not_in_effect() {
         ".host.suite.example",
         ".SUITE.example.",
     ] {
-        write_rule_at(LOCAL, FOREIGN, &rule(taken), None).unwrap();
+        write_rule_at(LOCAL, FOREIGN, &rule(taken), None, Lifetime::Lasting).unwrap();
         assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No, "{taken}");
     }
     // A rule above ours, or beside it, takes nothing.
     for apart in [".example", ".notsuite.example"] {
-        write_rule_at(LOCAL, FOREIGN, &rule(apart), None).unwrap();
+        write_rule_at(LOCAL, FOREIGN, &rule(apart), None, Lifetime::Lasting).unwrap();
         assert_eq!(
             WinDns.split_dns_matches(&chosen()),
             Verified::Unobservable,
@@ -265,7 +265,7 @@ fn another_rule_for_our_domain_is_not_in_effect() {
         );
     }
     let theirs = rule(".host.suite.example");
-    write_rule_at(LOCAL, FOREIGN, &theirs, None).unwrap();
+    write_rule_at(LOCAL, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
     // Clearing ours leaves theirs alone.
     WinDns.clear_split_dns().unwrap();
     let still = super::dns::read_rule_at(LOCAL, FOREIGN).unwrap();
@@ -286,9 +286,81 @@ fn a_rule_key_another_owner_made_first_is_not_ours() {
     let ours = super::dns::rules(&chosen()).unwrap();
     let me = super::security::process_user().unwrap();
     let owner = format!("O:{me}");
-    write_rule_at(LOCAL, super::dns::RULES[0], &ours[0], Some(&owner)).unwrap();
+    write_rule_at(
+        LOCAL,
+        super::dns::RULES[0],
+        &ours[0],
+        Some(&owner),
+        Lifetime::Lasting,
+    )
+    .unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
     WinDns.set_split_dns("", &chosen()).unwrap();
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
     ran("dns owner");
+}
+
+/// The error from making a lasting key `probe` under `path`, which Windows
+/// refuses under a volatile key. A key it makes goes with the rule.
+fn lasting_child_of(path: &str) -> u32 {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, KEY_READ, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW,
+    };
+    let path = wide(&format!(r"{path}\probe"));
+    let mut key = std::ptr::null_mut();
+    // SAFETY: the path is NUL-terminated, the optional pointers are null and
+    // the out pointer is valid.
+    let code = unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            path.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if code == 0 {
+        // SAFETY: the call succeeded, so the key is open and ours to close.
+        unsafe { RegCloseKey(key) };
+    }
+    code
+}
+
+// Security rule: our rules last only until the machine restarts, so a
+// service that never runs again, or is removed while a rule is set, cannot
+// leave the machine's names going to the VPN's resolvers for good. A
+// lasting key already under one of our identifiers is replaced too.
+#[test]
+fn our_rules_do_not_outlast_a_restart() {
+    use windows_sys::Win32::Foundation::ERROR_CHILD_MUST_BE_VOLATILE;
+    let _turn = turn();
+    let Some(_wintun) = wintun() else { return };
+    let _rules = DnsCleanup;
+    let mut many = chosen();
+    many.domains = (0..60).map(|n| format!("d{n}.suite.example")).collect();
+    let ours = super::dns::rules(&many).unwrap();
+    let first = super::dns::RULES[0];
+    write_rule_at(LOCAL, first, &ours[0], None, Lifetime::Lasting).unwrap();
+    assert_eq!(lasting_child_of(&format!(r"{LOCAL}\{first}")), 0);
+    WinDns.set_split_dns("", &many).unwrap();
+    assert_eq!(WinDns.split_dns_matches(&many), Verified::Unobservable);
+    assert_eq!(ours.len(), 2);
+    for id in &super::dns::RULES[..ours.len()] {
+        assert_eq!(
+            lasting_child_of(&format!(r"{LOCAL}\{id}")),
+            ERROR_CHILD_MUST_BE_VOLATILE,
+            "{id}"
+        );
+    }
+    // The folder they are in lasts: anyone may still add a lasting rule.
+    let theirs = Rule {
+        names: vec![".elsewhere.example".to_string()],
+        servers: "192.0.2.99".to_string(),
+    };
+    write_rule_at(LOCAL, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
+    ran("dns volatile");
 }
