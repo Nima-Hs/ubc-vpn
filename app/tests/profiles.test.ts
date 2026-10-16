@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import { afterEach, describe, expect, it } from "vitest";
 import { PROFILES_ARGS, ProfilesRunner } from "../src/main/channel/profiles";
-import { takeProfile, takeStartup } from "../src/main/profiles-ipc";
+import { takeProfile, takeStartup } from "../src/main/profiles-checks";
 
 const ID = "0123456789abcdef0123456789abcdef";
 // A character that reverses text direction, and a NUL, written by code
