@@ -307,6 +307,59 @@ fn a_password_that_cannot_be_saved_does_not_fail_the_connect() {
     assert_eq!(err, format!("ubc-vpn: {NOT_SAVED}\n"));
 }
 
+// Security rule: what is saved after a connect is judged by the settings
+// as they are then, under the lock, not as the connect found them: a
+// profile that stopped saving its password, changed its username or is
+// gone has nothing saved.
+#[test]
+fn a_password_is_saved_only_as_the_settings_still_ask() {
+    let scene = saving();
+    let dir = scene.rig.root.join("settings");
+    let first = ProfileId::first();
+    let keep = |username: &str| {
+        let mut err = Vec::new();
+        let password = Secret::new(PASSWORD);
+        crate::passwords::keep(&dir, &first, username, &password, &mut err);
+        assert!(err.is_empty());
+    };
+    keep("bob");
+    assert_eq!(entry(), None, "saved for another username");
+    keep("ALICE");
+    let expected = ("alice".to_string(), PASSWORD.to_string(), false);
+    assert_eq!(
+        entry(),
+        Some(expected),
+        "saved under the profile's own name"
+    );
+    keyring().secrets().forget(first.as_str()).unwrap();
+
+    let not_saving = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    std::fs::write(dir.join("settings.json"), not_saving).unwrap();
+    keep("alice");
+    assert_eq!(entry(), None, "saved for a profile that saves none");
+
+    let mut err = Vec::new();
+    let gone = ProfileId::from_random([0x3c; 16]);
+    crate::passwords::keep(&dir, &gone, "alice", &Secret::new(PASSWORD), &mut err);
+    assert_eq!(keyring().entries(), [], "saved for a profile that is gone");
+}
+
+// A refusal settles only the password that was sent: one another connect
+// saved since is left as it is.
+#[test]
+fn a_refusal_settles_only_the_password_it_sent() {
+    let scene = saving();
+    let dir = scene.rig.root.join("settings");
+    let first = ProfileId::first();
+    put(&first, "alice", PASSWORD, false);
+    let sent = Secret::new(STALE);
+    for code_entered in [false, true] {
+        crate::passwords::refused(&dir, &first, &sent, code_entered).unwrap();
+        let kept = ("alice".to_string(), PASSWORD.to_string(), false);
+        assert_eq!(entry(), Some(kept), "code entered: {code_entered}");
+    }
+}
+
 /// Settings with the first profile, as `settings`, and a second one, `Lab`,
 /// with username `alice` and the same routes, which saves its password.
 fn with_a_lab(first: &str) -> (String, ProfileId) {
