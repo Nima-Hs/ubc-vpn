@@ -16,6 +16,10 @@ fake = ["rustix/pty"]
 # dev-mode feature enables this one feature and nothing else. Never enabled in
 # a release build.
 dev-mode = ["fake"]
+# Saved passwords in the user's OS keyring (`secrets`). Only the
+# command-line client enables it: the service must never link the keyring,
+# and CI checks that it does not.
+secrets = ["dep:keyring"]
 
 [dependencies]
 ubc-vpn-core.workspace = true
@@ -29,7 +33,7 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [target."cfg(windows)".dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"], optional = true }
 windows-sys = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Console", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_SystemInformation", "Win32_System_Services", "Win32_System_Registry", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [target."cfg(windows)".dev-dependencies]
@@ -43,7 +47,7 @@ rustix = { version = "1.1.5", default-features = false, features = ["std", "net"
 rustix = { version = "1.1.5", default-features = false, features = ["pty"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["async-secret-service", "crypto-rust", "async-io"] }
+keyring = { version = "3.6.3", default-features = false, features = ["async-secret-service", "crypto-rust", "async-io"], optional = true }
