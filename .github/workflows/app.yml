@@ -47,6 +47,13 @@ jobs:
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      # Electron fetches its binary on first use. Do it once, as its own step,
+      # before anything loads the electron package: when several unit test
+      # files load it at once on a fresh runner, they race to unpack it and
+      # fail with "Electron failed to install correctly". A failed download
+      # is then not mistaken for a failed test either.
+      - name: Download Electron
+        run: node node_modules/electron/install.js
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
@@ -55,10 +62,6 @@ jobs:
         run: pnpm check:build
 
       # The end-to-end test drives the real app, built in demo mode.
-      # Electron fetches its binary on first use; do it as its own step so a
-      # failed download is not mistaken for a failed test.
-      - name: Download Electron
-        run: node node_modules/electron/install.js
       # Ubuntu stops unprivileged programs from creating the namespaces
       # Chromium's sandbox is built on. Lift that for this job, so the test
       # runs with the sandbox on, as the app does.
