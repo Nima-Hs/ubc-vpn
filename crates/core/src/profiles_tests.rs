@@ -222,18 +222,22 @@ fn names_and_usernames_today_refuses_are_cleaned_not_fatal() {
     }
     // A name given to one with none usable never takes a name the user
     // chose, even one later in the file: that one is kept as it was.
-    let mut file = good.clone();
-    file["profiles"][0]["name"] = Value::from("");
-    file["profiles"][1]["name"] = Value::from("Profile 1");
-    let read = Profiles::read(Some(&file.to_string())).unwrap();
-    let names: Vec<_> = read
-        .profiles
-        .profiles
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
-    assert_eq!(names, ["Profile 2", "Profile 1"]);
-    assert_eq!(read.profiles.check(), Ok(()));
+    // Compared as it will be kept: "Profile 1 " is the user's "Profile 1".
+    for chosen in ["Profile 1", "Profile 1 ", " profile 1\u{200b}"] {
+        let mut file = good.clone();
+        file["profiles"][0]["name"] = Value::from("");
+        file["profiles"][1]["name"] = Value::from(chosen);
+        let read = Profiles::read(Some(&file.to_string())).unwrap();
+        let names: Vec<_> = read
+            .profiles
+            .profiles
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        let kept = chosen.replace('\u{200b}', "");
+        assert_eq!(names, ["Profile 2", kept.trim()], "{chosen:?}");
+        assert_eq!(read.profiles.check(), Ok(()), "{chosen:?}");
+    }
 }
 
 // A newer version, or a version 2 file whose structure is broken, is
@@ -291,20 +295,35 @@ fn files_that_break_the_rules_are_unreadable() {
             "{case}"
         );
     }
-    let many = spoiled(&|f| {
-        let profile = f["profiles"][1].clone();
-        let list = f["profiles"].as_array_mut().unwrap();
-        for n in 0..MAX_PROFILES {
-            let mut more = profile.clone();
-            more["id"] = Value::from(id(100 + n as u8).as_str());
-            more["name"] = Value::from(format!("Lab {n}"));
-            list.push(more);
-        }
-    });
+}
+
+// More profiles than this version makes, as a newer one might allow, are no
+// reason to lose any: all are kept and can be changed, and no more can be
+// made until there are fewer.
+#[test]
+fn more_profiles_than_the_limit_are_kept() {
+    let mut file: Value = serde_json::from_str(&two().to_text()).unwrap();
+    let profile = file["profiles"][1].clone();
+    let list = file["profiles"].as_array_mut().unwrap();
+    for n in 0..MAX_PROFILES {
+        let mut more = profile.clone();
+        more["id"] = Value::from(id(100 + n as u8).as_str());
+        more["name"] = Value::from(format!("Lab {n}"));
+        list.push(more);
+    }
+    let read = Profiles::read(Some(&file.to_string())).unwrap();
+    let mut all = read.profiles;
+    assert_eq!(all.profiles.len(), MAX_PROFILES + 2);
+    assert!(read.cleaned.is_empty());
+    all.rename(&id(100), "Lab zero").unwrap();
+    all.switch(&id(101)).unwrap();
     assert_eq!(
-        Profiles::read(Some(&many)),
-        Err(SettingsFailureCode::Unreadable)
+        all.create(id(250), "One more", None, RouteSet::default(), false),
+        Err(ProfileFailureCode::TooManyProfiles)
     );
+    assert_eq!(all.delete(&id(102)), Ok(Password::Forget));
+    assert_eq!(all.profiles.len(), MAX_PROFILES + 1);
+    assert_eq!(Profiles::read(Some(&all.to_text())).unwrap().profiles, all);
 }
 
 #[test]

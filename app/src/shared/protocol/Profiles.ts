@@ -15,7 +15,7 @@ version: number,
  */
 global: GlobalSettings, 
 /**
- * At least one, at most [`MAX_PROFILES`], in the order the user made
- * them.
+ * At least one, in the order the user made them. No more are made
+ * once there are [`MAX_PROFILES`].
  */
 profiles: Array<Profile>, };
