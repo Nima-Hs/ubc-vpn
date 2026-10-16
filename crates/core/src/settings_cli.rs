@@ -19,6 +19,16 @@
 //!   left to move one to, it changes nothing and fails with
 //!   [`SettingsFailureCode::Unwritable`].
 //!
+//! - `ubc-vpn settings set-tunnel --json` reads one [`TunnelInput`] line and
+//!   writes one [`TunnelReply`] line. It saves `global.tunnel` under the
+//!   settings lock, changing nothing else, unless the mode is full and the
+//!   policy forbids it: then it answers [`TunnelReply::Forbidden`] and saves
+//!   nothing. With a policy that cannot be read nothing forbids it here.
+//!   Once saved, it asks the service to switch a live connection to the
+//!   mode, as `set-routes` does for routes, and says what came of that in
+//!   `live`. Both answers exit with status 0. `ubc-vpn connect` sends the
+//!   saved mode.
+//!
 //! The username is not set through these commands. `ubc-vpn connect` saves
 //! the one the user typed once a login with it has succeeded, and removes a
 //! saved one that the gateway refused (see [`replace_username`]).

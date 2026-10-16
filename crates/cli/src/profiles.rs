@@ -1,9 +1,9 @@
 //! The profiles commands, for the app: `profiles list`, `create`, `rename`,
 //! `update`, `delete` and `switch`; `profile set-routes`; `password forget`;
-//! and `settings set-startup`. Each is spelled with `--json`, reads at most
-//! one line on standard input, and writes one line. The rules are in
-//! `ubc_vpn_core::profiles`; this file reads the file, calls one, and saves
-//! the result.
+//! `settings set-startup`; and `settings set-tunnel`. Each is spelled with
+//! `--json`, reads at most one line on standard input, and writes one line.
+//! The rules are in `ubc_vpn_core::profiles`; this file reads the file,
+//! calls one, and saves the result.
 //!
 //! - **Every change is made under the settings lock,** from the read to the
 //!   save, and so is every change to a saved password that goes with it:
@@ -18,12 +18,17 @@
 //!   one, and the profiles are shown all the same.
 //! - **Nothing is saved that cannot be shown:** a change whose answer would
 //!   not fit in one line is refused, with the file as it was.
-//! - **This claims nothing.** Only `profile set-routes` talks to the
-//!   service, for the active profile, as `settings set-routes` does.
+//! - **Full mode the policy forbids is never saved:** `settings set-tunnel`
+//!   answers [`TunnelReply::Forbidden`] under the lock, with the file as it
+//!   was.
+//! - **This claims nothing.** Only `profile set-routes` and `settings
+//!   set-tunnel` talk to the service, as `settings set-routes` does: the
+//!   one for the active profile, the other to switch the live connection
+//!   to the mode just saved.
 
 use std::io::{BufRead, Write};
 
-use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::policy::{FullTunnel, Policy};
 use ubc_vpn_core::profiles::{
     Keyring, MaybeProfile, NewProfile, Password, ProfileFailure, ProfileFailureCode, ProfileRef,
     ProfileRoutes, ProfileView, Profiles, ProfilesView, RenameProfile, Startup, UpdateProfile,
@@ -31,8 +36,10 @@ use ubc_vpn_core::profiles::{
 use ubc_vpn_core::protocol::{decode, encode};
 use ubc_vpn_core::routes::RouteSet;
 use ubc_vpn_core::settings_cli::{
-    RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, check_input,
+    LiveRoutes, RouteInput, RoutesReply, SettingsFailure, SettingsFailureCode, TunnelInput,
+    TunnelReply, check_input,
 };
+use ubc_vpn_core::state::TunnelMode;
 use ubc_vpn_platform::Platform;
 
 use crate::settings::{Found, line, new_id, policy, read_profiles, write_profiles};
@@ -60,6 +67,8 @@ pub enum Command {
     ForgetPassword,
     /// `settings set-startup --json`
     SetStartup,
+    /// `settings set-tunnel --json`
+    SetTunnel,
 }
 
 impl Command {
@@ -75,6 +84,7 @@ impl Command {
             ["profile", "set-routes", "--json"] => Self::SetRoutes,
             ["password", "forget", "--json"] => Self::ForgetPassword,
             ["settings", "set-startup", "--json"] => Self::SetStartup,
+            ["settings", "set-tunnel", "--json"] => Self::SetTunnel,
             _ => return None,
         })
     }
@@ -86,6 +96,8 @@ enum Answer {
     Profiles(Box<ProfilesView>),
     /// For `profile set-routes`: as `settings set-routes` answers.
     Routes(RoutesReply),
+    /// For `settings set-tunnel`.
+    Tunnel(TunnelReply),
     /// A change the rules refused. Nothing was changed.
     Refused(ProfileFailureCode),
 }
@@ -107,6 +119,7 @@ pub fn run(
     let (line, failed) = match answered {
         Ok(Answer::Profiles(view)) => (encode(&*view), false),
         Ok(Answer::Routes(reply)) => (encode(&reply), false),
+        Ok(Answer::Tunnel(reply)) => (encode(&reply), false),
         Ok(Answer::Refused(error)) => (encode(&ProfileFailure { error }), true),
         Err(error) => (encode(&SettingsFailure { error }), true),
     };
@@ -155,7 +168,16 @@ fn answer(
                 Answer::Profiles(Box::new(fits(&profiles, policy.as_ref())?)),
                 None,
             ),
+            // Shown as the reply will be once the service has answered.
+            Ok(Made::Tunnel(tunnel)) => (
+                Answer::Tunnel(TunnelReply::Ok {
+                    tunnel,
+                    live: LiveRoutes::NextConnect,
+                }),
+                None,
+            ),
             Ok(Made::Invalid(reply)) => return Ok(Answer::Routes(reply)),
+            Ok(Made::Forbidden) => return Ok(Answer::Tunnel(TunnelReply::Forbidden)),
             Err(code) => return Ok(Answer::Refused(code)),
         };
         // Nothing is saved that cannot be shown.
@@ -168,17 +190,22 @@ fn answer(
         };
         (answer, live)
     };
-    // Routes saved for the active profile go to the live connection too,
-    // once the lock on the settings is let go: the service may take a
-    // moment.
+    // Routes saved for the active profile, and a tunnel mode, go to the
+    // live connection too, once the lock on the settings is let go: the
+    // service may take a moment.
+    let limits = crate::client::Limits::default();
     match (answer, live) {
         (Answer::Routes(RoutesReply::Ok { routes, .. }), Some(_)) => {
-            let live = live::apply(platform, &routes, crate::client::Limits::default());
+            let live = live::apply(platform, &routes, limits);
             let reply = RoutesReply::Ok {
                 routes,
                 live: Some(live),
             };
             Ok(Answer::Routes(reply))
+        }
+        (Answer::Tunnel(TunnelReply::Ok { tunnel, .. }), _) => {
+            let live = live::switch(platform, tunnel, limits);
+            Ok(Answer::Tunnel(TunnelReply::Ok { tunnel, live }))
         }
         (answer, _) => Ok(answer),
     }
@@ -194,6 +221,7 @@ enum Asked {
     Routes(ProfileRoutes),
     Forget(MaybeProfile),
     Startup(Startup),
+    Tunnel(TunnelInput),
 }
 
 fn asked(command: Command, stdin: &mut dyn BufRead) -> Result<Asked, SettingsFailureCode> {
@@ -212,6 +240,7 @@ fn asked(command: Command, stdin: &mut dyn BufRead) -> Result<Asked, SettingsFai
         Command::SetRoutes => Asked::Routes(decode(&text).map_err(bad)?),
         Command::ForgetPassword => Asked::Forget(decode(&text).map_err(bad)?),
         Command::SetStartup => Asked::Startup(decode(&text).map_err(bad)?),
+        Command::SetTunnel => Asked::Tunnel(decode(&text).map_err(bad)?),
     })
 }
 
@@ -223,6 +252,10 @@ enum Made {
     Routes(RouteSet, bool),
     /// The routes typed have problems: nothing was changed.
     Invalid(RoutesReply),
+    /// The tunnel mode was set to this.
+    Tunnel(TunnelMode),
+    /// The policy forbids the mode asked for: nothing was changed.
+    Forbidden,
 }
 
 /// Makes the change asked for to `profiles`, adding to `forget` the
@@ -318,6 +351,16 @@ fn apply(
         Asked::Startup(startup) => {
             profiles.set_startup(startup.start, startup.auto_connect);
             Ok(Made::Profiles)
+        }
+        // Without a policy that can be read nothing forbids it here; the
+        // service refuses to connect at all then.
+        Asked::Tunnel(TunnelInput { mode }) => {
+            let forbidden = policy.is_some_and(|p| p.full_tunnel == FullTunnel::Forbidden);
+            if mode == TunnelMode::Full && forbidden {
+                return Ok(Made::Forbidden);
+            }
+            profiles.set_tunnel(mode);
+            Ok(Made::Tunnel(mode))
         }
     }
 }
