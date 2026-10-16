@@ -14,9 +14,20 @@
 //!   only once its entry is gone, so the index always names every entry.
 //!   [`Secrets::forget_all`] works from it, and so forgets every password
 //!   this product saved, whatever the settings file says now.
+//! - **A password can be in doubt.** When the gateway refuses a login that
+//!   used a saved password together with a one-time code, it does not say
+//!   which was wrong. The password is then kept but marked in doubt
+//!   ([`Saved::in_doubt`]), and the next login asks for it instead of
+//!   sending it. A mark this version does not know reads as in doubt: the
+//!   safe side.
 //! - **Nothing secret leaves this module in an error.** Errors are fixed
 //!   text; neither the password, the username nor the OS's own message is
 //!   in them.
+//! - **Tests never use the user's keyring.** They use [`FakeSecrets`] in
+//!   memory, or, to share one between processes, [`file_backed`], which
+//!   keeps entries as files in a folder of the test's and exists only in a
+//!   debug build. Only one CI step uses the real keyring, under a
+//!   throwaway service name.
 
 use std::sync::Arc;
 
@@ -37,6 +48,10 @@ pub struct Saved {
     pub username: String,
     /// The password.
     pub password: Secret,
+    /// Whether a login that used it was refused without it being known
+    /// which answer was wrong. One in doubt is not sent again: the user is
+    /// asked, and a typed password that works replaces it.
+    pub in_doubt: bool,
 }
 
 impl std::fmt::Debug for Saved {
@@ -59,32 +74,52 @@ pub trait Secrets: Send + Sync {
 
     /// Forgets every password this product saved.
     fn forget_all(&self) -> Result<()>;
+
+    /// The accounts that have a password saved, as the index names them.
+    /// No password is read for this.
+    fn saved(&self) -> Result<Vec<String>>;
 }
 
 /// The first line of an entry, which says what form it is in.
 const FORM: &str = "ubc-vpn 1";
 
-/// An entry as stored: [`FORM`], the username and the password, each after
-/// a line break. A username that may be saved holds no line break, so the
-/// password is everything after the second one.
+/// The mark on the first line of an entry whose password is in doubt.
+const IN_DOUBT: &str = "in-doubt";
+
+/// An entry as stored: [`FORM`] (followed by [`IN_DOUBT`] when it is), the
+/// username and the password, each after a line break. A username that may
+/// be saved holds no line break, so the password is everything after the
+/// second one.
 fn entry(saved: &Saved) -> Option<Secret> {
     let username = &saved.username;
+    let form = match saved.in_doubt {
+        true => format!("{FORM} {IN_DOUBT}"),
+        false => FORM.to_string(),
+    };
     match username.contains(['\n', '\r']) {
         true => None,
         false => Some(Secret::new(format!(
-            "{FORM}\n{username}\n{}",
+            "{form}\n{username}\n{}",
             saved.password.expose()
         ))),
     }
 }
 
-/// An entry read back, or `None` when it is not in [`FORM`].
+/// An entry read back, or `None` when it is not in [`FORM`]. Any mark after
+/// the form, known or not, reads as in doubt.
 fn read_entry(text: &str) -> Option<Saved> {
-    let rest = text.strip_prefix(FORM)?.strip_prefix('\n')?;
+    let (first, rest) = text.split_once('\n')?;
+    let in_doubt = match first.strip_prefix(FORM)? {
+        "" => false,
+        mark if mark.starts_with(' ') => true,
+        // Another form, such as a later version's: not one to trust.
+        _ => return None,
+    };
     let (username, password) = rest.split_once('\n')?;
     Some(Saved {
         username: username.to_string(),
         password: Secret::new(password),
+        in_doubt,
     })
 }
 
@@ -179,6 +214,11 @@ impl<S: Store> Secrets for Kept<S> {
         }
         self.store.delete(INDEX)
     }
+
+    fn saved(&self) -> Result<Vec<String>> {
+        // `save` never takes the index's own account, so it is never named.
+        self.index()
+    }
 }
 
 /// The error for anything that went wrong in the keyring, in fixed text.
@@ -195,6 +235,56 @@ pub fn native() -> Arc<dyn Secrets> {
 /// of their own; nothing else does.
 pub fn under(service: &str) -> Arc<dyn Secrets> {
     Arc::new(Kept::new(Native(service.to_string())))
+}
+
+/// A keyring kept as files in `dir`, one to an entry, for tests that run
+/// several processes of the command-line client and need them to share
+/// one. It touches nothing but that folder: never the OS keyring. It exists
+/// only in a debug build, so a program that ships cannot use it.
+#[cfg(debug_assertions)]
+pub fn file_backed(dir: &std::path::Path) -> Arc<dyn Secrets> {
+    Arc::new(Kept::new(Files(dir.to_path_buf())))
+}
+
+/// The keyring as files in a folder: see [`file_backed`].
+#[cfg(debug_assertions)]
+struct Files(std::path::PathBuf);
+
+#[cfg(debug_assertions)]
+impl Files {
+    /// The file for `account`. Accounts are profile ids and the index:
+    /// letters and digits only, so no account can name a path elsewhere.
+    fn path(&self, account: &str) -> Result<std::path::PathBuf> {
+        let plain = !account.is_empty() && account.bytes().all(|b| b.is_ascii_alphanumeric());
+        match plain {
+            true => Ok(self.0.join(account)),
+            false => Err(failed()),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Store for Files {
+    fn get(&self, account: &str) -> Result<Option<Secret>> {
+        match std::fs::read_to_string(self.path(account)?) {
+            Ok(text) => Ok(Some(Secret::new(text))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(failed()),
+        }
+    }
+
+    fn set(&self, account: &str, value: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.0).map_err(|_| failed())?;
+        std::fs::write(self.path(account)?, value).map_err(|_| failed())
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        match std::fs::remove_file(self.path(account)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(failed()),
+        }
+    }
 }
 
 /// The OS keyring, through the `keyring` crate.

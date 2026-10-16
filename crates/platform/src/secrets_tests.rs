@@ -11,7 +11,87 @@ fn saved(username: &str, password: &str) -> Saved {
     Saved {
         username: username.to_string(),
         password: Secret::new(password),
+        in_doubt: false,
     }
+}
+
+// A password in doubt is saved and read back so; one that is not, is not.
+#[test]
+fn a_password_in_doubt_reads_back_in_doubt() {
+    let fake = FakeSecrets::new();
+    let secrets = fake.secrets();
+    let doubted = Saved {
+        in_doubt: true,
+        ..saved("user.ece@app", "made-up-pass")
+    };
+    secrets.save(PROFILE, &doubted).unwrap();
+    let back = secrets.load(PROFILE).unwrap().unwrap();
+    assert!(back.in_doubt);
+    assert_eq!(back.password.expose(), "made-up-pass");
+    assert_eq!(back.username, "user.ece@app");
+    secrets
+        .save(PROFILE, &saved("user.ece@app", "made-up-pass"))
+        .unwrap();
+    assert!(!secrets.load(PROFILE).unwrap().unwrap().in_doubt);
+}
+
+// Security rule: a mark this version does not know reads as in doubt, the
+// safe side; a first line that is not this form is no password at all.
+#[test]
+fn an_unknown_mark_reads_as_in_doubt() {
+    let fake = FakeSecrets::new();
+    for mark in ["in-doubt", "trusted", "later-version", " "] {
+        fake.put(PROFILE, &format!("ubc-vpn 1 {mark}\nuser@app\nmade-up"));
+        let back = fake.secrets().load(PROFILE).unwrap();
+        assert!(back.is_some_and(|b| b.in_doubt), "{mark:?}");
+    }
+    for other in [
+        "ubc-vpn 10\nuser@app\nmade-up",
+        "ubc-vpn 1x\nuser@app\nmade-up",
+    ] {
+        fake.put(PROFILE, other);
+        assert!(fake.secrets().load(PROFILE).unwrap().is_none(), "{other:?}");
+    }
+}
+
+// Whether a password is saved comes from the index; no password is read.
+#[test]
+fn the_saved_accounts_come_from_the_index() {
+    let fake = FakeSecrets::new();
+    let secrets = fake.secrets();
+    assert_eq!(secrets.saved().unwrap(), Vec::<String>::new());
+    secrets.save(PROFILE, &saved("a@app", "made-up-1")).unwrap();
+    secrets.save(OTHER, &saved("b@app", "made-up-2")).unwrap();
+    assert_eq!(secrets.saved().unwrap(), [PROFILE, OTHER]);
+    secrets.forget(PROFILE).unwrap();
+    assert_eq!(secrets.saved().unwrap(), [OTHER]);
+}
+
+// Two processes that use the same folder share one keyring, and nothing
+// is written anywhere else: an account that is not plain is refused.
+#[cfg(debug_assertions)]
+#[test]
+fn a_file_backed_keyring_is_shared_through_its_folder() {
+    let dir = std::env::temp_dir().join(format!("ubc-vpn-keyring-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let one = file_backed(&dir);
+    let two = file_backed(&dir);
+    one.save(PROFILE, &saved("a@app", "made-up-1")).unwrap();
+    assert_eq!(
+        two.load(PROFILE).unwrap().unwrap().password.expose(),
+        "made-up-1"
+    );
+    assert_eq!(two.saved().unwrap(), [PROFILE]);
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(files, [PROFILE, INDEX]);
+    assert!(one.load("../escape").is_err());
+    two.forget_all().unwrap();
+    assert!(one.load(PROFILE).unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
