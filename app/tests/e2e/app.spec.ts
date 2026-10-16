@@ -23,6 +23,7 @@ import {
     test,
 } from "@playwright/test";
 import { photographIcons } from "./icon-sheets";
+import { launchEnvironment } from "./safe-env";
 
 /**
  * Off the screen unless this is CI: a test run on someone's computer must
@@ -68,7 +69,8 @@ const contentsOf = (folder: string): string[] =>
         : ["(no such folder)"];
 const installedFolderBefore = contentsOf(installedFolder);
 const launchEnv = {
-    ...process.env,
+    // Off CI, nothing that could lead an app to a real client; see safe-env.ts.
+    ...launchEnvironment(process.env),
     ...HIDDEN,
     UBC_VPN_DEMO_STEP_MS: "600",
     // Whatever desktop the test machine runs, behave as on one with a tray.

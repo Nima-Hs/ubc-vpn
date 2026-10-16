@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import electronPath from "electron";
+import { launchEnvironment } from "./safe-env";
 
 /**
  * Off the screen unless this is CI: a test run on someone's computer must
@@ -67,8 +68,9 @@ function launch(build: Build, port: number, env: Record<string, string> = {}): C
         stdio: "ignore",
         // Its own profile, never the installed product's folder. A
         // packaged app ignores the variable and uses its own.
+        // Off CI, nothing that could lead it to a real client; see safe-env.ts.
         env: {
-            ...process.env,
+            ...launchEnvironment(process.env),
             ...HIDDEN,
             UBC_VPN_PROFILE: mkdtempSync(join(tmpdir(), "ubc-vpn-debug-probe-")),
             ...env,
