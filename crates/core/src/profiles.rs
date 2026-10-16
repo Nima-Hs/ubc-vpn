@@ -22,13 +22,32 @@
 //!   profile [`FIRST_PROFILE_NAME`], with the id [`ProfileId::first`], made
 //!   active; its routes are kept exactly. Reading writes nothing: the file
 //!   becomes version 2 the first time it is saved, and the id is the same
-//!   every time it is read until then.
+//!   every time it is read until then. A user with no file at all is read
+//!   the same way, as an empty first profile. These untouched users are the
+//!   only ones with the fixed id; every other profile, a fresh one after a
+//!   reset included, has a random one ([`Profiles::fresh`]).
+//! - **A rule made stricter later never loses a file.** Only what breaks
+//!   the file's structure makes it unreadable: the version, the number of
+//!   profiles, an id that is not one, an id twice, or an active profile
+//!   that is not there. A name or a username that today's rules refuse is
+//!   cleaned instead, and [`Read::cleaned`] says which, so the user can be
+//!   told once: a name loses the characters that mislead and is trimmed,
+//!   and becomes "Profile 2" or the like if nothing usable is left or it
+//!   is another's name; a username is cleared, and that profile's saved
+//!   password is forgotten, as it was the old username's.
 //! - **Anything else is unreadable.** A newer version, or a version 2 file
-//!   that breaks a rule here, is [`SettingsFailureCode::Unreadable`]: the
+//!   whose structure is broken, is [`SettingsFailureCode::Unreadable`]: the
 //!   way out is `settings reset`, as for any file that cannot be read.
+//! - **A reset forgets every saved password.** Settings that are reset, or
+//!   replaced because they could not be read, may have had profiles whose
+//!   ids nobody knows any more. So a reset forgets every password this
+//!   product saved, found in the keyring by its service name
+//!   (`io.github.nima-hs.ubc-vpn`) and not by the old file's ids, and the
+//!   fresh profile it starts with has a random id.
 //! - **Fields this version does not know are kept,** at the top, in
 //!   `global` and in each profile, so a file saved by a newer version keeps
-//!   what that version stored.
+//!   what that version stored. Inside `routes` they are dropped: routes are
+//!   only `subnets` and `dns_domains`.
 //!
 //! The rules for changing them are the methods of [`Profiles`]; the
 //! command-line client reads the file, calls one, and saves the result. The
@@ -204,6 +223,39 @@ pub enum ProfileFailureCode {
     /// The username is not one that is saved: see
     /// [`usable_username`].
     BadUsername,
+    /// Another profile has that id already. The caller makes a new random
+    /// id and tries again.
+    IdTaken,
+}
+
+/// What reading a settings file found that today's rules refuse, and made
+/// usable, for the user to be told once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cleaned {
+    /// Which profile.
+    pub id: ProfileId,
+    /// Its name was changed to the one it now has.
+    pub renamed: bool,
+    /// Its username was cleared, and its saved password must be forgotten.
+    pub username_cleared: bool,
+}
+
+/// A settings file as read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Read {
+    /// The settings, every rule holding.
+    pub profiles: Profiles,
+    /// What was cleaned on the way, if anything. Saved, the file holds the
+    /// cleaned values.
+    pub cleaned: Vec<Cleaned>,
+}
+
+impl Read {
+    /// The profiles whose saved passwords must be forgotten.
+    pub fn passwords_to_forget(&self) -> impl Iterator<Item = &ProfileId> {
+        let cleared = self.cleaned.iter().filter(|c| c.username_cleared);
+        cleared.map(|c| &c.id)
+    }
 }
 
 /// A profile name made fit to store: trimmed, 1 to [`MAX_NAME_CHARS`]
@@ -229,15 +281,15 @@ pub enum Password {
 }
 
 impl Profiles {
-    /// The settings of a user who has saved none: one empty profile.
-    pub fn fresh() -> Self {
-        Self::from_v1(Settings::default(), Map::new())
+    /// Fresh settings, as a reset leaves them: one empty profile, with the
+    /// `id` the caller makes at random.
+    pub fn fresh(id: ProfileId) -> Self {
+        Self::from_v1(id, Settings::default(), Map::new())
     }
 
-    /// Settings from before profiles, as one active profile. `other` are
-    /// the file's other fields, kept.
-    fn from_v1(v1: Settings, other: Map<String, Value>) -> Self {
-        let id = ProfileId::first();
+    /// Settings from before profiles, as one active profile with `id`.
+    /// `other` are the file's other fields, kept.
+    fn from_v1(id: ProfileId, v1: Settings, other: Map<String, Value>) -> Self {
         let profile = Profile {
             id: id.clone(),
             name: FIRST_PROFILE_NAME.to_string(),
@@ -260,33 +312,115 @@ impl Profiles {
     }
 
     /// Reads a settings file's text, or `None` when there is no file. A
-    /// file from before profiles is read as one profile; see the module
-    /// documentation.
-    pub fn read(text: Option<&str>) -> Result<Self, SettingsFailureCode> {
+    /// file from before profiles is read as one profile, and what today's
+    /// rules refuse is cleaned; see the module documentation.
+    pub fn read(text: Option<&str>) -> Result<Read, SettingsFailureCode> {
         let unreadable = |_| SettingsFailureCode::Unreadable;
-        let Some(text) = text else {
-            return Ok(Self::fresh());
-        };
-        let Value::Object(mut file) = serde_json::from_str(text).map_err(unreadable)? else {
-            return Err(SettingsFailureCode::Unreadable);
-        };
-        match file.get("version").map(Value::as_u64) {
-            // Before profiles there was no version.
-            None | Some(Some(1)) => {
-                let v1: Settings =
-                    serde_json::from_value(Value::Object(file.clone())).map_err(unreadable)?;
-                for moved in ["version", "username", "routes", "save_password"] {
-                    file.remove(moved);
+        let untouched = |v1, other| Self::from_v1(ProfileId::first(), v1, other);
+        let mut profiles = match text {
+            None => untouched(Settings::default(), Map::new()),
+            Some(text) => {
+                let Value::Object(mut file) = serde_json::from_str(text).map_err(unreadable)?
+                else {
+                    return Err(SettingsFailureCode::Unreadable);
+                };
+                match file.get("version").map(Value::as_u64) {
+                    // Before profiles there was no version.
+                    None | Some(Some(1)) => {
+                        let v1: Settings = serde_json::from_value(Value::Object(file.clone()))
+                            .map_err(unreadable)?;
+                        for moved in ["version", "username", "routes", "save_password"] {
+                            file.remove(moved);
+                        }
+                        untouched(v1, file)
+                    }
+                    Some(Some(2)) => {
+                        serde_json::from_value(Value::Object(file)).map_err(unreadable)?
+                    }
+                    // A newer version, or not a number: not this version's.
+                    Some(_) => return Err(SettingsFailureCode::Unreadable),
                 }
-                Ok(Self::from_v1(v1, file))
             }
-            Some(Some(2)) => {
-                let read: Self = serde_json::from_value(Value::Object(file)).map_err(unreadable)?;
-                read.check().map_err(|_| SettingsFailureCode::Unreadable)?;
-                Ok(read)
+        };
+        profiles
+            .check_structure()
+            .map_err(|_| SettingsFailureCode::Unreadable)?;
+        let cleaned = profiles.clean();
+        // Cleaned, every rule holds; a file that still breaks one is not
+        // one this version understands.
+        profiles
+            .check()
+            .map_err(|_| SettingsFailureCode::Unreadable)?;
+        Ok(Read { profiles, cleaned })
+    }
+
+    /// Makes every name and username one that today's rules accept, and
+    /// says what it changed.
+    fn clean(&mut self) -> Vec<Cleaned> {
+        let mut cleaned = Vec::new();
+        // A name given to one that has none usable is free of every name in
+        // the file, so no name the user chose is taken by it.
+        let stored: HashSet<String> = self
+            .profiles
+            .iter()
+            .map(|p| p.name.to_lowercase())
+            .collect();
+        let mut taken = HashSet::new();
+        for at in 0..self.profiles.len() {
+            let profile = &mut self.profiles[at];
+            let plain: String = profile.name.chars().filter(|c| !misleads(*c)).collect();
+            let plain: String = plain.trim().chars().take(MAX_NAME_CHARS).collect();
+            let plain = plain.trim().to_string();
+            let name = match !plain.is_empty() && !taken.contains(&plain.to_lowercase()) {
+                true => plain,
+                false => (at + 1..)
+                    .map(|n| format!("Profile {n}"))
+                    .find(|name| {
+                        let name = name.to_lowercase();
+                        !taken.contains(&name) && !stored.contains(&name)
+                    })
+                    .unwrap_or_default(),
+            };
+            let renamed = name != profile.name;
+            profile.name = name;
+            taken.insert(profile.name.to_lowercase());
+            let username_cleared = profile
+                .username
+                .as_deref()
+                .is_some_and(|name| !usable_username(name));
+            if username_cleared {
+                profile.username = None;
             }
-            // A newer version, or not a number: not this version's to read.
-            Some(_) => Err(SettingsFailureCode::Unreadable),
+            if renamed || username_cleared {
+                cleaned.push(Cleaned {
+                    id: profile.id.clone(),
+                    renamed,
+                    username_cleared,
+                });
+            }
+        }
+        cleaned
+    }
+
+    /// Checks the rules a file must keep to be read at all: see the module
+    /// documentation.
+    fn check_structure(&self) -> Result<(), ProfileFailureCode> {
+        if self.version != SETTINGS_VERSION {
+            return Err(ProfileFailureCode::UnknownProfile);
+        }
+        if self.profiles.is_empty() {
+            return Err(ProfileFailureCode::LastProfile);
+        }
+        if self.profiles.len() > MAX_PROFILES {
+            return Err(ProfileFailureCode::TooManyProfiles);
+        }
+        let mut ids = HashSet::new();
+        if !self.profiles.iter().all(|p| ids.insert(&p.id)) {
+            return Err(ProfileFailureCode::IdTaken);
+        }
+        match ids.contains(&self.global.active_profile) {
+            true => Ok(()),
+            false => Err(ProfileFailureCode::UnknownProfile),
         }
     }
 
@@ -299,21 +433,9 @@ impl Profiles {
 
     /// Checks every rule of the module documentation.
     pub fn check(&self) -> Result<(), ProfileFailureCode> {
-        if self.version != SETTINGS_VERSION {
-            return Err(ProfileFailureCode::UnknownProfile);
-        }
-        if self.profiles.is_empty() {
-            return Err(ProfileFailureCode::LastProfile);
-        }
-        if self.profiles.len() > MAX_PROFILES {
-            return Err(ProfileFailureCode::TooManyProfiles);
-        }
-        let mut ids = HashSet::new();
+        self.check_structure()?;
         let mut names = HashSet::new();
         for profile in &self.profiles {
-            if !ids.insert(&profile.id) {
-                return Err(ProfileFailureCode::UnknownProfile);
-            }
             if check_name(&profile.name).as_deref() != Ok(profile.name.as_str()) {
                 return Err(ProfileFailureCode::BadName);
             }
@@ -328,10 +450,7 @@ impl Profiles {
                 return Err(ProfileFailureCode::BadUsername);
             }
         }
-        match ids.contains(&self.global.active_profile) {
-            true => Ok(()),
-            false => Err(ProfileFailureCode::UnknownProfile),
-        }
+        Ok(())
     }
 
     /// The profile with `id`.
@@ -365,7 +484,8 @@ impl Profiles {
     }
 
     /// Makes a profile with a new `id`, which the caller makes at random.
-    /// It is not made active.
+    /// It is not made active. An id that is taken is refused with
+    /// [`ProfileFailureCode::IdTaken`], and the caller tries another.
     pub fn create(
         &mut self,
         id: ProfileId,
@@ -380,6 +500,9 @@ impl Profiles {
         }
         if self.profiles.len() >= MAX_PROFILES {
             return Err(ProfileFailureCode::TooManyProfiles);
+        }
+        if self.profile(&id).is_ok() {
+            return Err(ProfileFailureCode::IdTaken);
         }
         self.change(|all| {
             all.profiles.push(Profile {
