@@ -7,7 +7,7 @@ import {
     TUNNEL_CURVE,
     TUNNEL_WIDTH,
 } from "@shared/mark";
-import { Minus, X } from "lucide-react";
+import { Minus, Shapes, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { api, useSnapshot } from "@/lib/store";
 import { IconButton } from "./ui/icon-button";
@@ -55,7 +55,12 @@ function Mark({ tone }: { tone: Tone }) {
  * OS. It drags the window. macOS places its window buttons at the left, so
  * there the bar leaves room for them and shows none of its own.
  */
-export function TitleBar() {
+export function TitleBar({
+    onGallery,
+}: {
+    /** Demo builds only: opens the screen showing every component. */
+    onGallery?: () => void;
+}) {
     const mac = api.platform === "darwin";
     const closeHides = useSnapshot((snapshot) => snapshot.closeHides);
     const tone = useSnapshot((snapshot) => describe(snapshot.state).tone);
@@ -71,6 +76,11 @@ export function TitleBar() {
                 UBC VPN
             </span>
             <div className="ms-auto flex items-center gap-1">
+                {onGallery !== undefined && (
+                    <IconButton label="Parts" onClick={onGallery}>
+                        <Shapes />
+                    </IconButton>
+                )}
                 {!mac && (
                     <>
                         <IconButton label="Minimize" onClick={() => void api.minimizeWindow()}>

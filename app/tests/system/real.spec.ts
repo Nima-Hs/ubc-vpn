@@ -402,6 +402,23 @@ test("the app, the client and a dev-mode service work together", async () => {
         dns_domains: [DOMAIN],
     });
 
+    // --- Settings: read from the real client, and a change saved by it.
+    await tab("Settings").click();
+    await expect(heading()).toHaveText("Settings");
+    await expect(page.getByText("Reading your settings…")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    const autoConnect = page.getByRole("switch", { name: "Connect when UBC VPN starts" });
+    await expect(autoConnect).toHaveAttribute("aria-checked", "false");
+    await autoConnect.click();
+    await expect(autoConnect).toHaveAttribute("aria-checked", "true");
+    await shoot("settings");
+    const listed = client(["profiles", "list", "--json"]);
+    expect(listed.status).toBe(0);
+    expect(JSON.parse(listed.out).global.auto_connect).toBe(true);
+    // Put back, so the connect below is the user's own.
+    await autoConnect.click();
+    await expect(autoConnect).toHaveAttribute("aria-checked", "false");
+
     // --- Connect: the questions the pretend gateway asks, then connected.
     await tab("Connection").click();
     await expect(heading()).toHaveText("Not connected");

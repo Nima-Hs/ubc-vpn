@@ -1,7 +1,9 @@
 import { join } from "node:path";
-import { DEMO_IPC } from "@shared/api";
+import { DEMO_IPC, type LinkState } from "@shared/api";
+import { DEMO_PROFILES_IPC } from "@shared/profiles";
 import { app, type BrowserWindow, clipboard, Menu, protocol, session } from "electron";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
+import { ProfilesRunner, type ProfilesService } from "./channel/profiles";
 import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
 import { handleFromInterface, registerIpc } from "./ipc";
@@ -9,6 +11,7 @@ import { createServiceLink, type ServiceLink } from "./link";
 import { clientLogin } from "./login";
 import type { LogFeed } from "./logs/book";
 import { profileFolder } from "./profile";
+import type { LoginItems } from "./profiles-ipc";
 import { holdQuitForCancel, stopForQuit } from "./quit";
 import {
     allowsRemoteDebugging,
@@ -18,6 +21,14 @@ import {
     registerAppScheme,
     secureSession,
 } from "./security";
+import {
+    connectsAtStart,
+    type LoginItem,
+    loginItemFor,
+    showsAfterSettings,
+    startsInTray,
+    startupSupported,
+} from "./startup";
 import { appImage, createTray, followStateOnTaskbar } from "./tray";
 import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray-icon";
 import { createWindow, keepHidden, showWindow } from "./window";
@@ -72,8 +83,19 @@ async function start(): Promise<void> {
     let link: ServiceLink;
     let login: LoginFactory;
     let demoSettings: SettingsService | undefined;
+    let demoProfiles: ProfilesService | undefined;
     let logFeed: LogFeed | undefined;
     let registerDemo: ((window: BrowserWindow) => void) | null = null;
+    // Where a choice of starting at sign-in goes. Only an installed app asks
+    // the OS; any other run keeps the last request, for the tests to read.
+    let loginItemAsked: LoginItem | null = null;
+    const loginItems: LoginItems = app.isPackaged
+        ? { apply: (item) => app.setLoginItemSettings(item) }
+        : {
+              apply: (item) => {
+                  loginItemAsked = item;
+              },
+          };
     if (__DEMO__) {
         const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
         const { createDemoLogin, DEMO_LOGIN_SCENARIOS } = await import("./demo/demo-login");
@@ -81,8 +103,13 @@ async function start(): Promise<void> {
             "./demo/demo-settings"
         );
         const { createDemoLogs, DEMO_LOG_SCENARIOS } = await import("./demo/demo-logs");
+        const { createDemoProfiles, DEMO_PROFILES_SCENARIOS } = await import(
+            "./demo/demo-profiles"
+        );
         const fakeSettings = createDemoSettings();
         demoSettings = fakeSettings;
+        const fakeProfiles = createDemoProfiles();
+        demoProfiles = fakeProfiles;
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
         const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
         const fakeLogs = createDemoLogs(step);
@@ -100,6 +127,7 @@ async function start(): Promise<void> {
                 ...DEMO_LOGIN_SCENARIOS,
                 ...DEMO_SETTINGS_SCENARIOS,
                 ...DEMO_LOG_SCENARIOS,
+                ...DEMO_PROFILES_SCENARIOS,
             ]);
             handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
                 if (typeof name === "string") {
@@ -108,8 +136,14 @@ async function start(): Promise<void> {
                     demo.setScenario(name);
                     fakeSettings.setScenario(name);
                     fakeLogs.setScenario(name);
+                    fakeProfiles.setScenario(name);
                 }
             });
+            handleFromInterface(window, devServerUrl, DEMO_PROFILES_IPC.loginItem, () =>
+                loginItemAsked === null
+                    ? null
+                    : { openAtLogin: loginItemAsked.openAtLogin, args: loginItemAsked.args },
+            );
         };
     } else {
         // A login given up after the service accepted it is undone through
@@ -147,7 +181,19 @@ async function start(): Promise<void> {
 
     // Only for the end-to-end tests: the window is never put on screen.
     const hidden = keepHidden(app, process);
-    const window = createWindow(entryUrl, appImage(), developmentBuild, hidden);
+    // Started at sign-in to sit in the tray (an installed app only). If no
+    // tray can be made after all, the window is shown below.
+    const inTray = startsInTray({
+        packaged: app.isPackaged,
+        argv: process.argv,
+        openedAtLogin:
+            app.isPackaged &&
+            process.platform === "darwin" &&
+            app.getLoginItemSettings().wasOpenedAtLogin,
+        platform: process.platform,
+        trayCreated: true,
+    });
+    const window = createWindow(entryUrl, appImage(), developmentBuild, hidden, inTray);
     registerIpc(window, controller, settings, devServerUrl);
     // The log screen: in no production build until its contract is on main.
     // Until then the only service that can be asked for its log is the
@@ -165,6 +211,15 @@ async function start(): Promise<void> {
         });
     }
     registerDemo?.(window);
+    // The Settings screen, asking the command-line client (#208); a demo
+    // build asks its fake instead. Only an installed app ever asks the OS to
+    // start it at sign-in; anything else records the request instead.
+    let profiles: ProfilesService | undefined;
+    if (__SETTINGS__) {
+        profiles = demoProfiles ?? new ProfilesRunner(settingsCommand(app, process));
+        const { registerProfiles } = await import("./profiles-ipc");
+        registerProfiles(window, devServerUrl, profiles, loginItems, process.platform);
+    }
 
     let quitting = false;
     const quit = () => {
@@ -208,6 +263,56 @@ async function start(): Promise<void> {
         icons.show(trayKind(snapshot.state));
         tray?.update(snapshot.state);
     });
+    // Put away at start, with nowhere to come back from, or on macOS with no
+    // settings to say it belongs in the tray: shown after all.
+    if (
+        inTray &&
+        (tray === null || (!__SETTINGS__ && showsAfterSettings(process.platform, null)))
+    ) {
+        show();
+    }
+
+    // As the app starts: the OS's record of starting at sign-in is made to
+    // match the settings, in case they were changed elsewhere, and the app
+    // connects if the user asked it to. It connects as the tray does, with
+    // the window shown first, because a login may have a question to ask.
+    if (__SETTINGS__ && profiles !== undefined) {
+        void profiles.list().then((result) => {
+            // macOS waits for the settings to say whether the window belongs in the tray.
+            if (
+                inTray &&
+                showsAfterSettings(process.platform, result.ok ? result.value.global.start : null)
+            ) {
+                show();
+            }
+            if (!result.ok) {
+                return;
+            }
+            const global = result.value.global;
+            if (app.isPackaged && startupSupported(process.platform)) {
+                loginItems.apply(loginItemFor(global.start, process.platform));
+            }
+            if (!global.auto_connect) {
+                return;
+            }
+            const once = (state: LinkState): boolean => {
+                if (state.link === "starting") {
+                    return false;
+                }
+                if (connectsAtStart(global, state.link === "ready" ? state.conn : null)) {
+                    connectFromTray(show, () => controller.connect());
+                }
+                return true;
+            };
+            if (!once(controller.getSnapshot().state)) {
+                const stop = controller.subscribe((snapshot) => {
+                    if (once(snapshot.state)) {
+                        stop();
+                    }
+                });
+            }
+        });
+    }
 
     // Closing the window leaves the app running in the tray, but only where
     // there is a way back to a hidden window. Elsewhere closing quits.
@@ -234,6 +339,7 @@ async function start(): Promise<void> {
     app.on("will-quit", () => {
         stopForQuit(controller, settings, tray);
         icons.dispose();
+        profiles?.stop();
     });
 
     // If the interface's process dies, start it again, but not in a loop.

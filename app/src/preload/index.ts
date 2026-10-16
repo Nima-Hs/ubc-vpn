@@ -4,10 +4,14 @@
 
 import { DEMO_IPC, IPC, type Snapshot, type VpnApi } from "@shared/api";
 import { LOGS_IPC, type LogUpdate } from "@shared/logs";
+import { DEMO_PROFILES_IPC, PROFILES_IPC } from "@shared/profiles";
+import type { ProfileId } from "@shared/protocol/ProfileId";
+import type { StartMode } from "@shared/protocol/StartMode";
 import { contextBridge, ipcRenderer } from "electron";
 
 declare const __DEMO__: boolean;
 declare const __LOGS__: boolean;
+declare const __SETTINGS__: boolean;
 
 const api: VpnApi = {
     platform: process.platform,
@@ -43,10 +47,20 @@ const api: VpnApi = {
             copyReport: () => ipcRenderer.invoke(LOGS_IPC.copyReport),
         },
     }),
+    ...(__SETTINGS__ && {
+        profiles: {
+            list: () => ipcRenderer.invoke(PROFILES_IPC.list),
+            setStartup: (start: StartMode, autoConnect: boolean) =>
+                ipcRenderer.invoke(PROFILES_IPC.setStartup, start, autoConnect),
+            forgetPassword: (id: ProfileId | null) =>
+                ipcRenderer.invoke(PROFILES_IPC.forgetPassword, id),
+        },
+    }),
     ...(__DEMO__ && {
         demo: {
             listScenarios: () => ipcRenderer.invoke(DEMO_IPC.listScenarios),
             setScenario: (name: string) => ipcRenderer.invoke(DEMO_IPC.setScenario, name),
+            loginItem: () => ipcRenderer.invoke(DEMO_PROFILES_IPC.loginItem),
         },
     }),
 };

@@ -19,9 +19,9 @@ import type { RouteInput } from "@shared/protocol/RouteInput";
 import type { RouteSet } from "@shared/protocol/RouteSet";
 import type { RoutesReply } from "@shared/protocol/RoutesReply";
 import type { SettingsView } from "@shared/protocol/SettingsView";
-import { startClient } from "./bridge";
 import { markedText, plainText } from "./connect";
-import { encodeLine, LineDecoder } from "./framing";
+import { encodeLine } from "./framing";
+import { type OneLine, OneLineCalls, type OneLineOptions } from "./one-line";
 import { isRoutesReply, isSettingsFailure, isSettingsView } from "./validate";
 
 /** What the rest of the main process needs from the settings, real or fake. */
@@ -42,21 +42,7 @@ export const SETTINGS_ARGS = {
     save: ["settings", "set-routes", "--json"],
 } as const;
 
-export interface SettingsOptions {
-    /** The command-line client, as an absolute path. */
-    command: string;
-    /**
-     * Put before the fixed arguments. Empty in the app, or `--dev` in dev
-     * mode; tests use it to run a script.
-     */
-    leadingArgs?: readonly string[];
-    /** How long one call may take before the client is ended. */
-    timeoutMs?: number;
-    /** The app's own environment, from which the client's short one is taken. */
-    env?: Record<string, string | undefined>;
-    /** Whether the client is started in dev mode; see `bridgeCommand`. */
-    dev?: boolean;
-}
+export type SettingsOptions = OneLineOptions;
 
 const UNAVAILABLE = { ok: false, error: "unavailable" } as const;
 
@@ -106,21 +92,13 @@ function fitsInput(reply: RoutesReply, input: RouteInput): boolean {
 }
 
 export class SettingsRunner implements SettingsService {
-    private readonly options: Required<SettingsOptions>;
-    /** Each client still running, with what ends it and its call at once. */
-    private readonly running = new Map<ChildProcessWithoutNullStreams, () => void>();
+    private readonly calls: OneLineCalls;
     private reading: Promise<SettingsResult<SettingsView>> | null = null;
     private saving = false;
     private checking: ChildProcessWithoutNullStreams | null = null;
 
     constructor(options: SettingsOptions) {
-        this.options = {
-            leadingArgs: [],
-            timeoutMs: 10_000,
-            env: process.env,
-            dev: false,
-            ...options,
-        };
+        this.calls = new OneLineCalls(options);
     }
 
     getSettings(): Promise<SettingsResult<SettingsView>> {
@@ -174,15 +152,20 @@ export class SettingsRunner implements SettingsService {
     }
 
     stop(): void {
-        for (const end of [...this.running.values()]) {
-            end();
-        }
-        this.running.clear();
+        this.calls.stop();
     }
 
     /** Ends a client, and its call with it, whether or not the client goes. */
     private end(child: ChildProcessWithoutNullStreams): void {
-        this.running.get(child)?.();
+        this.calls.end(child);
+    }
+
+    private run(
+        args: readonly string[],
+        input: Buffer | null,
+        onStart?: (child: ChildProcessWithoutNullStreams) => void,
+    ): Promise<OneLine | null> {
+        return this.calls.run(args, input, onStart);
     }
 
     private async routes(
@@ -211,74 +194,6 @@ export class SettingsRunner implements SettingsService {
             };
         }
         return failureOf(line);
-    }
-
-    /**
-     * Runs the client once and returns its one line with its exit status, or
-     * `null` if it did not behave: could not be started, ran out of time,
-     * wrote nothing, more than one line, too much, or something unreadable.
-     */
-    private run(
-        args: readonly string[],
-        input: Buffer | null,
-        onStart?: (child: ChildProcessWithoutNullStreams) => void,
-    ): Promise<{ status: number | null; value: unknown } | null> {
-        return new Promise((answer) => {
-            let child: ChildProcessWithoutNullStreams;
-            try {
-                child = startClient(
-                    this.options.command,
-                    [...this.options.leadingArgs, ...args],
-                    this.options.env,
-                    this.options.dev,
-                );
-            } catch {
-                answer(null);
-                return;
-            }
-            // Only the first answer counts: a client that was ended has none.
-            const resolve = (result: { status: number | null; value: unknown } | null) => {
-                clearTimeout(timer);
-                answer(result);
-            };
-            // Ending does not wait for the client to go. One that ignores
-            // being killed would otherwise hold its call, and with it a
-            // save, for ever.
-            this.running.set(child, () => {
-                child.kill();
-                resolve(null);
-            });
-            onStart?.(child);
-            const decoder = new LineDecoder();
-            const lines: string[] = [];
-            const timer = setTimeout(() => this.end(child), this.options.timeoutMs);
-
-            child.stdout.on("data", (chunk: Buffer) => {
-                try {
-                    lines.push(...decoder.push(chunk));
-                } catch {
-                    this.end(child);
-                }
-            });
-            child.on("error", () => {});
-            child.stdin.on("error", () => {});
-            child.once("close", (status) => {
-                this.running.delete(child);
-                // Exactly one whole line, and nothing after it.
-                const [text] = lines;
-                if (lines.length !== 1 || text === undefined || decoder.hasPartial()) {
-                    resolve(null);
-                    return;
-                }
-                try {
-                    resolve({ status, value: JSON.parse(text) });
-                } catch {
-                    resolve(null);
-                }
-            });
-            // The one line of input, then the end of input.
-            child.stdin.end(input ?? undefined);
-        });
     }
 }
 

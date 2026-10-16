@@ -29,6 +29,10 @@ const markers = [
     "Copy report",
     "UBC VPN diagnostics report",
     "logs-new-run",
+    // The Settings screen's fake: its scenarios and the record a demo
+    // build keeps of what it would have asked the OS.
+    "settings-no-keyring",
+    "demo:login-item",
 ];
 
 if (!existsSync(out)) {
