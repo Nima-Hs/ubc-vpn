@@ -135,9 +135,14 @@ Exit status:
 /// Whether the arguments start with `--dev`, and the arguments after it. The
 /// flag exists only in a build with the `dev-mode` feature; in any other it
 /// is an argument like any unknown one.
+///
+/// With it, this run's saved passwords are kept apart from the installed
+/// product's from here on (see [`keys::dev_mode`]), so no command run with
+/// `--dev` can read or forget theirs.
 fn dev_flag<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
     #[cfg(feature = "dev-mode")]
     if let ["--dev", rest @ ..] = args {
+        keys::dev_mode();
         return (true, rest);
     }
     (false, args)
@@ -343,9 +348,6 @@ fn main() -> ExitCode {
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (dev, args) = dev_flag(&args);
-    if dev {
-        keys::dev_mode();
-    }
     // First, before anything starts a thread.
     let logs_in = !dev && matches!(args, ["connect"] | ["connect", "--json"]);
     let real = Real::load(logs_in);
