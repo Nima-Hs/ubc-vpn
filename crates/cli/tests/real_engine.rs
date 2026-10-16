@@ -43,7 +43,11 @@ fn connect_from(dir: &Path) -> String {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = vec![bin()];
     paths.extend(std::env::split_paths(&path));
+    // Security rule: never the service installed on this machine. A debug
+    // build talks to this channel, which nobody serves; see `binary.rs`.
+    let channel = format!("ubc-vpn-test-real-engine-{}", std::process::id());
     let output = Command::new(dir.join("ubc-vpn.exe"))
+        .env("UBC_VPN_TEST_CHANNEL", channel)
         .args(["connect", "--json"])
         .current_dir(bin())
         .env("PATH", std::env::join_paths(paths).unwrap())
@@ -62,6 +66,12 @@ fn connect_from(dir: &Path) -> String {
 // the copy in its working folder or on the search path, and says so.
 #[test]
 fn the_library_is_loaded_only_from_beside_the_program() {
+    // A release build cannot be pointed away from the installed service, so
+    // it runs this only on CI, whose machines have none.
+    if !cfg!(debug_assertions) && std::env::var_os("CI").is_none() {
+        println!("SKIPPED: a release build would reach the installed service; CI only");
+        return;
+    }
     let alone = installed("alone", false);
     let line = connect_from(&alone);
     assert!(
