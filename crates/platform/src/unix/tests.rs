@@ -1029,7 +1029,7 @@ fn native_has_a_real_channel_and_nothing_else_yet() {
     };
     let dns = SplitDns {
         resolvers: vec![gateway],
-        domains: vec!["ece.example".to_string()],
+        domains: vec!["dept.example".to_string()],
     };
     let _turn = turn();
     let modes = [Some(Mode::Installed), DEV];

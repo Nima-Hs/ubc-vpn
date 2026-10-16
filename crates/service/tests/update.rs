@@ -37,7 +37,7 @@ fn failed_with(state: &ConnState, expected: ErrorCode) -> bool {
 }
 
 /// Connects with `good()`: 10.255.0.0/24 and 192.0.2.0/24, the domain
-/// ece.example.test, and the gateway's DNS server 10.255.0.53.
+/// dept.example.test, and the gateway's DNS server 10.255.0.53.
 fn connected(rig: &Rig) -> Peer {
     let mut alice = rig.owner();
     let state = alice.connect_ends(good());
@@ -56,7 +56,7 @@ fn a_change_while_connected_is_applied_and_checked() {
 
     let change = update(
         &["10.255.0.0/24", "198.51.100.0/24"],
-        &["ece.example.test", "cs.example.test"],
+        &["dept.example.test", "cs.example.test"],
     );
     assert_eq!(alice.ask(change), ACCEPTED);
     let state = alice.state();
@@ -73,7 +73,7 @@ fn a_change_while_connected_is_applied_and_checked() {
     let dns = SplitDns {
         resolvers: vec![[10, 255, 0, 53].into()],
         domains: vec![
-            "ece.example.test".to_string(),
+            "dept.example.test".to_string(),
             "cs.example.test".to_string(),
         ],
     };
@@ -137,7 +137,7 @@ fn adding_domains_routes_the_dns_server_first() {
     let mut alice = rig.owner();
     let state = alice.connect_ends(connect(COOKIE, GATEWAY, &["192.0.2.0/24"], &[]));
     assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
-    let change = update(&["192.0.2.0/24"], &["ece.example.test"]);
+    let change = update(&["192.0.2.0/24"], &["dept.example.test"]);
     assert_eq!(alice.ask(change), ACCEPTED);
     assert!(matches!(alice.state(), ConnState::Connected { .. }));
     let applied = rig.fake.applied();
@@ -273,7 +273,7 @@ fn a_route_being_added_is_removed_by_name_if_the_change_fails() {
     rig.fake.set_failure(Op::RemoveAllRoutes, unknown);
     let change = update(
         &["10.255.0.0/24", "198.51.100.0/24", "198.51.100.128/25"],
-        &["ece.example.test"],
+        &["dept.example.test"],
     );
     assert_eq!(alice.ask(change), ACCEPTED);
     let state = alice.state();
@@ -315,13 +315,13 @@ fn only_routes_the_service_added_are_removed() {
     let rig = rig();
     let mut alice = rig.owner();
     let subnets = ["192.0.2.0/24", "10.255.0.53/32", "10.255.9.0/24"];
-    let first = connect(COOKIE, GATEWAY, &subnets, &["ece.example.test"]);
+    let first = connect(COOKIE, GATEWAY, &subnets, &["dept.example.test"]);
     assert!(matches!(
         alice.connect_ends(first),
         ConnState::Connected { .. }
     ));
     rig.fake.add_foreign_route("other0", net("10.255.9.0/24"));
-    let change = update(&["192.0.2.0/24"], &["ece.example.test"]);
+    let change = update(&["192.0.2.0/24"], &["dept.example.test"]);
     assert_eq!(alice.ask(change), ACCEPTED);
     let state = alice.state();
     assert_eq!(subnets_of(&state), [net("192.0.2.0/24")]);
@@ -356,11 +356,11 @@ fn the_same_routes_again_change_nothing() {
     // Compared as sets: in another order, or with an entry twice, they are
     // still the same routes.
     let same = [
-        update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]),
-        update(&["192.0.2.0/24", "10.255.0.0/24"], &["ece.example.test"]),
+        update(&["10.255.0.0/24", "192.0.2.0/24"], &["dept.example.test"]),
+        update(&["192.0.2.0/24", "10.255.0.0/24"], &["dept.example.test"]),
         update(
             &["10.255.0.0/24", "192.0.2.0/24", "10.255.0.0/24"],
-            &["ece.example.test", "ece.example.test"],
+            &["dept.example.test", "dept.example.test"],
         ),
     ];
     for request in same {
@@ -380,7 +380,7 @@ fn the_same_routes_again_change_nothing() {
     rig.os.hold_at(Op::RemoveTunnelRoutes);
     assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
     rig.os.wait_until_held();
-    let same = update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]);
+    let same = update(&["10.255.0.0/24", "192.0.2.0/24"], &["dept.example.test"]);
     let asked = alice.ask(same);
     rig.os.release();
     assert_eq!(asked, Err(ErrorCode::Busy));
@@ -395,8 +395,11 @@ fn the_same_routes_again_change_nothing() {
 fn a_change_then_back_is_applied_both_times() {
     let rig = rig();
     let mut alice = connected(&rig);
-    let first = || update(&["10.255.0.0/24", "192.0.2.0/24"], &["ece.example.test"]);
-    let other = update(&["10.255.0.0/24", "198.51.100.0/24"], &["ece.example.test"]);
+    let first = || update(&["10.255.0.0/24", "192.0.2.0/24"], &["dept.example.test"]);
+    let other = update(
+        &["10.255.0.0/24", "198.51.100.0/24"],
+        &["dept.example.test"],
+    );
     assert_eq!(alice.ask(other), ACCEPTED);
     let state = alice.state();
     assert_eq!(
@@ -424,7 +427,12 @@ fn a_change_then_back_is_applied_both_times() {
 fn changes_again_and_again_do_not_fill_the_log() {
     let rig = rig();
     let mut alice = connected(&rig);
-    let one = || update(&["10.255.0.0/24", "198.51.100.0/24"], &["ece.example.test"]);
+    let one = || {
+        update(
+            &["10.255.0.0/24", "198.51.100.0/24"],
+            &["dept.example.test"],
+        )
+    };
     let other = || update(&["10.255.0.0/24", "192.0.2.0/24"], &["cs.example.test"]);
     for round in 0..ubc_vpn_service::LOG_CAPACITY + 20 {
         let change = if round % 2 == 0 { one() } else { other() };
@@ -482,7 +490,7 @@ fn unusable_dns_servers_refuse_the_change_and_keep_the_connection() {
             "{case}: {state:?}"
         );
         let (calls, applied) = (rig.fake.calls(), rig.fake.applied());
-        let change = update(&["10.255.0.0/24"], &["ece.example.test"]);
+        let change = update(&["10.255.0.0/24"], &["dept.example.test"]);
         assert_eq!(alice.ask(change), Err(ErrorCode::RouteRefused), "{case}");
         assert_eq!(rig.fake.calls(), calls, "{case}: something was done");
         assert_eq!(rig.fake.applied(), applied, "{case}: something changed");

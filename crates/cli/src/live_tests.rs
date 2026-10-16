@@ -10,10 +10,10 @@ use crate::client::{Client, Limits};
 use crate::connect_tests::{CODE, PASSWORD, Scene, Typist};
 use crate::settings::{Command, run};
 
-/// The saved routes are 10.255.0.0/24 and ece.example.test (see
+/// The saved routes are 10.255.0.0/24 and dept.example.test (see
 /// `connect_tests.rs`). These add 198.51.100.0/24.
 const WIDER: &str =
-    r#"{"subnets":["10.255.0.0/24","198.51.100.0/24"],"dns_domains":["ece.example.test"]}"#;
+    r#"{"subnets":["10.255.0.0/24","198.51.100.0/24"],"dns_domains":["dept.example.test"]}"#;
 
 fn connected() -> Scene {
     let scene = Scene::usual();
@@ -77,7 +77,7 @@ fn routes_saved_while_connected_are_applied_to_it() {
 fn routes_the_connection_carries_already_are_applied() {
     let scene = connected();
     let calls = scene.rig.fake.calls();
-    let same = r#"{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}"#;
+    let same = r#"{"subnets":["10.255.0.0/24"],"dns_domains":["dept.example.test"]}"#;
     assert_eq!(save(&scene, same), Some(LiveRoutes::Applied));
     assert_eq!(scene.rig.fake.calls(), calls, "something was done");
 }

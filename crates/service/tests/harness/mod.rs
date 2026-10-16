@@ -72,7 +72,7 @@ pub fn connect(cookie: &str, addr: [u8; 4], subnets: &[&str], domains: &[&str]) 
 /// holds the DNS server the pretend gateway assigns.
 pub fn good() -> RequestBody {
     let subnets = ["10.255.0.0/24", "192.0.2.0/24"];
-    connect(COOKIE, GATEWAY, &subnets, &["ece.example.test"])
+    connect(COOKIE, GATEWAY, &subnets, &["dept.example.test"])
 }
 
 /// A service on fakes, with its files in a folder of its own.

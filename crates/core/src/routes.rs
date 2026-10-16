@@ -165,7 +165,7 @@ pub struct RouteSet {
     /// Subnets routed through the tunnel.
     #[cfg_attr(test, ts(type = "Array<string>"))]
     pub subnets: Vec<Ipv4Net>,
-    /// DNS domains resolved through the tunnel, such as `ece.ubc.ca`.
+    /// DNS domains resolved through the tunnel, such as `dept.ubc.ca`.
     #[serde(default)]
     pub dns_domains: Vec<String>,
 }
@@ -454,9 +454,9 @@ mod tests {
     #[test]
     fn routes_are_compared_as_sets() {
         let carried = [net("10.255.0.0/24"), net("192.0.2.0/24")];
-        let domains = ["ece.example.test".to_string()];
+        let domains = ["dept.example.test".to_string()];
         let mut asked = set(&["192.0.2.0/24", "10.255.0.0/24", "192.0.2.0/24"]);
-        asked.dns_domains = vec!["ece.example.test".to_string(); 2];
+        asked.dns_domains = vec!["dept.example.test".to_string(); 2];
         assert!(asked.is_carried_by(&carried, &domains));
         assert!(!set(&["10.255.0.0/24"]).is_carried_by(&carried, &[]));
         let mut more = set(&["10.255.0.0/24", "192.0.2.0/24", "198.51.100.0/24"]);
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn parses_and_prints_cidr() {
-        assert_eq!(net("142.103.0.0/16").to_string(), "142.103.0.0/16");
+        assert_eq!(net("198.19.0.0/16").to_string(), "198.19.0.0/16");
         assert_eq!(net("10.0.0.0/8").prefix_len(), 8);
     }
 
@@ -576,13 +576,13 @@ mod tests {
     fn containment() {
         assert!(net("10.0.0.0/8").contains(&net("10.19.0.0/16")));
         assert!(!net("10.19.0.0/16").contains(&net("10.0.0.0/8")));
-        assert!(net("142.103.0.0/16").contains_addr(Ipv4Addr::new(142, 103, 1, 2)));
-        assert!(!net("142.103.0.0/16").contains_addr(Ipv4Addr::new(142, 104, 0, 1)));
+        assert!(net("198.19.0.0/16").contains_addr(Ipv4Addr::new(198, 19, 1, 2)));
+        assert!(!net("198.19.0.0/16").contains_addr(Ipv4Addr::new(198, 18, 255, 1)));
     }
 
     #[test]
     fn accepts_ordinary_campus_routes() {
-        assert_eq!(set(&["142.103.0.0/16", "10.0.0.0/8"]).check(None), Ok(()));
+        assert_eq!(set(&["198.19.0.0/16", "10.0.0.0/8"]).check(None), Ok(()));
     }
 
     // Security rule: a default route, or either half of one, must never be
@@ -609,16 +609,16 @@ mod tests {
     // Security rule: with an allow-list, nothing outside it is accepted.
     #[test]
     fn allow_list_is_enforced() {
-        let allowed = [net("142.103.0.0/16")];
-        assert_eq!(set(&["142.103.5.0/24"]).check(Some(&allowed)), Ok(()));
+        let allowed = [net("198.19.0.0/16")];
+        assert_eq!(set(&["198.19.5.0/24"]).check(Some(&allowed)), Ok(()));
         assert_eq!(
             set(&["10.19.0.0/16"]).check(Some(&allowed)),
             Err(RouteError::NotAllowed(net("10.19.0.0/16")))
         );
         // A route wider than the allowed entry is outside it.
         assert_eq!(
-            set(&["142.0.0.0/8"]).check(Some(&allowed)),
-            Err(RouteError::NotAllowed(net("142.0.0.0/8")))
+            set(&["198.0.0.0/8"]).check(Some(&allowed)),
+            Err(RouteError::NotAllowed(net("198.0.0.0/8")))
         );
     }
 
@@ -633,7 +633,7 @@ mod tests {
             subnets: vec![net("10.19.0.0/16")],
             dns_domains: vec![d.to_string()],
         };
-        assert_eq!(with("ece.ubc.ca").check(None), Ok(()));
+        assert_eq!(with("dept.ubc.ca").check(None), Ok(()));
         assert_eq!(with("xn--bcher-kva.example").check(None), Ok(()));
         for bad in [
             "", "ubc", "*.ubc.ca", "ubc.ca.", "UBC.ca", "a..b", "-a.ca", "a_b.ca", "1.2", "1.2.3.4",

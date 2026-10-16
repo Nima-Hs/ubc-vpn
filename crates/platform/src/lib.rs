@@ -488,7 +488,7 @@ pub struct SplitDns {
     /// must route them through the tunnel and check that with
     /// [`Routes::uses_interface`].
     pub resolvers: Vec<Ipv4Addr>,
-    /// The domains they answer for, such as `ece.ubc.ca`. Every other name
+    /// The domains they answer for, such as `dept.ubc.ca`. Every other name
     /// keeps using the system's resolvers.
     pub domains: Vec<String>,
 }
@@ -1462,7 +1462,7 @@ mod tests {
         let subnets = ["192.0.2.0/24".parse().unwrap()];
         let dns = SplitDns {
             resolvers: vec![gateway],
-            domains: vec!["ece.example".to_string()],
+            domains: vec!["dept.example".to_string()],
         };
 
         assert_eq!(Native.capture_physical(gateway).err(), unsupported);
@@ -1508,7 +1508,7 @@ mod tests {
         };
         let dns = SplitDns {
             resolvers: vec![gateway],
-            domains: vec!["ece.example".to_string()],
+            domains: vec!["dept.example".to_string()],
         };
         let modes = [
             Mode::Installed,

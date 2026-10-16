@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let json = r#"{"username":"jdoe","routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]},"save_password":true}"#;
+        let json = r#"{"username":"jdoe","routes":{"subnets":["198.19.0.0/16"],"dns_domains":["dept.ubc.ca"]},"save_password":true}"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.username.as_deref(), Some("jdoe"));
         assert!(settings.save_password);
@@ -83,9 +83,9 @@ mod tests {
         assert_eq!(newer.routes.subnets.len(), 1);
 
         let partial: Settings =
-            serde_json::from_str(r#"{"routes":{"dns_domains":["ece.ubc.ca"]}}"#).unwrap();
+            serde_json::from_str(r#"{"routes":{"dns_domains":["dept.ubc.ca"]}}"#).unwrap();
         assert!(partial.routes.subnets.is_empty());
-        assert_eq!(partial.routes.dns_domains, ["ece.ubc.ca"]);
+        assert_eq!(partial.routes.dns_domains, ["dept.ubc.ca"]);
     }
 
     #[test]

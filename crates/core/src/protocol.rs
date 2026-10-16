@@ -885,8 +885,8 @@ mod tests {
                 cookie: Secret::new("s3cr3t-cookie"),
                 gateway_addr: Ipv4Addr::new(192, 0, 2, 1),
                 routes: RouteSet {
-                    subnets: vec!["142.103.0.0/16".parse::<Ipv4Net>().unwrap()],
-                    dns_domains: vec!["ece.ubc.ca".to_string()],
+                    subnets: vec!["198.19.0.0/16".parse::<Ipv4Net>().unwrap()],
+                    dns_domains: vec!["dept.ubc.ca".to_string()],
                 },
                 tunnel: TunnelMode::Split,
             }),
@@ -903,7 +903,7 @@ mod tests {
             line,
             concat!(
                 r#"{"id":7,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","gateway_addr":"192.0.2.1","#,
-                r#""routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]},"tunnel":"split"}}}"#,
+                r#""routes":{"subnets":["198.19.0.0/16"],"dns_domains":["dept.ubc.ca"]},"tunnel":"split"}}}"#,
                 "\n"
             )
         );
@@ -916,7 +916,7 @@ mod tests {
     fn a_connect_says_its_tunnel_mode() {
         let without = concat!(
             r#"{"id":7,"body":{"method":"connect","params":{"cookie":"s3cr3t-cookie","gateway_addr":"192.0.2.1","#,
-            r#""routes":{"subnets":["142.103.0.0/16"],"dns_domains":["ece.ubc.ca"]}}}}"#
+            r#""routes":{"subnets":["198.19.0.0/16"],"dns_domains":["dept.ubc.ca"]}}}}"#
         );
         assert_eq!(decode::<Request>(without).unwrap(), connect());
         let full = without.replace(r#"]}}}}"#, r#"]},"tunnel":"full"}}}"#);
@@ -1061,7 +1061,7 @@ mod tests {
             id: 9,
             body: RequestBody::UpdateRoutes(RouteSet {
                 subnets: vec!["10.255.0.0/16".parse().unwrap()],
-                dns_domains: vec!["ece.example.test".to_string()],
+                dns_domains: vec!["dept.example.test".to_string()],
             }),
         };
         let line = encode(&update).unwrap();
@@ -1069,7 +1069,7 @@ mod tests {
             line,
             concat!(
                 r#"{"id":9,"body":{"method":"update_routes","params":"#,
-                r#"{"subnets":["10.255.0.0/16"],"dns_domains":["ece.example.test"]}}}"#,
+                r#"{"subnets":["10.255.0.0/16"],"dns_domains":["dept.example.test"]}}}"#,
                 "\n"
             )
         );
@@ -1240,7 +1240,7 @@ mod tests {
             assert!(!is_plausible_gateway_addr(addr), "{bad} must be refused");
         }
         for good in [
-            "142.103.1.1",
+            "198.19.1.1",
             "10.0.0.1",
             "192.168.1.1",
             "1.1.1.1",

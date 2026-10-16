@@ -418,12 +418,12 @@ fn a_reset_says_when_saved_passwords_could_not_be_forgotten() {
 fn version_1_settings_are_kept_when_saved_as_version_2() {
     let machine = Machine::new();
     machine.write_settings(
-        r#"{"username":"user.ece@app","routes":{"subnets":["10.255.0.0/16"],"dns_domains":["ece.example.test"]}}"#,
+        r#"{"username":"user.dept@app","routes":{"subnets":["10.255.0.0/16"],"dns_domains":["dept.example.test"]}}"#,
     );
     machine.create("Lab", "user.lab@app");
     let stored = machine.stored();
     let first = stored.profile(&ProfileId::first()).unwrap();
-    assert_eq!(first.username.as_deref(), Some("user.ece@app"));
+    assert_eq!(first.username.as_deref(), Some("user.dept@app"));
     assert_eq!(first.routes.subnets[0].to_string(), "10.255.0.0/16");
     let platform = || Ok(Fake::new().platform(&machine.root));
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -435,7 +435,7 @@ fn version_1_settings_are_kept_when_saved_as_version_2() {
         &mut err,
     );
     let view: SettingsView = decode(&String::from_utf8(out).unwrap()).unwrap();
-    assert_eq!(view.settings.username.as_deref(), Some("user.ece@app"));
+    assert_eq!(view.settings.username.as_deref(), Some("user.dept@app"));
 }
 
 // Security rule: a username today's rules refuse is cleared when read,
@@ -475,8 +475,8 @@ fn a_cleaned_username_loses_its_saved_password() {
     ];
     for (name, saving) in saves {
         let machine = Machine::new();
-        machine.write_settings(r#"{"username":"user.ece@app\nsudo","save_password":true}"#);
-        save_password(&ProfileId::first(), "user.ece@app");
+        machine.write_settings(r#"{"username":"user.dept@app\nsudo","save_password":true}"#);
+        save_password(&ProfileId::first(), "user.dept@app");
         machine.list();
         assert!(
             machine.said.borrow().contains("could not be kept"),

@@ -391,7 +391,7 @@ fn start_up_cleans_up_before_it_listens() {
     let subnets = ["10.255.0.0/24".parse().unwrap()];
     let dns = SplitDns {
         resolvers: vec![[10, 255, 0, 53].into()],
-        domains: vec!["ece.example.test".to_string()],
+        domains: vec!["dept.example.test".to_string()],
     };
     rig.fake.add_gateway_route(gateway, &physical).unwrap();
     rig.fake.add_tunnel_routes("old0", &subnets).unwrap();

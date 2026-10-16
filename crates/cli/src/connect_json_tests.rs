@@ -320,7 +320,7 @@ fn every_failure_has_its_code() {
     let mut scene = Scene::usual();
     let mut script = Script::new(pin());
     script.form.truncate(1);
-    script.form[0].1 = Secret::new("alice.ece@app");
+    script.form[0].1 = Secret::new("alice.dept@app");
     scene.gateway = FakeEngine::new(script);
     let said = "CWL.dept@method";
     assert_eq!(fails(&scene, &[], "check_username", LOGIN_REFUSED, said), 0);

@@ -769,9 +769,9 @@ pub struct ProfileRoutes {
     /// Which profile; the active one when left out.
     #[serde(default)]
     pub id: Option<ProfileId>,
-    /// Subnets such as `142.103.0.0/16`.
+    /// Subnets such as `198.19.0.0/16`.
     pub subnets: Vec<String>,
-    /// DNS domains such as `ece.ubc.ca`.
+    /// DNS domains such as `dept.ubc.ca`.
     pub dns_domains: Vec<String>,
 }
 

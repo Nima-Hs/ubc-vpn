@@ -16,7 +16,7 @@ fn ip(text: &str) -> IpAddr {
 fn saved() -> RouteSet {
     RouteSet {
         subnets: vec![net("10.255.0.0/16"), net("10.255.7.0/24")],
-        dns_domains: vec!["ece.example.test".to_string()],
+        dns_domains: vec!["dept.example.test".to_string()],
     }
 }
 
@@ -34,7 +34,7 @@ fn tunnel(subnets: &[&str], domains: &[&str]) -> TunnelInfo {
 // not covered, and as not going through the tunnel while it is connected.
 #[test]
 fn a_host_outside_the_routes_is_not_covered() {
-    let live = tunnel(&["10.255.0.0/16", "10.255.7.0/24"], &["ece.example.test"]);
+    let live = tunnel(&["10.255.0.0/16", "10.255.7.0/24"], &["dept.example.test"]);
     let report = check_host(
         "ssh.elsewhere.example",
         &[ip("192.0.2.25")],
@@ -60,18 +60,21 @@ fn a_host_outside_the_routes_is_not_covered() {
 // saved and live.
 #[test]
 fn a_host_inside_the_routes_is_covered_by_the_most_specific_network() {
-    let live = tunnel(&["10.255.0.0/16", "10.255.7.0/24"], &["ece.example.test"]);
+    let live = tunnel(&["10.255.0.0/16", "10.255.7.0/24"], &["dept.example.test"]);
     let report = check_host(
-        "build.ece.example.test",
+        "build.dept.example.test",
         &[ip("10.255.7.9"), ip("10.255.1.1")],
         &saved(),
         Live::Connected(&live),
     );
     assert!(report.covered);
-    assert_eq!(report.saved_dns_domain.as_deref(), Some("ece.example.test"));
+    assert_eq!(
+        report.saved_dns_domain.as_deref(),
+        Some("dept.example.test")
+    );
     assert_eq!(
         report.tunnel_dns_domain.as_deref(),
-        Some("ece.example.test")
+        Some("dept.example.test")
     );
     let networks: Vec<_> = report
         .addresses
@@ -130,7 +133,7 @@ fn no_addresses_is_not_covered() {
 #[test]
 fn not_connected_nothing_goes_through_the_tunnel() {
     let report = check_host(
-        "build.ece.example.test",
+        "build.dept.example.test",
         &[ip("10.255.7.9")],
         &saved(),
         Live::NotConnected,
@@ -147,7 +150,7 @@ fn not_connected_nothing_goes_through_the_tunnel() {
 fn the_saved_and_the_live_routes_are_told_apart() {
     let live = tunnel(&["10.254.0.0/16"], &[]);
     let report = check_host(
-        "build.ece.example.test",
+        "build.dept.example.test",
         &[ip("10.255.7.9"), ip("10.254.3.3")],
         &saved(),
         Live::Connected(&live),
@@ -170,11 +173,11 @@ fn the_saved_and_the_live_routes_are_told_apart() {
 
 #[test]
 fn a_name_is_under_a_domain_only_at_a_label_boundary() {
-    let domains = vec!["example.test".to_string(), "ece.example.test".to_string()];
+    let domains = vec!["example.test".to_string(), "dept.example.test".to_string()];
     assert_eq!(under_domain("example.test", &domains), Some("example.test"));
     assert_eq!(
-        under_domain("A.ECE.Example.Test.", &domains),
-        Some("ece.example.test")
+        under_domain("A.DEPT.Example.Test.", &domains),
+        Some("dept.example.test")
     );
     assert_eq!(under_domain("notexample.test", &domains), None);
     assert_eq!(under_domain("example.test.evil", &domains), None);

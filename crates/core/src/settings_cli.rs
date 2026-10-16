@@ -108,9 +108,9 @@ impl SettingsView {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub struct RouteInput {
-    /// Subnets such as `142.103.0.0/16`.
+    /// Subnets such as `198.19.0.0/16`.
     pub subnets: Vec<String>,
-    /// DNS domains such as `ece.ubc.ca`.
+    /// DNS domains such as `dept.ubc.ca`.
     pub dns_domains: Vec<String>,
 }
 
@@ -487,28 +487,28 @@ mod tests {
 
     #[test]
     fn good_input_becomes_the_routes_it_spells() {
-        let routes = check_input(&input(&["142.103.0.0/16"], &["ece.ubc.ca"]), None).unwrap();
-        assert_eq!(routes.subnets, ["142.103.0.0/16".parse().unwrap()]);
-        assert_eq!(routes.dns_domains, ["ece.ubc.ca"]);
+        let routes = check_input(&input(&["198.19.0.0/16"], &["dept.ubc.ca"]), None).unwrap();
+        assert_eq!(routes.subnets, ["198.19.0.0/16".parse().unwrap()]);
+        assert_eq!(routes.dns_domains, ["dept.ubc.ca"]);
     }
 
     #[test]
     fn every_problem_is_reported_with_its_place() {
         use RouteList::{DnsDomains, Subnets};
         use RouteProblemCode::{BadDomain, BadSubnet, NotAllowed, Reserved, TooWide};
-        let allowed: Vec<Ipv4Net> = vec!["142.103.0.0/16".parse().unwrap()];
+        let allowed: Vec<Ipv4Net> = vec!["198.19.0.0/16".parse().unwrap()];
         let typed = input(
             &[
-                "142.103.5.0/24",
+                "198.19.5.0/24",
                 "not a subnet",
-                "142.103.5.1/24",
-                " 142.103.0.0/16",
+                "198.19.5.1/24",
+                " 198.19.0.0/16",
                 "0.0.0.0/0",
                 "10.0.0.0/7",
                 "127.0.0.0/8",
                 "10.19.0.0/16",
             ],
-            &["ece.ubc.ca", "ECE.ubc.ca", "*.ubc.ca", "ubc"],
+            &["dept.ubc.ca", "DEPT.ubc.ca", "*.ubc.ca", "ubc"],
         );
         assert_eq!(
             check_input(&typed, Some(&allowed)),
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn nothing_to_tunnel_is_a_problem_with_the_whole_input() {
         assert_eq!(
-            check_input(&input(&[], &["ece.ubc.ca"]), None),
+            check_input(&input(&[], &["dept.ubc.ca"]), None),
             Err(vec![whole(RouteProblemCode::NoSubnets)])
         );
     }
@@ -551,7 +551,7 @@ mod tests {
 
         let domains = RouteInput {
             subnets: vec![subnet],
-            dns_domains: vec!["ece.ubc.ca".to_string(); MAX_ROUTES + 1],
+            dns_domains: vec!["dept.ubc.ca".to_string(); MAX_ROUTES + 1],
         };
         assert_eq!(
             check_input(&domains, None),
@@ -582,16 +582,16 @@ mod tests {
     // the service's rule refuses is refused here.
     #[test]
     fn agrees_with_the_rule_the_service_applies() {
-        let allowed: Vec<Ipv4Net> = vec!["142.103.0.0/16".parse().unwrap()];
+        let allowed: Vec<Ipv4Net> = vec!["198.19.0.0/16".parse().unwrap()];
         let cases: [(&[&str], &[&str]); 8] = [
-            (&["142.103.0.0/16"], &["ece.ubc.ca"]),
-            (&["142.103.9.0/24", "142.103.0.0/16"], &[]),
+            (&["198.19.0.0/16"], &["dept.ubc.ca"]),
+            (&["198.19.9.0/24", "198.19.0.0/16"], &[]),
             (&[], &[]),
             (&["0.0.0.0/0"], &[]),
             (&["10.0.0.0/7"], &[]),
             (&["224.0.0.0/8"], &[]),
             (&["10.19.0.0/16"], &[]),
-            (&["142.103.0.0/16"], &["ubc"]),
+            (&["198.19.0.0/16"], &["ubc"]),
         ];
         for (subnets, domains) in cases {
             for allow_list in [None, Some(allowed.as_slice())] {
@@ -746,7 +746,7 @@ mod tests {
             allowed_routes,
             full_tunnel: Default::default(),
         };
-        let limit = vec!["142.103.0.0/16".parse().unwrap()];
+        let limit = vec!["198.19.0.0/16".parse().unwrap()];
 
         let none = SettingsView::new(Settings::default(), None);
         assert!(!none.policy_readable);
@@ -764,7 +764,7 @@ mod tests {
     }
 
     fn routes(subnet: &str) -> RouteSet {
-        check_input(&input(&[subnet], &["ece.ubc.ca"]), None).unwrap()
+        check_input(&input(&[subnet], &["dept.ubc.ca"]), None).unwrap()
     }
 
     // Settings files are shared between versions. Saving routes with this
@@ -773,17 +773,17 @@ mod tests {
     fn saving_routes_changes_nothing_else_in_the_file() {
         let before = r#"{"username":"jdoe","routes":{"subnets":["10.19.0.0/16"],"old":1},
             "save_password":true,"theme":"dark","future":{"a":[1,2]}}"#;
-        let after = replace_routes(Some(before), &routes("142.103.0.0/16")).unwrap();
+        let after = replace_routes(Some(before), &routes("198.19.0.0/16")).unwrap();
 
         let saved: Settings = serde_json::from_str(&after).unwrap();
         assert_eq!(saved.username.as_deref(), Some("jdoe"));
         assert!(saved.save_password);
-        assert_eq!(saved.routes, routes("142.103.0.0/16"));
+        assert_eq!(saved.routes, routes("198.19.0.0/16"));
 
         let mut expected: serde_json::Value = serde_json::from_str(before).unwrap();
         expected["routes"] = serde_json::json!({
-            "subnets": ["142.103.0.0/16"],
-            "dns_domains": ["ece.ubc.ca"],
+            "subnets": ["198.19.0.0/16"],
+            "dns_domains": ["dept.ubc.ca"],
         });
         let got: serde_json::Value = serde_json::from_str(&after).unwrap();
         assert_eq!(got, expected);
@@ -792,12 +792,12 @@ mod tests {
 
     #[test]
     fn saving_routes_with_no_file_makes_one() {
-        let after = replace_routes(None, &routes("142.103.0.0/16")).unwrap();
+        let after = replace_routes(None, &routes("198.19.0.0/16")).unwrap();
         let saved: Settings = serde_json::from_str(&after).unwrap();
         assert_eq!(
             saved,
             Settings {
-                routes: routes("142.103.0.0/16"),
+                routes: routes("198.19.0.0/16"),
                 ..Settings::default()
             }
         );

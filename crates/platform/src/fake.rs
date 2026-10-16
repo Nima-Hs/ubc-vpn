@@ -1095,18 +1095,18 @@ mod tests {
         assert_eq!(fake.full_tunnel_ipv6(TUNNEL), Err(Error::Unsupported));
     }
 
-    // A machine on a home network that also has virtual machines' host-only
-    // networks, none of them a UBC range: full mode keeps every one of them
-    // direct, their routers included, and takes everything else.
+    // A machine with a home LAN and two host-only adapters, none of them a
+    // UBC range: full mode keeps every one of those networks direct, their
+    // routers included, and takes everything else.
     #[test]
     fn full_mode_keeps_every_network_the_machine_is_on() {
         let fake = Fake::new();
         let home = net("192.168.0.0/24");
-        let host_only = [net("192.168.130.0/24"), net("192.168.140.0/24")];
+        let host_only = [net("172.31.130.0/24"), net("172.31.140.0/24")];
         let own = [
             OWN_ADDRESS,
-            Ipv4Addr::new(192, 168, 130, 1),
-            Ipv4Addr::new(192, 168, 140, 1),
+            Ipv4Addr::new(172, 31, 130, 1),
+            Ipv4Addr::new(172, 31, 140, 1),
         ];
         fake.set_local(&own, &[home, host_only[0], host_only[1]]);
         let physical = fake.capture_physical(GATEWAY).unwrap();
@@ -1116,8 +1116,8 @@ mod tests {
         for dest in [
             ROUTER,
             Ipv4Addr::new(192, 168, 0, 200),
-            Ipv4Addr::new(192, 168, 130, 128),
-            Ipv4Addr::new(192, 168, 140, 254),
+            Ipv4Addr::new(172, 31, 130, 128),
+            Ipv4Addr::new(172, 31, 140, 254),
             GATEWAY,
         ] {
             let direct = fake.uses_interface(dest, PHYSICAL_INTERFACE);
@@ -1363,12 +1363,12 @@ mod tests {
         let fake = Fake::new();
         let dns = SplitDns {
             resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
-            domains: vec!["ece.example".to_string()],
+            domains: vec!["dept.example".to_string()],
         };
         fake.set_failure(Op::SetSplitDns, Some(Error::Unsupported));
         assert_eq!(fake.set_split_dns(TUNNEL, &dns), Err(Error::Unsupported));
         assert_eq!(fake.applied(), Applied::default());
-        assert_eq!(fake.resolvers_for("www.ece.example"), [ROUTER]);
+        assert_eq!(fake.resolvers_for("www.dept.example"), [ROUTER]);
     }
 
     // The suite's ownership check must notice an implementation that takes a
@@ -1451,7 +1451,7 @@ mod tests {
         let fake = Fake::new();
         let dns = SplitDns {
             resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
-            domains: vec!["ece.example".to_string()],
+            domains: vec!["dept.example".to_string()],
         };
         {
             let crashed = fake.platform(Path::new("fake"));
@@ -1479,7 +1479,7 @@ mod tests {
         let fake = Fake::new();
         let dns = SplitDns {
             resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
-            domains: vec!["ece.example".to_string()],
+            domains: vec!["dept.example".to_string()],
         };
         fake.set_split_dns(TUNNEL, &dns).unwrap();
         assert_eq!(fake.uses_interface(GATEWAY, TUNNEL), Verified::No);
@@ -1501,7 +1501,7 @@ mod tests {
         let fake = Fake::new();
         let dns = SplitDns {
             resolvers: vec![Ipv4Addr::new(192, 0, 2, 53)],
-            domains: vec!["ece.example".to_string()],
+            domains: vec!["dept.example".to_string()],
         };
         let other = SplitDns {
             domains: vec!["other.example".to_string()],

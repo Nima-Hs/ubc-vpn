@@ -99,7 +99,7 @@ fn connect_applies_in_order_and_verifies_before_connected() {
     );
     let dns = SplitDns {
         resolvers: vec![[10, 255, 0, 53].into()],
-        domains: vec!["ece.example.test".to_string()],
+        domains: vec!["dept.example.test".to_string()],
     };
     assert_eq!(applied.split_dns, Some(("fake0".to_string(), dns)));
 
@@ -469,7 +469,7 @@ fn a_disconnect_removes_everything_and_logs_the_session_off() {
 fn a_dns_server_outside_the_subnets_gets_its_own_route() {
     let rig = rig();
     let mut alice = rig.owner();
-    let request = connect(COOKIE, GATEWAY, &["192.0.2.0/24"], &["ece.example.test"]);
+    let request = connect(COOKIE, GATEWAY, &["192.0.2.0/24"], &["dept.example.test"]);
     let state = alice.connect_ends(request);
     assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
     let routed = ["192.0.2.0/24", "10.255.0.53/32"];
@@ -807,7 +807,7 @@ fn on_local(own: &[[u8; 4]], on_link: &[&str], subnets: &[&str]) -> (Rig, ConnSt
     let own: Vec<_> = own.iter().map(|addr| (*addr).into()).collect();
     let on_link: Vec<_> = on_link.iter().map(|net| net.parse().unwrap()).collect();
     rig.fake.set_local(&own, &on_link);
-    let request = connect(COOKIE, GATEWAY, subnets, &["ece.example.test"]);
+    let request = connect(COOKIE, GATEWAY, subnets, &["dept.example.test"]);
     let state = rig.owner().connect_ends(request);
     (rig, state)
 }

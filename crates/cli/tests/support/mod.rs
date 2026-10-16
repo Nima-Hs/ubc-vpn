@@ -18,7 +18,7 @@ pub const USERNAME: &str = "alice";
 pub const PASSWORD: &str = "correct-horse-battery";
 pub const CODE: &str = "123456";
 pub const COOKIE: &str = "Zq7-made-up-0123456789";
-pub const ROUTES: &str = r#"{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}"#;
+pub const ROUTES: &str = r#"{"subnets":["10.255.0.0/24"],"dns_domains":["dept.example.test"]}"#;
 pub const PATIENCE: Duration = Duration::from_secs(30);
 
 /// Everything any child wrote, on either stream.

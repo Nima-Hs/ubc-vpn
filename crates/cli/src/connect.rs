@@ -61,7 +61,7 @@ pub const LOGIN_REFUSED: u8 = 8;
 /// example is made up.
 pub const CHECK_USERNAME: &str = "The gateway did not take the login. Check your username: \
 UBC's gateway expects your CWL username, your department and the way to confirm, \
-as CWL.dept@method, for example user.ece@app.";
+as CWL.dept@method, for example jdoe.dept@app.";
 /// The user gave up.
 pub const CANCELLED: u8 = 9;
 

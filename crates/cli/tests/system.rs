@@ -42,7 +42,7 @@ fn the_service_and_the_client_work_together() {
     let home = Home::new();
     let state = |state: &str| format!(r#""state":"{state}""#);
     let connected = "Connected (fake0 as 10.255.0.2)\n  Subnets: 10.255.0.0/24\n  \
-                     DNS domains: ece.example.test";
+                     DNS domains: dept.example.test";
 
     // Nothing is running yet. On Windows this also shows that no other
     // dev-mode service of this user holds the channel. A bridge asks, since
@@ -74,7 +74,10 @@ fn the_service_and_the_client_work_together() {
     let later = checked.replace("}}", r#"},"live":{"result":"next_connect"}}"#);
     assert_eq!((status, &saved), (0, &later));
     let (status, shown) = home.run(&["settings", "get", "--json"], "");
-    assert!(status == 0 && shown.contains("ece.example.test"), "{shown}");
+    assert!(
+        status == 0 && shown.contains("dept.example.test"),
+        "{shown}"
+    );
     // Settings that can be read are not reset by asking.
     let (status, kept) = home.run(&["settings", "reset", "--json"], "");
     assert_eq!((status, kept.as_str()), (0, r#"{"type":"not_needed"}"#));

@@ -25,7 +25,7 @@ pub(crate) const PASSWORD: &str = "correct-horse-battery";
 pub(crate) const CODE: &str = "246810";
 pub(crate) const COOKIE: &str = "Zq7-made-up-0123456789";
 pub(crate) const ROUTES: &str =
-    r#""routes":{"subnets":["10.255.0.0/24"],"dns_domains":["ece.example.test"]}"#;
+    r#""routes":{"subnets":["10.255.0.0/24"],"dns_domains":["dept.example.test"]}"#;
 
 /// The person at the terminal: answers in order, and keeps what was asked.
 #[derive(Default)]
@@ -172,7 +172,7 @@ fn connect_logs_in_asks_only_what_it_must_and_connects() {
     assert_eq!(
         out,
         "Connected (fake0 as 10.255.0.2)\n  Subnets: 10.255.0.0/24\n  \
-         DNS domains: ece.example.test\n"
+         DNS domains: dept.example.test\n"
     );
     // The saved username answered for itself; the rest was asked once each.
     assert_eq!(typist.asked, [PromptKind::Password, PromptKind::Code]);
@@ -296,7 +296,7 @@ fn a_failed_or_ended_connection_can_be_connected_again() {
 #[test]
 fn a_doomed_connect_asks_nothing_and_sends_nothing() {
     let usual = format!(r#"{{"username":"alice",{ROUTES}}}"#);
-    let narrow = r#","allowed_routes":["142.103.0.0/16"]"#;
+    let narrow = r#","allowed_routes":["198.19.0.0/16"]"#;
     let doomed: [(Option<&str>, &str, &str); 5] = [
         (None, "", "saved routes cannot be used: no subnets"),
         (Some("{}"), "", "saved routes cannot be used: no subnets"),
@@ -679,7 +679,7 @@ fn no_username_is_kept_from_a_connect_that_did_not_start() {
     }
     // The login is good, and the service refuses the connect: the policy it
     // read when it started does not allow routes the policy file now does.
-    let narrow = r#","allowed_routes":["142.103.0.0/16"]"#;
+    let narrow = r#","allowed_routes":["198.19.0.0/16"]"#;
     let scene = Scene::new(Some(&format!("{{{ROUTES}}}")), narrow);
     let before = saved(&scene);
     let open = format!(
@@ -845,7 +845,7 @@ fn a_refused_username_is_to_be_checked_and_is_forgotten() {
     let mut scene = Scene::usual();
     let mut script = Script::new(pin());
     script.form.truncate(1);
-    script.form[0].1 = Secret::new("alice.ece@app");
+    script.form[0].1 = Secret::new("alice.dept@app");
     scene.gateway = FakeEngine::new(script);
     let (code, _, err) = scene.connect(&mut Typist::default());
     assert_eq!(code, LOGIN_REFUSED, "{err}");

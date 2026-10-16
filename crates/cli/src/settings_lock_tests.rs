@@ -17,7 +17,7 @@ use crate::settings::{Command, DURING_A_SAVE, remember_username, run};
 use crate::settings_lock::{Tried, WAIT, change, change_with, change_within};
 use crate::tests::settings_folder;
 
-const ROUTES: &str = r#"{"subnets":["10.19.0.0/16"],"dns_domains":["ece.example.test"]}"#;
+const ROUTES: &str = r#"{"subnets":["10.19.0.0/16"],"dns_domains":["dept.example.test"]}"#;
 const SHORT: Duration = Duration::from_millis(100);
 const HELD: Result<bool, SettingsFailureCode> = Err(SettingsFailureCode::Unwritable);
 
