@@ -33,7 +33,7 @@ export function SavePasswordChoice() {
             label={LOGIN_SAVE.label}
             hint={
                 refused !== null
-                    ? describeProfileRefusal(refused)
+                    ? describeProfileRefusal(refused, view.keyring)
                     : noKeyring
                       ? SETTINGS.password.noKeyring
                       : LOGIN_SAVE.hint(whereKept(api.platform))

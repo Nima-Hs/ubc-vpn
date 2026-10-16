@@ -3,9 +3,14 @@
 // the demo too; the tray menu lists the profiles; and every request the
 // screen sends is checked before anything is started.
 
-import type { LinkState } from "@shared/api";
+import type { LinkState, LoginState } from "@shared/api";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
+import { describeProfileRefusal } from "@shared/settings-copy";
 import { describe, expect, it } from "vitest";
+import type { LoginRunner } from "../src/main/channel/connect";
+import { withProfile } from "../src/main/channel/connect";
+import { Controller } from "../src/main/controller";
+import { createDemoLink } from "../src/main/demo/demo-link";
 import { createDemoProfiles } from "../src/main/demo/demo-profiles";
 import { takeId, takeName, takeRename, takeUpdate } from "../src/main/profiles-checks";
 import { type TrayActions, type TrayMenuItem, trayMenu } from "../src/main/tray-menu";
@@ -184,5 +189,107 @@ describe("what the screen may send for profiles", () => {
         for (const args of [[null], [], ["x"], [ID, ID]]) {
             expect(() => takeId(args), JSON.stringify(args)).toThrow("refused");
         }
+    });
+});
+
+describe("a saved password that could not be cleared", () => {
+    it("keeps saving off, and says why, as the keyring allows", async () => {
+        const profiles = createDemoProfiles();
+        profiles.setScenario("settings-old-password-stuck");
+        const id = (await view(profiles.list())).global.active_profile;
+        await expect(profiles.update(id, { save_password: true })).resolves.toEqual({
+            ok: false,
+            error: "keyring_not_cleared",
+        });
+        expect((await view(profiles.list())).profiles[0]?.save_password).toBe(false);
+        expect(describeProfileRefusal("keyring_not_cleared")).toBe(
+            "UBC VPN couldn't remove the old saved password, so saving stays off.",
+        );
+        expect(describeProfileRefusal("keyring_not_cleared", "unavailable")).toBe(
+            "The keyring can't be used, so saving stays off.",
+        );
+    });
+});
+
+describe("a login, bound to its profile", () => {
+    const ID = "0123456789abcdef0123456789abcdef";
+
+    it("starts the client with --profile after connect, and nothing for the active one", () => {
+        expect(withProfile(["connect", "--json"], ID)).toEqual([
+            "connect",
+            "--profile",
+            ID,
+            "--json",
+        ]);
+        expect(withProfile(["--dev", "connect", "--json"], ID)).toEqual([
+            "--dev",
+            "connect",
+            "--profile",
+            ID,
+            "--json",
+        ]);
+        expect(withProfile(["connect", "--json"], null)).toEqual(["connect", "--json"]);
+        // Never anything that is not an id.
+        expect(withProfile(["connect", "--json"], "--json; rm")).toEqual(["connect", "--json"]);
+    });
+
+    it("keeps the profile it started with, whatever is chosen while it runs", async () => {
+        let active = ID;
+        const started: (string | null | undefined)[] = [];
+        let report: (state: LoginState) => void = () => {};
+        const runner: LoginRunner = {
+            start: (profile) => {
+                started.push(profile);
+                report({ phase: "working" });
+                return true;
+            },
+            answer: () => true,
+            cancel: () => {},
+            stop: () => {},
+            windDown: () => null,
+        };
+        const controller = new Controller(createDemoLink(10), (onState) => {
+            report = onState;
+            return runner;
+        });
+        controller.setProfileForLogin(() => active);
+        await controller.connect();
+        expect(started).toEqual([ID]);
+        expect(controller.getSnapshot().loginProfile).toBe(ID);
+        // Another profile is chosen while it runs: the login keeps its own.
+        active = "fedcba9876543210fedcba9876543210";
+        report({ phase: "working" });
+        expect(controller.getSnapshot().loginProfile).toBe(ID);
+        // Once it ends, it is for nobody.
+        report({ phase: "idle" });
+        expect(controller.getSnapshot().loginProfile).toBeNull();
+        controller.dispose();
+    });
+});
+
+describe("the tray menu during a login", () => {
+    it("keeps the profiles as they are, and says why", async () => {
+        const profiles = createDemoProfiles();
+        profiles.setScenario("settings-profiles");
+        const actions: TrayActions = {
+            showWindow: () => {},
+            connect: () => {},
+            disconnect: () => {},
+            retry: () => {},
+            quit: () => {},
+            switchProfile: () => {},
+        };
+        const items = trayMenu(
+            { link: "ready", conn: { state: "disconnected" } },
+            await view(profiles.list()),
+            actions,
+            true,
+        );
+        const submenu = items.find((item) => item.label === "Profile")?.submenu ?? [];
+        expect(submenu[0]).toEqual({
+            label: "You can change profile once this login ends.",
+            enabled: false,
+        });
+        expect(submenu.slice(1).every((item) => item.enabled === false)).toBe(true);
     });
 });

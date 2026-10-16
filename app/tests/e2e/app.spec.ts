@@ -1747,15 +1747,25 @@ test("profiles: added, renamed, used and deleted, with the last one kept", async
 
     // Deleted, only once the user says so.
     await page.getByRole("button", { name: "Edit Lab 2" }).click();
-    await page.getByRole("button", { name: "Delete profile" }).click();
-    const question = page.getByRole("alert");
-    await expect(question).toContainText("Delete “Lab 2”?");
-    await expect(question.getByRole("button", { name: "Delete profile" })).toBeFocused();
+    // From the keyboard, Enter twice: the question takes the keyboard on
+    // "Keep it", so the second Enter keeps the profile.
+    await page.getByRole("button", { name: "Delete profile" }).focus();
+    await page.keyboard.press("Enter");
+    const question = page.getByRole("alertdialog", { name: /Delete “Lab 2”\?/ });
+    await expect(question).toBeVisible();
+    await expect(question.getByRole("button", { name: "Keep it" })).toBeFocused();
     await shoot("profiles-delete-ask");
-    await question.getByRole("button", { name: "Keep it" }).click();
+    await page.keyboard.press("Enter");
+    await expect(question).toHaveCount(0);
     await expect(profileRow("Lab 2")).toBeVisible();
+    // Escape keeps it too.
     await page.getByRole("button", { name: "Delete profile" }).click();
-    await page.getByRole("alert").getByRole("button", { name: "Delete profile" }).click();
+    await page.keyboard.press("Escape");
+    await expect(question).toHaveCount(0);
+    await expect(profileRow("Lab 2")).toBeVisible();
+    // Deleted deliberately.
+    await page.getByRole("button", { name: "Delete profile" }).click();
+    await question.getByRole("button", { name: "Delete profile" }).click();
     await expect(profileRow("Lab 2")).toHaveCount(0);
     // The one left is in use.
     await expect(profileRow("UBC VPN")).toContainText("In use");
@@ -1790,6 +1800,31 @@ test("profiles: chosen from the main screen, for the next connect while connecte
     await tab("Connection").click();
     // With one profile there is nothing to choose.
     await expect(page.getByLabel("Profile", { exact: true })).toHaveCount(0);
+});
+
+test("profiles: saving stays off when an old saved password could not be removed", async () => {
+    const stuck = "UBC VPN couldn't remove the old saved password, so saving stays off.";
+    // In Settings, under the switch.
+    await scenario("settings-old-password-stuck");
+    await tab("Settings").click();
+    await page.getByRole("button", { name: "Edit UBC VPN" }).click();
+    const save = page.getByRole("switch", { name: "Save password" });
+    await expect(save).toHaveAttribute("aria-checked", "false");
+    await save.click();
+    await expect(save).toHaveAccessibleDescription(stuck);
+    await expect(save).toHaveAttribute("aria-checked", "false");
+    await shoot("profiles-password-stuck");
+    await page.getByRole("button", { name: "Done" }).click();
+    // Beside the password question too.
+    await tab("Connection").click();
+    await scenario("login-password");
+    const box = page.getByRole("checkbox", { name: "Save password" });
+    await expect(box).not.toBeChecked();
+    await box.click();
+    await expect(box).toHaveAccessibleDescription(stuck);
+    await expect(box).not.toBeChecked();
+    await scenario("settings");
+    await scenario("disconnected");
 });
 
 test("profiles: the password question offers to save it, and says why when it can't", async () => {

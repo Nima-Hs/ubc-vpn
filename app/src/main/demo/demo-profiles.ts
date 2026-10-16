@@ -59,6 +59,11 @@ interface Scenario {
     list?: ProfilesError;
     /** What every change answers, when it is refused. */
     change?: ProfilesError;
+    /**
+     * Turning saving the password back on is refused: an old saved password
+     * that was set aside could not be removed from the keyring.
+     */
+    stuckPassword?: boolean;
 }
 
 const withActive = (view: ProfilesView, change: Partial<ProfileView>): ProfilesView => ({
@@ -97,6 +102,10 @@ const SCENARIOS: Record<string, Scenario> = {
                 })),
             ],
         }),
+    },
+    "settings-old-password-stuck": {
+        view: (view) => withActive(view, { save_password: false, password_saved: false }),
+        stuckPassword: true,
     },
     "settings-loading": {},
     "settings-unreadable": { list: "unreadable" },
@@ -234,6 +243,9 @@ export function createDemoProfiles(): DemoProfiles {
                         next.username = username;
                         next.password_saved = false;
                     }
+                }
+                if (changed.save_password === true && scenario.stuckPassword === true) {
+                    return "keyring_not_cleared";
                 }
                 if (changed.save_password !== undefined) {
                     if (changed.save_password && view.keyring === "unavailable") {

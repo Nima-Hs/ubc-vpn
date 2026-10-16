@@ -5,7 +5,7 @@ import { describeProfileRefusal, PROFILES, SETTINGS, whereKept } from "@shared/s
 import { Plus, Trash2 } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Panel } from "@/components/ui/panel";
+import { Confirm } from "@/components/ui/confirm";
 import { Switch } from "@/components/ui/switch";
 import { Subheading, Text } from "@/components/ui/text";
 import { TextField } from "@/components/ui/text-field";
@@ -129,6 +129,8 @@ function Editor({
     const [usernameError, setUsernameError] = useState<string | undefined>();
     const [asking, setAsking] = useState(false);
     const [deleteError, setDeleteError] = useState<string | undefined>();
+    /** Why the last change to saving the password was refused, said under it. */
+    const [saveError, setSaveError] = useState<string | undefined>();
     const noKeyring = keyring === "unavailable";
 
     const rename = async (event: FormEvent) => {
@@ -191,15 +193,21 @@ function Editor({
                 <Switch
                     label={PROFILES.savePassword}
                     hint={
-                        noKeyring
+                        saveError ??
+                        (noKeyring
                             ? SETTINGS.password.noKeyring
-                            : PROFILES.savePasswordHint(whereKept(api.platform))
+                            : PROFILES.savePasswordHint(whereKept(api.platform)))
                     }
                     on={profile.save_password}
                     disabled={busy || noKeyring}
-                    onChange={(on) =>
-                        void change(() => api.profiles?.update(profile.id, { save_password: on }))
-                    }
+                    onChange={async (on) => {
+                        const refused = await change(() =>
+                            api.profiles?.update(profile.id, { save_password: on }),
+                        );
+                        setSaveError(
+                            refused === null ? undefined : describeProfileRefusal(refused, keyring),
+                        );
+                    }}
                 />
             </div>
             {!asking ? (
@@ -223,48 +231,30 @@ function Editor({
                     )}
                 </div>
             ) : (
-                <div role="alert">
-                    <Panel tone="attention">
-                        <Text>{PROFILES.deleteAsk(profile.name)}</Text>
-                        {deleteError !== undefined && (
-                            <Text size="label" tone="danger">
-                                {deleteError}
-                            </Text>
-                        )}
-                        <div className="flex gap-2 pt-1">
-                            {/* The question takes the keyboard, so it cannot be missed. */}
-                            <Button
-                                size="sm"
-                                variant="destructive"
-                                loading={busy}
-                                ref={(button) => button?.focus()}
-                                onClick={async () => {
-                                    const refused = await change(() =>
-                                        api.profiles?.remove(profile.id),
-                                    );
-                                    if (refused === null) {
-                                        onDeleted();
-                                    } else {
-                                        setDeleteError(describeProfileRefusal(refused));
-                                    }
-                                }}
-                            >
-                                {PROFILES.deleteYes}
-                            </Button>
-                            <Button
-                                size="sm"
-                                variant="quiet"
-                                disabled={busy}
-                                onClick={() => {
-                                    setAsking(false);
-                                    setDeleteError(undefined);
-                                }}
-                            >
-                                {PROFILES.deleteNo}
-                            </Button>
-                        </div>
-                    </Panel>
-                </div>
+                <Confirm
+                    question={PROFILES.deleteAsk(profile.name)}
+                    confirm={PROFILES.deleteYes}
+                    cancel={PROFILES.deleteNo}
+                    busy={busy}
+                    onConfirm={async () => {
+                        const refused = await change(() => api.profiles?.remove(profile.id));
+                        if (refused === null) {
+                            onDeleted();
+                        } else {
+                            setDeleteError(describeProfileRefusal(refused));
+                        }
+                    }}
+                    onCancel={() => {
+                        setAsking(false);
+                        setDeleteError(undefined);
+                    }}
+                >
+                    {deleteError !== undefined && (
+                        <Text size="label" tone="danger">
+                            {deleteError}
+                        </Text>
+                    )}
+                </Confirm>
             )}
         </div>
     );

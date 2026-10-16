@@ -88,8 +88,18 @@ export const LOGIN_SAVE = {
 } as const;
 
 /** Why a change to a profile was refused, said beside what was changed. */
-export function describeProfileRefusal(error: ProfilesError): string {
+export function describeProfileRefusal(
+    error: ProfilesError,
+    /** Whether the keyring can be used at all, for saying why saving stays off. */
+    keyring: "available" | "unavailable" = "available",
+): string {
     switch (error) {
+        case "keyring_not_cleared":
+            // Turning saving back on is refused while an old saved password
+            // that was set aside could not be removed.
+            return keyring === "unavailable"
+                ? "The keyring can't be used, so saving stays off."
+                : "UBC VPN couldn't remove the old saved password, so saving stays off.";
         case "bad_name":
             return "Use a name of 1 to 64 characters, without line breaks or hidden characters.";
         case "name_taken":
@@ -141,7 +151,7 @@ export function describeProfilesError(error: ProfilesError, doing: "read" | "cha
         case "bad_username":
         case "id_taken":
         case "keyring_not_cleared":
-            // Not something this screen sends yet; said plainly if it happens.
+            // Said by `describeProfileRefusal` where it can happen; plainly here.
             return "The change was not made. Try again.";
     }
 }
