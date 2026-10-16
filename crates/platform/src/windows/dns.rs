@@ -4,8 +4,9 @@
 //! - **Ours** are the keys named in [`RULES`], and no others. Setting writes
 //!   them and deletes the ones not needed; clearing deletes them all. A rule
 //!   holds at most [`PER_RULE`] domains, so a long list takes several.
-//! - **Refused** when rules from group policy exist: Windows then ignores the
-//!   local ones, so setting ours would look applied and do nothing.
+//! - **Refused** when a group-policy table of rules exists, even an empty
+//!   one: Windows then ignores every local rule, so setting ours would look
+//!   applied and do nothing.
 //! - **Read back** exactly, together with a check that no group-policy table
 //!   and no rule of anyone else's names our domains. Windows offers no
 //!   documented way to see which rules its resolver took in, so a match
@@ -371,11 +372,32 @@ pub(super) fn delete_rule_at(base: &str, id: &str) -> Result<()> {
     }
 }
 
-/// Whether group policy has name resolution rules, which replace local ones.
+/// Whether group policy has a table of name resolution rules, which
+/// replaces the local ones. An empty table does too: while it exists,
+/// Windows takes in no local rule at all (seen on CI).
 fn policy_rules_exist() -> Result<bool> {
-    match open(POLICY, KEY_READ)? {
-        Some(key) => Ok(!subkeys(&key)?.is_empty()),
-        None => Ok(false),
+    Ok(open(POLICY, KEY_READ)?.is_some())
+}
+
+/// Deletes the key at `path` if it has no subkeys, for tests to remove a
+/// table they made.
+#[cfg(test)]
+pub(super) fn delete_if_empty(path: &str) -> Result<()> {
+    let Some(key) = open(path, KEY_READ)? else {
+        return Ok(());
+    };
+    if !subkeys(&key)?.is_empty() {
+        return Ok(());
+    }
+    drop(key);
+    let name = wide(path);
+    // SAFETY: the path is NUL-terminated.
+    let code = unsafe {
+        windows_sys::Win32::System::Registry::RegDeleteKeyW(HKEY_LOCAL_MACHINE, name.as_ptr())
+    };
+    match checked(code) {
+        Ok(()) | Err(Error::NotFound) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

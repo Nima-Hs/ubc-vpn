@@ -135,6 +135,10 @@ impl Drop for DnsCleanup {
         let _ = WinDns.clear_split_dns();
         let _ = delete_rule_at(POLICY, FOREIGN);
         let _ = delete_rule_at(LOCAL, FOREIGN);
+        // A group-policy table left empty still makes Windows ignore every
+        // local rule, so the table a test made goes too. One with rules in
+        // it is not the tests', and stays.
+        let _ = super::dns::delete_if_empty(POLICY);
     }
 }
 
@@ -167,8 +171,10 @@ fn chosen() -> SplitDns {
     }
 }
 
-// Security rule: with group policy rules in place Windows ignores ours, so
-// setting them would only look applied. It is refused, and nothing written.
+// Security rule: with a group-policy table in place Windows ignores ours,
+// so setting them would only look applied. It is refused, and nothing
+// written. An empty table counts: Windows ignores local rules while it
+// exists, rules in it or not.
 #[test]
 fn refuses_split_dns_while_group_policy_rules_exist() {
     let _turn = turn();
@@ -181,12 +187,80 @@ fn refuses_split_dns_while_group_policy_rules_exist() {
     write_rule_at(POLICY, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
     assert_eq!(WinDns.set_split_dns("", &chosen()), Err(Error::Unsupported));
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
+    // The table is empty now, and still there.
     delete_rule_at(POLICY, FOREIGN).unwrap();
+    assert_eq!(
+        WinDns.set_split_dns("", &chosen()),
+        Err(Error::Unsupported),
+        "set under an empty policy table"
+    );
+    super::dns::delete_if_empty(POLICY).unwrap();
     WinDns
         .set_split_dns("", &chosen())
         .expect("set once the policy is gone");
     assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
+    // An empty table appearing after the rules were set: not in effect.
+    write_rule_at(POLICY, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
+    delete_rule_at(POLICY, FOREIGN).unwrap();
+    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::No);
     ran("dns policy");
+}
+
+// What Windows does with an empty group-policy table, which the rule above
+// relies on: local rules are not taken in while it exists, and are once it
+// has gone.
+#[test]
+fn an_empty_policy_table_hides_local_rules() {
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let tunnel = "ubc-vpn-gp0";
+    let dir = state_dir("empty-policy");
+    let _adapter = wintun.adapter(tunnel);
+    let _routes = Cleanup(vec![dir]);
+    let _rules = DnsCleanup;
+    for server in SERVERS {
+        Outsider.add_address(tunnel, server);
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let asked = Asked::default();
+    let _servers = SERVERS.map(|server| Server::start(server, asked.clone()));
+    // An empty table, then our rule written past the refusal.
+    let theirs = Rule {
+        names: vec![".policy.example".to_string()],
+        servers: "192.0.2.99".to_string(),
+    };
+    write_rule_at(POLICY, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
+    delete_rule_at(POLICY, FOREIGN).unwrap();
+    let ours = super::dns::rules(&chosen()).unwrap();
+    write_rule_at(
+        LOCAL,
+        super::dns::RULES[0],
+        &ours[0],
+        None,
+        Lifetime::Lasting,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let hidden = resolvers_for(&asked, "host.suite.example");
+    super::dns::delete_if_empty(POLICY).unwrap();
+    let started = std::time::Instant::now();
+    let shown = loop {
+        let shown = resolvers_for(&asked, "host.suite.example");
+        if !shown.is_empty() || started.elapsed() > Duration::from_secs(15) {
+            break shown;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    println!(
+        "EMPTY-POLICY hidden={hidden:?} shown={shown:?} after {:?}",
+        started.elapsed()
+    );
+    assert!(
+        hidden.is_empty(),
+        "a local rule was used under an empty policy table"
+    );
+    assert_eq!(shown, [SERVERS[0]]);
+    ran("dns policy empty");
 }
 
 /// Whether `Get-DnsClientNrptPolicy -Effective` lists `namespace`.
