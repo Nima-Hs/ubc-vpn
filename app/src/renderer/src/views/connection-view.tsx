@@ -48,7 +48,7 @@ export function ConnectionView() {
 
     if (loggingIn && login.phase !== "idle") {
         return (
-            <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
+            <main className="scroll-region flex min-h-0 flex-1 flex-col gap-4 px-5 pt-2 pb-5">
                 <TunnelDiagram
                     tone={login.phase === "failed" ? "problem" : "busy"}
                     mode={copy.mode}
@@ -64,7 +64,10 @@ export function ConnectionView() {
     }
 
     return (
-        <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
+        // A little closer than other screens: at the default size the
+        // details must still show their first rows whole, in either mode,
+        // with the main button in view.
+        <main className="scroll-region flex min-h-0 flex-1 flex-col gap-4 px-5 pt-2 pb-5">
             <TunnelDiagram
                 tone={copy.tone}
                 mode={copy.mode}
