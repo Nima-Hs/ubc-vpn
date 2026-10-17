@@ -68,7 +68,7 @@ describe("the words for each state", () => {
         expect(of(8)).toMatchObject({
             tone: "on",
             title: "Connected",
-            body: "Traffic to 2 UBC subnets goes through the VPN. Everything else uses your normal connection.",
+            body: "Split tunnel: traffic to 2 UBC subnets goes through the VPN. Everything else uses your normal connection.",
             action: { kind: "disconnect", label: "Disconnect" },
         });
         expect(of(10)).toMatchObject({ tone: "busy", title: "Disconnecting", working: true });
@@ -201,7 +201,11 @@ describe("the words for each state", () => {
 
 describe("the writing rules", () => {
     const everything = [
-        ...STATES.map(copyFor).flatMap((copy) => [copy.title, copy.body, copy.action?.label ?? ""]),
+        ...STATES.map((state) => copyFor(state)).flatMap((copy) => [
+            copy.title,
+            copy.body,
+            copy.action?.label ?? "",
+        ]),
         describeActionError({ kind: "login_unavailable" }).text,
         describeActionError({ kind: "service_unavailable" }).text,
     ].filter((text) => text !== "");
@@ -224,7 +228,7 @@ describe("the writing rules", () => {
     });
 
     it("ends every sentence, and keeps titles short", () => {
-        for (const copy of STATES.map(copyFor)) {
+        for (const copy of STATES.map((state) => copyFor(state))) {
             expect(copy.body).toMatch(/\.$/);
             expect(copy.title).not.toMatch(/\.$/);
             expect(copy.title.length).toBeLessThanOrEqual(24);

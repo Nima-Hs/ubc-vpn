@@ -5,7 +5,9 @@
 
 import type { LinkState } from "@shared/api";
 import type { ErrorCode } from "@shared/protocol/ErrorCode";
+import type { LiveRoutes } from "@shared/protocol/LiveRoutes";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
+import type { TunnelMode } from "@shared/protocol/TunnelMode";
 import { LinkStore, type ServiceLink } from "../link";
 
 // 198.51.100.0/24 and 203.0.113.0/24 are reserved for documentation, and
@@ -90,6 +92,18 @@ const SCENARIOS: Record<string, LinkState> = {
     connected: { link: "ready", conn: { state: "connected", tunnel: TUNNEL } },
     "connected-crowded": { link: "ready", conn: { state: "connected", tunnel: CROWDED_TUNNEL } },
     "connected-pieces": { link: "ready", conn: { state: "connected", tunnel: PIECES_TUNNEL } },
+    // Full tunnel: everything through UBC, the local network still direct.
+    "tunnel-full": {
+        link: "ready",
+        conn: { state: "connected", tunnel: { ...TUNNEL, mode: "full" } },
+    },
+    "tunnel-full-connecting": { link: "ready", conn: { state: "connecting" } },
+    "tunnel-full-off": { link: "ready", conn: { state: "disconnected" } },
+    // Connected in split, for a switch that hangs, is refused, or is not
+    // allowed (see `TUNNEL_SWITCHES`, and `demo-profiles.ts`).
+    "tunnel-switch-held": { link: "ready", conn: { state: "connected", tunnel: TUNNEL } },
+    "tunnel-refused": { link: "ready", conn: { state: "connected", tunnel: TUNNEL } },
+    "tunnel-forbidden": { link: "ready", conn: { state: "connected", tunnel: TUNNEL } },
     "connected-empty": {
         link: "ready",
         conn: { state: "connected", tunnel: { ...TUNNEL, subnets: [], dns_domains: [] } },
@@ -134,14 +148,35 @@ const SCENARIOS: Record<string, LinkState> = {
 
 export const DEMO_SCENARIOS: readonly string[] = Object.keys(SCENARIOS);
 
+/**
+ * How a live switch of mode goes in a scenario: it never finishes, so the
+ * switching state can be looked at, or the service refuses it, in the words
+ * the service uses (`crates/service/src/full.rs`).
+ */
+const TUNNEL_SWITCHES: Record<string, "held" | LiveRoutes> = {
+    "tunnel-switch-held": "held",
+    "tunnel-refused": {
+        result: "refused",
+        code: "route_refused",
+        message:
+            "Full tunnel cannot be used on this network: its router is not on a network this computer is on, so it could not stay reachable directly.",
+    },
+};
+
 export interface DemoLink extends ServiceLink {
     /** Jumps straight to a named state. Unknown names are ignored. */
     setScenario(name: string): void;
+    /** What the service does with a switch of mode: in place while connected. */
+    switchTunnel(mode: TunnelMode): Promise<LiveRoutes>;
 }
 
-export function createDemoLink(stepMs = 1400): DemoLink {
+/** `mode` says which mode a connect uses: the one saved. */
+export function createDemoLink(stepMs = 1400, mode: () => TunnelMode = () => "split"): DemoLink {
     const store = new LinkStore();
     let timer: NodeJS.Timeout | null = null;
+    let switches: "held" | LiveRoutes | null = null;
+    /** Answers a held switch: the next scenario does, for the next connect. */
+    let release: (() => void) | null = null;
 
     const cancel = () => {
         if (timer !== null) {
@@ -175,7 +210,10 @@ export function createDemoLink(stepMs = 1400): DemoLink {
                 return busy;
             }
             store.set(SCENARIOS.connecting as LinkState);
-            after(SCENARIOS.connected as LinkState);
+            after({
+                link: "ready",
+                conn: { state: "connected", tunnel: { ...TUNNEL, mode: mode() } },
+            });
             return { ok: true };
         },
         disconnect: async () => {
@@ -190,12 +228,42 @@ export function createDemoLink(stepMs = 1400): DemoLink {
             store.set(SCENARIOS.starting as LinkState);
             after(SCENARIOS.disconnected as LinkState);
         },
+        switchTunnel: (to) => {
+            const state = store.get();
+            if (state.link !== "ready" || state.conn.state !== "connected") {
+                return Promise.resolve({ result: "next_connect" });
+            }
+            if (switches === "held") {
+                return new Promise((resolve) => {
+                    release = () => resolve({ result: "next_connect" });
+                });
+            }
+            if (switches !== null) {
+                return Promise.resolve(switches);
+            }
+            const tunnel = state.conn.tunnel;
+            // As the client answers: once the service shows the new mode.
+            return new Promise((resolve) => {
+                setTimeout(() => {
+                    store.set({
+                        link: "ready",
+                        conn: { state: "connected", tunnel: { ...tunnel, mode: to } },
+                    });
+                    resolve({ result: "applied" });
+                }, stepMs / 2);
+            });
+        },
         setScenario: (name) => {
+            release?.();
+            release = null;
             // `hasOwn`, so a name such as "__proto__" is not mistaken for a scenario.
             const state = Object.hasOwn(SCENARIOS, name) ? SCENARIOS[name] : undefined;
             if (state !== undefined) {
                 cancel();
                 store.set(state);
+                switches = Object.hasOwn(TUNNEL_SWITCHES, name)
+                    ? (TUNNEL_SWITCHES[name] ?? null)
+                    : null;
             }
         },
         dispose: cancel,

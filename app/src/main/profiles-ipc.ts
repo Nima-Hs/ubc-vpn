@@ -47,6 +47,8 @@ export function watchProfiles(
         update: (id, change) => tell(profiles.update(id, change)),
         remove: (id) => tell(profiles.remove(id)),
         switchTo: (id) => tell(profiles.switchTo(id)),
+        // Its answer is not a view; whoever asked reads the profiles again.
+        setTunnel: (mode) => profiles.setTunnel(mode),
         stop: () => profiles.stop(),
     };
 }

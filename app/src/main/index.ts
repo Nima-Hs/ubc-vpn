@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { DEMO_IPC, type LinkState } from "@shared/api";
 import { DEMO_PROFILES_IPC, PROFILES_IPC } from "@shared/profiles";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
+import type { TunnelMode } from "@shared/protocol/TunnelMode";
 import { app, type BrowserWindow, clipboard, Menu, protocol, session } from "electron";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
 import { ProfilesRunner, type ProfilesService } from "./channel/profiles";
@@ -32,6 +33,7 @@ import {
 } from "./startup";
 import { appImage, createTray, followStateOnTaskbar } from "./tray";
 import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray-icon";
+import { TunnelSwitch } from "./tunnel-switch";
 import { createWindow, keepHidden, showWindow } from "./window";
 
 // First of all, before the profile is read or anything is written to it.
@@ -109,13 +111,19 @@ async function start(): Promise<void> {
         );
         const fakeSettings = createDemoSettings();
         demoSettings = fakeSettings;
-        const fakeProfiles = createDemoProfiles();
-        demoProfiles = fakeProfiles;
         const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
         const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
+        // The pretend service connects with the mode the pretend settings
+        // hold, and switches a live connection when they change.
+        let savedMode: TunnelMode = "split";
+        const demo = createDemoLink(step, () => savedMode);
+        const fakeProfiles = createDemoProfiles((mode) => {
+            savedMode = mode;
+            return demo.switchTunnel(mode);
+        });
+        demoProfiles = fakeProfiles;
         const fakeLogs = createDemoLogs(step);
         logFeed = fakeLogs;
-        const demo = createDemoLink(step);
         link = demo;
         let demoLogin: ReturnType<typeof createDemoLogin> | undefined;
         login = (onState) => {
@@ -138,6 +146,12 @@ async function start(): Promise<void> {
                     fakeSettings.setScenario(name);
                     fakeLogs.setScenario(name);
                     fakeProfiles.setScenario(name);
+                    // Everyone hears of the scenario's profiles, the saved mode among them.
+                    void profiles?.list().then((result) => {
+                        if (result.ok) {
+                            savedMode = result.value.global.tunnel;
+                        }
+                    });
                 }
             });
             handleFromInterface(window, devServerUrl, DEMO_PROFILES_IPC.loginItem, () =>
@@ -195,7 +209,12 @@ async function start(): Promise<void> {
         trayCreated: true,
     });
     const window = createWindow(entryUrl, appImage(), developmentBuild, hidden, inTray);
-    registerIpc(window, controller, settings, devServerUrl);
+    // Split or full: one switch for the window and the tray, made below
+    // once the profiles it saves into are there.
+    let tunnelSwitch: TunnelSwitch | undefined;
+    registerIpc(window, controller, settings, devServerUrl, (mode) => {
+        void tunnelSwitch?.request(mode);
+    });
     // The log screen: in no production build until its contract is on main.
     // Until then the only service that can be asked for its log is the
     // demo's pretend one.
@@ -228,6 +247,7 @@ async function start(): Promise<void> {
             demoProfiles ?? new ProfilesRunner(settingsCommand(app, process)),
             (view) => {
                 latestProfiles = view;
+                tunnelSwitch?.fromProfiles(view);
                 if (!window.isDestroyed()) {
                     window.webContents.send(PROFILES_IPC.changed, view);
                 }
@@ -235,6 +255,15 @@ async function start(): Promise<void> {
             },
         );
         registerProfiles(window, devServerUrl, profiles, loginItems, process.platform);
+        const watched = profiles;
+        tunnelSwitch = new TunnelSwitch({
+            save: (mode) => watched.setTunnel(mode),
+            reread: () => void watched.list(),
+            state: () => link.getState(),
+            subscribe: (listener) => link.subscribe(listener),
+            loggingIn: () => controller.getSnapshot().login.phase !== "idle",
+            publish: (status) => controller.setTunnel(status),
+        });
     }
 
     let quitting = false;
@@ -251,7 +280,7 @@ async function start(): Promise<void> {
     // The state icon, which the tray and the taskbar button share: one state,
     // one working frame, one timer.
     const icons = createStateIcons();
-    icons.show(trayKind(controller.getSnapshot().state));
+    icons.show(trayKind(controller.getSnapshot().state, controller.getSnapshot().tunnel));
     followStateOnTaskbar(window, icons);
 
     // Kept off the screen for a test run, the tray icon included. Without a
@@ -268,6 +297,8 @@ async function start(): Promise<void> {
                   quit,
                   // The tray's profile list: the same change as Settings makes.
                   switchProfile: (id) => void profiles?.switchTo(id),
+                  // The same switch as the window's.
+                  setTunnel: (mode) => void tunnelSwitch?.request(mode),
               },
               controller.getSnapshot().state,
               icons,
@@ -279,8 +310,8 @@ async function start(): Promise<void> {
         }
     }
     controller.subscribe((snapshot) => {
-        icons.show(trayKind(snapshot.state));
-        tray?.update(snapshot.state, snapshot.login.phase !== "idle");
+        icons.show(trayKind(snapshot.state, snapshot.tunnel));
+        tray?.update(snapshot.state, snapshot.login.phase !== "idle", snapshot.tunnel);
     });
     // Put away at start, with nowhere to come back from, or on macOS with no
     // settings to say it belongs in the tray: shown after all.
@@ -359,6 +390,7 @@ async function start(): Promise<void> {
         stopForQuit(controller, settings, tray);
         icons.dispose();
         profiles?.stop();
+        tunnelSwitch?.dispose();
     });
 
     // If the interface's process dies, start it again, but not in a loop.

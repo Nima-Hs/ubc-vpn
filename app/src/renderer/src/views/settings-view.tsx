@@ -5,6 +5,7 @@ import { describeProfilesError, SETTINGS, whereKept } from "@shared/settings-cop
 import { KeyRound } from "lucide-react";
 import { useState } from "react";
 import { ProfileList } from "@/components/profile-list";
+import { TunnelSettings } from "@/components/tunnel-choice";
 import { Button } from "@/components/ui/button";
 import { ChoiceList } from "@/components/ui/choice-list";
 import { Confirm } from "@/components/ui/confirm";
@@ -81,6 +82,9 @@ export default function SettingsView() {
             {held.state === "ready" && (
                 <ProfileList view={held.view} busy={busy} change={attempt} />
             )}
+
+            {/* Split or full: the same setting as the main screen's and the tray's. */}
+            {held.state === "ready" && <TunnelSettings />}
 
             {held.state === "ready" && (
                 <Ready

@@ -60,9 +60,19 @@ const REQUIRED_FILES = [
     "resources/licenses/microsoft/microsoft-visual-studio-2026-distributable-code.txt",
     "resources/policy.json",
     // The taskbar button's state icons, the tray's own pictures (src/main/tray.ts).
-    ...["off", "busy-0", "busy-1", "busy-2", "on", "attention", "problem"].map(
-        (name) => `resources/state-icons/${name}.ico`,
-    ),
+    ...[
+        "off",
+        "busy-0",
+        "busy-1",
+        "busy-2",
+        "on",
+        "busy-full-0",
+        "busy-full-1",
+        "busy-full-2",
+        "on-full",
+        "attention",
+        "problem",
+    ].map((name) => `resources/state-icons/${name}.ico`),
 ];
 
 /** What an updater reads, anywhere in the app or the output folder. */

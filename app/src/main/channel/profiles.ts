@@ -14,11 +14,30 @@ import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { RouteSet } from "@shared/protocol/RouteSet";
 import type { StartMode } from "@shared/protocol/StartMode";
+import type { TunnelMode } from "@shared/protocol/TunnelMode";
+import type { TunnelReply } from "@shared/protocol/TunnelReply";
 import { markedText, plainText } from "./connect";
 import { encodeLine } from "./framing";
 import { OneLineCalls, type OneLineOptions } from "./one-line";
 import { MAX_SHOWN_LENGTH } from "./settings";
-import { isProfileFailure, isProfileId, isProfilesView } from "./validate";
+import {
+    isProfileFailure,
+    isProfileId,
+    isProfilesView,
+    isTunnelMode,
+    isTunnelReply,
+} from "./validate";
+
+/** What came of `settings set-tunnel`: its reply, or why there was none. */
+export type TunnelResult = { ok: true; value: TunnelReply } | { ok: false; error: ProfilesError };
+
+/**
+ * How long a switch of mode may take. The client waits for the service to
+ * switch a live connection and check it, for up to two minutes
+ * (`Limits::outcome`, `crates/cli/src/client.rs`); ending it sooner would
+ * leave the app not knowing what the service went on to do.
+ */
+export const SET_TUNNEL_TIMEOUT_MS = 150_000;
 
 /** What the rest of the main process needs from the profiles, real or fake. */
 export interface ProfilesService {
@@ -34,6 +53,11 @@ export interface ProfilesService {
     remove(id: ProfileId): Promise<ProfilesResult>;
     /** Makes a profile the one the next connect uses. */
     switchTo(id: ProfileId): Promise<ProfilesResult>;
+    /**
+     * Saves split or full for every profile, and has a live connection
+     * switched to it. Its answer is not a view: read the profiles again after.
+     */
+    setTunnel(mode: TunnelMode): Promise<TunnelResult>;
     /** Ends every client still running, for when the app quits. */
     stop(): void;
 }
@@ -54,6 +78,7 @@ export const PROFILES_ARGS = {
     update: ["profiles", "update", "--json"],
     remove: ["profiles", "delete", "--json"],
     switchTo: ["profiles", "switch", "--json"],
+    setTunnel: ["settings", "set-tunnel", "--json"],
 } as const;
 
 const UNAVAILABLE = { ok: false, error: "unavailable" } as const;
@@ -91,16 +116,46 @@ function shownView(view: ProfilesView): ProfilesView {
         keyring: view.keyring,
         policy_readable: view.policy_readable,
         allowed_routes: view.allowed_routes?.map(shown) ?? null,
+        full_tunnel: view.full_tunnel,
     };
+}
+
+/** A reply as the rest of the app is given it: the service's words cleaned. */
+function shownReply(reply: TunnelReply): TunnelReply {
+    if (reply.type === "forbidden") {
+        return { type: "forbidden" };
+    }
+    const { live } = reply;
+    switch (live.result) {
+        case "applied":
+        case "next_connect":
+            return { type: "ok", tunnel: reply.tunnel, live: { result: live.result } };
+        case "refused":
+        case "failed":
+            return {
+                type: "ok",
+                tunnel: reply.tunnel,
+                live: { result: live.result, code: live.code, message: shown(live.message) },
+            };
+        case "unknown":
+            return {
+                type: "ok",
+                tunnel: reply.tunnel,
+                live: { result: "unknown", message: shown(live.message) },
+            };
+    }
 }
 
 export class ProfilesRunner implements ProfilesService {
     private readonly calls: OneLineCalls;
+    /** For switches of mode alone, which may wait on the service for longer. */
+    private readonly slowCalls: OneLineCalls;
     private reading: Promise<ProfilesResult> | null = null;
     private changing = false;
 
     constructor(options: OneLineOptions) {
         this.calls = new OneLineCalls(options);
+        this.slowCalls = new OneLineCalls({ timeoutMs: SET_TUNNEL_TIMEOUT_MS, ...options });
     }
 
     list(): Promise<ProfilesResult> {
@@ -156,6 +211,32 @@ export class ProfilesRunner implements ProfilesService {
         return this.withId(id, () => this.change(PROFILES_ARGS.switchTo, { id }));
     }
 
+    async setTunnel(mode: TunnelMode): Promise<TunnelResult> {
+        // Only a mode, and only one of the two.
+        if (!isTunnelMode(mode)) {
+            return { ok: false, error: "bad_input" };
+        }
+        if (this.changing) {
+            return { ok: false, error: "busy" };
+        }
+        this.changing = true;
+        try {
+            const line = await this.slowCalls.run(PROFILES_ARGS.setTunnel, encodeLine({ mode }));
+            if (line === null) {
+                return UNAVAILABLE;
+            }
+            if (line.status === 0 && isTunnelReply(line.value)) {
+                return { ok: true, value: shownReply(line.value) };
+            }
+            if (line.status === 1 && isProfileFailure(line.value)) {
+                return { ok: false, error: line.value.error as ProfilesError };
+            }
+            return UNAVAILABLE;
+        } finally {
+            this.changing = false;
+        }
+    }
+
     /** Runs `then` only for an id that is one; anything else starts nothing. */
     private withId(id: ProfileId, then: () => Promise<ProfilesResult>): Promise<ProfilesResult> {
         return isProfileId(id) ? then() : Promise.resolve({ ok: false, error: "bad_input" });
@@ -163,6 +244,7 @@ export class ProfilesRunner implements ProfilesService {
 
     stop(): void {
         this.calls.stop();
+        this.slowCalls.stop();
     }
 
     /** One change at a time: two at once could finish in either order. */

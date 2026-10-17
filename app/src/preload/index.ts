@@ -28,6 +28,7 @@ const api: VpnApi = {
     disconnect: () => ipcRenderer.invoke(IPC.disconnect),
     answerPrompt: (id, value) => ipcRenderer.invoke(IPC.answerPrompt, id, value),
     cancelLogin: () => ipcRenderer.invoke(IPC.cancelLogin),
+    setTunnel: (mode) => ipcRenderer.invoke(IPC.setTunnel, mode),
     getSettings: () => ipcRenderer.invoke(IPC.getSettings),
     checkRoutes: (input) => ipcRenderer.invoke(IPC.checkRoutes, input),
     saveRoutes: (input) => ipcRenderer.invoke(IPC.saveRoutes, input),

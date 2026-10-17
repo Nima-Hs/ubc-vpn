@@ -788,7 +788,7 @@ test("log in, connect and disconnect, by keyboard", async () => {
     await expect(heading()).toHaveText("Connected");
     await expect(page.getByText("198.51.100.42")).toBeVisible();
     await expect(page.getByRole("status")).toContainText(
-        "Traffic to 2 UBC subnets goes through the VPN",
+        "Split tunnel: traffic to 2 UBC subnets goes through the VPN",
     );
 
     // The same button, still focused, now disconnects.
@@ -2130,6 +2130,177 @@ test("a test run can keep the window off the screen, and only a test run", async
     } finally {
         await other.close();
     }
+});
+
+/** The main screen's split or full choice. */
+const tunnelGroup = () => page.getByRole("radiogroup", { name: "Tunnel" });
+const tunnelRadio = (name: "Split tunnel" | "Full tunnel") =>
+    tunnelGroup().getByRole("radio", { name });
+const diagramMode = () => page.locator("svg[data-mode]").getAttribute("data-mode");
+/** Chooses a mode as a pointer does: on its visible label. The radio itself is hidden. */
+const chooseTunnel = (name: "Split tunnel" | "Full tunnel") =>
+    tunnelGroup().locator("label", { hasText: name }).click();
+
+/** Puts the tunnel setting back as it starts: split, with full allowed. */
+async function resetTunnel(): Promise<void> {
+    await scenario("settings");
+    await scenario("disconnected");
+    await tab("Connection").click();
+    await expect(tunnelRadio("Split tunnel")).toBeChecked();
+}
+
+test("tunnel: switched while connected, without disconnecting, and back", async () => {
+    await scenario("connected");
+    await tab("Connection").click();
+    await expect(heading()).toHaveText("Connected");
+    await expect(tunnelRadio("Split tunnel")).toBeChecked();
+    // Said before anyone switches.
+    await expect(tunnelGroup()).toHaveAccessibleDescription(
+        "Switching keeps you connected. Connections to sites outside UBC may reset.",
+    );
+    await expect(said("Split tunnel: traffic to 2 UBC subnets")).toBeVisible();
+    expect(await diagramMode()).toBe("split");
+    await shoot("tunnel-split-connected");
+
+    const states: string[] = [];
+    await page.exposeFunction("recordHeading", (text: string) => states.push(text));
+    await page.evaluate(() => {
+        const record = () =>
+            (window as unknown as { recordHeading(text: string): void }).recordHeading(
+                document.querySelector("h1")?.textContent ?? "",
+            );
+        new MutationObserver(record).observe(document.body, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+        });
+    });
+    await chooseTunnel("Full tunnel");
+    await expect(heading()).toHaveText("Connected");
+    await expect(said("Full tunnel: all your traffic goes through UBC")).toBeVisible();
+    await expect(tunnelRadio("Full tunnel")).toBeChecked();
+    expect(await diagramMode()).toBe("full");
+    // It went through "Switching", and never through disconnecting.
+    expect(states).toContain("Switching to full tunnel");
+    expect(states.some((text) => /Disconnect|Not connected|Connecting/.test(text))).toBe(false);
+    await expect(page.getByRole("button", { name: "Disconnect" })).toBeEnabled();
+    await shoot("tunnel-full-connected");
+
+    // The keyboard switches it too.
+    await tunnelRadio("Full tunnel").focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(said("Split tunnel: traffic to 2 UBC subnets")).toBeVisible();
+    expect(await diagramMode()).toBe("split");
+    await resetTunnel();
+});
+
+test("tunnel: a switch under way shows switching, and nothing can be changed meanwhile", async () => {
+    await scenario("tunnel-switch-held");
+    await tab("Connection").click();
+    await chooseTunnel("Full tunnel");
+    await expect(heading()).toHaveText("Switching to full tunnel");
+    await expect(
+        said("The VPN stays connected. Connections to sites outside UBC may reset."),
+    ).toBeVisible();
+    await expect(tunnelRadio("Full tunnel")).toBeChecked();
+    await expect(tunnelRadio("Split tunnel")).toBeDisabled();
+    // The picture shows the way being opened through UBC.
+    await expect
+        .poll(() =>
+            page
+                .locator('[data-pulse="full"]')
+                .evaluate((pulse) =>
+                    Number.parseFloat(getComputedStyle(pulse.parentElement ?? pulse).opacity),
+                ),
+        )
+        .toBe(1);
+    await shoot("tunnel-switching");
+    // Settings shows the same switch under way.
+    await tab("Settings").click();
+    await expect(page.getByRole("radio", { name: /^Full tunnel/ })).toBeChecked();
+    await expect(page.getByRole("radio", { name: /^Split tunnel/ })).toBeDisabled();
+    await tab("Connection").click();
+    // The next scenario answers the held switch, for the next connect.
+    await resetTunnel();
+});
+
+test("tunnel: a refused switch keeps the old mode and says why", async () => {
+    await scenario("tunnel-refused");
+    await tab("Connection").click();
+    await chooseTunnel("Full tunnel");
+    await expect(said("Still on split tunnel")).toBeVisible();
+    await expect(said("its router is not on a network this computer is on")).toBeVisible();
+    await expect(tunnelRadio("Split tunnel")).toBeChecked();
+    await expect(heading()).toHaveText("Connected");
+    await expect(said("Split tunnel: traffic to 2 UBC subnets")).toBeVisible();
+    expect(await diagramMode()).toBe("split");
+    await expect(page.getByRole("status").first()).toContainText("Still on split tunnel");
+    await shoot("tunnel-refused");
+    // Saved back as it was: Settings says split too.
+    await tab("Settings").click();
+    await expect(page.getByRole("radio", { name: /^Split tunnel/ })).toBeChecked();
+    await resetTunnel();
+});
+
+test("tunnel: full tunnel the policy forbids cannot be chosen, and it says why", async () => {
+    await scenario("tunnel-forbidden");
+    await tab("Connection").click();
+    await expect(tunnelRadio("Full tunnel")).toBeDisabled();
+    await expect(tunnelGroup()).toHaveAccessibleDescription(
+        "Full tunnel is turned off by this computer’s VPN policy.",
+    );
+    await shoot("tunnel-forbidden");
+    await tab("Settings").click();
+    await expect(page.getByRole("radio", { name: /^Full tunnel/ })).toBeDisabled();
+    await expect(page.getByRole("radio", { name: /^Split tunnel/ })).toBeChecked();
+    await expect(
+        page.getByText("Full tunnel is turned off by this computer’s VPN policy."),
+    ).toBeVisible();
+    await shoot("tunnel-forbidden-settings");
+    await resetTunnel();
+});
+
+test("tunnel: in full tunnel the routes are kept and shown, but not in use", async () => {
+    await scenario("tunnel-full-off");
+    await tab("Connection").click();
+    await expect(tunnelRadio("Full tunnel")).toBeChecked();
+    expect(await diagramMode()).toBe("full");
+    await shoot("tunnel-full-off");
+    await tab("Routes").click();
+    await expect(heading()).toHaveText("Routes");
+    await expect(page.getByText("Reading your settings…")).toHaveCount(0);
+    await expect(page.getByText("Not in use")).toBeVisible();
+    const first = page.getByLabel("Subnet 1", { exact: true });
+    await expect(first).toBeDisabled();
+    await expect(first).not.toHaveValue("");
+    await expect(page.getByRole("button", { name: "Add subnet" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save routes" })).toBeDisabled();
+    await shoot("tunnel-full-routes");
+    // Back to split from Settings: the list is in use again, as it was.
+    await tab("Settings").click();
+    await page.getByRole("radio", { name: /^Split tunnel/ }).check();
+    await tab("Routes").click();
+    await expect(page.getByText("Not in use")).toHaveCount(0);
+    await expect(page.getByLabel("Subnet 1", { exact: true })).toBeEnabled();
+    await resetTunnel();
+});
+
+test("tunnel: connecting in full tunnel shows the way through UBC", async () => {
+    await scenario("tunnel-full-connecting");
+    await tab("Connection").click();
+    await expect(heading()).toHaveText("Connecting");
+    expect(await diagramMode()).toBe("full");
+    await expect(said("all your traffic will go through UBC")).toBeVisible();
+    // The mode a connection uses is fixed while it is being made.
+    await expect(tunnelRadio("Split tunnel")).toBeDisabled();
+    await expect(tunnelGroup()).toHaveAccessibleDescription(
+        "You can change the tunnel once the VPN has connected or disconnected.",
+    );
+    await shoot("tunnel-full-connecting");
+    await scenario("tunnel-full");
+    await expect(heading()).toHaveText("Connected");
+    await shoot("tunnel-full-details");
+    await resetTunnel();
 });
 
 test("nothing was blocked or broken along the way", () => {

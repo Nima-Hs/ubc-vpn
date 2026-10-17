@@ -9,6 +9,7 @@ import type { RouteInput } from "@shared/protocol/RouteInput";
 import type { RouteList } from "@shared/protocol/RouteList";
 import type { RouteProblem } from "@shared/protocol/RouteProblem";
 import type { SettingsView } from "@shared/protocol/SettingsView";
+import { shownMode, TUNNEL } from "@shared/tunnel";
 import { Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import { Panel } from "@/components/ui/panel";
 import { Heading, Subheading, Text } from "@/components/ui/text";
 import { TextField } from "@/components/ui/text-field";
+import { cn } from "@/lib/cn";
 import { leave, setUnsaved, stay, useNavigation } from "@/lib/navigation";
 import { api, useSnapshot } from "@/lib/store";
 
@@ -63,11 +65,14 @@ function Entries({
     rows,
     problems,
     onChange,
+    notInUse,
 }: {
     list: RouteList;
     rows: Row[];
     problems: Map<number, string>;
     onChange(rows: Row[]): void;
+    /** Shown as they are, and not to be changed: full tunnel is on. */
+    notInUse: boolean;
 }) {
     // The row that was just added takes the keyboard.
     const added = useRef<number | null>(null);
@@ -84,6 +89,7 @@ function Entries({
                         value={row.value}
                         autoCapitalize="none"
                         autoCorrect="off"
+                        disabled={notInUse}
                         ref={(field) => {
                             if (field !== null && added.current === row.id) {
                                 added.current = null;
@@ -101,17 +107,19 @@ function Entries({
                         }
                         {...(problems.has(row.id) && { error: problems.get(row.id) as string })}
                     />
-                    <IconButton
-                        label={`Remove ${ROW_NAME[list].toLowerCase()} ${index + 1}`}
-                        tooltipSide="left"
-                        className="shrink-0"
-                        onClick={() => onChange(rows.filter((other) => other.id !== row.id))}
-                    >
-                        <X />
-                    </IconButton>
+                    {!notInUse && (
+                        <IconButton
+                            label={`Remove ${ROW_NAME[list].toLowerCase()} ${index + 1}`}
+                            tooltipSide="left"
+                            className="shrink-0"
+                            onClick={() => onChange(rows.filter((other) => other.id !== row.id))}
+                        >
+                            <X />
+                        </IconButton>
+                    )}
                 </div>
             ))}
-            <div className="flex">
+            <div className={cn("flex", notInUse && "hidden")}>
                 <Button
                     size="sm"
                     icon={<Plus aria-hidden />}
@@ -141,6 +149,11 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
     const connected = useSnapshot(
         (snapshot) =>
             snapshot.state.link === "ready" && snapshot.state.conn.state !== "disconnected",
+    );
+    // In full tunnel everything goes through UBC: the list is kept, and
+    // shown, but not used, so it is not edited either.
+    const notInUse = useSnapshot(
+        (snapshot) => shownMode(snapshot.state, snapshot.tunnel) === "full",
     );
 
     const { input, ids } = useMemo(() => inputOf(rows), [rows]);
@@ -232,6 +245,16 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
             {/* Every child keeps its own height: the area scrolls, and nothing
                 in it may be squeezed to make it fit. */}
             <div className="scroll-region ring-room flex min-h-0 flex-1 flex-col gap-6">
+                {notInUse && (
+                    <Panel className="shrink-0">
+                        <div className="flex flex-col gap-1 px-4 py-3">
+                            <Text>{TUNNEL.routesNotUsedTitle}</Text>
+                            <Text size="label" tone="secondary">
+                                {TUNNEL.routesNotUsed}
+                            </Text>
+                        </div>
+                    </Panel>
+                )}
                 {limits.noPolicy !== undefined && (
                     <Panel tone="attention" className="shrink-0">
                         <Text>{limits.noPolicy}</Text>
@@ -263,6 +286,7 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
                         rows={rows.subnets}
                         problems={byRow.subnets}
                         onChange={(next) => edit("subnets", next)}
+                        notInUse={notInUse}
                     />
                 </section>
 
@@ -276,6 +300,7 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
                         rows={rows.dns_domains}
                         problems={byRow.dns_domains}
                         onChange={(next) => edit("dns_domains", next)}
+                        notInUse={notInUse}
                     />
                 </section>
             </div>
@@ -320,8 +345,9 @@ function Editor({ view, onSaved }: { view: SettingsView; onSaved(routes: RouteIn
                     size="lg"
                     variant="primary"
                     loading={saving}
-                    // Nothing is saved that has not just been checked and found acceptable.
-                    disabled={!changed || check.state !== "ok"}
+                    // Nothing is saved that has not just been checked and found
+                    // acceptable, and nothing while the list is not in use.
+                    disabled={notInUse || !changed || check.state !== "ok"}
                     onClick={() => void save()}
                 >
                     {saving ? "Saving…" : "Save routes"}

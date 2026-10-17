@@ -1,4 +1,5 @@
 import type { Snapshot, VpnApi } from "@shared/api";
+import { UNREAD_TUNNEL } from "@shared/tunnel";
 import { create } from "zustand";
 
 export const api: VpnApi = window.ubcVpn;
@@ -9,6 +10,7 @@ export const useSnapshot = create<Snapshot>(() => ({
     notice: null,
     login: { phase: "idle" },
     loginProfile: null,
+    tunnel: UNREAD_TUNNEL,
     closeHides: false,
     development: false,
 }));

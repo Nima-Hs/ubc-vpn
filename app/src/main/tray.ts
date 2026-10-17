@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { LinkState } from "@shared/api";
-import { describe } from "@shared/copy";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
+import { type TunnelStatus, UNREAD_TUNNEL } from "@shared/tunnel";
 import { app, type BrowserWindow, Menu, type NativeImage, nativeImage, Tray } from "electron";
 import { appIcon } from "./icon/designs";
 import { encodePng } from "./icon/formats";
@@ -16,7 +16,7 @@ import {
     trayIconPng,
     trayKind,
 } from "./tray-icon";
-import { type TrayActions, trayMenu } from "./tray-menu";
+import { type TrayActions, trayMenu, trayStatus } from "./tray-menu";
 
 export type { TrayActions } from "./tray-menu";
 
@@ -126,8 +126,8 @@ export function createTray(
     initial: LinkState,
     icons: StateIcons,
 ): {
-    /** The state, and whether a login is under way. */
-    update(state: LinkState, loggingIn?: boolean): void;
+    /** The state, whether a login is under way, and the tunnel setting. */
+    update(state: LinkState, loggingIn?: boolean, tunnel?: TunnelStatus): void;
     /** The profiles as they now are, for the menu's list of them. */
     setProfiles(view: ProfilesView): void;
     destroy(): void;
@@ -154,13 +154,17 @@ export function createTray(
     let state = initial;
     let profiles: ProfilesView | null = null;
     let loggingIn = false;
+    let tunnel: TunnelStatus = UNREAD_TUNNEL;
     const rebuild = () => {
-        tray.setToolTip(`UBC VPN: ${describe(state).title}`);
-        tray.setContextMenu(Menu.buildFromTemplate(trayMenu(state, profiles, actions, loggingIn)));
+        tray.setToolTip(`UBC VPN: ${trayStatus(state, tunnel)}`);
+        tray.setContextMenu(
+            Menu.buildFromTemplate(trayMenu(state, profiles, actions, loggingIn, tunnel)),
+        );
     };
-    const update = (next: LinkState, nowLoggingIn = false) => {
+    const update = (next: LinkState, nowLoggingIn = false, nowTunnel = tunnel) => {
         state = next;
         loggingIn = nowLoggingIn;
+        tunnel = nowTunnel;
         rebuild();
     };
 

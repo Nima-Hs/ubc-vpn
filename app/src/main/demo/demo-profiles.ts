@@ -13,11 +13,13 @@ import {
     type ProfilesError,
     type ProfilesResult,
 } from "@shared/profiles";
+import type { LiveRoutes } from "@shared/protocol/LiveRoutes";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { ProfileView } from "@shared/protocol/ProfileView";
 import type { StartMode } from "@shared/protocol/StartMode";
-import type { ProfileChange, ProfilesService } from "../channel/profiles";
+import type { TunnelMode } from "@shared/protocol/TunnelMode";
+import type { ProfileChange, ProfilesService, TunnelResult } from "../channel/profiles";
 
 // Made-up ids, names and addresses: 203.0.113.0/24 and 198.51.100.0/24 are
 // for documentation, and `.example` never resolves.
@@ -49,8 +51,14 @@ function fresh(): ProfilesView {
         keyring: "available",
         policy_readable: true,
         allowed_routes: null,
+        full_tunnel: "allowed",
     };
 }
+
+const savedFull = (view: ProfilesView): ProfilesView => ({
+    ...view,
+    global: { ...view.global, tunnel: "full" },
+});
 
 interface Scenario {
     /** Changes the view starts from. */
@@ -107,6 +115,13 @@ const SCENARIOS: Record<string, Scenario> = {
         view: (view) => withActive(view, { save_password: false, password_saved: false }),
         stuckPassword: true,
     },
+    // Full tunnel saved, for the main screen and the tray in each state.
+    "tunnel-full": { view: savedFull },
+    "tunnel-full-connecting": { view: savedFull },
+    "tunnel-full-off": { view: savedFull },
+    "tunnel-switch-held": {},
+    "tunnel-refused": {},
+    "tunnel-forbidden": { view: (view) => ({ ...view, full_tunnel: "forbidden" }) },
     "settings-loading": {},
     "settings-unreadable": { list: "unreadable" },
     "settings-unavailable": { list: "unavailable" },
@@ -129,11 +144,17 @@ function checkName(name: string): string | null {
     return length >= 1 && length <= MAX_NAME_CHARS && !MISLEADING.test(trimmed) ? trimmed : null;
 }
 
-export function createDemoProfiles(): DemoProfiles {
+/** `live` is what the pretend service does with a switch of mode. */
+export function createDemoProfiles(
+    live: (mode: TunnelMode) => Promise<LiveRoutes> = () =>
+        Promise.resolve({ result: "next_connect" }),
+): DemoProfiles {
     let view = fresh();
     let scenario: Scenario = {};
     let loading = false;
     let made = 0;
+    /** Whether the last scenario was a tunnel one, whose mode is undone by the next. */
+    let tunnelScenario = false;
     /** A copy, as the real client sends a new view each time. */
     const answer = (): ProfilesResult => ({ ok: true, value: structuredClone(view) });
     const refuse = (error: ProfilesError): Promise<ProfilesResult> =>
@@ -283,11 +304,33 @@ export function createDemoProfiles(): DemoProfiles {
                 view = { ...view, global: { ...view.global, active_profile: id } };
                 return null;
             }),
+        setTunnel: async (mode: TunnelMode): Promise<TunnelResult> => {
+            if (scenario.change !== undefined) {
+                return { ok: false, error: scenario.change };
+            }
+            // As the client: a mode the policy forbids is not saved, and
+            // the service is not asked.
+            if (mode === "full" && view.full_tunnel === "forbidden") {
+                return { ok: true, value: { type: "forbidden" } };
+            }
+            view = { ...view, global: { ...view.global, tunnel: mode } };
+            return { ok: true, value: { type: "ok", tunnel: mode, live: await live(mode) } };
+        },
         stop: () => {},
         setScenario: (name) => {
             if (!Object.hasOwn(SCENARIOS, name)) {
+                // A connection state after a tunnel one: back to split.
+                if (tunnelScenario) {
+                    tunnelScenario = false;
+                    view = {
+                        ...view,
+                        global: { ...view.global, tunnel: "split" },
+                        full_tunnel: "allowed",
+                    };
+                }
                 return;
             }
+            tunnelScenario = name.startsWith("tunnel-");
             scenario = SCENARIOS[name] as Scenario;
             loading = name === "settings-loading";
             view = scenario.view?.(fresh()) ?? fresh();

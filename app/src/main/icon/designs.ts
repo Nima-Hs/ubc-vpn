@@ -107,11 +107,25 @@ export function appIcon(size: number): Drawing {
 /**
  * The things the tray can say. Each has a shape of its own as well as a
  * colour, for anyone who cannot tell the colours apart and because macOS
- * draws tray icons in one colour.
+ * draws tray icons in one colour. Working and on come in two shapes, for
+ * split and full tunnel.
  */
-export type TrayKind = "off" | "busy" | "on" | "attention" | "problem";
+export type TrayKind = "off" | "busy" | "on" | "busy-full" | "on-full" | "attention" | "problem";
 
-export const TRAY_KINDS: readonly TrayKind[] = ["off", "busy", "on", "attention", "problem"];
+export const TRAY_KINDS: readonly TrayKind[] = [
+    "off",
+    "busy",
+    "on",
+    "busy-full",
+    "on-full",
+    "attention",
+    "problem",
+];
+
+/** Whether a kind steps through the working frames. */
+export function isWorking(kind: TrayKind): boolean {
+    return kind === "busy" || kind === "busy-full";
+}
 
 /** The colour of each part of the tray icon. */
 export interface TrayPalette {
@@ -156,7 +170,7 @@ export const BUSY_FRAME_MS = 280;
 /** Every picture the state icon can show: each state, and each working frame. */
 export const STATE_PICTURES: readonly { kind: TrayKind; frame: number }[] = TRAY_KINDS.flatMap(
     (kind): { kind: TrayKind; frame: number }[] =>
-        kind === "busy"
+        isWorking(kind)
             ? Array.from({ length: BUSY_FRAMES }, (_, frame) => ({ kind, frame }))
             : [{ kind, frame: 0 }],
 );
@@ -167,6 +181,28 @@ export const STATE_PICTURES: readonly { kind: TrayKind; frame: number }[] = TRAY
  * open at 16 pixels.
  */
 const DASH = { on: 0.14, off: 0.36 };
+
+/**
+ * Full tunnel: from the end of the tunnel down to where the lower line ends,
+ * because everything else is now reached through UBC.
+ */
+const ONWARD: Curve = [
+    [14, 3.5],
+    [14, 6.5],
+    [14, 9.5],
+    [14, 12.5],
+];
+
+/**
+ * Full tunnel: the first half of the lower line, which is all that still
+ * goes directly: the local network.
+ */
+const LOCAL: Curve = [
+    [2, 8],
+    [4.5, 8],
+    [5.75, 9.125],
+    [7.25, 10.25],
+];
 
 /** Where the badge sits: over the end of the lower line. */
 const BADGE = { cx: 12, cy: 12, gap: 4.4 };
@@ -188,28 +224,37 @@ const DIAMOND = [
  * Off: both lines thin, the tunnel closed. Working: the tunnel wide and in
  * moving dashes. On: the tunnel wide and whole. Needs attention: off, with a
  * triangle over the end of the lower line. A problem: off, with a diamond
- * there instead.
+ * there instead. In full tunnel, working and on keep only the start of the
+ * lower line, and a line drops from the end of the tunnel to where the
+ * lower one ended: everything else goes through UBC.
  */
 export function trayIcon(kind: TrayKind, palette: TrayPalette, frame = 0): Drawing {
-    const open = kind === "busy" || kind === "on";
+    const working = isWorking(kind);
+    const on = kind === "on" || kind === "on-full";
+    const full = kind === "busy-full" || kind === "on-full";
+    const lit = working ? palette.busy : on ? palette.on : palette.ink;
+    const thin = DIRECT_WIDTH + 0.1;
     const layers: Layer[] = [
         {
-            shape: { kind: "curve", curve: DIRECT_CURVE, width: DIRECT_WIDTH + 0.1 },
+            shape: { kind: "curve", curve: full ? LOCAL : DIRECT_CURVE, width: thin },
             colour: palette.ink,
         },
+        ...(full
+            ? [{ shape: { kind: "curve", curve: ONWARD, width: thin }, colour: lit } as const]
+            : []),
         {
             shape: {
                 kind: "curve",
                 curve: TUNNEL_CURVE,
-                width: open ? TUNNEL_WIDTH + 0.25 : DIRECT_WIDTH + 0.1,
-                ...(kind === "busy" && {
+                width: working || on ? TUNNEL_WIDTH + 0.25 : thin,
+                ...(working && {
                     dash: {
                         ...DASH,
                         phase: -((frame % BUSY_FRAMES) / BUSY_FRAMES) * (DASH.on + DASH.off),
                     },
                 }),
             },
-            colour: kind === "busy" ? palette.busy : kind === "on" ? palette.on : palette.ink,
+            colour: lit,
         },
     ];
     if (kind === "attention" || kind === "problem") {

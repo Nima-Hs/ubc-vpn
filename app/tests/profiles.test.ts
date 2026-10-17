@@ -40,6 +40,7 @@ const VIEW: ProfilesView = {
     keyring: "available",
     policy_readable: true,
     allowed_routes: null,
+    full_tunnel: "allowed",
 };
 
 type Answer = { line?: unknown; raw?: string; exit?: number; hang?: boolean };

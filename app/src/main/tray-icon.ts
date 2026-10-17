@@ -6,10 +6,12 @@
 
 import type { LinkState } from "@shared/api";
 import { describe } from "@shared/copy";
+import type { TunnelStatus } from "@shared/tunnel";
 import {
     BUSY_FRAME_MS,
     BUSY_FRAMES,
     COLOUR_PALETTE,
+    isWorking,
     type TrayKind,
     type TrayPalette,
     trayIcon,
@@ -29,14 +31,17 @@ export {
 } from "./icon/designs";
 export { encodePng } from "./icon/formats";
 
-export function trayKind(state: LinkState): TrayKind {
-    switch (describe(state).tone) {
+/** The state icon for a state, in the shape of the tunnel mode it shows. */
+export function trayKind(state: LinkState, tunnel?: TunnelStatus): TrayKind {
+    const copy = describe(state, tunnel);
+    const full = copy.mode === "full";
+    switch (copy.tone) {
         case "idle":
             return "off";
         case "on":
-            return "on";
+            return full ? "on-full" : "on";
         case "busy":
-            return "busy";
+            return full ? "busy-full" : "busy";
         case "attention":
             return "attention";
         case "problem":
@@ -113,7 +118,7 @@ export function drawWindowIcon(kind: TrayKind, size: number, frame = 0): Buffer 
 
 /** The `.ico` file a state picture is kept in, in `build/state-icons`. */
 export function stateIconFile(kind: TrayKind, frame: number): string {
-    return kind === "busy" ? `busy-${frame % BUSY_FRAMES}.ico` : `${kind}.ico`;
+    return isWorking(kind) ? `${kind}-${frame % BUSY_FRAMES}.ico` : `${kind}.ico`;
 }
 
 /** Something that shows the state icon: the tray, the taskbar button. */
@@ -165,7 +170,13 @@ export function createStateIcons(
         }
     };
     const startIfWorking = () => {
-        if (timer === undefined && !disposed && kind === "busy" && painters.size > 0) {
+        if (
+            timer === undefined &&
+            !disposed &&
+            kind !== null &&
+            isWorking(kind) &&
+            painters.size > 0
+        ) {
             timer = timers.set(() => {
                 frame = (frame + 1) % BUSY_FRAMES;
                 paintAll();

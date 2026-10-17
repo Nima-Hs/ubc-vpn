@@ -7,6 +7,7 @@ import type { CliMessage } from "@shared/protocol/CliMessage";
 import type { ConnState } from "@shared/protocol/ConnState";
 import type { ErrorCode } from "@shared/protocol/ErrorCode";
 import type { ErrorInfo } from "@shared/protocol/ErrorInfo";
+import type { LiveRoutes } from "@shared/protocol/LiveRoutes";
 import type { LoginErrorCode } from "@shared/protocol/LoginErrorCode";
 import type { Outcome } from "@shared/protocol/Outcome";
 import type { ProfileFailureCode } from "@shared/protocol/ProfileFailureCode";
@@ -26,6 +27,7 @@ import type { SettingsView } from "@shared/protocol/SettingsView";
 import type { StartMode } from "@shared/protocol/StartMode";
 import type { TunnelInfo } from "@shared/protocol/TunnelInfo";
 import type { TunnelMode } from "@shared/protocol/TunnelMode";
+import type { TunnelReply } from "@shared/protocol/TunnelReply";
 
 // Typed against `ErrorCode`, so a code added to the protocol fails the type
 // check here until it is listed.
@@ -361,8 +363,43 @@ export function isProfilesView(value: unknown): value is ProfilesView {
         new Set(profiles.map((profile) => (profile as ProfileView).id)).size === profiles.length &&
         (value.keyring === "available" || value.keyring === "unavailable") &&
         typeof value.policy_readable === "boolean" &&
-        (value.allowed_routes === null || isStringArray(value.allowed_routes))
+        (value.allowed_routes === null || isStringArray(value.allowed_routes)) &&
+        (value.full_tunnel === "allowed" || value.full_tunnel === "forbidden")
     );
+}
+
+/** Whether a value says what saving did to the live connection. */
+function isLiveRoutes(value: unknown): value is LiveRoutes {
+    if (!isObject(value)) {
+        return false;
+    }
+    switch (value.result) {
+        case "applied":
+        case "next_connect":
+            return true;
+        case "refused":
+        case "failed":
+            return isErrorCode(value.code) && typeof value.message === "string";
+        case "unknown":
+            return typeof value.message === "string";
+        default:
+            return false;
+    }
+}
+
+/** Whether a parsed line is the answer to `settings set-tunnel`. */
+export function isTunnelReply(value: unknown): value is TunnelReply {
+    if (!isObject(value)) {
+        return false;
+    }
+    switch (value.type) {
+        case "ok":
+            return isTunnelMode(value.tunnel) && isLiveRoutes(value.live);
+        case "forbidden":
+            return true;
+        default:
+            return false;
+    }
 }
 
 /** Whether a parsed line says a profiles command refused a change, or could not do its work. */

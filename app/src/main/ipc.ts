@@ -1,5 +1,7 @@
 import { IPC } from "@shared/api";
 import type { RouteInput } from "@shared/protocol/RouteInput";
+import type { TunnelMode } from "@shared/protocol/TunnelMode";
+import { TUNNEL_MODES } from "@shared/tunnel";
 import { type BrowserWindow, type IpcMainInvokeEvent, ipcMain } from "electron";
 import type { SettingsService } from "./channel/settings";
 import type { Controller } from "./controller";
@@ -123,8 +125,21 @@ export function takeRouteInput(args: readonly unknown[]): RouteInput {
     return { subnets: [...subnets], dns_domains: [...dns_domains] };
 }
 
+/** Takes a tunnel mode from the interface: one argument, split or full, or a refusal. */
+export function takeTunnelMode(args: readonly unknown[]): TunnelMode {
+    const [mode] = args;
+    if (
+        args.length !== 1 ||
+        typeof mode !== "string" ||
+        !TUNNEL_MODES.includes(mode as TunnelMode)
+    ) {
+        throw new Error("refused");
+    }
+    return mode as TunnelMode;
+}
+
 /**
- * The fixed set of things the interface can ask for. Three take arguments,
+ * The fixed set of things the interface can ask for. Four take arguments,
  * and each checks them before anything else happens.
  */
 export function registerIpc(
@@ -132,6 +147,7 @@ export function registerIpc(
     controller: Controller,
     settings: SettingsService,
     devServerUrl: string | undefined,
+    setTunnel: (mode: TunnelMode) => void = () => {},
 ): void {
     const handle = (channel: string, handler: () => unknown) =>
         handleFromInterface(window, devServerUrl, channel, handler);
@@ -151,6 +167,9 @@ export function registerIpc(
     handleFromInterface(window, devServerUrl, IPC.saveRoutes, (...args) =>
         settings.saveRoutes(takeRouteInput(args)),
     );
+    handleFromInterface(window, devServerUrl, IPC.setTunnel, (...args) => {
+        setTunnel(takeTunnelMode(args));
+    });
     handle(IPC.minimizeWindow, () => window.minimize());
     handle(IPC.closeWindow, () => window.close());
 

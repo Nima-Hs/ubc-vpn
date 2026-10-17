@@ -12,6 +12,8 @@ import type { RouteInput } from "./protocol/RouteInput";
 import type { RoutesReply } from "./protocol/RoutesReply";
 import type { SettingsFailureCode } from "./protocol/SettingsFailureCode";
 import type { SettingsView } from "./protocol/SettingsView";
+import type { TunnelMode } from "./protocol/TunnelMode";
+import type { TunnelStatus } from "./tunnel";
 
 /** Why the service cannot be used right now. */
 export type UnavailableReason =
@@ -111,6 +113,8 @@ export interface Snapshot {
      * client reads it.
      */
     loginProfile: ProfileId | null;
+    /** Split or full: what is saved, whether full may be chosen, and a switch under way. */
+    tunnel: TunnelStatus;
     /**
      * Whether closing the window hides it and leaves the app in the tray.
      * Where there is no tray to come back from, closing quits instead.
@@ -140,6 +144,12 @@ export interface VpnApi {
     answerPrompt(id: number, value: string): Promise<void>;
     /** Gives up a login, or dismisses one that failed. */
     cancelLogin(): Promise<void>;
+    /**
+     * Saves split or full for every profile, and switches a live connection
+     * to it without disconnecting. What comes of it arrives as a new
+     * snapshot (`tunnel`), not as a return value.
+     */
+    setTunnel(mode: TunnelMode): Promise<void>;
     /** The user's settings, with the limits the policy puts on routes. */
     getSettings(): Promise<SettingsResult<SettingsView>>;
     /** Checks routes as typed. Changes nothing. */
@@ -183,6 +193,7 @@ export const IPC = {
     retry: "vpn:retry",
     answerPrompt: "login:answer",
     cancelLogin: "login:cancel",
+    setTunnel: "tunnel:set",
     getSettings: "settings:get",
     checkRoutes: "settings:check-routes",
     saveRoutes: "settings:save-routes",

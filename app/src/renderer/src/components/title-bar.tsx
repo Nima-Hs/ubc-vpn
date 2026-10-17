@@ -63,7 +63,7 @@ export function TitleBar({
 }) {
     const mac = api.platform === "darwin";
     const closeHides = useSnapshot((snapshot) => snapshot.closeHides);
-    const tone = useSnapshot((snapshot) => describe(snapshot.state).tone);
+    const tone = useSnapshot((snapshot) => describe(snapshot.state, snapshot.tunnel).tone);
     return (
         <header
             className={cn(
