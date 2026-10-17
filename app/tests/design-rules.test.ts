@@ -110,6 +110,8 @@ describe("the tray icon", () => {
     const stateColour: Record<Exclude<TrayKind, "off">, readonly number[]> = {
         busy: COLOUR_PALETTE.busy,
         on: COLOUR_PALETTE.on,
+        "busy-full": COLOUR_PALETTE.busy,
+        "on-full": COLOUR_PALETTE.on,
         attention: COLOUR_PALETTE.attention,
         problem: COLOUR_PALETTE.problem,
     };
@@ -139,7 +141,15 @@ describe("the tray icon", () => {
     });
 
     it("has a different shape for each state, so it reads in one colour", () => {
-        expect([...kinds]).toEqual(["off", "busy", "on", "attention", "problem"]);
+        expect([...kinds]).toEqual([
+            "off",
+            "busy",
+            "on",
+            "busy-full",
+            "on-full",
+            "attention",
+            "problem",
+        ]);
         for (const size of [16, 32]) {
             const shapes = kinds.map((kind) => alpha(kind, size).join(","));
             expect(new Set(shapes).size).toBe(kinds.length);
@@ -155,6 +165,33 @@ describe("the tray icon", () => {
         expect(tunnel("on")).toBeGreaterThan(tunnel("off") * 1.4);
         expect(tunnel("busy")).toBeGreaterThan(tunnel("off"));
         expect(tunnel("attention")).toBe(tunnel("off"));
+    });
+
+    it("shows full tunnel by a short lower line, and a line on from the tunnel's end", () => {
+        // Down the right-hand edge, between the two lines' ends: only full
+        // tunnel draws there, the line on to everything else.
+        const onward = (kind: TrayKind) => alpha(kind, 32)[16 * 32 + 28] ?? 0;
+        expect(onward("on-full")).toBe(255);
+        expect(onward("busy-full")).toBe(255);
+        expect(onward("on")).toBe(0);
+        expect(onward("busy")).toBe(0);
+        // Where the lower line ends in split tunnel, and no longer reaches in full.
+        const lowerEnd = (kind: TrayKind) => alpha(kind, 32)[25 * 32 + 22] ?? 0;
+        expect(lowerEnd("on")).toBe(255);
+        expect(lowerEnd("on-full")).toBe(0);
+        // The tunnel is as wide in either mode.
+        const tunnel = (kind: TrayKind) =>
+            alpha(kind, 32)
+                .slice(0, 10 * 32)
+                .reduce((sum, value) => sum + value, 0);
+        expect(tunnel("on-full")).toBeGreaterThanOrEqual(tunnel("on"));
+    });
+
+    it("moves while working in full tunnel too, in as many pictures", () => {
+        const frames = Array.from({ length: BUSY_FRAMES }, (_, frame) =>
+            alpha("busy-full", 16, frame).join(","),
+        );
+        expect(new Set(frames).size).toBe(BUSY_FRAMES);
     });
 
     it("marks needing attention with a triangle and a problem with a diamond", () => {
@@ -256,7 +293,8 @@ describe("the state icon, shared by the tray and the taskbar button", () => {
                 );
             }
         }
-        expect(STATE_PICTURES).toHaveLength(TRAY_KINDS.length - 1 + BUSY_FRAMES);
+        // Two working kinds, split and full, with all their frames.
+        expect(STATE_PICTURES).toHaveLength(TRAY_KINDS.length - 2 + 2 * BUSY_FRAMES);
     });
 
     it("paints every place with the same state and the same working frame", () => {
@@ -333,6 +371,10 @@ describe("the state icon, shared by the tray and the taskbar button", () => {
             "busy-1.ico",
             "busy-2.ico",
             "on.ico",
+            "busy-full-0.ico",
+            "busy-full-1.ico",
+            "busy-full-2.ico",
+            "on-full.ico",
             "attention.ico",
             "problem.ico",
         ]);

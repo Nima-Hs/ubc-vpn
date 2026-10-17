@@ -191,6 +191,15 @@
     scroll-padding-block: var(--focus-room);
 }
 
+/* A control whose own input is hidden, such as one part of a segmented
+   choice: it shows the focus ring its input would. */
+@utility segment {
+    &:has(:focus-visible) {
+        outline: var(--focus-width) solid var(--c-focus);
+        outline-offset: var(--focus-offset);
+    }
+}
+
 /* A region that scrolls inside the window without moving anything behind it. */
 @utility scroll-region {
     overflow-x: hidden;

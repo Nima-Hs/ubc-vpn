@@ -92,6 +92,7 @@ function SubnetEntry({ entry }: { entry: ShownSubnet }) {
  */
 export function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
     const { subnets, dns_domains: domains } = tunnel;
+    const full = tunnel.mode === "full";
     const combined = useMemo(() => summariseSubnets(subnets), [subnets]);
     const canCombine = combined.length < subnets.length;
     const [showEach, setShowEach] = useState(false);
@@ -107,9 +108,11 @@ export function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
                 <ListRow label={DETAILS.address} data>
                     {tunnel.address}
                 </ListRow>
+                {/* Full tunnel: everything goes through, not only the lists below. */}
+                {full && <ListRow label={DETAILS.traffic}>{DETAILS.allTraffic}</ListRow>}
             </List>
             <Group
-                title={DETAILS.subnets}
+                title={full ? DETAILS.subnetsFull : DETAILS.subnets}
                 count={DETAILS.subnetCount(subnets.length)}
                 listId={listId}
                 footer={
@@ -136,7 +139,10 @@ export function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
                     ))
                 )}
             </Group>
-            <Group title={DETAILS.domains} count={DETAILS.domainCount(domains.length)}>
+            <Group
+                title={full ? DETAILS.domainsFull : DETAILS.domains}
+                count={DETAILS.domainCount(domains.length)}
+            >
                 {domains.length === 0 ? (
                     <NoEntries />
                 ) : (

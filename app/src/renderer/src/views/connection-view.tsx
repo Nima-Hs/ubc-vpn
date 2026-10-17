@@ -7,12 +7,14 @@ import {
 } from "@shared/copy";
 import { useEffect, useRef } from "react";
 import { ProfileSwitcher } from "@/components/profile-switcher";
+import { TunnelSwitch, useTunnelOutcomeText } from "@/components/tunnel-choice";
 import { TunnelDetails } from "@/components/tunnel-details";
 import { TunnelDiagram } from "@/components/tunnel-diagram";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
+import { cn } from "@/lib/cn";
 import { api, useSnapshot } from "@/lib/store";
 import { LoginView } from "./login-view";
 
@@ -24,8 +26,9 @@ const run: Record<ActionKind, () => Promise<void>> = {
 
 /** The app's first screen: where the connection stands, and one thing to do about it. */
 export function ConnectionView() {
-    const { state, notice, login } = useSnapshot();
-    const copy = describe(state);
+    const { state, notice, login, tunnel: tunnelStatus } = useSnapshot();
+    const copy = describe(state, tunnelStatus);
+    const outcomeText = useTunnelOutcomeText();
     const { action } = copy;
     const tunnel =
         state.link === "ready" && state.conn.state === "connected" ? state.conn.tunnel : null;
@@ -48,6 +51,7 @@ export function ConnectionView() {
             <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
                 <TunnelDiagram
                     tone={login.phase === "failed" ? "problem" : "busy"}
+                    mode={copy.mode}
                     className="shrink-0"
                 />
                 <LoginView login={login} />
@@ -61,7 +65,12 @@ export function ConnectionView() {
 
     return (
         <main className="scroll-region flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
-            <TunnelDiagram tone={copy.tone} className="shrink-0" />
+            <TunnelDiagram
+                tone={copy.tone}
+                mode={copy.mode}
+                held={tunnel !== null && tunnelStatus.switching !== null}
+                className="shrink-0"
+            />
 
             {/* The words change the instant the state does; only their arrival is animated. */}
             <section key={copy.title} className="flex shrink-0 animate-arrive flex-col gap-2">
@@ -72,17 +81,26 @@ export function ConnectionView() {
                 <Text tone="secondary">{copy.body}</Text>
             </section>
 
+            {/* Split or full, for every profile: switched in place while connected. */}
+            <TunnelSwitch />
+
             {/* Which profile Connect uses, when there is more than one. */}
             <ProfileSwitcher />
 
-            {/* Read out, politely, whenever the state or the notice changes. */}
+            {/* Read out, politely, whenever the state, the notice or a switch's outcome changes. */}
             <p role="status" className="sr-only">
-                {copy.title}. {copy.body} {noticeCopy?.text}
+                {copy.title}. {copy.body} {noticeCopy?.text} {outcomeText}
             </p>
 
-            {/* Keeps a minimum height, so when the text is zoomed past what the
-                window can hold, the screen scrolls and the button stays reachable. */}
-            <div className="flex min-h-24 flex-1 flex-col">
+            {/* With something in it, keeps a minimum height, so when the text is
+                zoomed past what the window can hold, the screen scrolls and the
+                button stays reachable. Empty, it takes only the room left over. */}
+            <div
+                className={cn(
+                    "flex flex-1 flex-col",
+                    (tunnel !== null || copy.detail !== undefined) && "min-h-16",
+                )}
+            >
                 {tunnel !== null && <TunnelDetails tunnel={tunnel} />}
                 {copy.detail !== undefined && (
                     <Panel tone="problem" scrollLabel="What the VPN service reported">

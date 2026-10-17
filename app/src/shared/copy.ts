@@ -11,6 +11,8 @@ import type { LoginErrorCode } from "./protocol/LoginErrorCode";
 import type { PromptKind } from "./protocol/PromptKind";
 import type { RouteProblemCode } from "./protocol/RouteProblemCode";
 import type { SettingsView } from "./protocol/SettingsView";
+import type { TunnelMode } from "./protocol/TunnelMode";
+import { shownMode, TUNNEL, type TunnelStatus, UNREAD_TUNNEL } from "./tunnel";
 
 /** Picks the colour and motion of the status indicator. */
 export type Tone = "idle" | "busy" | "on" | "attention" | "problem";
@@ -30,6 +32,11 @@ export interface StateCopy {
     action: { kind: ActionKind; label: string } | null;
     /** The button is shown but waiting: something is already under way. */
     working: boolean;
+    /**
+     * Split or full: what the picture, the tray icon and the taskbar show.
+     * The mode being switched to, the one in effect, or the one saved.
+     */
+    mode: TunnelMode;
 }
 
 const CONNECT = { kind: "connect", label: "Connect" } as const;
@@ -49,6 +56,11 @@ export const DETAILS = {
     address: "Your VPN address",
     subnets: "Subnets through the VPN",
     domains: "Domains looked up through the VPN",
+    /** Full tunnel: everything goes through, and the saved lists are the user's own. */
+    traffic: "Through the VPN",
+    allTraffic: "All your traffic",
+    subnetsFull: "Your saved subnets",
+    domainsFull: "Your saved domains",
     none: "None",
     subnetCount: (n: number) => count(n, "subnet", "subnets"),
     domainCount: (n: number) => count(n, "domain", "domains"),
@@ -154,7 +166,7 @@ const FAILURES: Record<ErrorCode, Failure> = {
     },
 };
 
-function describeConn(conn: ConnState): StateCopy {
+function describeConn(conn: ConnState, tunnel: TunnelStatus): Omit<StateCopy, "mode"> {
     switch (conn.state) {
         case "disconnected":
             return {
@@ -168,19 +180,42 @@ function describeConn(conn: ConnState): StateCopy {
             return {
                 tone: "busy",
                 title: "Connecting",
-                body: "Opening the tunnel and setting up your routes.",
+                body:
+                    tunnel.saved === "full"
+                        ? "Opening the tunnel. Once it is open, all your traffic will go through UBC."
+                        : "Opening the tunnel and setting up your routes.",
                 action: { kind: "connect", label: "Connecting…" },
                 working: true,
             };
         case "connected": {
             const subnets = conn.tunnel.subnets.length;
+            const switching = tunnel.switching;
+            if (switching !== null) {
+                return {
+                    tone: "busy",
+                    // Short, so the title keeps to one line and nothing moves.
+                    title: "Switching",
+                    body: `Moving to ${TUNNEL.names[switching.to].toLowerCase()}. The VPN stays connected.`,
+                    action: { kind: "disconnect", label: "Disconnect" },
+                    working: false,
+                };
+            }
+            if (conn.tunnel.mode === "full") {
+                return {
+                    tone: "on",
+                    title: "Connected",
+                    body: "Full tunnel: all your traffic goes through UBC, and your computer’s name lookups go to UBC’s DNS servers. Your local network is still reached directly.",
+                    action: { kind: "disconnect", label: "Disconnect" },
+                    working: false,
+                };
+            }
             return {
                 tone: "on",
                 title: "Connected",
                 body:
                     subnets === 0
                         ? "The tunnel is open, but no subnets are routed through it. All your traffic is using your normal connection."
-                        : `Traffic to ${count(subnets, "UBC subnet", "UBC subnets")} goes through the VPN. Everything else uses your normal connection.`,
+                        : `Split tunnel: traffic to ${count(subnets, "UBC subnet", "UBC subnets")} goes through the VPN. Everything else uses your normal connection.`,
                 action: { kind: "disconnect", label: "Disconnect" },
                 working: false,
             };
@@ -220,8 +255,15 @@ function describeConn(conn: ConnState): StateCopy {
     }
 }
 
-/** The words for a state. */
-export function describe(state: LinkState): StateCopy {
+/**
+ * The words for a state, and the mode its picture shows. Without `tunnel`,
+ * nothing is known of the tunnel setting, and split is shown.
+ */
+export function describe(state: LinkState, tunnel: TunnelStatus = UNREAD_TUNNEL): StateCopy {
+    return { ...describeLink(state, tunnel), mode: shownMode(state, tunnel) };
+}
+
+function describeLink(state: LinkState, tunnel: TunnelStatus): Omit<StateCopy, "mode"> {
     switch (state.link) {
         case "starting":
             return {
@@ -281,7 +323,7 @@ export function describe(state: LinkState): StateCopy {
                 working: false,
             };
         case "ready":
-            return describeConn(state.conn);
+            return describeConn(state.conn, tunnel);
     }
 }
 

@@ -7,7 +7,8 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use ubc_vpn_core::profiles::{ProfileId, Profiles, StartMode};
+use ubc_vpn_core::policy::FullTunnel;
+use ubc_vpn_core::profiles::{ProfileId, Profiles, ProfilesView, StartMode};
 use ubc_vpn_core::protocol::{
     ClientKind, ErrorCode, Event, Outcome, Request, RequestBody, Response, ResponseBody,
     ServerMessage, SetTunnelParams, decode,
@@ -393,4 +394,34 @@ fn an_answer_of_the_wrong_kind_is_not_applied() {
             "{answer:?}: {live:?}"
         );
     }
+}
+
+/// The answer to `profiles list`.
+fn listed(scene: &Scene) -> ProfilesView {
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = run(
+        Command::List,
+        &platform,
+        &mut "".as_bytes(),
+        &mut out,
+        &mut err,
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(status, 0, "{out}");
+    decode(out.trim_end()).unwrap()
+}
+
+// The profiles view says whether the policy lets full mode be chosen, so
+// the app can say so before anyone chooses it. Without a word in the
+// policy, it may be.
+#[test]
+fn the_profiles_view_says_whether_the_policy_allows_full_mode() {
+    let settings = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let forbidden = Scene::new(Some(&settings), r#","full_tunnel":"forbidden""#);
+    assert_eq!(listed(&forbidden).full_tunnel, FullTunnel::Forbidden);
+    let allowed = Scene::new(Some(&settings), r#","full_tunnel":"allowed""#);
+    assert_eq!(listed(&allowed).full_tunnel, FullTunnel::Allowed);
+    let unsaid = Scene::new(Some(&settings), "");
+    assert_eq!(listed(&unsaid).full_tunnel, FullTunnel::Allowed);
 }

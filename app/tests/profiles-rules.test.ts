@@ -94,6 +94,7 @@ describe("the tray menu", () => {
         retry: () => {},
         quit: () => {},
         switchProfile: () => {},
+        setTunnel: () => {},
     };
     const disconnected: LinkState = { link: "ready", conn: { state: "disconnected" } };
     const two = async () => {
@@ -279,6 +280,7 @@ describe("the tray menu during a login", () => {
             retry: () => {},
             quit: () => {},
             switchProfile: () => {},
+            setTunnel: () => {},
         };
         const items = trayMenu(
             { link: "ready", conn: { state: "disconnected" } },

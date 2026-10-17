@@ -15,7 +15,18 @@ export function ChoiceList<T extends string>({
     note,
 }: {
     legend: string;
-    options: readonly { value: T; label: string; hint?: string | undefined }[];
+    /** An option with `disabled` is shown but cannot be chosen; `note` should say why. */
+    options: readonly {
+        value: T;
+        label: string;
+        hint?: string | undefined;
+        disabled?: boolean;
+        /**
+         * Chosen, but cannot be changed just now: it stays focusable, so the
+         * keyboard keeps its place and a screen reader reaches `note`.
+         */
+        locked?: boolean;
+    }[];
     value: T;
     onChange(value: T): void;
     disabled?: boolean;
@@ -32,39 +43,48 @@ export function ChoiceList<T extends string>({
         >
             <legend className="pb-2 font-strong text-title text-text">{legend}</legend>
             <div className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border-strong bg-surface shadow-surface">
-                {options.map((option) => (
-                    <label
-                        key={option.value}
-                        className={cn(
-                            "flex items-start gap-3 px-4 py-3",
-                            !disabled && "hover:bg-quiet-hover",
-                        )}
-                    >
-                        <input
-                            type="radio"
-                            name={name}
-                            value={option.value}
-                            checked={value === option.value}
-                            onChange={() => onChange(option.value)}
-                            className="mt-1 size-4 shrink-0 accent-accent"
-                        />
-                        <span className="flex min-w-0 flex-col gap-0.5">
-                            <span
-                                className={cn(
-                                    "text-body",
-                                    disabled ? "text-text-tertiary" : "text-text",
-                                )}
-                            >
-                                {option.label}
-                            </span>
-                            {option.hint !== undefined && (
-                                <span className="text-label text-text-secondary">
-                                    {option.hint}
-                                </span>
+                {options.map((option) => {
+                    const off = disabled || option.disabled === true || option.locked === true;
+                    return (
+                        <label
+                            key={option.value}
+                            className={cn(
+                                "flex items-start gap-3 px-4 py-3",
+                                !off && "hover:bg-quiet-hover",
                             )}
-                        </span>
-                    </label>
-                ))}
+                        >
+                            <input
+                                type="radio"
+                                name={name}
+                                value={option.value}
+                                checked={value === option.value}
+                                disabled={option.disabled === true}
+                                aria-disabled={option.locked === true || undefined}
+                                onChange={() => {
+                                    if (option.locked !== true) {
+                                        onChange(option.value);
+                                    }
+                                }}
+                                className="mt-1 size-4 shrink-0 accent-accent"
+                            />
+                            <span className="flex min-w-0 flex-col gap-0.5">
+                                <span
+                                    className={cn(
+                                        "text-body",
+                                        off ? "text-text-tertiary" : "text-text",
+                                    )}
+                                >
+                                    {option.label}
+                                </span>
+                                {option.hint !== undefined && (
+                                    <span className="text-label text-text-secondary">
+                                        {option.hint}
+                                    </span>
+                                )}
+                            </span>
+                        </label>
+                    );
+                })}
             </div>
             {note !== undefined && (
                 <p id={noteId} className="text-label text-text-secondary">

@@ -1,5 +1,6 @@
 import type { ActionResult, LoginState, Snapshot } from "@shared/api";
 import type { ProfileId } from "@shared/protocol/ProfileId";
+import { type TunnelStatus, UNREAD_TUNNEL } from "@shared/tunnel";
 import type { LoginRunner } from "./channel/connect";
 import type { ServiceLink } from "./link";
 
@@ -24,6 +25,7 @@ export class Controller {
     private login: LoginState = { phase: "idle" };
     /** The profile the login under way is for, while there is one. */
     private loginProfile: ProfileId | null = null;
+    private tunnel: TunnelStatus = UNREAD_TUNNEL;
     /** Which profile a login started now is for: the active one, as the app knows it. */
     private profileForLogin: () => ProfileId | null = () => null;
 
@@ -42,6 +44,7 @@ export class Controller {
             notice: null,
             login: this.login,
             loginProfile: null,
+            tunnel: this.tunnel,
             closeHides: false,
             development,
         };
@@ -111,6 +114,12 @@ export class Controller {
         return this.run(() => this.link.disconnect());
     }
 
+    /** Where the tunnel setting now stands, for the window and the tray. */
+    setTunnel(tunnel: TunnelStatus): void {
+        this.tunnel = tunnel;
+        this.publish(this.snapshot);
+    }
+
     /** Says whether closing the window hides it or quits the app. */
     setCloseHides(closeHides: boolean): void {
         this.closeHides = closeHides;
@@ -143,6 +152,7 @@ export class Controller {
             notice: next.notice,
             login: this.login,
             loginProfile: this.login.phase === "idle" ? null : this.loginProfile,
+            tunnel: this.tunnel,
             closeHides: this.closeHides,
             development: this.development,
         };

@@ -84,6 +84,7 @@ pub struct Policy {
 /// What a [`Policy`] says of full mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 pub enum FullTunnel {
     /// Users may choose it.
     #[default]
