@@ -105,11 +105,15 @@ export function TunnelDetails({ tunnel }: { tunnel: TunnelInfo }) {
     return (
         <Panel scrollLabel={DETAILS.label}>
             <List>
-                <ListRow label={DETAILS.address} data>
+                <ListRow label={DETAILS.address} data compact>
                     {tunnel.address}
                 </ListRow>
                 {/* Full tunnel: everything goes through, not only the lists below. */}
-                {full && <ListRow label={DETAILS.traffic}>{DETAILS.allTraffic}</ListRow>}
+                {full && (
+                    <ListRow label={DETAILS.traffic} compact>
+                        {DETAILS.allTraffic}
+                    </ListRow>
+                )}
             </List>
             <Group
                 title={full ? DETAILS.subnetsFull : DETAILS.subnets}
