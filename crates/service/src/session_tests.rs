@@ -155,47 +155,55 @@ fn a_connect_never_settled_is_undone() {
     session.stop();
 }
 
-// Until full mode can be applied it is refused, at connect and on a switch,
-// with nothing done for it; split is the mode every tunnel has, so a switch
-// to split is no change while connected and waits for a connect otherwise.
+// Security rule: what full mode needs of the policy and of this system is
+// checked first, with nothing done: at connect, and on a switch, where it
+// comes before `not_connected` and `busy`, so the answer names the cause.
 #[test]
-fn full_mode_is_refused_until_it_can_be_applied() {
-    let (session, hub, fake) = reconnecting_session();
-    let full = ConnectParams {
-        tunnel: TunnelMode::Full,
-        ..params()
-    };
-    let refused = session.connect(full).map(drop).unwrap_err();
-    assert_eq!(refused.code, ErrorCode::RouteRefused);
-    assert_eq!(refused.message, FULL_NOT_YET);
-    assert!(fake.calls().is_empty(), "something was done for it");
-
-    let idle = session.set_tunnel(TunnelMode::Split).map(drop).unwrap_err();
-    assert_eq!(idle.code, ErrorCode::NotConnected);
-    let refused = session.set_tunnel(TunnelMode::Full).map(drop).unwrap_err();
-    assert_eq!(refused.code, ErrorCode::RouteRefused);
-
-    session.connect(params()).unwrap().settle(true);
-    until("connected", || {
-        matches!(hub.state(), ConnState::Connected { .. })
-    });
-    let ConnState::Connected { tunnel } = hub.state() else {
-        panic!("{:?}", hub.state())
-    };
-    assert_eq!(tunnel.mode, TunnelMode::Split);
-    let calls = fake.calls().len();
-    let refused = session.set_tunnel(TunnelMode::Full).map(drop).unwrap_err();
-    assert_eq!(refused.code, ErrorCode::RouteRefused);
-    assert_eq!(refused.message, FULL_NOT_YET);
-    match session.set_tunnel(TunnelMode::Split) {
-        Ok(Admitted::Unchanged(same)) => assert_eq!(same, tunnel),
-        other => panic!("{:?}", other.map(drop)),
+fn full_mode_the_policy_or_system_rules_out_is_refused_first() {
+    for case in ["policy", "system"] {
+        let fake = Fake::new();
+        let platform = fake.platform(&std::env::temp_dir().join("ubc-vpn-made-up"));
+        let pin: Pin = format!("pin-sha256:{}=", "A".repeat(43))
+            .try_into()
+            .unwrap();
+        let engine = Arc::new(FakeEngine::new(Script::new(pin.clone())));
+        let full_tunnel = match case {
+            "policy" => ubc_vpn_core::policy::FullTunnel::Forbidden,
+            _ => ubc_vpn_core::policy::FullTunnel::Allowed,
+        };
+        if case == "system" {
+            fake.set_reports_ipv6_changes(false);
+        }
+        let policy = Policy {
+            gateway: "vpn.example.test".to_string(),
+            pins: vec![pin],
+            allowed_routes: None,
+            full_tunnel,
+        };
+        let hub = Arc::new(Hub::new(None));
+        let session = Session::start(&platform, engine, Ok(policy), hub, Logs::default());
+        let session = session.unwrap();
+        let message = match case {
+            "policy" => full::FORBIDDEN,
+            _ => full::UNSUPPORTED,
+        };
+        let full = ConnectParams {
+            tunnel: TunnelMode::Full,
+            ..params()
+        };
+        let refused = session.connect(full).map(drop).unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (ErrorCode::RouteRefused, message)
+        );
+        let refused = session.set_tunnel(TunnelMode::Full).map(drop).unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (ErrorCode::RouteRefused, message)
+        );
+        let idle = session.set_tunnel(TunnelMode::Split).map(drop).unwrap_err();
+        assert_eq!(idle.code, ErrorCode::NotConnected, "{case}");
+        assert!(fake.calls().is_empty(), "{case}: something was done");
+        session.stop();
     }
-    assert_eq!(
-        fake.calls().len(),
-        calls,
-        "a refusal or no change did something"
-    );
-    assert_eq!(hub.state(), ConnState::Connected { tunnel });
-    session.stop();
 }

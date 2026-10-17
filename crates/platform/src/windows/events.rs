@@ -341,6 +341,12 @@ impl NetworkEvents for WinEvents {
         );
         Ok(Subscription::new(receiver, ending))
     }
+
+    // The notifications are registered for IPv4 and IPv6 alike, and the
+    // worker sends `Ipv6Changed` whenever the IPv6 leak paths change.
+    fn reports_ipv6_changes(&self) -> bool {
+        true
+    }
 }
 
 /// What dropping a [`Subscription`] ends, in this order: the registrations,

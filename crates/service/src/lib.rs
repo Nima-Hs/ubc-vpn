@@ -15,6 +15,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 pub mod args;
 mod connect;
 mod diagnostics;
+mod full;
 mod hub;
 pub mod install;
 mod logs;
@@ -28,11 +29,12 @@ mod update;
 mod verify;
 mod words;
 
+pub use full::MODE_CHANGED;
 pub use logs::{CAPACITY as LOG_CAPACITY, LINGER, Logs, NOT_LOGGED, REQUEST_LINES};
 pub use server::{MAX_CONNECTIONS, MAX_PER_STRANGER, MAX_STRANGERS, Service, Timeouts};
 pub use session::ABANDONED;
 pub use update::ROUTES_CHANGED;
-pub use verify::DNS_UNCONFIRMED;
+pub use verify::{CATCH_ALL_UNCONFIRMED, DNS_UNCONFIRMED};
 
 /// Locks a mutex, carrying on after another thread panicked while holding it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

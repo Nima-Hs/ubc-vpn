@@ -152,6 +152,19 @@ struct State {
     physical_ipv6: bool,
     /// Whether a rule that is not the product's takes every name.
     foreign_catch_all: bool,
+    /// Networks the machine is on through an adapter other than the
+    /// physical one, such as a virtual machine program's host-only network,
+    /// with that adapter's name.
+    adapters: Vec<(String, Ipv4Net)>,
+    /// Tunnel routes the fake OS says it added but did not, to play a route
+    /// that went missing.
+    lost: HashSet<Ipv4Net>,
+    /// Whether a subscription sends `Ipv6Changed`.
+    reports_ipv6: bool,
+    /// The router the physical network hands traffic to.
+    router: Ipv4Addr,
+    /// Destinations whose route check answers that it could not tell.
+    untold_routes: HashSet<Ipv4Addr>,
 }
 
 impl Default for State {
@@ -176,6 +189,11 @@ impl Default for State {
             tunnel_ipv6: true,
             physical_ipv6: true,
             foreign_catch_all: false,
+            adapters: Vec::new(),
+            lost: HashSet::new(),
+            reports_ipv6: true,
+            router: ROUTER,
+            untold_routes: HashSet::new(),
         }
     }
 }
@@ -303,10 +321,13 @@ impl Fake {
 
     /// Makes every later `op` fail with `error`, or with `None` work again.
     ///
-    /// A failing operation changes nothing, with one exception: a failing
-    /// [`Routes::add_tunnel_routes`] first adds every subnet but the last, as
-    /// an OS that fails partway would. A failing check answers
-    /// [`Verified::Unknown`].
+    /// A failing operation changes nothing, with three exceptions, each as
+    /// an OS that fails part-way would: a failing
+    /// [`Routes::add_tunnel_routes`] first adds every subnet but the last; a
+    /// failing [`Routes::add_full_tunnel`] first adds the halves, when it
+    /// would have added them; and a failing [`Dns::set_catch_all_dns`]
+    /// first sets the catch-all, when it would have set it. A failing check
+    /// answers [`Verified::Unknown`].
     pub fn set_failure(&self, op: Op, error: Option<Error>) {
         let mut state = self.state();
         match error {
@@ -384,6 +405,19 @@ impl Fake {
         routes.retain(|(interface, _)| interface != name);
     }
 
+    /// Makes every later [`Routes::uses_interface`] for `dest` answer
+    /// [`Verified::Unknown`], whatever it is asked, as a check that could
+    /// not read the table would.
+    pub fn cannot_tell_route_to(&self, dest: Ipv4Addr) {
+        self.state().untold_routes.insert(dest);
+    }
+
+    /// Sets the router the next [`Routes::capture_physical`] reports, and
+    /// the resolver every name uses until DNS rules say otherwise.
+    pub fn set_router(&self, router: Ipv4Addr) {
+        self.state().router = router;
+    }
+
     /// Sets what the next [`Routes::capture_physical`] reports as the
     /// machine's own addresses and on-link networks.
     pub fn set_local(&self, own_addresses: &[Ipv4Addr], on_link: &[Ipv4Net]) {
@@ -424,6 +458,34 @@ impl Fake {
         state.physical_ipv6 = physical;
     }
 
+    /// Puts the machine on `net` through `adapter`, an adapter that is not
+    /// the physical one, such as a virtual machine program's host-only
+    /// network: the next [`Routes::capture_physical`] counts it among the
+    /// networks the machine is on, and an address in it leaves by `adapter`.
+    pub fn add_adapter_network(&self, adapter: &str, net: Ipv4Net) {
+        let mut state = self.state();
+        state.adapters.push((adapter.to_string(), net));
+        if !state.on_link.contains(&net) {
+            state.on_link.push(net);
+        }
+    }
+
+    /// Makes [`Routes::add_tunnel_routes`] report `net` added without adding
+    /// it, as an OS that lost a route would; `false` ends that.
+    pub fn lose_tunnel_route(&self, net: Ipv4Net, lost: bool) {
+        let mut state = self.state();
+        match lost {
+            true => state.lost.insert(net),
+            false => state.lost.remove(&net),
+        };
+    }
+
+    /// Whether a subscription sends [`NetworkEvent::Ipv6Changed`]; `true`
+    /// until a test says otherwise.
+    pub fn set_reports_ipv6_changes(&self, reports: bool) {
+        self.state().reports_ipv6 = reports;
+    }
+
     /// Plays a rule that is not the product's taking every name, such as
     /// another VPN's, or takes it away.
     pub fn set_foreign_catch_all(&self, present: bool) {
@@ -443,7 +505,7 @@ impl Fake {
         match (&state.applied.split_dns, &state.applied.catch_all_dns) {
             (Some((_, dns)), _) if dns.domains.iter().any(under) => dns.resolvers.clone(),
             (_, Some(all)) => all.clone(),
-            _ => vec![ROUTER],
+            _ => vec![state.router],
         }
     }
 
@@ -524,7 +586,7 @@ impl Routes for Fake {
         }
         Ok(PhysicalNetwork {
             interface: PHYSICAL_INTERFACE.to_string(),
-            next_hop: Some(ROUTER),
+            next_hop: Some(state.router),
             own_addresses: state.own_addresses.clone(),
             on_link: state.on_link.clone(),
         })
@@ -587,6 +649,7 @@ impl Routes for Fake {
             match state.route_to(*subnet, tunnel) {
                 Present::Identical => {}
                 Present::Elsewhere => return Err(Error::AlreadyExists),
+                Present::None if state.lost.contains(subnet) => {}
                 Present::None => {
                     let route = (tunnel.to_string(), *subnet);
                     state.applied.tunnel_routes.push(route);
@@ -639,15 +702,21 @@ impl Routes for Fake {
     /// count like the product's own.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
         let (state, outcome) = self.start(Op::VerifyRoute);
-        if outcome.is_err() {
+        if outcome.is_err() || state.untold_routes.contains(&dest) {
             return Verified::Unknown;
         }
         let applied = &state.applied;
         let host = applied.gateway_routes.iter().find(|(d, _)| *d == dest);
         // The machine's own networks are routes too: more specific than a
         // wider chosen subnet and than the halves of full mode.
+        // Each through its own adapter: the physical one unless another was
+        // named for it.
+        let adapter = |net: &Ipv4Net| {
+            let named = state.adapters.iter().find(|(_, n)| n == net);
+            named.map_or(PHYSICAL_INTERFACE, |(name, _)| name.as_str())
+        };
         let on_link = state.on_link.iter();
-        let local = on_link.map(|net| (PHYSICAL_INTERFACE.to_string(), *net));
+        let local = on_link.map(|net| (adapter(net).to_string(), *net));
         let table: Vec<_> = state.table().into_iter().chain(local).collect();
         let narrowest = table
             .iter()
@@ -674,24 +743,27 @@ impl Routes for Fake {
     /// added nothing. Then adds the halves. A half through another
     /// interface fails with [`Error::AlreadyExists`] before anything is
     /// added; where an OS would have added the first half, the fake adds
-    /// none, which only makes less to remove.
+    /// none, which only makes less to remove. Told to fail, it adds the
+    /// halves first, as an OS that failed after adding them would.
     fn add_full_tunnel(&self, tunnel: &str) -> Result<Ipv6Block> {
         let (mut state, outcome) = self.start(Op::AddFullTunnel);
-        outcome?;
         if state.absent.contains(tunnel) {
-            return Err(Error::NotFound);
+            return outcome.and(Err(Error::NotFound));
         }
-        let ipv6 = state.ipv6_decision()?;
+        let ipv6 = match state.ipv6_decision() {
+            Ok(ipv6) => ipv6,
+            Err(refused) => return outcome.and(Err(refused)),
+        };
         let elsewhere = |half| matches!(state.route_to(half, tunnel), Present::Elsewhere);
         if v4_halves().into_iter().any(elsewhere) {
-            return Err(Error::AlreadyExists);
+            return outcome.and(Err(Error::AlreadyExists));
         }
         let full = FullTunnel {
             tunnel: tunnel.to_string(),
             ipv6,
         };
         state.applied.full_tunnel = Some(full);
-        Ok(ipv6)
+        outcome.map(|()| ipv6)
     }
 
     fn remove_full_tunnel(&self, tunnel: &str) -> Result<()> {
@@ -790,14 +862,18 @@ impl Dns for Fake {
         }
     }
 
+    /// Told to fail, it sets the catch-all first, as an OS that failed after
+    /// writing the rule would.
     fn set_catch_all_dns(&self, resolvers: &[Ipv4Addr]) -> Result<()> {
         let (mut state, outcome) = self.start(Op::SetCatchAllDns);
-        outcome?;
         if state.foreign_catch_all {
-            return Err(Error::AlreadyExists);
+            return outcome.and(Err(Error::AlreadyExists));
+        }
+        if resolvers.is_empty() {
+            return outcome.and(Err(Error::InvalidInput));
         }
         state.applied.catch_all_dns = Some(resolvers.to_vec());
-        Ok(())
+        outcome
     }
 
     fn clear_catch_all_dns(&self) -> Result<()> {
@@ -825,6 +901,10 @@ impl Dns for Fake {
 }
 
 impl NetworkEvents for Fake {
+    fn reports_ipv6_changes(&self) -> bool {
+        self.state().reports_ipv6
+    }
+
     /// Delivers only what [`Fake::send_event`] injects, whatever is watched.
     fn subscribe(&self, _watching: &PhysicalNetwork) -> Result<Subscription> {
         let (mut state, outcome) = self.start(Op::Subscribe);
@@ -1101,31 +1181,62 @@ mod tests {
     #[test]
     fn full_mode_keeps_every_network_the_machine_is_on() {
         let fake = Fake::new();
-        let home = net("192.168.0.0/24");
-        let host_only = [net("172.31.130.0/24"), net("172.31.140.0/24")];
-        let own = [
-            OWN_ADDRESS,
-            Ipv4Addr::new(172, 31, 130, 1),
-            Ipv4Addr::new(172, 31, 140, 1),
-        ];
-        fake.set_local(&own, &[home, host_only[0], host_only[1]]);
+        // The home network is the physical one; the host-only networks are
+        // on adapters of their own, as a virtual machine program makes them.
+        let router = Ipv4Addr::new(10, 200, 0, 1);
+        fake.set_router(router);
+        fake.set_local(&[Ipv4Addr::new(10, 200, 0, 10)], &[net("10.200.0.0/24")]);
+        fake.add_adapter_network("fake-host1", net("172.31.130.0/24"));
+        fake.add_adapter_network("fake-host2", net("172.31.140.0/24"));
         let physical = fake.capture_physical(GATEWAY).unwrap();
+        assert_eq!(physical.next_hop(), Some(router));
         assert!(physical.router_is_on_link());
+        assert_eq!(physical.on_link().len(), 3);
         fake.add_gateway_route(GATEWAY, &physical).unwrap();
         assert_eq!(fake.add_full_tunnel(TUNNEL), Ok(Ipv6Block::Blocked));
-        for dest in [
-            ROUTER,
-            Ipv4Addr::new(192, 168, 0, 200),
-            Ipv4Addr::new(172, 31, 130, 128),
-            Ipv4Addr::new(172, 31, 140, 254),
-            GATEWAY,
-        ] {
-            let direct = fake.uses_interface(dest, PHYSICAL_INTERFACE);
-            assert_eq!(direct, Verified::Yes, "{dest}");
+        let direct = [
+            (router, PHYSICAL_INTERFACE),
+            (Ipv4Addr::new(10, 200, 0, 200), PHYSICAL_INTERFACE),
+            (Ipv4Addr::new(172, 31, 130, 128), "fake-host1"),
+            (Ipv4Addr::new(172, 31, 140, 254), "fake-host2"),
+            (GATEWAY, PHYSICAL_INTERFACE),
+        ];
+        for (dest, adapter) in direct {
+            assert_eq!(fake.uses_interface(dest, TUNNEL), Verified::No, "{dest}");
+            assert_eq!(fake.uses_interface(dest, adapter), Verified::Yes, "{dest}");
+            // Not the physical interface, for the host-only networks.
+            let physical = fake.uses_interface(dest, PHYSICAL_INTERFACE);
+            assert_eq!(physical == Verified::Yes, adapter == PHYSICAL_INTERFACE);
         }
-        for dest in [Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(8, 8, 8, 8)] {
+        for dest in [Ipv4Addr::new(10, 201, 0, 1), Ipv4Addr::new(203, 0, 113, 1)] {
             assert_eq!(fake.uses_interface(dest, TUNNEL), Verified::Yes, "{dest}");
         }
+        assert_eq!(fake.resolvers_for("www.example.org"), [router]);
+    }
+
+    // "On error some may have been added": a failing add of the halves or
+    // set of the catch-all leaves them behind, so a service that does not
+    // record them before it adds them fails its tests. A route check can be
+    // made to say it could not tell, for one address only.
+    #[test]
+    fn failing_full_mode_steps_leave_what_they_did() {
+        let fake = Fake::new();
+        fake.set_failure(Op::AddFullTunnel, failed());
+        fake.set_failure(Op::SetCatchAllDns, failed());
+        assert!(fake.add_full_tunnel(TUNNEL).is_err());
+        let resolvers = [Ipv4Addr::new(10, 255, 0, 53)];
+        assert!(fake.set_catch_all_dns(&resolvers).is_err());
+        let applied = fake.applied();
+        assert!(applied.full_tunnel.is_some());
+        assert_eq!(applied.catch_all_dns, Some(resolvers.to_vec()));
+        fake.set_failure(Op::SetCatchAllDns, None);
+        assert_eq!(fake.set_catch_all_dns(&[]), Err(Error::InvalidInput));
+
+        let away = Ipv4Addr::new(203, 0, 113, 1);
+        fake.cannot_tell_route_to(away);
+        assert_eq!(fake.uses_interface(away, TUNNEL), Verified::Unknown);
+        let other = Ipv4Addr::new(203, 0, 113, 2);
+        assert_eq!(fake.uses_interface(other, TUNNEL), Verified::Yes);
     }
 
     // Another program's halves are a conflict: it is seen before anything
@@ -1554,6 +1665,9 @@ mod tests {
                 let (_sender, receiver) = mpsc::channel();
                 Ok(Subscription::new(receiver, Stuck))
             }
+            fn reports_ipv6_changes(&self) -> bool {
+                false
+            }
         }
         let fake = Fake::new();
         let physical = fake.capture_physical(GATEWAY).unwrap();
@@ -1590,6 +1704,9 @@ mod tests {
                 // Keeps the fake's subscription after the drop.
                 std::mem::forget(inner);
                 Ok(Subscription::new(receiver, ()))
+            }
+            fn reports_ipv6_changes(&self) -> bool {
+                false
             }
         }
         let lingering = Lingering(fake.clone());

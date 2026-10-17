@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::policy::{FullTunnel, Policy};
 use ubc_vpn_core::protocol::{
     ConnectParams, ErrorCode, ErrorInfo, LastError, LogLevel, is_plausible_cookie,
     is_plausible_gateway_addr,
@@ -25,10 +25,13 @@ use ubc_vpn_core::protocol::{
 use ubc_vpn_core::routes::{Ipv4Net, LocalNetworks, RouteSet, check_against_local};
 use ubc_vpn_core::state::{ConnState, TunnelInfo, TunnelMode};
 use ubc_vpn_engine::{Cancel, Gateway, Tunnel, TunnelEngine, TunnelEvent};
-use ubc_vpn_platform::{Dns, NetworkEvent, NetworkEvents, PhysicalNetwork, Platform, Routes};
+use ubc_vpn_platform::{
+    Dns, Ipv6Block, NetworkEvent, NetworkEvents, PhysicalNetwork, Platform, Routes,
+};
 
 use crate::connect::dns_servers;
 use crate::diagnostics::failure;
+use crate::full;
 use crate::hub::Hub;
 use crate::logs::Held;
 use crate::words::{counted, word};
@@ -79,8 +82,10 @@ struct Live {
     /// The DNS servers the gateway assigned.
     assigned_dns: Vec<Ipv4Addr>,
     /// Whether routes to them are in place, as they are once a connection
-    /// has had DNS domains.
+    /// has had DNS domains or full mode.
     dns_routed: bool,
+    /// Whether the network is watched, so that an IPv6 change is seen.
+    watched: bool,
 }
 
 /// What the log says when a connect is undone because its client went
@@ -114,6 +119,8 @@ enum Command {
     /// Apply these routes to the live tunnel. Checked before it was
     /// admitted.
     UpdateRoutes(RouteSet),
+    /// Switch the live tunnel to this mode. Checked before it was admitted.
+    SetTunnel(TunnelMode),
     /// The OS reported this about the network watched by the subscription
     /// with this number.
     Network(u64, NetworkEvent),
@@ -144,6 +151,18 @@ pub(crate) struct Applied {
     pub(crate) dns_servers: Vec<Ipv4Net>,
     /// The DNS domains resolved through the tunnel.
     pub(crate) dns_domains: Vec<String>,
+    /// The domains split DNS is set for. The same as `dns_domains`, except
+    /// in full mode after a change of routes dropped domains: clearing them
+    /// would take the catch-all with it, so they stay until the mode or the
+    /// connection ends. They name the same servers as the catch-all.
+    pub(crate) split_rules: Vec<String>,
+    /// Whether full mode's halves may be in place: set before they are
+    /// added, cleared once they are removed. It is the connection's mode.
+    pub(crate) full: bool,
+    /// What full mode did about IPv6, once its halves were added.
+    pub(crate) ipv6: Option<Ipv6Block>,
+    /// Whether full mode's catch-all may be set, as for `full`.
+    pub(crate) catch_all: bool,
 }
 
 /// The worker's side: the only code that touches the tunnel, routes and DNS.
@@ -183,6 +202,13 @@ pub(crate) struct Machine {
 pub(crate) struct Session {
     /// The policy's allow-list, or why the policy is unusable.
     allowed: Result<Option<Vec<Ipv4Net>>, String>,
+    /// Whether the policy allows full mode.
+    full_allowed: bool,
+    /// For the checks a switch to full mode needs before it is admitted.
+    /// They only read.
+    routes: Arc<dyn Routes>,
+    dns: Arc<dyn Dns>,
+    events: Arc<dyn NetworkEvents>,
     gate: Arc<Mutex<Gate>>,
     commands: Sender<Command>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -199,11 +225,12 @@ impl Session {
     ) -> Result<Self, String> {
         let trusted = policy.and_then(|policy| {
             let gateway = Gateway::from_policy(&policy).map_err(|e| e.to_string())?;
-            Ok((gateway, policy.allowed_routes))
+            let full = policy.full_tunnel == FullTunnel::Allowed;
+            Ok((gateway, policy.allowed_routes, full))
         });
-        let (gateway, allowed) = match trusted {
-            Ok((gateway, allowed)) => (Some(gateway), Ok(allowed)),
-            Err(message) => (None, Err(message)),
+        let (gateway, allowed, full_allowed) = match trusted {
+            Ok((gateway, allowed, full)) => (Some(gateway), Ok(allowed), full),
+            Err(message) => (None, Err(message), false),
         };
         let (phase, cancel) = (Phase::Idle, Cancel::new());
         let gate = Arc::new(Mutex::new(Gate {
@@ -234,6 +261,10 @@ impl Session {
         let worker = worker.map_err(|e| format!("The service could not start a thread: {e}."))?;
         Ok(Self {
             allowed,
+            full_allowed,
+            routes: platform.routes.clone(),
+            dns: platform.dns.clone(),
+            events: platform.events.clone(),
             gate,
             commands,
             worker: Mutex::new(Some(worker)),
@@ -252,8 +283,12 @@ impl Session {
     /// so that the line comes before any the connect leads to.
     pub(crate) fn connect(&self, params: ConnectParams) -> Result<Attempt, ErrorInfo> {
         let routes = &params.routes;
+        let full = match params.tunnel {
+            TunnelMode::Split => "",
+            TunnelMode::Full => ", full tunnel",
+        };
         let carries = format!(
-            "{} and {}",
+            "{} and {}{full}",
             counted(routes.subnets.len(), "subnet"),
             counted(routes.dns_domains.len(), "DNS domain")
         );
@@ -274,8 +309,13 @@ impl Session {
         if let Err(why) = params.routes.check(allowed) {
             return refused(ErrorCode::RouteRefused, format!("Route refused: {why}."));
         }
-        if params.tunnel == TunnelMode::Full {
-            return refused(ErrorCode::RouteRefused, FULL_NOT_YET.to_string());
+        // What full mode needs of the policy and of this system. What it
+        // needs of the network and the tunnel is known only once the worker
+        // captures the one and opens the other, so `set_up` refuses those.
+        if params.tunnel == TunnelMode::Full
+            && let Err(why) = full::refuse_anywhere(self.full_allowed, &*self.events)
+        {
+            return refused(ErrorCode::RouteRefused, why);
         }
         // The machine's own addresses and the networks it is on are known
         // only once the worker captures them, so `set_up` refuses those,
@@ -336,11 +376,14 @@ impl Session {
         admitted
     }
 
-    /// Switches the live tunnel between split and full.
+    /// Switches the live tunnel between split and full, which the worker
+    /// does and checks; the outcome comes as a state event.
     ///
-    /// Until this service can apply full mode, full is refused, at once and
-    /// before anything else, and every tunnel is split: so a switch to
-    /// split, while connected, is no change.
+    /// A switch to full is checked first against everything full mode
+    /// needs: the policy and this system, then the connection's network and
+    /// tunnel. Those checks only read. A switch refused here leaves the
+    /// connection exactly as it was. A switch to the mode the tunnel has is
+    /// no change: it is answered at once with the connection as it is.
     pub(crate) fn set_tunnel(&self, mode: TunnelMode) -> Result<Admitted, ErrorInfo> {
         let admitted = self.admit_set_tunnel(mode);
         if let Err(refusal) = &admitted {
@@ -354,10 +397,12 @@ impl Session {
     }
 
     fn admit_set_tunnel(&self, mode: TunnelMode) -> Result<Admitted, ErrorInfo> {
-        if mode == TunnelMode::Full {
-            return Err(error(ErrorCode::RouteRefused, FULL_NOT_YET.to_string()));
+        let full = mode == TunnelMode::Full;
+        let refused = |why: String| Err(error(ErrorCode::RouteRefused, why));
+        if full && let Err(why) = full::refuse_anywhere(self.full_allowed, &*self.events) {
+            return refused(why);
         }
-        let gate = lock(&self.gate);
+        let mut gate = lock(&self.gate);
         match gate.phase {
             Phase::Connected => {}
             Phase::Idle => {
@@ -366,13 +411,41 @@ impl Session {
             }
             Phase::Connecting | Phase::Updating | Phase::Stopping => return Err(busy()),
         }
-        match &gate.live {
-            Some(live) => Ok(Admitted::Unchanged(live.tunnel.clone())),
-            None => {
-                let message = "The connection's network is not known.";
-                Err(error(ErrorCode::Internal, message.to_string()))
-            }
+        let Some(live) = &gate.live else {
+            let message = "The connection's network is not known.";
+            return Err(error(ErrorCode::Internal, message.to_string()));
+        };
+        if live.tunnel.mode == mode {
+            return Ok(Admitted::Unchanged(live.tunnel.clone()));
         }
+        // Checked under the gate, so nothing else starts meanwhile.
+        if full && let Err(why) = self.full_needs(live) {
+            return refused(format!("{why} The connection keeps the mode it has."));
+        }
+        gate.phase = Phase::Updating;
+        let line = format!("tunnel mode change admitted ({})", word!(mode));
+        self.logs.about_requests(LogLevel::Info, &line);
+        self.send(Command::SetTunnel(mode))
+            .map(|()| Admitted::Changing)
+    }
+
+    /// What full mode needs of the live connection: of its network, of the
+    /// gateway's DNS servers, judged as at connect, and of its tunnel.
+    fn full_needs(&self, live: &Live) -> Result<(), String> {
+        if !live.watched {
+            return Err(full::UNSUPPORTED.to_string());
+        }
+        full::refuse_here(&live.physical, &*self.dns)?;
+        let servers = dns_servers(&live.assigned_dns, live.gateway, &live.physical);
+        let servers = servers.map_err(|(_, why)| why)?;
+        let local = LocalNetworks {
+            own_addresses: live.physical.own_addresses(),
+            on_link: live.physical.on_link(),
+            next_hop: live.physical.next_hop(),
+        };
+        check_against_local(&servers, live.gateway, &local)
+            .map_err(|c| format!("A DNS server the gateway assigned cannot be used: {c}."))?;
+        full::refuse_on(&live.tunnel.interface, &servers, &*self.routes)
     }
 
     fn admit_update(&self, routes: RouteSet, carries: &str) -> Result<Admitted, ErrorInfo> {
@@ -593,7 +666,8 @@ impl Machine {
             Command::Connect(params, cancel, hidden, answered) => {
                 self.connect(params, &cancel, hidden, &answered)
             }
-            Command::UpdateRoutes(routes) => self.update(routes),
+            Command::UpdateRoutes(routes) => self.update(|machine| machine.change_routes(routes)),
+            Command::SetTunnel(mode) => self.update(|machine| machine.change_tunnel(mode)),
             Command::Disconnect => {
                 self.publish(ConnState::Disconnecting);
                 let idle = |phase: &mut Phase| *phase = Phase::Idle;
@@ -641,6 +715,27 @@ impl Machine {
                 };
                 self.finish_then_open(state, idle);
             }
+            // Full mode with no IPv6 to block holds only while there is no
+            // IPv6 leak path. Any IPv6 change is checked again at once, and
+            // a leak path that has appeared closes the connection.
+            Command::Network(subscription, NetworkEvent::Ipv6Changed)
+                if subscription == self.watching.load(Ordering::SeqCst)
+                    && self.applied.ipv6 == Some(Ipv6Block::NothingToBlock) =>
+            {
+                let Some(tunnel) = &self.applied.tunnel else {
+                    return;
+                };
+                let still = self.routes.full_tunnel_ipv6(&tunnel.assigned().interface);
+                if still != Ok(Ipv6Block::NothingToBlock) {
+                    let state = failed(ErrorCode::VerificationFailed, full::IPV6_APPEARED);
+                    let idle = |phase: &mut Phase| {
+                        if matches!(*phase, Phase::Connected | Phase::Updating) {
+                            *phase = Phase::Idle;
+                        }
+                    };
+                    self.finish_then_open(state, idle);
+                }
+            }
             // Sleeping and waking change nothing by themselves: a tunnel
             // that does not survive them ends by itself.
             Command::Network(..) | Command::Ended(..) | Command::Shutdown => {}
@@ -656,6 +751,7 @@ impl Machine {
         self.disconnected = false;
         self.logs.forget(STATE);
         self.logs.forget(crate::update::CHANGED);
+        self.logs.forget(full::SWITCHED);
     }
 
     fn connect(
@@ -725,13 +821,8 @@ impl Machine {
         }
     }
 
-    /// Applies a change of routes to the live tunnel. Connected again with
-    /// the new routes when every step and check passed; otherwise the
-    /// connection is closed and everything removed, as for a connect that
-    /// fails. A tunnel that ended while the change waited has been reported
-    /// already, and there is nothing to change.
-    /// What a change of routes to the connection carrying `tunnel` will be
-    /// checked against, or nothing if the connection is not complete.
+    /// What a change to the connection carrying `tunnel` will be checked
+    /// against, or nothing if the connection is not complete.
     fn live(&self, tunnel: TunnelInfo) -> Option<Live> {
         let applied = &self.applied;
         let (gateway, physical) = (applied.gateway_route?, applied.physical.clone()?);
@@ -742,10 +833,20 @@ impl Machine {
             tunnel,
             assigned_dns,
             dns_routed: !applied.dns_servers.is_empty(),
+            watched: self.network_watch.is_some(),
         })
     }
 
-    fn update(&mut self, routes: RouteSet) {
+    /// Applies a change to the live tunnel, of its routes or of its mode,
+    /// with `change`. Connected again with the change when every step and
+    /// check passed; otherwise the connection is closed and everything
+    /// removed, as for a connect that fails. A tunnel that ended while the
+    /// change waited has been reported already, and there is nothing to
+    /// change.
+    fn update(
+        &mut self,
+        change: impl FnOnce(&mut Self) -> Result<TunnelInfo, (ErrorCode, String)>,
+    ) {
         if self.applied.tunnel.is_none() {
             let mut gate = lock(&self.gate);
             if gate.phase == Phase::Updating {
@@ -753,7 +854,7 @@ impl Machine {
             }
             return;
         }
-        match self.change_routes(routes) {
+        match change(self) {
             Ok(tunnel) => {
                 {
                     // A disconnect that came meanwhile keeps its own phase.
@@ -809,9 +910,6 @@ impl Machine {
     }
 }
 
-/// What a request for full mode is told until this service can apply it.
-const FULL_NOT_YET: &str = "Full tunnel is not available in this version yet.";
-
 const LEFT_BEHIND: &str = "Some routes or DNS settings could not be removed.";
 
 const NETWORK_CHANGED: &str = "The network changed, so the connection was closed. Connect again.";
@@ -826,10 +924,12 @@ impl Machine {
     /// subscription number no other attempt has. Events reach the worker as
     /// commands; the subscription ends at the first event after teardown, or
     /// with the service. A system that cannot report changes is no reason to
-    /// refuse; any other failure is.
+    /// refuse, except in full mode (`full`), which must see IPv6 changes;
+    /// any other failure is.
     pub(crate) fn watch_network(
         &mut self,
         physical: &PhysicalNetwork,
+        full: bool,
     ) -> Result<(), (ErrorCode, String)> {
         self.subscriptions += 1;
         let number = self.subscriptions;
@@ -840,6 +940,9 @@ impl Machine {
                 // Replacing an earlier one ends that one.
                 self.network_watch = Some(end);
                 events
+            }
+            Err(ubc_vpn_platform::Error::Unsupported) if full => {
+                return Err((ErrorCode::RouteRefused, full::UNSUPPORTED.to_string()));
             }
             Err(ubc_vpn_platform::Error::Unsupported) => {
                 self.logs.warn_about("network events", UNWATCHED);

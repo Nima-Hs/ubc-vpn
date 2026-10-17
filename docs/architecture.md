@@ -229,25 +229,26 @@ A chosen subnet may contain the gateway itself; UBC's gateway sits inside a camp
 
 ### Full tunnel
 
-**Not available yet.** Until the service part of full tunnel lands (PR 3 of its plan, after the contract in #217 and the platform calls in 2a and 2b), the service refuses full mode on every OS with `route_refused`, "Full tunnel is not available in this version yet.": at `connect`, before anything is done, and on `set_tunnel`, where this refusal comes before `not_connected` and `busy`. Everything below is the agreed design that PR 3 implements.
+**Where it is available.** Full mode needs the operating system to do it and to report every IPv6 change (`NetworkEvents::reports_ipv6_changes`). Only Windows does, for now; on macOS and Linux the service refuses full mode, with the reason below.
 
 Split tunnel is the default and the reason this client exists. A user may instead send everything through the VPN: one global setting, `global.tunnel` in the settings file, `split` or `full`, shared by every profile. The policy file may forbid full mode (`"full_tunnel": "forbidden"`); left out, it is allowed. Full mode is not a route the user chooses: the rules above for routes still apply to the user's own subnets, and full mode is modelled and checked on its own.
 
 **What full mode does:**
 
 - **All IPv4 traffic goes through the tunnel.** The service adds `0.0.0.0/1` and `128.0.0.0/1` through the tunnel. It never touches the default route. The halves are more specific than any default route, so they win whatever its metric, and a default route renewed by DHCP changes nothing.
-- **IPv6 is blocked.** The service adds `::/1` and `8000::/1` through the tunnel, which has no IPv6 address, so an IPv6 connection fails at once and programs fall back to IPv4. Teredo and 6to4 cannot get round this: they carry IPv6 inside IPv4, and that IPv4 follows the halves. Where the tunnel adapter has no IPv6 at all, the halves cannot be added. Full mode is then refused, before anything is changed, if there is an IPv6 leak path: a unicast IPv6 route on any interface other than the tunnel, whether that interface is up or down, other than `fe80::/10` (link-local), `::1/128` (loopback) and `ff00::/8` (multicast); Teredo's `2001::/32` counts. With no leak path it goes ahead without the IPv6 halves, since nothing can leak. That is a snapshot: while connected, the service checks again whenever an IPv6 route or address changes on any interface (`Ipv6Changed`), and fails closed if a leak path has appeared.
+- **IPv6 is blocked.** The service adds `::/1` and `8000::/1` through the tunnel, which has no IPv6 address, so every IPv6 connection that no more specific route takes elsewhere (the local network's link-local and on-link prefixes, or another interface's) fails at once, and programs fall back to IPv4. Teredo and 6to4 cannot get round this: they carry IPv6 inside IPv4, and that IPv4 follows the halves. Where the tunnel adapter has no IPv6 at all, the halves cannot be added. Full mode is then refused, before anything is changed, if there is an IPv6 leak path: a unicast IPv6 route on any interface other than the tunnel, whether that interface is up or down, other than `fe80::/10` (link-local), `::1/128` (loopback) and `ff00::/8` (multicast); Teredo's `2001::/32` counts. With no leak path it goes ahead without the IPv6 halves, since nothing can leak. That is a snapshot: while connected, the service checks again whenever an IPv6 route or address changes on any interface (`Ipv6Changed`), and fails closed if a leak path has appeared.
 - **All DNS goes to UBC's DNS servers, through the tunnel.** On Windows a catch-all name-resolution rule (NRPT namespace `.`) names the tunnel's DNS servers, beside the split-DNS rules for the user's domains. It takes precedence over Windows' habit of asking every network's DNS server at once: queries go only to the tunnel's servers, over IPv4 and IPv6 alike. A single-label name is sent to UBC's servers with the local network's suffix added. The rules this product writes are volatile, so a crash or a restart cannot leave a dead `.` rule behind; the service also clears its rules when it starts.
-- **The local network stays reachable directly:** the network the physical interface is on and its router. Their routes are more specific than the halves. The gateway keeps its own route through the physical network, as in split mode.
-- **The user's own subnets and domains stay applied.** Full mode adds to them, so switching is only adding or removing the halves and the `.` rule.
+- **The local network stays reachable directly:** every network the machine is on, on any adapter (a virtual machine program's host-only network is on an adapter of its own), and the router. Their routes are more specific than the halves. The gateway keeps its own route through the physical network, as in split mode.
+- **The user's own subnets and domains stay applied.** Full mode adds to them, so switching is only adding or removing the halves and the `.` rule, and routing the gateway's DNS servers when the connection had not. A route change in full mode keeps the halves and the `.` rule. When it drops every DNS domain, the split-DNS rules stay until the mode or the connection ends: clearing them on Windows takes the `.` rule with it, and names would go to the local network's resolver until it was set again. They name the same servers as the `.` rule, so nothing changes for the user.
 
-**What it refuses**, before anything is changed, with a reason the user can read:
+**What it refuses**, before anything is changed, with `route_refused` and a reason the user can read. At `connect`, the policy and the OS are checked before anything is done, the network before the gateway is contacted, and the rest once the tunnel is open and before anything is applied to it. On `set_tunnel`, all of it is checked before the switch is admitted, so the connection is kept as it was:
 
 - the policy forbids it;
-- the gateway assigned no DNS server the service can use, so DNS could not go to UBC;
+- the gateway assigned no DNS server, so DNS could not go to UBC (one it assigned that cannot be used fails the connect as in split mode);
 - another program already sends all traffic somewhere, such as another VPN's own `/1` halves, or already resolves all names, such as a foreign `.` rule from Tailscale's "override local DNS" or exit node;
 - the router is not inside a network the physical interface is on, such as with a `/32` or point-to-point address, or a router given by DHCP option 121, so it could not be kept reachable directly;
-- the operating system cannot do it. Only Windows can, for now.
+- the tunnel has no IPv6 and there is an IPv6 leak path, as above;
+- the operating system cannot do it, or cannot report IPv6 changes, which full mode must watch.
 
 **What it cannot do**, said to the user:
 
@@ -259,13 +260,15 @@ Split tunnel is the default and the reason this client exists. A user may instea
 
 - an address in each IPv4 half, outside the user's subnets and the local network, uses the tunnel;
 - an address in each IPv6 half uses the tunnel, unless there was nothing to block as above; the IPv6 check answers yes only when every route of the longest matching prefix goes through the tunnel;
-- the gateway, the router and the local network do not use the tunnel;
+- the gateway, the router and every network the machine is on do not use the tunnel. The check is "not the tunnel", not "the physical interface": a host-only network rightly uses its own adapter;
+- each DNS server uses the tunnel;
 - the DNS rules read back exactly. Windows cannot show which server a query really went to, so DNS answers "cannot be observed" there, as for split DNS; issue #214 is the end-to-end test of it.
 
 **Switching while connected** goes the way of a live route change, with `set_tunnel`, and never reconnects:
 
-- **To full:** add the halves, then the `.` rule, then check.
-- **To split:** remove the `.` rule, then the halves, then check that addresses outside the user's subnets no longer use the tunnel.
+- **To full:** route the DNS servers if the connection had not, add the halves, then the `.` rule, then check.
+- **To split:** remove the `.` rule, then the halves, then check that addresses outside the user's subnets no longer use the tunnel, IPv6 included, and that the `.` rule is gone.
+- **Teardown** removes the halves, then the `.` rule, then the rest, as for a split connection.
 - **Failing closed:** a step or a check that fails closes the connection and removes everything, as for a route change.
 - **What the user sees:** the VPN never drops, UBC traffic is never interrupted, and nothing leaks, but connections to non-UBC sites may reset on a switch. A connection that was open to such a site starts sending its packets another way, from another address.
 - **The bridge** refuses `set_tunnel` from the app, as it refuses `update_routes`. The mode comes from the user's saved setting, which `ubc-vpn settings set-tunnel` saves and then applies.

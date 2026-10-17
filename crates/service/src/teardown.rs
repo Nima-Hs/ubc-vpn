@@ -56,6 +56,21 @@ impl Machine {
             }
             result.is_ok()
         };
+        // Full mode first: its halves, then its catch-all, so that every
+        // name still goes to the gateway's DNS servers while the halves go.
+        // Each is removed by name here, and again by the catch-all steps
+        // below.
+        if let Some(tunnel) = &tunnel.0
+            && applied.full
+        {
+            let interface = &tunnel.assigned().interface;
+            let removed = self.routes.remove_full_tunnel(interface);
+            step("removing the routes for all traffic", removed);
+        }
+        if applied.catch_all {
+            let cleared = self.dns.clear_catch_all_dns();
+            step("clearing DNS for every name", cleared);
+        }
         if let Some(tunnel) = &tunnel.0 {
             let interface = &tunnel.assigned().interface;
             let removed = self.routes.remove_tunnel_routes(interface, &applied.routes);
