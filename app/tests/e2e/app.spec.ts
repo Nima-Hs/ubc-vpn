@@ -327,6 +327,7 @@ test("the window renders, locked down", async () => {
         "profiles",
         "retry",
         "saveRoutes",
+        "setTunnel",
     ]);
     // The Settings screen's: none takes or returns a password.
     expect(exposed.profiles).toEqual([
@@ -1533,7 +1534,11 @@ test("the taskbar button's state icons are files Electron can read", async () =>
         "busy-0.ico",
         "busy-1.ico",
         "busy-2.ico",
+        "busy-full-0.ico",
+        "busy-full-1.ico",
+        "busy-full-2.ico",
         "off.ico",
+        "on-full.ico",
         "on.ico",
         "problem.ico",
     ]);
@@ -1925,7 +1930,7 @@ test("the working animations carry on through every change, never jumping", asyn
     await expect
         .poll(() =>
             page
-                .locator("[data-pulse]")
+                .locator('[data-pulse="split"]')
                 .evaluate((pulse) =>
                     Number.parseFloat(getComputedStyle(pulse.parentElement ?? pulse).opacity),
                 ),
@@ -1933,7 +1938,7 @@ test("the working animations carry on through every change, never jumping", asyn
         .toBe(1);
     // How long one lap takes, in milliseconds.
     const lap = await page
-        .locator("[data-pulse]")
+        .locator('[data-pulse="split"]')
         .evaluate((pulse) =>
             Number(pulse.getAnimations()[0]?.effect?.getComputedTiming().duration),
         );
@@ -1944,7 +1949,7 @@ test("the working animations carry on through every change, never jumping", asyn
         const record = { frames, stop: false };
         (window as unknown as { pulseRecord: typeof record }).pulseRecord = record;
         const tick = () => {
-            const pulse = document.querySelector<SVGPathElement>("[data-pulse]");
+            const pulse = document.querySelector<SVGPathElement>('[data-pulse="split"]');
             frames.push({
                 time: Number(document.timeline.currentTime),
                 at:
@@ -2063,7 +2068,7 @@ test("with reduced motion the working pulse rests and nothing loops", async () =
         expect(looping).toEqual([]);
         // It rests mid-way, so the state can still be seen.
         const offset = await page
-            .locator("[data-pulse]")
+            .locator('[data-pulse="split"]')
             .evaluate((pulse) => Number.parseFloat(getComputedStyle(pulse).strokeDashoffset));
         expect(offset).toBeCloseTo(-0.42);
         await shoot("connecting-reduced-motion");
@@ -2156,7 +2161,7 @@ test("tunnel: switched while connected, without disconnecting, and back", async 
     await expect(tunnelRadio("Split tunnel")).toBeChecked();
     // Said before anyone switches.
     await expect(tunnelGroup()).toHaveAccessibleDescription(
-        "Switching keeps you connected. Connections to sites outside UBC may reset.",
+        "You stay connected. Connections outside UBC may reset.",
     );
     await expect(said("Split tunnel: traffic to 2 UBC subnets")).toBeVisible();
     expect(await diagramMode()).toBe("split");

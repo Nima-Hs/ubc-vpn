@@ -94,7 +94,7 @@ export const TUNNEL = {
     } satisfies Record<TunnelMode, string>,
     forbidden: "Full tunnel is turned off by this computer’s VPN policy.",
     /** Beside the choice while connected: said before anyone switches. */
-    live: "Switching keeps you connected. Connections to sites outside UBC may reset.",
+    live: "You stay connected. Connections outside UBC may reset.",
     whileConnecting: "You can change the tunnel once the VPN has connected or disconnected.",
     unread: "Reading your settings…",
     /** Atop the routes while full tunnel is on. */
