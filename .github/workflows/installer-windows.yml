@@ -176,6 +176,18 @@ jobs:
         run: pnpm package:win
       - name: The app is fused, licensed and has no updater
         run: pnpm check:package
+      # The update leg of the job below installs this program first, and
+      # takes it from here instead of building it again. It is handed on as
+      # soon as it is built and checked, so that leg can go on while the
+      # tests below run. It is for this run only; the copy kept for trying
+      # by hand is uploaded after the tests, at the end.
+      - name: Hand the setup program to the update test
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-setup
+          path: app/dist/ubc-vpn-setup-*-x64.exe
+          if-no-files-found: error
+          retention-days: 1
 
       - name: The setup program refuses another folder
         run: pwsh -NoProfile -File "$CHECK" refuse-folder dist/ubc-vpn-setup-*-x64.exe
@@ -247,10 +259,11 @@ jobs:
   # registered and running) and leave nothing behind: no files, no service,
   # no data folder, no registry entries. The update leg fails the same way
   # over an installed copy that has an owner: the data folder, and the owner
-  # in it, must stay, and stay through the install after it. These builds
-  # have the test switch and only exist on their runner: nothing from here
-  # is uploaded, and the setup program the job above builds and keeps never
-  # has it.
+  # in it, must stay, and stay through the install after it; the ordinary
+  # setup program it installs is the one the job above built and checked.
+  # These builds have the test switch and only exist on their runner:
+  # nothing from here is uploaded, and the setup program the job above
+  # builds, hands on and keeps never has it.
   failing-setup:
     name: failing setup (${{ matrix.step }}${{ matrix.update && ', update' || '' }})
     needs: stage
@@ -289,16 +302,6 @@ jobs:
       - name: Add Wintun, the Visual C++ runtime and the licence page
         working-directory: .
         run: packaging/windows/stage-redist.sh
-      # The update leg's starting point: the ordinary setup program
-      # installed, with an owner in state.json.
-      - name: Install the ordinary setup program first
-        if: matrix.update
-        run: |
-          pnpm package:win
-          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
-          pwsh -NoProfile -File "$CHECK" service
-          pwsh -NoProfile -File "$CHECK" status-as-user
-          pwsh -NoProfile -File "$CHECK" remember-state "$RUNNER_TEMP/state.sha256"
       - name: Build the setup program with the step made to fail
         env:
           UBC_VPN_TEST_FAIL_STEP: ${{ matrix.step }}
@@ -306,6 +309,42 @@ jobs:
           node node_modules/electron/install.js
           pnpm build
           pnpm exec electron-builder --win --publish never -c.nsis.include=../packaging/windows/tests/fail-step.nsh -c.directories.output=dist/fail
+      # The update leg's ordinary setup program, from the installer job,
+      # which hands it on once it has built and checked it. A job can only
+      # wait for another job to finish, and that one runs its own tests
+      # after, so this leg waits for the file itself. It stops if that job
+      # ends without handing it on.
+      - name: Wait for the ordinary setup program
+        if: matrix.update
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          until [ "$(gh api "$api/artifacts?name=installer-setup" --jq .total_count)" -gt 0 ]; do
+            # A failed request only means asking again, until the step's limit.
+            state=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '.jobs[] | select(.name == "installer") | .status' || true)
+            if [ "$state" = completed ]; then
+              echo "The installer job ended without handing on the setup program."
+              exit 1
+            fi
+            sleep 10
+          done
+      - name: Fetch the ordinary setup program
+        if: matrix.update
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-setup
+          path: app/ordinary
+      # The update leg's starting point: the ordinary setup program
+      # installed, with an owner in state.json.
+      - name: Install the ordinary setup program first
+        if: matrix.update
+        run: |
+          pwsh -NoProfile -File "$CHECK" install ordinary/ubc-vpn-setup-*-x64.exe
+          pwsh -NoProfile -File "$CHECK" service
+          pwsh -NoProfile -File "$CHECK" status-as-user
+          pwsh -NoProfile -File "$CHECK" remember-state "$RUNNER_TEMP/state.sha256"
       - name: It stops with its own exit code and leaves nothing behind
         if: ${{ !matrix.update }}
         run: pwsh -NoProfile -File "$CHECK" install-fails dist/fail/ubc-vpn-setup-*-x64.exe ${{ matrix.code }}
@@ -320,6 +359,6 @@ jobs:
       - name: The next install keeps that owner
         if: matrix.update
         run: |
-          pwsh -NoProfile -File "$CHECK" install dist/ubc-vpn-setup-*-x64.exe
+          pwsh -NoProfile -File "$CHECK" install ordinary/ubc-vpn-setup-*-x64.exe
           pwsh -NoProfile -File "$CHECK" service
           pwsh -NoProfile -File "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
