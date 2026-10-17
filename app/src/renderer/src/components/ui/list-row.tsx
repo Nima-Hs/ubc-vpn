@@ -16,16 +16,19 @@ export function ListRow({
     children,
     stacked = false,
     data = false,
+    compact = false,
 }: {
     label: string;
     children: ReactNode;
     stacked?: boolean;
     data?: boolean;
+    /** Less room above and below, for a short panel that must show its first rows whole. */
+    compact?: boolean;
 }) {
     return (
         <div
             className={cn(
-                "px-4 py-3",
+                compact ? "px-4 py-2.5" : "px-4 py-3",
                 stacked ? "flex flex-col gap-1.5" : "flex items-baseline justify-between gap-4",
             )}
         >

@@ -2347,6 +2347,43 @@ test("tunnel: connecting in full tunnel shows the way through UBC", async () => 
     await resetTunnel();
 });
 
+test("the details' first rows are shown whole at the default size, in either mode", async () => {
+    // How much of an element the scrolling details show, from 0 to 1.
+    const shownOf = (label: string) =>
+        page.evaluate((name) => {
+            const region = document.querySelector('[aria-label="Connection details"]');
+            const term = [...(region?.querySelectorAll("dt, h2") ?? [])].find(
+                (element) => element.textContent === name,
+            );
+            // The row: a value's own line, or a group's heading line.
+            const row = term?.closest("div") ?? null;
+            if (region === null || row === null) {
+                return -1;
+            }
+            const outer = region.getBoundingClientRect();
+            const inner = row.getBoundingClientRect();
+            const seen =
+                Math.max(0, Math.min(outer.bottom, inner.bottom) - Math.max(outer.top, inner.top)) /
+                inner.height;
+            return Math.round(seen * 100) / 100;
+        }, label);
+    for (const [name, rows] of [
+        ["connected", ["Your VPN address", "Subnets through the VPN"]],
+        ["tunnel-full", ["Through the VPN", "Your VPN address"]],
+    ] as const) {
+        await scenario(name);
+        await tab("Connection").click();
+        await expect(heading()).toHaveText("Connected");
+        await page.waitForTimeout(400);
+        for (const row of rows) {
+            expect(await shownOf(row), `${name}: ${row}`).toBe(1);
+        }
+        await expect(action()).toBeInViewport({ ratio: 1 });
+    }
+    await shoot("details-full-default-size");
+    await resetTunnel();
+});
+
 test("nothing was blocked or broken along the way", () => {
     expect(problems).toEqual([]);
 });
