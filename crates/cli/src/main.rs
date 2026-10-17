@@ -50,6 +50,8 @@ mod terminal;
 mod terminal_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tunnel_tests;
 
 /// Exit codes. Scripts and the app tell failures apart by these.
 const FAILED: u8 = 1;
@@ -75,6 +77,7 @@ Commands:
   settings set-routes --json     Check them and, if they pass, save them
   settings reset [--force] --json  Start afresh when the settings cannot be read
   settings set-startup --json    Set how UBC VPN starts when you sign in
+  settings set-tunnel --json     Send UBC traffic only, or all of it, through the VPN
   profiles list --json           Show the profiles and which saves its password
   profiles create|rename|update|delete|switch --json  Change the profiles
   profile set-routes --json      Check and save one profile's routes
@@ -90,6 +93,16 @@ profile, with `profile set-routes`), and it claims nothing: when
 the VPN is connected it asks the service to apply the routes it has just
 saved, and its reply says whether they were applied, refused, or are used
 at the next connect. A connection that cannot take them is closed.
+
+settings set-tunnel reads {\"mode\":\"split\"} or {\"mode\":\"full\"} and saves it for
+every profile. Split sends only the chosen UBC subnets and domains through
+the VPN; full sends all IPv4 traffic and every name lookup through it, and
+blocks IPv6. When the policy forbids full mode nothing is saved and the
+reply says so. Like set-routes, it then asks the service to switch a
+connected VPN, and claims nothing. Switching keeps the VPN up and never
+interrupts UBC traffic, but connections to non-UBC sites may be reset. The
+service may refuse full mode for this network, and says why; the mode stays
+saved and is tried at the next connect, which uses the saved mode.
 
 Passwords are saved only in the OS keyring, never in the settings file.
 A profile's saved password is forgotten when the profile is deleted, when

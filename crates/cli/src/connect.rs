@@ -39,6 +39,7 @@ use ubc_vpn_core::protocol::{
 use ubc_vpn_core::redact::{REDACTED, Secret};
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_core::state::ConnState;
+use ubc_vpn_core::state::TunnelMode;
 use ubc_vpn_engine::{
     Cancel, Gateway, LogLevel, LogSink, LoginEngine, LoginError, Prompt, Prompts, Session,
 };
@@ -326,7 +327,7 @@ pub(crate) fn start(
 
     let engine = engines(&policy).map_err(|why| internal(&why))?;
     let dir = platform.paths.settings_dir.as_path();
-    let profile = chosen(dir, profile)?;
+    let (profile, tunnel) = chosen(dir, profile)?;
     let id = &profile.id;
     // The routes come from the user's settings and from nowhere else.
     if let Err(why) = profile.routes.check(policy.allowed_routes.as_deref()) {
@@ -419,9 +420,9 @@ pub(crate) fn start(
         cookie,
         gateway_addr,
         routes: profile.routes.clone(),
-        // Split until this client can set the mode: the saved setting is
-        // sent once `settings set-tunnel` exists.
-        tunnel: ubc_vpn_core::state::TunnelMode::Split,
+        // The mode saved for every profile. The service refuses full mode
+        // when the policy or the network rules it out.
+        tunnel,
     };
     // The last moment a cancel can still stop the connect. A login that was
     // cancelled too late to stop still yields a session; it is thrown away
@@ -483,9 +484,10 @@ fn remember(
     }
 }
 
-/// The profile to connect with: the one `which` names, or the active one.
+/// The profile to connect with, the one `which` names or the active one,
+/// and the tunnel mode saved for every profile.
 /// From the user's settings, or the defaults when none are saved.
-fn chosen(dir: &std::path::Path, which: Option<&ProfileId>) -> Result<Profile, Stop> {
+fn chosen(dir: &std::path::Path, which: Option<&ProfileId>) -> Result<(Profile, TunnelMode), Stop> {
     let unreadable = |_| {
         let unsafe_folder = settings::folder_problem(dir);
         let why = unsafe_folder.unwrap_or_else(|| "The settings file cannot be read.".to_string());
@@ -493,13 +495,13 @@ fn chosen(dir: &std::path::Path, which: Option<&ProfileId>) -> Result<Profile, S
     };
     let profiles = settings::read_profiles(dir).map_err(unreadable)?.profiles;
     let Some(id) = which else {
-        return Ok(profiles.active().clone());
+        return Ok((profiles.active().clone(), profiles.global.tunnel));
     };
     let unknown = "No profile has that id. `ubc-vpn profiles list --json` shows them.";
     let profile = profiles
         .profile(id)
         .map_err(|_| failed(LoginErrorCode::Internal, unknown));
-    profile.cloned()
+    profile.map(|profile| (profile.clone(), profiles.global.tunnel))
 }
 
 /// Gives the service what the login wrote, for its log: its lines, each at
