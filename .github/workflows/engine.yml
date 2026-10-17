@@ -120,6 +120,13 @@ jobs:
         if: steps.toolchain.outcome != 'success'
         timeout-minutes: 4
         run: rustup toolchain install
+      # Restores the build of our dependencies, not of our own crates, which
+      # are always built again, so the checks of the engine's build script
+      # below still run. After the toolchain: its version is part of the
+      # key, as are the OS, the job and the lockfile.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: engine
 
       - name: The build refuses to look for a library by itself
         run: |
@@ -312,6 +319,12 @@ jobs:
           cargo test --locked -p ubc-vpn-cli --features real-engine --test real_engine
           # With dev mode as well, the service refuses to run as the installed one.
           cargo test --locked -p ubc-vpn-service --features real-engine,dev-mode --test binary
+
+      # Wintun is put beside the test programs for this run only, so it is
+      # taken out of target/ before the build cache saves that folder.
+      - name: Wintun is not kept in the build cache
+        if: always() && runner.os == 'Windows'
+        run: rm -f "$GITHUB_WORKSPACE"/target/{debug,release}/deps/wintun.dll
 
       # Every tunnel test removes its device on every path. Whatever the
       # tests reported, show that no Wintun adapter is left on the runner.

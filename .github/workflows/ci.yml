@@ -33,6 +33,12 @@ jobs:
         if: steps.toolchain.outcome != 'success'
         timeout-minutes: 4
         run: rustup toolchain install
+      # Restores the build of our dependencies, not of our own crates, which
+      # are always built again. After the toolchain: its version is part of
+      # the key, as are the OS, the job and the lockfile.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ci
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Generated from crates/core by the tests. Deleting them first means a stale or
