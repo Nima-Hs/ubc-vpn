@@ -15,6 +15,9 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - .github/workflows/app-system.yml
+      # Last, so it wins: a change to Markdown files alone starts nothing.
+      # None is built, tested or shipped. Any other file still counts.
+      - "!**/*.md"
   push:
     branches: [main]
     paths:
@@ -24,6 +27,7 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - .github/workflows/app-system.yml
+      - "!**/*.md"
   workflow_dispatch:
 
 permissions:
