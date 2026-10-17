@@ -69,10 +69,38 @@ fi
 
 t=$work/timeout
 shard "$t" linux-0 yes "timeout a.rs:1:1: replace f with g"
-if [ "$(summary "$t" 1)" = 0 ] && grep -q '| cargo-mutants | 0 | 0 | 1 | 0 |' "$work/summary.out"; then
-  pass "a timeout is counted and reported"
+if [ "$(summary "$t" 1)" = 1 ] && grep -q '| cargo-mutants | 0 | 0 | 1 | 0 |' "$work/summary.out" &&
+  grep -qF -- '- `a.rs:1:1: replace f with g`' "$work/summary.out"; then
+  pass "a mutant that only timed out fails the run and is named"
 else
-  fail "a timeout should be counted"; cat "$work/summary.out"
+  fail "a mutant that only timed out should fail the run"; cat "$work/summary.out"
+fi
+
+# The proof run's set-tunnel mutant: missed on Linux, timed out on Windows.
+t=$work/missed-and-timeout
+shard "$t" linux-0 yes "missed a.rs:1:1: replace f with g" "missed a.rs:1:1: replace f with g"
+shard "$t" windows-0 yes "missed a.rs:1:1: replace f with g" "timeout a.rs:1:1: replace f with g"
+if [ "$(summary "$t" 2)" = 1 ] && grep -q '| cargo-mutants | 0 | 1 | 0 | 0 |' "$work/summary.out"; then
+  pass "a mutant missed on one OS and timed out on the other counts as missed"
+else
+  fail "a miss must not be hidden by a timeout elsewhere"; cat "$work/summary.out"
+fi
+
+t=$work/caught-and-timeout
+shard "$t" linux-0 yes "caught a.rs:1:1: replace f with g"
+shard "$t" windows-0 yes "timeout a.rs:1:1: replace f with g"
+if [ "$(summary "$t" 2)" = 0 ] && grep -q '| cargo-mutants | 1 | 0 | 0 | 0 |' "$work/summary.out"; then
+  pass "a mutant caught on one OS and timed out on the other counts as caught"
+else
+  fail "a catch on one OS should count over a timeout on the other"; cat "$work/summary.out"
+fi
+
+t=$work/unviable-patch
+shard "$t" linux-0 yes "caught patch keep-attr" "unviable patch broken-patch"
+if [ "$(summary "$t" 1)" = 1 ] && grep -qF -- '- `patch broken-patch`' "$work/summary.out"; then
+  pass "a hand-made mutation that does not build fails the run and is named"
+else
+  fail "a hand-made mutation that does not build should fail the run"; cat "$work/summary.out"
 fi
 
 t=$work/unfinished
@@ -313,6 +341,40 @@ if sed -n '/^  summary:$/,$p' "$workflow" | grep -q '^    if: always()$' &&
   pass "the summary always runs and can fail the run"
 else
   fail "the summary job must run always() and never continue on error"
+fi
+
+# Only a scratch branch may start it: the first step of the first job
+# refuses any other ref, before anything is checked out, and every other job
+# that checks out the pull request needs that job.
+prepare=$(sed -n '/^  prepare:$/,/^  [a-z]*:$/p' "$workflow")
+first_step=$(awk '/^    steps:$/ { on = 1; next } on && /^      - / { n++ } on && n == 1' <<< "$prepare")
+if grep -qF 'if [[ $GITHUB_REF != refs/heads/test/mut-* ]]; then' <<< "$first_step" &&
+  grep -q 'exit 1' <<< "$first_step" && ! grep -q 'uses:' <<< "$first_step" &&
+  [ "$(sed -n '/^  mutants:$/,/^  [a-z]*:$/p' "$workflow" | grep -c '^    needs: prepare$')" = 1 ]; then
+  pass "only a test/mut-* branch can start it"
+else
+  fail "mutants.yml must refuse, in prepare's first step, any ref but refs/heads/test/mut-*"
+fi
+
+# A timeout is not a catch: only caught.txt takes a mutant out of the later
+# runs, and the runs over the whole workspace get a longer test time limit.
+if grep -B 1 'grep -vxF -f - "$remaining"' "$here/shard.sh" | grep -q 'caught.txt' &&
+  ! grep -B 1 'grep -vxF -f - "$remaining"' "$here/shard.sh" | grep -q 'timeout.txt' &&
+  [ "$(grep -F -- '--test-workspace=true' "$here/shard.sh" | grep -cF '"${slow[@]}"')" = 2 ] &&
+  [ "$(grep -cF -- '--test-workspace=true' "$here/shard.sh")" = 2 ] &&
+  grep -q '^slow=(--minimum-test-timeout=[0-9]*)$' "$here/shard.sh"; then
+  pass "timed-out mutants go on to the later runs, and workspace runs have a longer limit"
+else
+  fail "shard.sh must drop only caught mutants and give workspace runs a minimum test timeout"
+fi
+
+# shard.sh checks the tracked files match the commit before it starts and
+# after every cargo-mutants run, so no mutation is left in place.
+if [ "$(grep -c '^  if ! clean; then$' "$here/shard.sh")" = 1 ] && [ "$(grep -c '^if ! clean; then$' "$here/shard.sh")" = 1 ] &&
+  grep -q 'git status --porcelain --untracked-files=no' "$here/shard.sh"; then
+  pass "shard.sh checks the checkout before and after each run"
+else
+  fail "shard.sh must check the checkout matches its commit before and after each run"
 fi
 
 if [ "$failures" -ne 0 ]; then

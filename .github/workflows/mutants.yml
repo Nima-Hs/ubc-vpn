@@ -12,8 +12,9 @@ name: Mutants
 # as in platform-windows.yml and platform-unix.yml, and never on a machine
 # of ours. .github/mutants/test.sh checks these rules.
 #
-# The scripts and the file of hand-made mutations come from the branch this
-# runs from, never from the pull request.
+# It refuses to run except from a scratch branch named test/mut-*. The
+# scripts and the file of hand-made mutations come from that branch, never
+# from the pull request.
 
 on:
   workflow_dispatch:
@@ -54,6 +55,17 @@ jobs:
     outputs:
       head: ${{ steps.diff.outputs.head }}
     steps:
+      # The pull request's code runs as root and as an administrator, and
+      # could write to the Actions cache of the branch this runs from. On
+      # main, that is the cache every other workflow restores. A scratch
+      # branch's cache is read only by that branch, so only those may start
+      # it. Every job that runs the pull request's code needs this one.
+      - name: Started from a scratch branch
+        run: |
+          if [[ $GITHUB_REF != refs/heads/test/mut-* ]]; then
+            echo "Run this from a scratch branch named test/mut-<pr> (gh workflow run mutants.yml --ref test/mut-<pr>), not from $GITHUB_REF."
+            exit 1
+          fi
       - name: Check the inputs
         env:
           PR: ${{ inputs.pr }}
@@ -97,6 +109,10 @@ jobs:
           echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "Pull request #$PR at $head, from its merge-base with main, $base:"
           git diff --stat "$base" "$head" -- '*.rs'
+          # cargo-mutants generates nothing in code marked to be skipped.
+          if grep -nE '^\+.*mutants::skip' "$RUNNER_TEMP/diff/pr.diff"; then
+            echo "::warning::The pull request adds #[mutants::skip]: cargo-mutants makes no mutants there."
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-diff

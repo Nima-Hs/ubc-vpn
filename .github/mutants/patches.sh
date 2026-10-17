@@ -22,7 +22,8 @@
 #
 # The mutations for this OS are shared out among the shards in order. For
 # each one in this shard, the tests must pass without it and its patch must
-# apply. If it then does not build, it is unviable. Otherwise the tests run
+# apply. If it then does not build, it is unviable, and the summary fails
+# the run, since the patch is wrong. Otherwise the tests run
 # with it: one failing means it was caught, all passing means it was missed.
 # Its patch is then taken out again, and the tracked files must match the
 # commit checked out. Once all have run, each test must still pass.
@@ -128,7 +129,8 @@ if ! clean; then
 fi
 
 # Runs the tests named by a mutation, with a time limit. Status 124 is a
-# timeout.
+# timeout. On Windows, `timeout` stops only its own child, so a test process
+# started through token.ps1 can outlive it; the job's time limit bounds that.
 tests() {
   local args
   read -ra args <<< "$1"

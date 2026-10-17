@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Adds up the shards' results and fails if any mutant was missed.
+# Adds up the shards' results and fails unless every mutant was caught or
+# could not be built, and every hand-made mutation was caught.
 #
 # Usage: summary.sh <reports> <shards>
 #
@@ -8,9 +9,13 @@
 # both finished. <shards> is how many such folders there must be.
 #
 # A mutant is tested on each OS, and possibly more than once on each. It
-# counts as caught if any run caught it; failing that, as a timeout if any
-# run timed out; failing that, as missed if any run missed it; and otherwise
-# as unviable. Written to standard output and, when GITHUB_STEP_SUMMARY
+# counts as caught if any run caught it; failing that, as missed if any run
+# missed it; failing that, as a timeout if any run timed out; and otherwise
+# as unviable. A timeout is never taken for a catch: a slow suite runs out of
+# time too. So a mutant that only timed out fails the run like a missed one,
+# and a miss anywhere is never hidden by a timeout elsewhere. A hand-made
+# mutation that does not build fails the run as well: its patch is wrong.
+# Written to standard output and, when GITHUB_STEP_SUMMARY
 # names a file, to that file too.
 set -euo pipefail
 
@@ -38,7 +43,7 @@ fi
 merged=$(mktemp)
 cat "$reports"/*/results.tsv 2> /dev/null |
   awk -F '\t' '
-    BEGIN { rank["unviable"] = 1; rank["missed"] = 2; rank["timeout"] = 3; rank["caught"] = 4 }
+    BEGIN { rank["unviable"] = 1; rank["timeout"] = 2; rank["missed"] = 3; rank["caught"] = 4 }
     NF != 2 || !($1 in rank) { print "A results line is not as expected: " $0 > "/dev/stderr"; bad = 1; next }
     !($2 in best) || rank[$1] > rank[best[$2]] { best[$2] = $1 }
     END { for (name in best) print best[name] "\t" name; exit bad }
@@ -67,12 +72,14 @@ has() {
     if [ "$kind" = patches ]; then label="Hand-made"; fi
     echo "| $label | $(count caught "$kind") | $(count missed "$kind") | $(count timeout "$kind") | $(count unviable "$kind") |"
   done
-  for outcome in missed timeout; do
-    if has "$outcome"; then
+  # Unviable ones are listed only for hand-made mutations.
+  for outcome in missed timeout unviable; do
+    listed=$(awk -F '\t' -v o="$outcome" '$1 == o && (o != "unviable" || $2 ~ /^patch /) { print "- `" $2 "`" }' "$merged")
+    if [ -n "$listed" ]; then
       echo
       echo "### ${outcome^}"
       echo
-      awk -F '\t' -v o="$outcome" '$1 == o { print "- `" $2 "`" }' "$merged"
+      echo "$listed"
     fi
   done
   if [ "$failed" -ne 0 ]; then
@@ -83,6 +90,14 @@ has() {
 
 if has missed; then
   echo "Some mutants were missed: no test failed with them." >&2
+  failed=1
+fi
+if has timeout; then
+  echo "Some mutants only timed out, and a timeout is not a catch: no test failed with them." >&2
+  failed=1
+fi
+if [ "$(count unviable patches)" -ne 0 ]; then
+  echo "Some hand-made mutations do not build: their patches need fixing." >&2
   failed=1
 fi
 rm -f "$merged"

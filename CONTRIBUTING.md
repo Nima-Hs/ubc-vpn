@@ -199,21 +199,24 @@ The TypeScript types in `app/src/shared/protocol/` are generated from `crates/co
 
 ## Mutation tests
 
-A reviewer checks each security rule a pull request states by breaking it and seeing a test fail. `.github/workflows/mutants.yml` does that on GitHub's runners instead of your machine. Start it for pull request `N` and follow it:
+A reviewer checks each security rule a pull request states by breaking it and seeing a test fail. `.github/workflows/mutants.yml` does that on GitHub's runners instead of your machine. It runs only from a scratch branch named `test/mut-<N>`, made from `main`, and refuses to start from any other branch. Make the branch, start the workflow for pull request `N` from it, and follow it:
 
 ```sh
-gh workflow run mutants.yml -f pr=N
-gh run list --workflow mutants.yml --limit 1   # the run's ID
+git push origin origin/main:refs/heads/test/mut-N
+gh workflow run mutants.yml --ref test/mut-N -f pr=N
+gh run list --workflow mutants.yml --branch test/mut-N --limit 1   # the run's ID
 gh run watch <run-id>
 ```
 
+The pull request's code runs as root and as an administrator there, and it could write to the Actions cache of the branch the run starts from. Run from `main`, that would be the cache every other workflow restores. A scratch branch's cache is read only by that branch.
+
 - It runs [cargo-mutants](https://mutants.rs/) with `--in-diff` over the Rust lines the pull request changed since its merge-base with `main`, split into four shards on Linux and four on Windows. Every mutant is tried on both, and counts as caught if a test fails on either.
 - A mutant is first tested with its own crate's tests and the features CI tests that crate with, and only if those miss it, with the whole workspace, then both again in release builds, and on Linux the platform crate's tests as root. On Windows the tests that need an elevated process and a second user run too, as in `platform-windows.yml`.
-- The run fails if any mutant was missed. The run's summary page has the number caught, missed, timed out and unviable, and names each missed one. Each shard's reports, its `mutants.out` folders with every mutant's diff and log, are kept as an artifact named `mutants-<os>-<shard>`.
+- The run fails if any mutant was missed, or only timed out: a timeout is not a catch, since a slow suite runs out of time too, so a timed-out mutant is still tried in the later builds, and a miss anywhere counts over a timeout elsewhere. The runs that test the whole workspace get a longer time limit than cargo-mutants would set (10 minutes, 15 on Windows). The run's summary page has the number caught, missed, timed out and unviable, and names each missed and timed-out one. Each shard's reports, its `mutants.out` folders with every mutant's diff and log, are kept as an artifact named `mutants-<os>-<shard>`.
 - It has a read-only token and no secrets, and commits and pushes nothing. Its rules are checked by `.github/mutants/test.sh`, which CI runs.
 - Not covered: code built only for macOS is not mutated, and the engine tests that need the stand-in gateway, ocserv or a real tunnel device are skipped there. A mutant only those would catch shows as missed; check it by hand.
 
-cargo-mutants cannot remove an attribute or a `cfg`, such as `#[serde(deny_unknown_fields)]` or `#[cfg(debug_assertions)]`. Write those mutations by hand in a file, push it on a branch made from `main` named `test/mut-<N>`, and name the file and the branch:
+cargo-mutants cannot remove an attribute or a `cfg`, such as `#[serde(deny_unknown_fields)]` or `#[cfg(debug_assertions)]`. Write those mutations by hand in a file, commit it on the scratch branch `test/mut-N`, and name the file as well:
 
 ```sh
 gh workflow run mutants.yml --ref test/mut-N -f pr=N -f patches=mutations.txt
@@ -230,7 +233,7 @@ diff --git a/crates/core/src/policy.rs b/crates/core/src/policy.rs
 ```
 
 - `os` is `all`, `linux` or `windows`. `test` is the arguments for `cargo test --locked`, words separated by single spaces, with no quoting.
-- Each mutation runs by itself: its tests must pass without it and its patch must apply to the pull request's head, or the run fails. If it then does not build it is unviable; otherwise a failing test means it was caught. Its patch is then taken out again. A missed one fails the run like a missed mutant.
+- Each mutation runs by itself: its tests must pass without it and its patch must apply to the pull request's head, or the run fails. If it then does not build it is unviable, and that fails the run, since the patch is wrong; otherwise a failing test means it was caught. Its patch is then taken out again. A missed or timed-out one fails the run like a missed mutant. On Windows a test that runs out of time can leave its process running until the job ends.
 - Delete the branch when the review is done. The scripts and the file come from that branch, never from the pull request.
 
 cargo-mutants is a test tool under the MIT licence and is never shipped. Its version is pinned in `.github/mutants/cargo-mutants.pin`; the workflow installs it with `cargo install --locked cargo-mutants@<version>`, the same command to use on your own machine. Dependabot does not update it: to move to a newer release at least two weeks old, change the pin.

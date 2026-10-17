@@ -12,6 +12,8 @@
 # whole workspace, then both again in release builds, and on Linux the
 # platform crate's tests as root. A rule that exists in only one of those
 # builds is still checked, and a mutant the first run catches costs no more.
+# A mutant that only timed out goes on to the later runs, as a missed one
+# does: a timeout is not a catch.
 #
 # <out>/results.tsv gets a line for each run of each mutant: the outcome
 # (caught, missed, timeout or unviable), a tab, and the mutant's name.
@@ -85,6 +87,14 @@ echo "$(wc -l < "$out/lists/all.tsv") mutants in the diff, $(wc -l < "$out/lists
 # mutant that left the machine broken cannot pass for caught.
 #   run <name> <cargo-mutants arguments...> -- <cargo test arguments...>
 prefix=()
+head=$(git rev-parse HEAD)
+clean() {
+  [ -z "$(git status --porcelain --untracked-files=no)" ] && [ "$(git rev-parse HEAD)" = "$head" ]
+}
+if ! clean; then
+  echo "The checkout has changes before any mutant is tested." >&2
+  exit 1
+fi
 run() {
   local name=$1
   shift
@@ -125,7 +135,9 @@ run() {
     echo "cargo-mutants tested $tested of $count mutants: $package, $name." >&2
     exit 1
   fi
-  cat "$dir/mutants.out/caught.txt" "$dir/mutants.out/timeout.txt" 2> /dev/null |
+  # Only a catch takes a mutant out of the later runs. A timeout is not a
+  # catch: a slow suite runs out of time too.
+  cat "$dir/mutants.out/caught.txt" 2> /dev/null |
     grep -vxF -f - "$remaining" > "$remaining.next" || true
   mv "$remaining.next" "$remaining"
   echo "::group::$package, $name: the tests pass without a mutation"
@@ -135,7 +147,21 @@ run() {
     exit 1
   fi
   echo "::endgroup::"
+  # And no mutation was left in place.
+  if ! clean; then
+    echo "The checkout does not match its commit after $package, $name:" >&2
+    git status --short --untracked-files=no >&2
+    exit 1
+  fi
 }
+
+# cargo-mutants sets the test timeout from a baseline of the mutated crate's
+# own tests, which is far too short for the whole workspace: on Windows the
+# platform crate's event tests alone take longer. The runs that test the
+# workspace get a floor of their own, so they end in a pass or a failure
+# rather than a timeout.
+slow=(--minimum-test-timeout=600)
+if [ "$os" = windows ]; then slow=(--minimum-test-timeout=900); fi
 
 while IFS= read -r package; do
   awk -F '\t' -v p="$package" '$1 == p { print $2 }' "$out/lists/shard.tsv" > "$out/lists/$package.remaining"
@@ -143,9 +169,9 @@ while IFS= read -r package; do
   own=()
   if [ -n "$features" ]; then own=(--features "$features"); fi
   run own "${own[@]}" -- -p "$package" "${own[@]}"
-  run workspace --test-workspace=true -- --workspace
+  run workspace --test-workspace=true "${slow[@]}" -- --workspace
   run own-release "${own[@]}" --profile=release -- -p "$package" "${own[@]}" --release
-  run workspace-release --test-workspace=true --profile=release -- --workspace --release
+  run workspace-release --test-workspace=true --profile=release "${slow[@]}" -- --workspace --release
   # The channel's rules that only root can test (platform-unix.yml).
   if [ "$os" = linux ] && [ "$package" = ubc-vpn-platform ]; then
     prefix=(sudo env "PATH=$PATH" "HOME=$HOME" UBC_VPN_REQUIRE_ROOT=1)
