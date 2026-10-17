@@ -197,6 +197,44 @@ CI runs `cargo fmt`, `cargo clippy` and `cargo test`. For the app it runs the li
 
 The TypeScript types in `app/src/shared/protocol/` are generated from `crates/core` by `cargo test`. Never edit them by hand; change the Rust type, run the tests, and commit the result.
 
+## Mutation tests
+
+A reviewer checks each security rule a pull request states by breaking it and seeing a test fail. `.github/workflows/mutants.yml` does that on GitHub's runners instead of your machine. Start it for pull request `N` and follow it:
+
+```sh
+gh workflow run mutants.yml -f pr=N
+gh run list --workflow mutants.yml --limit 1   # the run's ID
+gh run watch <run-id>
+```
+
+- It runs [cargo-mutants](https://mutants.rs/) with `--in-diff` over the Rust lines the pull request changed since its merge-base with `main`, split into four shards on Linux and four on Windows. Every mutant is tried on both, and counts as caught if a test fails on either.
+- A mutant is first tested with its own crate's tests and the features CI tests that crate with, and only if those miss it, with the whole workspace, then both again in release builds, and on Linux the platform crate's tests as root. On Windows the tests that need an elevated process and a second user run too, as in `platform-windows.yml`.
+- The run fails if any mutant was missed. The run's summary page has the number caught, missed, timed out and unviable, and names each missed one. Each shard's reports, its `mutants.out` folders with every mutant's diff and log, are kept as an artifact named `mutants-<os>-<shard>`.
+- It has a read-only token and no secrets, and commits and pushes nothing. Its rules are checked by `.github/mutants/test.sh`, which CI runs.
+- Not covered: code built only for macOS is not mutated, and the engine tests that need the stand-in gateway, ocserv or a real tunnel device are skipped there. A mutant only those would catch shows as missed; check it by hand.
+
+cargo-mutants cannot remove an attribute or a `cfg`, such as `#[serde(deny_unknown_fields)]` or `#[cfg(debug_assertions)]`. Write those mutations by hand in a file, push it on a branch made from `main` named `test/mut-<N>`, and name the file and the branch:
+
+```sh
+gh workflow run mutants.yml --ref test/mut-N -f pr=N -f patches=mutations.txt
+```
+
+The file holds one or more mutations. Each starts with three header lines, then a patch that makes the one change, as `git diff` writes it from the repository's root. Lines before the first header are a comment:
+
+```text
+=== mutation: deny-unknown-fields
+=== os: all
+=== test: -p ubc-vpn-core --lib
+diff --git a/crates/core/src/policy.rs b/crates/core/src/policy.rs
+...
+```
+
+- `os` is `all`, `linux` or `windows`. `test` is the arguments for `cargo test --locked`, words separated by single spaces, with no quoting.
+- Each mutation runs by itself: its tests must pass without it and its patch must apply to the pull request's head, or the run fails. If it then does not build it is unviable; otherwise a failing test means it was caught. Its patch is then taken out again. A missed one fails the run like a missed mutant.
+- Delete the branch when the review is done. The scripts and the file come from that branch, never from the pull request.
+
+cargo-mutants is a test tool under the MIT licence and is never shipped. Its version is pinned in `.github/mutants/cargo-mutants.pin`; the workflow installs it with `cargo install --locked cargo-mutants@<version>`, the same command to use on your own machine. Dependabot does not update it: to move to a newer release at least two weeks old, change the pin.
+
 ## Security
 
 Never commit VPN profiles, credentials, keys, or logs. Report vulnerabilities privately with the "Report a vulnerability" button under the repository's Security tab, not in a public issue.

@@ -1,0 +1,276 @@
+name: Mutants
+
+# Mutation tests for one pull request, started by hand by its reviewer
+# (CONTRIBUTING.md says how). Each mutant cargo-mutants makes in the lines
+# the pull request changed, and each hand-made mutation in the file that
+# `patches` names, must make a test fail, or the run fails.
+#
+# It runs the pull request's code, so the token is read-only, it uses no
+# secrets, and no checkout keeps the token. Nothing is ever committed or
+# pushed: the checkouts are thrown away with the runners. The tests that need
+# an elevated process, a second user or root run here, on GitHub's runners,
+# as in platform-windows.yml and platform-unix.yml, and never on a machine
+# of ours. .github/mutants/test.sh checks these rules.
+#
+# The scripts and the file of hand-made mutations come from the branch this
+# runs from, never from the pull request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Number of the pull request to test
+        required: true
+        type: number
+      patches:
+        description: Path of a file of hand-made mutations in the branch this runs from (optional)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ inputs.pr }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Named outright, because only then does a failing command at the head of a
+# pipe fail the step, and on Windows it replaces PowerShell.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Must match the number of shards in the matrix below.
+  SHARDS: 4
+  CARGO_TERM_COLOR: never
+
+jobs:
+  prepare:
+    name: The pull request's diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      head: ${{ steps.diff.outputs.head }}
+    steps:
+      - name: Check the inputs
+        env:
+          PR: ${{ inputs.pr }}
+          PATCHES: ${{ inputs.patches }}
+        run: |
+          if ! [[ $PR =~ ^[1-9][0-9]*$ ]]; then
+            echo "pr must be the number of a pull request."
+            exit 1
+          fi
+          if [ -n "$PATCHES" ] && ! [[ $PATCHES =~ ^[A-Za-z0-9_][A-Za-z0-9_./-]*$ && $PATCHES != *..* ]]; then
+            echo "patches must be a path inside the repository."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+      - name: The file of hand-made mutations exists
+        if: inputs.patches != ''
+        env:
+          PATCHES: ${{ inputs.patches }}
+        run: test -f "tools/$PATCHES" || { echo "There is no $PATCHES in $GITHUB_REF."; exit 1; }
+      # All of main's history too, for the merge-base.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ inputs.pr }}/head
+          fetch-depth: 0
+          path: pr
+          persist-credentials: false
+      # Only Rust files: cargo-mutants mutates nothing else.
+      - name: The diff from the merge-base with main
+        id: diff
+        working-directory: pr
+        env:
+          PR: ${{ inputs.pr }}
+        run: |
+          base=$(git merge-base origin/main HEAD)
+          head=$(git rev-parse HEAD)
+          mkdir -p "$RUNNER_TEMP/diff"
+          git diff --no-color --no-ext-diff --no-renames "$base" "$head" -- '*.rs' > "$RUNNER_TEMP/diff/pr.diff"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "Pull request #$PR at $head, from its merge-base with main, $base:"
+          git diff --stat "$base" "$head" -- '*.rs'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pr-diff
+          path: ${{ runner.temp }}/diff/pr.diff
+          retention-days: 14
+
+  mutants:
+    name: mutants (${{ matrix.os }}, shard ${{ matrix.shard }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux for the shared and Unix code, Windows for the Windows code.
+        # Every mutant is tried on both, and is caught if either catches it.
+        os: [ubuntu-latest, windows-latest]
+        shard: [0, 1, 2, 3]
+    env:
+      MUTANTS_OS: ${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }}
+      SHARD: ${{ matrix.shard }}
+      PATCHES: ${{ inputs.patches }}
+      HEAD: ${{ needs.prepare.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.head }}
+          path: pr
+          persist-credentials: false
+      - name: The checkout is the head the diff was taken from
+        working-directory: pr
+        run: test "$(git rev-parse HEAD)" = "$HEAD"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pr-diff
+          path: ${{ runner.temp }}/diff
+      # The pull request's own pinned toolchain. A stalled download would
+      # otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        working-directory: pr
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        working-directory: pr
+        timeout-minutes: 4
+        run: rustup toolchain install
+      # The version is pinned in .github/mutants/cargo-mutants.pin, and
+      # --locked builds it with the dependencies its own lockfile pins.
+      - name: Install the pinned cargo-mutants
+        working-directory: pr
+        timeout-minutes: 20
+        run: |
+          mapfile -t pin < ../tools/.github/mutants/cargo-mutants.pin
+          if [ "${#pin[@]}" -ne 1 ] || ! [[ ${pin[0]} =~ ^CARGO_MUTANTS_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo ".github/mutants/cargo-mutants.pin is not as expected."
+            exit 1
+          fi
+          version=${BASH_REMATCH[1]}
+          cargo install --locked "cargo-mutants@$version"
+          test "$(cargo mutants --version)" = "cargo-mutants $version"
+      # As in platform-windows.yml: the library native/windows/wintun.pin
+      # names, checked against its digest, kept outside the checkout, loaded
+      # by test code only, and never uploaded.
+      - name: Fetch the pinned Wintun library for the tests
+        if: runner.os == 'Windows'
+        working-directory: pr
+        run: |
+          mapfile -t pin < native/windows/wintun.pin
+          url='^WINTUN_URL=(https://www\.wintun\.net/builds/[A-Za-z0-9._-]+\.zip)$'
+          sha='^WINTUN_SHA256=([0-9a-f]{64})$'
+          if [ "${#pin[@]}" -ne 2 ] || ! [[ ${pin[0]} =~ $url ]]; then
+            echo "native/windows/wintun.pin is not as expected."
+            exit 1
+          fi
+          zip_url=${BASH_REMATCH[1]}
+          if ! [[ ${pin[1]} =~ $sha ]]; then
+            echo "native/windows/wintun.pin is not as expected."
+            exit 1
+          fi
+          digest=${BASH_REMATCH[1]}
+          cd "$RUNNER_TEMP"
+          curl -fsSLo wintun.zip "$zip_url"
+          echo "$digest *wintun.zip" | sha256sum -c -
+          unzip -q wintun.zip
+          echo "UBC_VPN_TEST_WINTUN=$(cygpath -w "$RUNNER_TEMP/wintun/bin/amd64/wintun.dll")" >> "$GITHUB_ENV"
+      - name: Mutation tests
+        if: runner.os == 'Linux'
+        working-directory: pr
+        run: |
+          patches=()
+          if [ -n "$PATCHES" ]; then patches=("$GITHUB_WORKSPACE/tools/$PATCHES"); fi
+          bash ../tools/.github/mutants/run.sh "$RUNNER_TEMP/diff/pr.diff" "$SHARD" "$SHARDS" \
+            "$RUNNER_TEMP/out" "${patches[@]}"
+      # As in platform-windows.yml: the second user exists for this one
+      # step, and its random password stays in this step's memory, handed to
+      # the tests through their environment and never written to a file, a
+      # log or a command line. Every "skipped: needs an elevated process" is
+      # a failure.
+      - name: Mutation tests, including the elevated ones, with a throwaway second user
+        if: runner.os == 'Windows'
+        working-directory: pr
+        shell: pwsh
+        env:
+          UBC_VPN_REQUIRE_ELEVATED: "1"
+          TEST_USER: ubc-vpn-stranger
+        run: |
+          $bytes = [byte[]]::new(24)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = 'Aa1!' + [Convert]::ToBase64String($bytes)
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $env:TEST_USER -Password $secure -AccountNeverExpires | Out-Null
+          try {
+            Add-LocalGroupMember -Group Users -Member $env:TEST_USER
+            $env:UBC_VPN_TEST_USER = $env:TEST_USER
+            $env:UBC_VPN_TEST_PASSWORD = $password
+            $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+            $tools = (Join-Path $env:GITHUB_WORKSPACE 'tools') -replace '\\', '/'
+            $temp = $env:RUNNER_TEMP -replace '\\', '/'
+            $run = @("$tools/.github/mutants/run.sh", "$temp/diff/pr.diff", $env:SHARD, $env:SHARDS, "$temp/out")
+            if ($env:PATCHES) { $run += "$tools/$env:PATCHES" }
+            & $bash @run
+            if ($LASTEXITCODE -ne 0) { throw 'The mutation tests failed.' }
+          } finally {
+            Remove-LocalUser -Name $env:TEST_USER
+          }
+      - name: The second user is gone
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Get-LocalUser -Name ubc-vpn-stranger -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name ubc-vpn-stranger
+          }
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-${{ env.MUTANTS_OS }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/out
+          retention-days: 14
+          if-no-files-found: ignore
+
+  summary:
+    name: Summary
+    needs: [prepare, mutants]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mutants-*
+          path: reports
+      # Two OSes, so twice as many reports as shards.
+      - name: Caught, missed, timeout and unviable
+        env:
+          PREPARE: ${{ needs.prepare.result }}
+          MUTANTS: ${{ needs.mutants.result }}
+        run: |
+          mkdir -p reports
+          status=0
+          bash tools/.github/mutants/summary.sh reports $((SHARDS * 2)) || status=$?
+          if [ "$PREPARE" != success ] || [ "$MUTANTS" != success ]; then
+            echo "A job before this one did not succeed: prepare $PREPARE, mutants $MUTANTS."
+            exit 1
+          fi
+          exit "$status"

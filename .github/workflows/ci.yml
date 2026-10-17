@@ -133,15 +133,33 @@ jobs:
             exit 1
           fi
 
+  # The scripts behind the mutation tests (.github/workflows/mutants.yml),
+  # on both OSes they run on, and the rules of that workflow.
+  mutants-tools:
+    name: mutation test scripts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash .github/mutants/test.sh
+        shell: bash
+
   # The single required check. It keeps one stable name while the jobs behind
   # it change, and fails if any of them failed or was skipped.
   check:
     if: always()
-    needs: [test]
+    needs: [test, mutants-tools]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - run: test "${{ needs.test.result }}" = "success"
+      - run: test "${{ needs.mutants-tools.result }}" = "success"
 
   deny:
     name: Licences and advisories
