@@ -397,6 +397,7 @@ fn view(
         keyring,
         policy_readable: policy.is_some(),
         allowed_routes: policy.and_then(|p| p.allowed_routes.clone()),
+        full_tunnel: policy.map(|p| p.full_tunnel).unwrap_or_default(),
     };
     Ok(Box::new(view))
 }

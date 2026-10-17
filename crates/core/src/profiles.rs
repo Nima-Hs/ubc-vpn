@@ -59,6 +59,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::policy::FullTunnel;
 use crate::routes::{Ipv4Net, RouteSet};
 use crate::settings::{Settings, lenient_routes};
 use crate::settings_cli::{RouteInput, SettingsFailureCode, misleads, usable_username};
@@ -675,6 +676,11 @@ pub struct ProfilesView {
     /// When the policy limits routes, the only networks they may fall inside.
     #[cfg_attr(test, ts(type = "Array<string> | null"))]
     pub allowed_routes: Option<Vec<Ipv4Net>>,
+    /// Whether the policy lets users choose full mode, so the app can say so
+    /// before it is chosen. With a policy that cannot be read nothing
+    /// forbids it here, as for `settings set-tunnel`; connecting is refused
+    /// then anyway.
+    pub full_tunnel: FullTunnel,
 }
 
 /// A profile as the app sees it.
