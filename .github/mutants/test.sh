@@ -268,8 +268,8 @@ fi
 # On Windows only cargo.sh gives the tests the workflow's token defaults
 # (token.ps1), without which the elevated tests fail or, worse, pass for the
 # wrong reason.
-if grep -nE '(^|[^.[:alnum:]_/-])cargo +(mutants|test|build)' "$here/shard.sh" "$here/patches.sh" |
-  grep -vE '^[^:]+:[0-9]+: *#' | grep -v 'cargo\.sh'; then
+if grep -hnE '(^|[^.[:alnum:]_/-])cargo +(mutants|test|build)' "$here/shard.sh" "$here/patches.sh" |
+  grep -vE '^[0-9]+: *#' | grep -v 'cargo\.sh'; then
   fail "shard.sh and patches.sh must start cargo only through cargo.sh"
 else
   pass "every cargo goes through cargo.sh"
