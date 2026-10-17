@@ -83,6 +83,8 @@ export function ConnectionView() {
 
             {/* Split or full, for every profile: switched in place while connected. */}
             <TunnelSwitch />
+            {/* What came of the last switch, right under it, when it did not go as asked. */}
+            <TunnelOutcome />
 
             {/* Which profile Connect uses, when there is more than one. */}
             <ProfileSwitcher />
@@ -111,8 +113,6 @@ export function ConnectionView() {
                     </Panel>
                 )}
             </div>
-
-            <TunnelOutcome />
 
             {noticeCopy !== null && (
                 <Panel tone="attention" className="shrink-0">
