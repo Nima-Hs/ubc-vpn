@@ -73,6 +73,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: system-${{ matrix.profile }}
+          # Pull requests restore main's caches but save none of their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Each program is built by itself (-p), as a release is, so that
       # neither is given features only the other asked for.
       - name: Build the service and the client in dev mode
