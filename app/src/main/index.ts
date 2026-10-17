@@ -150,6 +150,8 @@ async function start(): Promise<void> {
                     void profiles?.list().then((result) => {
                         if (result.ok) {
                             savedMode = result.value.global.tunnel;
+                        } else {
+                            tunnelSwitch?.readFailed();
                         }
                     });
                 }
@@ -336,6 +338,8 @@ async function start(): Promise<void> {
                 show();
             }
             if (!result.ok) {
+                // Said where the tunnel is chosen, instead of reading for ever.
+                tunnelSwitch?.readFailed();
                 return;
             }
             const global = result.value.global;

@@ -155,7 +155,8 @@ export class ProfilesRunner implements ProfilesService {
 
     constructor(options: OneLineOptions) {
         this.calls = new OneLineCalls(options);
-        this.slowCalls = new OneLineCalls({ timeoutMs: SET_TUNNEL_TIMEOUT_MS, ...options });
+        // The long limit last, so no option can cut it short.
+        this.slowCalls = new OneLineCalls({ ...options, timeoutMs: SET_TUNNEL_TIMEOUT_MS });
     }
 
     list(): Promise<ProfilesResult> {

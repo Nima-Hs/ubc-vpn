@@ -21,6 +21,11 @@ export function ChoiceList<T extends string>({
         label: string;
         hint?: string | undefined;
         disabled?: boolean;
+        /**
+         * Chosen, but cannot be changed just now: it stays focusable, so the
+         * keyboard keeps its place and a screen reader reaches `note`.
+         */
+        locked?: boolean;
     }[];
     value: T;
     onChange(value: T): void;
@@ -39,7 +44,7 @@ export function ChoiceList<T extends string>({
             <legend className="pb-2 font-strong text-title text-text">{legend}</legend>
             <div className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border-strong bg-surface shadow-surface">
                 {options.map((option) => {
-                    const off = disabled || option.disabled === true;
+                    const off = disabled || option.disabled === true || option.locked === true;
                     return (
                         <label
                             key={option.value}
@@ -54,7 +59,12 @@ export function ChoiceList<T extends string>({
                                 value={option.value}
                                 checked={value === option.value}
                                 disabled={option.disabled === true}
-                                onChange={() => onChange(option.value)}
+                                aria-disabled={option.locked === true || undefined}
+                                onChange={() => {
+                                    if (option.locked !== true) {
+                                        onChange(option.value);
+                                    }
+                                }}
                                 className="mt-1 size-4 shrink-0 accent-accent"
                             />
                             <span className="flex min-w-0 flex-col gap-0.5">

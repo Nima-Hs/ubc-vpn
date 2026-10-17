@@ -10,8 +10,18 @@ import type { TunnelMode } from "./protocol/TunnelMode";
 
 /** What came of a switch, when there is something to say about it. */
 export type TunnelOutcome =
-    /** The service would not switch the live connection, which keeps `kept`. */
-    | { kind: "refused"; kept: TunnelMode; wanted: TunnelMode; message: string }
+    /**
+     * The service would not switch the live connection, which keeps `kept`.
+     * `restored` says whether `kept` could be saved again; if not, `wanted`
+     * is still saved, and the next connect uses it.
+     */
+    | {
+          kind: "refused";
+          kept: TunnelMode;
+          wanted: TunnelMode;
+          message: string;
+          restored: boolean;
+      }
     /** The policy forbids full mode. Nothing was saved. */
     | { kind: "forbidden" }
     /** The service did not say in time whether the connection was switched. */
@@ -29,6 +39,8 @@ export interface TunnelStatus {
     switching: { from: TunnelMode; to: TunnelMode } | null;
     /** What came of the last switch, until another starts or the connection changes. */
     outcome: TunnelOutcome | null;
+    /** The settings could not be read, so `saved` is not known. */
+    readFailed: boolean;
 }
 
 export const UNREAD_TUNNEL: TunnelStatus = {
@@ -36,6 +48,7 @@ export const UNREAD_TUNNEL: TunnelStatus = {
     fullAllowed: true,
     switching: null,
     outcome: null,
+    readFailed: false,
 };
 
 export const TUNNEL_MODES: readonly TunnelMode[] = ["split", "full"];
@@ -70,7 +83,7 @@ export function tunnelLocked(
     loggingIn: boolean,
 ): string | null {
     if (tunnel.saved === null) {
-        return TUNNEL.unread;
+        return tunnel.readFailed ? TUNNEL.unreadable : TUNNEL.unread;
     }
     if (tunnel.switching !== null) {
         return null;
@@ -90,13 +103,17 @@ export const TUNNEL = {
     short: { split: "Split", full: "Full" } satisfies Record<TunnelMode, string>,
     hints: {
         split: "Only traffic to UBC networks goes through the VPN. Everything else uses your normal connection.",
-        full: "All your traffic goes through UBC, and UBC looks up every web address. Your local network, such as a printer, is still reached directly.",
+        full: "All your traffic goes through UBC, and your computer’s name lookups go to UBC’s DNS servers. A browser using DNS over HTTPS still looks names up its own way, through the tunnel. Your local network, such as a printer, is still reached directly.",
     } satisfies Record<TunnelMode, string>,
     forbidden: "Full tunnel is turned off by this computer’s VPN policy.",
     /** Beside the choice while connected: said before anyone switches. */
     live: "You stay connected. Connections outside UBC may reset.",
     whileConnecting: "You can change the tunnel once the VPN has connected or disconnected.",
     unread: "Reading your settings…",
+    unreadable:
+        "UBC VPN could not read your settings, so the tunnel cannot be changed. Try again from Settings.",
+    /** The Routes screen's opening line while full tunnel is on. */
+    routesBodyFull: "In split tunnel, only traffic to these subnets goes through the VPN.",
     /** Atop the routes while full tunnel is on. */
     routesNotUsed:
         "Full tunnel is on, so all your traffic goes through UBC and this list is not used. It is kept for when you switch back to split tunnel.",
@@ -112,10 +129,16 @@ export function describeTunnelOutcome(
         case "refused":
             return {
                 title: `Still on ${TUNNEL.names[outcome.kept].toLowerCase()}`,
-                body:
+                body: [
                     outcome.message.trim() === ""
                         ? "The VPN service refused the switch."
                         : outcome.message.trim(),
+                    ...(outcome.restored
+                        ? []
+                        : [
+                              `${TUNNEL.names[outcome.wanted]} is still saved, so the next connect uses it.`,
+                          ]),
+                ].join(" "),
             };
         case "forbidden":
             return { title: "Full tunnel is not available", body: TUNNEL.forbidden };

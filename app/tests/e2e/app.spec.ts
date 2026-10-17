@@ -2186,9 +2186,14 @@ test("tunnel: switched while connected, without disconnecting, and back", async 
     await expect(tunnelRadio("Full tunnel")).toBeChecked();
     expect(await diagramMode()).toBe("full");
     // It went through "Switching", and never through disconnecting.
-    expect(states).toContain("Switching to full tunnel");
+    expect(states).toContain("Switching");
     expect(states.some((text) => /Disconnect|Not connected|Connecting/.test(text))).toBe(false);
     await expect(page.getByRole("button", { name: "Disconnect" })).toBeEnabled();
+    // The details say so too: everything goes through, the lists are the user's own.
+    const details = page.getByRole("group", { name: "Connection details" });
+    await expect(details).toContainText("All your traffic");
+    await expect(details).toContainText("Your saved subnets");
+    await expect(details).not.toContainText("Subnets through the VPN");
     await shoot("tunnel-full-connected");
 
     // The keyboard switches it too.
@@ -2201,14 +2206,42 @@ test("tunnel: switched while connected, without disconnecting, and back", async 
 
 test("tunnel: a switch under way shows switching, and nothing can be changed meanwhile", async () => {
     await scenario("tunnel-switch-held");
+    // Started from Settings with the keyboard: the radio it moved to keeps
+    // focus, stays reachable, and the reason it is locked is its description.
+    await tab("Settings").click();
+    const settingsSplit = page.getByRole("radio", { name: /^Split tunnel/ });
+    const settingsFull = page.getByRole("radio", { name: /^Full tunnel/ });
+    await settingsSplit.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(settingsFull).toBeChecked();
+    await expect(settingsFull).toBeFocused();
+    expect(await settingsFull.evaluate((radio) => (radio as HTMLInputElement).disabled)).toBe(
+        false,
+    );
+    await expect(settingsFull).toHaveAttribute("aria-disabled", "true");
+    await expect(settingsSplit).toBeDisabled();
+    await expect(page.getByRole("group", { name: "Tunnel" })).toHaveAccessibleDescription(
+        "You stay connected. Connections outside UBC may reset.",
+    );
+    // Pressing on does nothing while it is locked.
+    await page.keyboard.press("ArrowUp");
+    await expect(settingsFull).toBeChecked();
     await tab("Connection").click();
-    await chooseTunnel("Full tunnel");
-    await expect(heading()).toHaveText("Switching to full tunnel");
-    await expect(
-        said("The VPN stays connected. Connections to sites outside UBC may reset."),
-    ).toBeVisible();
+    await expect(heading()).toHaveText("Switching");
+    await expect(said("Moving to full tunnel. The VPN stays connected.")).toBeVisible();
+    // The note under the choice stays as it was, so nothing moves.
+    await expect(tunnelGroup()).toHaveAccessibleDescription(
+        "You stay connected. Connections outside UBC may reset.",
+    );
     await expect(tunnelRadio("Full tunnel")).toBeChecked();
     await expect(tunnelRadio("Split tunnel")).toBeDisabled();
+    // One line of title, as when connected.
+    const titleLines = await heading().evaluate(
+        (title) =>
+            title.getBoundingClientRect().height /
+            Number.parseFloat(getComputedStyle(title).lineHeight),
+    );
+    expect(Math.round(titleLines)).toBe(1);
     // The picture shows the way being opened through UBC.
     await expect
         .poll(() =>
@@ -2220,11 +2253,6 @@ test("tunnel: a switch under way shows switching, and nothing can be changed mea
         )
         .toBe(1);
     await shoot("tunnel-switching");
-    // Settings shows the same switch under way.
-    await tab("Settings").click();
-    await expect(page.getByRole("radio", { name: /^Full tunnel/ })).toBeChecked();
-    await expect(page.getByRole("radio", { name: /^Split tunnel/ })).toBeDisabled();
-    await tab("Connection").click();
     // The next scenario answers the held switch, for the next connect.
     await resetTunnel();
 });
@@ -2240,6 +2268,9 @@ test("tunnel: a refused switch keeps the old mode and says why", async () => {
     await expect(said("Split tunnel: traffic to 2 UBC subnets")).toBeVisible();
     expect(await diagramMode()).toBe("split");
     await expect(page.getByRole("status").first()).toContainText("Still on split tunnel");
+    // Said right under the choice, and the main button stays in view.
+    await expect(tunnelGroup()).toHaveAccessibleDescription(/^Still on split tunnel: /);
+    await expect(action()).toBeInViewport({ ratio: 1 });
     await shoot("tunnel-refused");
     // Saved back as it was: Settings says split too.
     await tab("Settings").click();
@@ -2258,9 +2289,12 @@ test("tunnel: full tunnel the policy forbids cannot be chosen, and it says why",
     await tab("Settings").click();
     await expect(page.getByRole("radio", { name: /^Full tunnel/ })).toBeDisabled();
     await expect(page.getByRole("radio", { name: /^Split tunnel/ })).toBeChecked();
-    await expect(
-        page.getByText("Full tunnel is turned off by this computer’s VPN policy."),
-    ).toBeVisible();
+    const forbiddenNote = page.getByText(
+        "Full tunnel is turned off by this computer’s VPN policy.",
+    );
+    await forbiddenNote.scrollIntoViewIfNeeded();
+    await expect(forbiddenNote).toBeInViewport();
+    await expect(page.getByRole("group", { name: "Tunnel" })).toBeInViewport();
     await shoot("tunnel-forbidden-settings");
     await resetTunnel();
 });
@@ -2275,6 +2309,11 @@ test("tunnel: in full tunnel the routes are kept and shown, but not in use", asy
     await expect(heading()).toHaveText("Routes");
     await expect(page.getByText("Reading your settings…")).toHaveCount(0);
     await expect(page.getByText("Not in use")).toBeVisible();
+    // The opening line does not say the list is in use.
+    await expect(
+        said("In split tunnel, only traffic to these subnets goes through the VPN."),
+    ).toBeVisible();
+    await expect(said("Everything else uses your normal connection.")).toHaveCount(0);
     const first = page.getByLabel("Subnet 1", { exact: true });
     await expect(first).toBeDisabled();
     await expect(first).not.toHaveValue("");

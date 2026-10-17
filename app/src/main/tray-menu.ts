@@ -45,7 +45,10 @@ export interface TrayMenuItem {
  */
 export function trayStatus(state: LinkState, tunnel: TunnelStatus = UNREAD_TUNNEL): string {
     const copy = describe(state, tunnel);
-    return switchesLive(state) && tunnel.switching === null
+    if (switchesLive(state) && tunnel.switching !== null) {
+        return `Switching to ${TUNNEL.names[tunnel.switching.to].toLowerCase()}`;
+    }
+    return switchesLive(state)
         ? `${copy.title}, ${TUNNEL.names[copy.mode].toLowerCase()}`
         : copy.title;
 }

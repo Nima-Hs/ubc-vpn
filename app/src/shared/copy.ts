@@ -56,6 +56,11 @@ export const DETAILS = {
     address: "Your VPN address",
     subnets: "Subnets through the VPN",
     domains: "Domains looked up through the VPN",
+    /** Full tunnel: everything goes through, and the saved lists are the user's own. */
+    traffic: "Through the VPN",
+    allTraffic: "All your traffic",
+    subnetsFull: "Your saved subnets",
+    domainsFull: "Your saved domains",
     none: "None",
     subnetCount: (n: number) => count(n, "subnet", "subnets"),
     domainCount: (n: number) => count(n, "domain", "domains"),
@@ -188,8 +193,9 @@ function describeConn(conn: ConnState, tunnel: TunnelStatus): Omit<StateCopy, "m
             if (switching !== null) {
                 return {
                     tone: "busy",
-                    title: `Switching to ${TUNNEL.names[switching.to].toLowerCase()}`,
-                    body: "The VPN stays connected. Connections to sites outside UBC may reset.",
+                    // Short, so the title keeps to one line and nothing moves.
+                    title: "Switching",
+                    body: `Moving to ${TUNNEL.names[switching.to].toLowerCase()}. The VPN stays connected.`,
                     action: { kind: "disconnect", label: "Disconnect" },
                     working: false,
                 };
@@ -198,7 +204,7 @@ function describeConn(conn: ConnState, tunnel: TunnelStatus): Omit<StateCopy, "m
                 return {
                     tone: "on",
                     title: "Connected",
-                    body: "Full tunnel: all your traffic goes through UBC, and UBC looks up every web address. Your local network is still reached directly.",
+                    body: "Full tunnel: all your traffic goes through UBC, and your computer’s name lookups go to UBC’s DNS servers. Your local network is still reached directly.",
                     action: { kind: "disconnect", label: "Disconnect" },
                     working: false,
                 };

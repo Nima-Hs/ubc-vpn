@@ -7,7 +7,7 @@ import {
 } from "@shared/copy";
 import { useEffect, useRef } from "react";
 import { ProfileSwitcher } from "@/components/profile-switcher";
-import { TunnelOutcome, TunnelSwitch, useTunnelOutcomeText } from "@/components/tunnel-choice";
+import { TunnelSwitch, useTunnelOutcomeText } from "@/components/tunnel-choice";
 import { TunnelDetails } from "@/components/tunnel-details";
 import { TunnelDiagram } from "@/components/tunnel-diagram";
 import { Button } from "@/components/ui/button";
@@ -83,8 +83,6 @@ export function ConnectionView() {
 
             {/* Split or full, for every profile: switched in place while connected. */}
             <TunnelSwitch />
-            {/* What came of the last switch, right under it, when it did not go as asked. */}
-            <TunnelOutcome />
 
             {/* Which profile Connect uses, when there is more than one. */}
             <ProfileSwitcher />
@@ -100,7 +98,7 @@ export function ConnectionView() {
             <div
                 className={cn(
                     "flex flex-1 flex-col",
-                    (tunnel !== null || copy.detail !== undefined) && "min-h-24",
+                    (tunnel !== null || copy.detail !== undefined) && "min-h-16",
                 )}
             >
                 {tunnel !== null && <TunnelDetails tunnel={tunnel} />}

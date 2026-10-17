@@ -14,12 +14,18 @@ import {
     describeTunnelOutcome,
     shownMode,
     TUNNEL,
+    type TunnelOutcome,
     type TunnelStatus,
     tunnelLocked,
     UNREAD_TUNNEL,
 } from "@shared/tunnel";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PROFILES_ARGS, ProfilesRunner, type TunnelResult } from "../src/main/channel/profiles";
+import {
+    PROFILES_ARGS,
+    ProfilesRunner,
+    SET_TUNNEL_TIMEOUT_MS,
+    type TunnelResult,
+} from "../src/main/channel/profiles";
 import { isProfilesView, isTunnelReply } from "../src/main/channel/validate";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
@@ -136,6 +142,37 @@ describe("settings set-tunnel", () => {
                 live: { result: "refused", code: "route_refused", message: "no way" },
             },
         });
+    });
+
+    it("cleans the reason the service gave no answer, too", async () => {
+        const { runner } = client({
+            "settings set-tunnel": {
+                line: {
+                    type: "ok",
+                    tunnel: "full",
+                    live: { result: "unknown", message: `not${NUL}  said ` },
+                },
+            },
+        });
+        await expect(runner.setTunnel("full")).resolves.toEqual({
+            ok: true,
+            value: {
+                type: "ok",
+                tunnel: "full",
+                live: { result: "unknown", message: "not said" },
+            },
+        });
+    });
+
+    it("gives a switch its long time limit, whatever the other calls are given", () => {
+        const runner = new ProfilesRunner({ command: process.execPath, timeoutMs: 1000 });
+        runners.push(runner);
+        const limit = (calls: string) =>
+            (runner as unknown as Record<string, { options: { timeoutMs: number } }>)[calls]
+                ?.options.timeoutMs;
+        expect(limit("calls")).toBe(1000);
+        expect(limit("slowCalls")).toBe(SET_TUNNEL_TIMEOUT_MS);
+        expect(SET_TUNNEL_TIMEOUT_MS).toBeGreaterThan(120_000);
     });
 
     it("starts nothing for a mode that is not one", async () => {
@@ -309,7 +346,13 @@ describe("the tunnel switch", () => {
         expect(tunnel.get()).toMatchObject({
             saved: "split",
             switching: null,
-            outcome: { kind: "refused", kept: "split", wanted: "full", message: "No router here." },
+            outcome: {
+                kind: "refused",
+                kept: "split",
+                wanted: "full",
+                message: "No router here.",
+                restored: true,
+            },
         });
         expect(shownMode(link.get(), tunnel.get())).toBe("split");
         // Said until the connection changes.
@@ -317,6 +360,30 @@ describe("the tunnel switch", () => {
         expect(tunnel.get().outcome).not.toBeNull();
         link.set(DISCONNECTED);
         expect(tunnel.get().outcome).toBeNull();
+    });
+
+    it("says so when the old mode could not be saved back after a refusal", async () => {
+        const { tunnel, answers, rereads } = rig();
+        answers.push(
+            {
+                ok: true,
+                value: {
+                    type: "ok",
+                    tunnel: "full",
+                    live: { result: "refused", code: "route_refused", message: "No router here." },
+                },
+            },
+            { ok: false, error: "unwritable" },
+        );
+        await tunnel.request("full");
+        // Full is still saved: the next connect would use it, and it is said.
+        expect(tunnel.get()).toMatchObject({
+            saved: "full",
+            outcome: { kind: "refused", kept: "split", wanted: "full", restored: false },
+        });
+        const words = describeTunnelOutcome(tunnel.get().outcome as TunnelOutcome, String);
+        expect(words.body).toContain("Full tunnel is still saved, so the next connect uses it.");
+        expect(rereads()).toBe(1);
     });
 
     it("does not ask the client for full mode the policy forbids", async () => {
@@ -339,15 +406,42 @@ describe("the tunnel switch", () => {
         });
     });
 
-    it("says so when the choice could not be saved, and changes nothing", async () => {
-        const { tunnel, answers } = rig();
-        answers.push({ ok: false, error: "unwritable" });
+    it("says so when the choice could not be saved, and reads the settings again", async () => {
+        const { tunnel, answers, rereads } = rig();
+        answers.push({ ok: false, error: "unavailable" });
         await tunnel.request("full");
         expect(tunnel.get()).toMatchObject({
             saved: "split",
             switching: null,
-            outcome: { kind: "not_saved", wanted: "full", error: "unwritable" },
+            outcome: { kind: "not_saved", wanted: "full", error: "unavailable" },
         });
+        // A client ended after saving may have saved: the settings say.
+        expect(rereads()).toBe(1);
+    });
+
+    it("says the settings could not be read, instead of reading for ever", () => {
+        const link = new LinkStore();
+        link.set(DISCONNECTED);
+        const published: TunnelStatus[] = [];
+        const tunnel = new TunnelSwitch({
+            save: () => new Promise(() => {}),
+            reread: () => {},
+            state: () => link.get(),
+            subscribe: (listener) => link.subscribe(listener),
+            loggingIn: () => false,
+            publish: (next) => published.push(next),
+        });
+        expect(tunnelLocked(DISCONNECTED, tunnel.get(), false)).toBe(TUNNEL.unread);
+        tunnel.readFailed();
+        expect(tunnel.get().readFailed).toBe(true);
+        expect(tunnelLocked(DISCONNECTED, tunnel.get(), false)).toBe(TUNNEL.unreadable);
+        // Read after all: usable, and the failure forgotten.
+        tunnel.fromProfiles(VIEW);
+        expect(tunnel.get()).toMatchObject({ saved: "split", readFailed: false });
+        expect(tunnelLocked(DISCONNECTED, tunnel.get(), false)).toBeNull();
+        // A later failure does not take back settings already read.
+        tunnel.readFailed();
+        expect(tunnel.get().readFailed).toBe(false);
     });
 
     it("saves for the next connect when not connected, with no wait", async () => {
@@ -405,6 +499,11 @@ describe("the words and pictures for each mode", () => {
         expect(full).toMatchObject({ tone: "on", title: "Connected", mode: "full" });
         expect(full.body).toMatch(/^Full tunnel: all your traffic goes through UBC/);
         expect(full.body).toContain("local network");
+        // Only what the computer looks up goes to UBC's DNS: no claim of every address.
+        expect(full.body).toContain("name lookups go to UBC’s DNS servers");
+        expect(full.body).not.toMatch(/every/);
+        expect(TUNNEL.hints.full).toContain("DNS over HTTPS");
+        expect(TUNNEL.hints.full).not.toMatch(/every/);
     });
 
     it("shows a switch under way, and warns that some connections may reset", () => {
@@ -413,13 +512,15 @@ describe("the words and pictures for each mode", () => {
             status({ switching: { from: "split", to: "full" } }),
         );
         expect(copy).toMatchObject({
+            // Short, so it keeps to one line.
             tone: "busy",
-            title: "Switching to full tunnel",
+            title: "Switching",
             mode: "full",
             action: { kind: "disconnect", label: "Disconnect" },
         });
-        expect(copy.body).toContain("stays connected");
-        expect(copy.body).toContain("may reset");
+        expect(copy.body).toBe("Moving to full tunnel. The VPN stays connected.");
+        // The warning is the choice's own line, the same before and during.
+        expect(TUNNEL.live).toContain("may reset");
     });
 
     it("connects with the saved mode, and shows it while not connected", () => {
@@ -456,6 +557,8 @@ describe("the words and pictures for each mode", () => {
     it("says why the mode cannot be changed just now", () => {
         expect(tunnelLocked(DISCONNECTED, UNREAD_TUNNEL, false)).toBe(TUNNEL.unread);
         expect(tunnelLocked(CONNECTING, status(), false)).toBe(TUNNEL.whileConnecting);
+        const disconnecting: LinkState = { link: "ready", conn: { state: "disconnecting" } };
+        expect(tunnelLocked(disconnecting, status(), false)).toBe(TUNNEL.whileConnecting);
         expect(tunnelLocked(DISCONNECTED, status(), true)).toBe(TUNNEL.whileConnecting);
         expect(tunnelLocked(DISCONNECTED, status(), false)).toBeNull();
         expect(tunnelLocked(connected("split"), status(), false)).toBeNull();
@@ -465,7 +568,13 @@ describe("the words and pictures for each mode", () => {
         const plain = (error: string) => `could not: ${error}`;
         expect(
             describeTunnelOutcome(
-                { kind: "refused", kept: "split", wanted: "full", message: "No router here." },
+                {
+                    kind: "refused",
+                    kept: "split",
+                    wanted: "full",
+                    message: "No router here.",
+                    restored: true,
+                },
                 plain,
             ),
         ).toEqual({ title: "Still on split tunnel", body: "No router here." });
@@ -544,7 +653,13 @@ describe("the tray's tunnel menu", () => {
             actions,
             false,
             status({
-                outcome: { kind: "refused", kept: "split", wanted: "full", message: "No router." },
+                outcome: {
+                    kind: "refused",
+                    kept: "split",
+                    wanted: "full",
+                    message: "No router.",
+                    restored: true,
+                },
             }),
         );
         expect(notes(items)).toEqual(["Still on split tunnel", "No router.", TUNNEL.live]);

@@ -73,7 +73,15 @@ export class TunnelSwitch {
         this.update({
             saved: view.global.tunnel,
             fullAllowed: view.full_tunnel === "allowed",
+            readFailed: false,
         });
+    }
+
+    /** The profiles could not be read, or the client took too long: say so. */
+    readFailed(): void {
+        if (this.status.saved === null) {
+            this.update({ readFailed: true });
+        }
     }
 
     /**
@@ -99,7 +107,16 @@ export class TunnelSwitch {
         }
         this.outcomeKind = null;
         this.update({ switching: { from, to: mode }, outcome: null });
+        try {
+            await this.run(mode, from);
+        } finally {
+            // Whatever came of it, a client that failed or was ended after
+            // saving included: every screen is given the mode as saved.
+            this.deps.reread();
+        }
+    }
 
+    private async run(mode: TunnelMode, from: TunnelMode): Promise<void> {
         const result = await this.deps.save(mode);
         if (!result.ok) {
             this.finish({ kind: "not_saved", wanted: mode, error: result.error });
@@ -109,7 +126,6 @@ export class TunnelSwitch {
         if (reply.type === "forbidden") {
             this.update({ fullAllowed: false });
             this.finish({ kind: "forbidden" });
-            this.deps.reread();
             return;
         }
         this.update({ saved: reply.tunnel });
@@ -128,17 +144,23 @@ export class TunnelSwitch {
                 // The connection keeps the mode it has, and so does the setting:
                 // what is chosen is what is in effect.
                 const back = await this.deps.save(from);
-                if (back.ok && back.value.type === "ok") {
-                    this.update({ saved: back.value.tunnel });
+                const restored = back.ok && back.value.type === "ok" && back.value.tunnel === from;
+                if (restored) {
+                    this.update({ saved: from });
                 }
-                this.finish({ kind: "refused", kept: from, wanted: mode, message: live.message });
+                this.finish({
+                    kind: "refused",
+                    kept: from,
+                    wanted: mode,
+                    message: live.message,
+                    restored,
+                });
                 break;
             }
             case "unknown":
                 this.finish({ kind: "unknown", wanted: mode, message: live.message });
                 break;
         }
-        this.deps.reread();
     }
 
     dispose(): void {

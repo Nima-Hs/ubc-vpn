@@ -377,6 +377,10 @@ export function RoutesView() {
         | { state: "ready"; view: SettingsView }
     >({ state: "loading" });
     const [attempt, setAttempt] = useState(0);
+    // The opening line says what the lists are for in the mode shown.
+    const notInUse = useSnapshot(
+        (snapshot) => shownMode(snapshot.state, snapshot.tunnel) === "full",
+    );
 
     useEffect(() => {
         let current = true;
@@ -399,7 +403,7 @@ export function RoutesView() {
         <main className="flex min-h-0 flex-1 flex-col gap-5 px-5 pt-2 pb-5">
             <section className="flex shrink-0 flex-col gap-2">
                 <Heading>{ROUTES.title}</Heading>
-                <Text tone="secondary">{ROUTES.body}</Text>
+                <Text tone="secondary">{notInUse ? TUNNEL.routesBodyFull : ROUTES.body}</Text>
             </section>
             {loaded.state === "loading" && (
                 <div role="status">

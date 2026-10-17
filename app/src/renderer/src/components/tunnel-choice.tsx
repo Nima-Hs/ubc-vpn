@@ -8,6 +8,7 @@ import {
     TUNNEL_MODES,
     tunnelLocked,
 } from "@shared/tunnel";
+import { TriangleAlert } from "lucide-react";
 import { useId } from "react";
 import { ChoiceList } from "@/components/ui/choice-list";
 import { Panel } from "@/components/ui/panel";
@@ -26,16 +27,10 @@ function useTunnelChoice() {
     const locked = tunnelLocked(state, tunnel, login.phase !== "idle");
     const value = shownMode(state, tunnel);
     const unavailable = locked !== null || tunnel.switching !== null;
+    // The same line before, during and after a switch, so nothing moves.
     const note =
         locked ??
-        // While switching, the status above says what is happening.
-        (tunnel.switching !== null
-            ? null
-            : !tunnel.fullAllowed
-              ? TUNNEL.forbidden
-              : switchesLive(state)
-                ? TUNNEL.live
-                : null);
+        (!tunnel.fullAllowed ? TUNNEL.forbidden : switchesLive(state) ? TUNNEL.live : null);
     const outcome =
         tunnel.outcome === null
             ? null
@@ -79,7 +74,10 @@ export function useTunnelOutcomeText(): string {
  * which is chosen and why one cannot be.
  */
 export function TunnelSwitch({ className }: { className?: string }) {
-    const { value, unavailable, note, choosable, choose } = useTunnelChoice();
+    const { value, unavailable, note: plainNote, outcome, choosable, choose } = useTunnelChoice();
+    // What came of a switch takes the note's place, right under the choice,
+    // in as little room as it can: the main button stays in view.
+    const note = outcome === null ? plainNote : `${outcome.title}: ${outcome.body}`;
     const name = useId();
     const labelId = useId();
     const noteId = useId();
@@ -130,7 +128,17 @@ export function TunnelSwitch({ className }: { className?: string }) {
                 </div>
             </div>
             {note !== null && (
-                <p id={noteId} className="text-caption text-text-secondary">
+                <p
+                    id={noteId}
+                    className={cn(
+                        "flex items-start gap-1.5 text-caption",
+                        outcome === null ? "text-text-secondary" : "select-text text-attention",
+                    )}
+                >
+                    {/* Something did not go as asked: marked as well as coloured. */}
+                    {outcome !== null && (
+                        <TriangleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />
+                    )}
                     {note}
                 </p>
             )}
@@ -146,13 +154,15 @@ export function TunnelSettings() {
             <ChoiceList
                 legend={TUNNEL.legend}
                 value={value}
-                disabled={unavailable}
                 note={note ?? undefined}
+                // As on the main screen: what cannot be chosen is disabled,
+                // and the one chosen stays reachable while it is locked.
                 options={TUNNEL_MODES.map((mode) => ({
                     value: mode,
                     label: TUNNEL.names[mode],
                     hint: TUNNEL.hints[mode],
-                    disabled: !choosable(mode),
+                    disabled: mode !== value && !choosable(mode),
+                    locked: mode === value && unavailable,
                 }))}
                 onChange={choose}
             />
