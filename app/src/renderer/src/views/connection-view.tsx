@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
+import { cn } from "@/lib/cn";
 import { api, useSnapshot } from "@/lib/store";
 import { LoginView } from "./login-view";
 
@@ -91,9 +92,15 @@ export function ConnectionView() {
                 {copy.title}. {copy.body} {noticeCopy?.text} {outcomeText}
             </p>
 
-            {/* Keeps a minimum height, so when the text is zoomed past what the
-                window can hold, the screen scrolls and the button stays reachable. */}
-            <div className="flex min-h-24 flex-1 flex-col">
+            {/* With something in it, keeps a minimum height, so when the text is
+                zoomed past what the window can hold, the screen scrolls and the
+                button stays reachable. Empty, it takes only the room left over. */}
+            <div
+                className={cn(
+                    "flex flex-1 flex-col",
+                    (tunnel !== null || copy.detail !== undefined) && "min-h-24",
+                )}
+            >
                 {tunnel !== null && <TunnelDetails tunnel={tunnel} />}
                 {copy.detail !== undefined && (
                     <Panel tone="problem" scrollLabel="What the VPN service reported">

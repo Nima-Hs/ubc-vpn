@@ -1453,9 +1453,9 @@ test("keyboard focus on the scrolling details is visible", async () => {
     const details = page.getByRole("group", { name: "Connection details" });
     await expect(details).toBeVisible();
     // Reach it the way a keyboard user does: Tab through the title bar,
-    // whose controls differ by OS, until focus lands on it.
+    // whose controls differ by OS, and the tunnel choice, until focus lands on it.
     await page.locator("body").click({ position: { x: 1, y: 1 } });
-    for (let presses = 0; presses < 8; presses++) {
+    for (let presses = 0; presses < 12; presses++) {
         await page.keyboard.press("Tab");
         if (await details.evaluate((region) => region === document.activeElement)) {
             break;
