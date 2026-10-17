@@ -38,7 +38,7 @@ if [ "$#" -ne 4 ]; then
 fi
 file=$1 shard=$2 shards=$3 out=$4
 os=${MUTANTS_OS:-}
-cargo=${MUTANTS_CARGO:-cargo}
+here=$(cd "$(dirname "$0")" && pwd)
 limit=${MUTANTS_TIMEOUT:-1800}
 case $os in
   linux | windows) ;;
@@ -132,7 +132,7 @@ fi
 tests() {
   local args
   read -ra args <<< "$1"
-  timeout "$limit" "$cargo" test --locked "${args[@]}"
+  timeout "$limit" bash "$here/cargo.sh" test --locked "${args[@]}"
 }
 
 declare -A passed=()
@@ -161,7 +161,7 @@ for n in "${mine[@]}"; do
   status=0
   args=()
   read -ra args <<< "$test"
-  if ! "$cargo" test --locked --no-run "${args[@]}"; then
+  if ! bash "$here/cargo.sh" test --locked --no-run "${args[@]}"; then
     outcome=unviable
   else
     tests "$test" || status=$?

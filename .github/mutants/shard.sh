@@ -24,6 +24,8 @@ if [ "$#" -ne 4 ]; then
 fi
 diff=$1 shard=$2 shards=$3 out=$4
 os=${MUTANTS_OS:-}
+# Every cargo goes through cargo.sh, for Windows (see token.ps1).
+here=$(cd "$(dirname "$0")" && pwd)
 case $os in
   linux | windows) ;;
   *) echo "MUTANTS_OS must be linux or windows." >&2; exit 2 ;;
@@ -70,7 +72,7 @@ for manifest in crates/*/Cargo.toml; do
     echo "No package name in $manifest." >&2
     exit 1
   fi
-  cargo mutants --list --colors=never --line-col=true --in-diff "$diff" \
+  bash "$here/cargo.sh" mutants --list --colors=never --line-col=true --in-diff "$diff" \
     --config "$none" -p "$package" "${exclude[@]}" > "$out/lists/$package.txt"
   sed "s/^/$package\t/" "$out/lists/$package.txt" >> "$out/lists/all.tsv"
 done
@@ -100,7 +102,7 @@ run() {
   local count status=0
   count=$(wc -l < "$remaining")
   echo "::group::$package, $name: $count mutants"
-  "${prefix[@]}" cargo mutants --in-place --cap-lints=true --colors=never \
+  "${prefix[@]}" bash "$here/cargo.sh" mutants --in-place --cap-lints=true --colors=never \
     --in-diff "$diff" --config "$dir.toml" -p "$package" "${exclude[@]}" \
     --output "$dir" "${margs[@]}" || status=$?
   echo "::endgroup::"
@@ -127,7 +129,7 @@ run() {
     grep -vxF -f - "$remaining" > "$remaining.next" || true
   mv "$remaining.next" "$remaining"
   echo "::group::$package, $name: the tests pass without a mutation"
-  if ! "${prefix[@]}" cargo test --locked "${targs[@]}"; then
+  if ! "${prefix[@]}" bash "$here/cargo.sh" test --locked "${targs[@]}"; then
     echo "::endgroup::"
     echo "The tests fail without a mutation after $package, $name: its results cannot be trusted." >&2
     exit 1

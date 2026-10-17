@@ -201,7 +201,9 @@ jobs:
       # step, and its random password stays in this step's memory, handed to
       # the tests through their environment and never written to a file, a
       # log or a command line. Every "skipped: needs an elevated process" is
-      # a failure.
+      # a failure. The scripts are bash, which would change who owns what the
+      # tests create, so each cargo they start gets this step's token
+      # defaults back first (.github/mutants/token.ps1).
       - name: Mutation tests, including the elevated ones, with a throwaway second user
         if: runner.os == 'Windows'
         working-directory: pr
@@ -222,6 +224,7 @@ jobs:
             $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
             $tools = (Join-Path $env:GITHUB_WORKSPACE 'tools') -replace '\\', '/'
             $temp = $env:RUNNER_TEMP -replace '\\', '/'
+            & "$tools/.github/mutants/token.ps1" save
             $run = @("$tools/.github/mutants/run.sh", "$temp/diff/pr.diff", $env:SHARD, $env:SHARDS, "$temp/out")
             if ($env:PATCHES) { $run += "$tools/$env:PATCHES" }
             & $bash @run
