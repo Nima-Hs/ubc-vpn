@@ -63,7 +63,7 @@ jobs:
             echo "pr must be the number of a pull request."
             exit 1
           fi
-          if [ -n "$PATCHES" ] && ! [[ $PATCHES =~ ^[A-Za-z0-9_][A-Za-z0-9_./-]*$ && $PATCHES != *..* ]]; then
+          if [ -n "$PATCHES" ] && ! [[ $PATCHES =~ ^[A-Za-z0-9_.][A-Za-z0-9_./-]*$ && $PATCHES != *..* ]]; then
             echo "patches must be a path inside the repository."
             exit 1
           fi
