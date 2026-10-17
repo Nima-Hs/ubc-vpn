@@ -46,6 +46,33 @@ jobs:
       - name: Release-mode tests
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked --workspace --release
+      # The profiles in Cargo.toml: debug builds keep line tables for our own
+      # crates and no debug info for dependencies, and release builds keep
+      # what they always had, with debug assertions off, since the rules
+      # tested above exist only there. Read from the compiler's command lines
+      # in a build of its own, so every crate is compiled and shown.
+      - name: Debug builds keep line tables only, release builds are unchanged
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/profiles"
+          cargo build --locked -p ubc-vpn-core -v > dev.log 2>&1
+          cargo build --locked -p ubc-vpn-core --release -v > release.log 2>&1
+          # check <log> <crate> <expected>: the debug info, debug assertion
+          # and optimization flags the compiler was given for that crate.
+          check() {
+            local call
+            call=$(grep -E "Running \`[^ ]*rustc(\.exe)? --crate-name $2 " "$1") || { echo "No compiler call for $2 in $1."; exit 1; }
+            local got
+            got=$({ grep -oE -- '-C (debuginfo|debug-assertions|opt-level)=[^ ]+' <<< "$call" || true; } | sort | paste -sd ' ')
+            if [ "$got" != "$3" ]; then
+              echo "$2 in $1: expected '$3', got '$got'."
+              exit 1
+            fi
+          }
+          check dev.log ubc_vpn_core "-C debuginfo=line-tables-only"
+          check dev.log serde_json ""
+          check release.log ubc_vpn_core "-C opt-level=3"
+          check release.log serde_json "-C opt-level=3"
       # Code behind these switches is not built by the steps above, so it would
       # otherwise only ever be checked on a developer machine.
       - name: Dev-mode and fake code builds and passes its tests

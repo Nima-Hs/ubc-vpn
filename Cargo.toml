@@ -17,6 +17,17 @@ ubc-vpn-core = { path = "crates/core" }
 ubc-vpn-engine = { path = "crates/engine" }
 ubc-vpn-platform = { path = "crates/platform" }
 
+# Debug and test builds keep only line tables for our own crates, enough for
+# file and line in a panic's backtrace, and no debug info for dependencies.
+# This makes target/ smaller and builds faster. Release builds are not
+# changed: some rules exist only in them (cfg(debug_assertions)), and that
+# setting is separate from this one. CI checks both (ci.yml).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # Crates that must call C or the OS (engine, platform) set their own lints.
 # Everything else inherits these and cannot contain unsafe code.
 [workspace.lints.rust]
