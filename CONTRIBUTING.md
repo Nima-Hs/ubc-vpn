@@ -23,7 +23,9 @@ pnpm install --frozen-lockfile
 
 The pnpm version is the `packageManager` field of `app/package.json`. `app/README.md` has the commands for running and testing the app.
 
-Ordinary builds and tests need no native library. Only the engine's `libopenconnect` feature does, and it takes our own build of it, never one installed on the system. Download the artifact of the newest `Native library` run on `main` for your OS, unpack it into an empty folder, and name that folder:
+On Linux, the command-line client keeps saved passwords in Secret Service through the system's D-Bus library, `libdbus-1`, which it loads at run time. Building it needs that library's headers and `pkg-config`: `sudo apt install libdbus-1-dev pkg-config` on Debian or Ubuntu. CI installs them at the exact versions pinned in `native/linux/test-packages.sh`, from that script's dated Ubuntu snapshot. The script replaces the machine's package sources, so never run it on a machine you keep. Never turn on a `vendored` feature of the D-Bus crates: libdbus must stay the system's own library (`.claude/rules/dependencies.md`).
+
+Apart from that, ordinary builds and tests need no native library. Only the engine's `libopenconnect` feature does, and it takes our own build of it, never one installed on the system. Download the artifact of the newest `Native library` run on `main` for your OS, unpack it into an empty folder, and name that folder:
 
 ```sh
 gh run list --workflow native-windows.yml --branch main --event push --status success --limit 1

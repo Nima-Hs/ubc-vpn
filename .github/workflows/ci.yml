@@ -41,6 +41,14 @@ jobs:
           key: ci
           # Pull requests restore main's caches but save none of their own.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The command-line client's keyring links the system's libdbus-1 on
+      # Linux: its headers and pkg-config, at the versions pinned in
+      # test-packages.sh, from its dated Ubuntu snapshot.
+      - name: Install the pinned D-Bus headers
+        if: runner.os == 'Linux'
+        run: |
+          mkdir "$RUNNER_TEMP/packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Generated from crates/core by the tests. Deleting them first means a stale or
@@ -54,6 +62,36 @@ jobs:
       - name: Release-mode tests
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked --workspace --release
+      # libdbus-1 (AFL-2.1 OR GPL-2.0+) is allowed only as the system's own
+      # library: the command-line client must load it at run time and never
+      # carry a copy (.claude/rules/dependencies.md). So the D-Bus
+      # crates are never built with their `vendored` feature, which compiles
+      # libdbus into the program, on any target or feature set, and the
+      # program built above names libdbus-1.so.3 among the libraries it
+      # loads.
+      - name: The command-line client links the system's libdbus at run time
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # Capture first, so a failing cargo tree fails the step instead of
+          # looking like "nothing found".
+          tree=$(cargo tree --locked --workspace --all-features --target all -e features -i libdbus-sys --prefix none)
+          # The check must find the crate, or it would pass by finding nothing.
+          if ! grep -q '^libdbus-sys v' <<<"$tree"; then
+            echo "libdbus-sys is not in the tree, so this check proves nothing."
+            exit 1
+          fi
+          if grep -E '^libdbus-sys feature "vendored"' <<<"$tree"; then
+            echo "libdbus would be compiled into a program instead of loaded from the system."
+            exit 1
+          fi
+          needed=$(readelf -d target/release/ubc-vpn | grep '(NEEDED)')
+          echo "$needed"
+          # The list must be readable, or the next check would prove nothing.
+          grep -q '\[libc\.so\.6\]' <<<"$needed"
+          if ! grep -q '\[libdbus-1\.so\.3\]' <<<"$needed"; then
+            echo "ubc-vpn does not load libdbus-1.so.3 from the system."
+            exit 1
+          fi
       # The profiles in Cargo.toml: debug builds keep line tables for our own
       # crates and no debug info for dependencies, and release builds keep
       # what they always had, with debug assertions off, since the rules
@@ -118,7 +156,7 @@ jobs:
         run: |
           for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-unknown-linux-gnu; do
             tree=$(cargo tree --locked -p ubc-vpn-service --target "$target" -e normal,build)
-            if grep -E 'keyring|zbus' <<<"$tree"; then
+            if grep -E 'keyring|zbus|dbus' <<<"$tree"; then
               echo "The service would link the keyring for $target."
               exit 1
             fi
