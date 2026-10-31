@@ -357,6 +357,62 @@ fn a_live_switch_to_full_and_back_never_reconnects() {
     assert!(alice.is_quiet(), "a state was reported");
 }
 
+// The bug seen on a real machine: adapters that are not connected have
+// tentative 169.254.x.x addresses with no route. They are not networks the
+// machine is on, so full mode does not ask that 169.254.0.0/16 stay off the
+// tunnel, and the switch, and a connect in full mode, succeed.
+#[test]
+fn an_unused_link_local_address_does_not_stop_full_mode() {
+    let unused = |rig: &Rig| {
+        rig.fake
+            .add_unused_address(Ipv4Addr::new(169, 254, 10, 20), 16);
+        rig.fake
+            .add_unused_address(Ipv4Addr::new(169, 254, 30, 40), 16);
+    };
+    let rig = rig();
+    home_network(&rig.fake);
+    unused(&rig);
+    let mut alice = rig.owner();
+    assert_eq!(mode_of(&alice.connect_ends(good())), TunnelMode::Split);
+    assert_eq!(alice.ask(set_tunnel(TunnelMode::Full)), ACCEPTED);
+    let state = alice.state();
+    assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+    let link_local = Ipv4Addr::new(169, 254, 10, 21);
+    assert_eq!(rig.fake.uses_interface(link_local, "fake0"), Verified::Yes);
+
+    let (rig, mut alice) = home_rig();
+    unused(&rig);
+    let state = alice.connect_ends(good_full());
+    assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+}
+
+// Security rule: a 169.254.x.x address that is in use, such as on a cable
+// with no DHCP, is a network the machine is on. Its route keeps it off the
+// tunnel, and full mode fails if the tunnel takes it.
+#[test]
+fn a_used_link_local_network_stays_off_the_tunnel() {
+    let link_local = net("169.254.0.0/16");
+    let (rig, mut alice) = home_rig();
+    rig.fake.add_adapter_network("fake-cable", link_local);
+    let state = alice.connect_ends(good_full());
+    assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+    let inside = Ipv4Addr::new(169, 254, 10, 21);
+    assert_eq!(rig.fake.uses_interface(inside, "fake-cable"), Verified::Yes);
+
+    let (rig, mut alice) = home_rig();
+    rig.fake.add_adapter_network("fake-cable", link_local);
+    rig.fake.add_foreign_route("fake0", net("169.254.0.0/17"));
+    let state = alice.connect_ends(good_full());
+    assert!(
+        failed_with(&state, ErrorCode::VerificationFailed),
+        "{state:?}"
+    );
+    assert!(message_of(&state).contains("169.254.0.0/16"), "{state:?}");
+    rig.fake
+        .remove_foreign_route("fake0", net("169.254.0.0/17"));
+    assert!(rig.is_clean());
+}
+
 // A switch to full on a connection made with no domains routes the
 // gateway's DNS server through the tunnel first: the catch-all names it.
 #[test]

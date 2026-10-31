@@ -13,6 +13,7 @@
 //! best-route lookup fails for a destination those cover (there is no
 //! source address), so IPv6 checks match the forwarding table themselves.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(test)]
 use std::path::Path;
@@ -27,20 +28,22 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToAlias, CreateIpForwardEntry2,
     CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable,
-    GetBestRoute2, GetIfEntry2, GetIpForwardTable2, GetIpInterfaceEntry, GetUnicastIpAddressTable,
-    IF_TYPE_PROP_VIRTUAL, InitializeIpForwardEntry, InitializeIpInterfaceEntry,
-    InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
-    MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
+    GetBestRoute2, GetIfEntry2, GetIfTable2, GetIpForwardTable2, GetIpInterfaceEntry,
+    GetUnicastIpAddressTable, IF_TYPE_PROP_VIRTUAL, InitializeIpForwardEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
+    MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
 };
-use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+use windows_sys::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IpDadStatePreferred, MIB_IPPROTO_NETMGMT, RouterDiscoveryDisabled,
-    SOCKADDR_INET,
+    AF_INET, AF_INET6, IpDadStateDeprecated, IpDadStateDuplicate, IpDadStatePreferred,
+    IpDadStateTentative, MIB_IPPROTO_NETMGMT, RouterDiscoveryDisabled, SOCKADDR_INET,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
 use super::journal::{Boot, Journal, Prefix, Row, Store};
 use super::security::{os_error, wide};
+use crate::on_link::{AddressRow, DadState, usable_networks};
 use crate::{
     Error, FULL_TUNNEL_V4, FULL_TUNNEL_V6, Ipv6Block, Mode, Paths, PhysicalNetwork, Result, Routes,
     TUNNEL_MTU, Verified, lock,
@@ -186,6 +189,40 @@ pub(super) fn addresses_of(family: u16) -> Result<Vec<MIB_UNICASTIPADDRESS_ROW>>
         std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
     };
     Ok(rows.to_vec())
+}
+
+/// The LUIDs of the interfaces that are up now.
+fn up_interfaces() -> Result<HashSet<u64>> {
+    let mut table: *mut MIB_IF_TABLE2 = null_mut();
+    // SAFETY: the out pointer is valid; the table is freed by `Table`.
+    checked(unsafe { GetIfTable2(&mut table) })?;
+    let table = Table(table);
+    // SAFETY: on success the table holds `NumEntries` initialised rows.
+    let rows = unsafe {
+        std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
+    };
+    let up = rows.iter().filter(|row| row.OperStatus == IfOperStatusUp);
+    Ok(up.map(|row| value(&row.InterfaceLuid)).collect())
+}
+
+/// An IPv4 address of the system's table, with what decides whether it is
+/// used, for [`usable_networks`]. Its interface is up when `up` holds it.
+// The states are constants of the API, named as Windows names them.
+#[allow(non_upper_case_globals)]
+fn address_row(row: &MIB_UNICASTIPADDRESS_ROW, up: &HashSet<u64>) -> Option<AddressRow> {
+    let state = match row.DadState {
+        IpDadStatePreferred => DadState::Preferred,
+        IpDadStateDeprecated => DadState::Deprecated,
+        IpDadStateTentative => DadState::Tentative,
+        IpDadStateDuplicate => DadState::Duplicate,
+        _ => DadState::Invalid,
+    };
+    Some(AddressRow {
+        addr: addr_of(&row.Address)?,
+        prefix_len: row.OnLinkPrefixLength,
+        state,
+        interface_up: up.contains(&value(&row.InterfaceLuid)),
+    })
 }
 
 /// The route the system would use to reach `dest`.
@@ -421,17 +458,14 @@ impl Routes for WinRoutes {
         let interface = alias(luid)?;
         let next_hop = addr_of(&route.NextHop).filter(|hop| !hop.is_unspecified());
         let addresses = address_table()?;
+        // Every address, used or not: see `PhysicalNetwork::own_addresses`.
         let own_addresses = addresses
             .iter()
             .filter_map(|row| addr_of(&row.Address))
             .collect();
-        let on_link = addresses.iter().filter_map(|row| {
-            let addr = u32::from(addr_of(&row.Address)?);
-            let len = row.OnLinkPrefixLength.min(32);
-            let mask = u32::MAX.checked_shl(32 - u32::from(len)).unwrap_or(0);
-            Ipv4Net::new(Ipv4Addr::from(addr & mask), len).ok()
-        });
-        let mut on_link: Vec<Ipv4Net> = on_link.collect();
+        let up = up_interfaces()?;
+        let rows = addresses.iter().filter_map(|row| address_row(row, &up));
+        let mut on_link = usable_networks(rows);
         on_link.sort_by_key(|net| (net.addr(), net.prefix_len()));
         on_link.dedup();
         Ok(PhysicalNetwork {
@@ -961,6 +995,25 @@ mod tests {
         let (v4, v6) = halves();
         assert_eq!(v4.map(|p| p.to_string()), FULL_TUNNEL_V4);
         assert_eq!(v6.map(|p| p.to_string()), FULL_TUNNEL_V6);
+    }
+
+    // Security rule, on the real tables: every network the machine counts
+    // as one it is on has a route of its own, which is what keeps it off
+    // the tunnel's halves. An address that is not used, such as a
+    // disconnected adapter's tentative 169.254.x.x one, has none, and is
+    // not counted. Only reads.
+    #[test]
+    fn every_network_the_machine_is_on_has_its_own_route() {
+        let dir = temp("on-link");
+        let physical = WinRoutes::unchecked(&dir)
+            .capture_physical(Ipv4Addr::new(192, 0, 2, 1))
+            .unwrap();
+        let routed: Vec<Ipv4Net> = route_table().unwrap().iter().filter_map(row_dest).collect();
+        assert!(!physical.on_link().is_empty(), "{physical:?}");
+        for net in physical.on_link() {
+            assert!(routed.contains(net), "{net} has no route: {routed:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A route is written to the journal before it is added, so a crash
