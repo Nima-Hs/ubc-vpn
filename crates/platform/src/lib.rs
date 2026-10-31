@@ -238,7 +238,11 @@ impl PhysicalNetwork {
     /// still being checked for duplicates, a duplicate one, or any address
     /// on an interface that is down is not used and has no on-link route,
     /// so it puts the machine on no network: a disconnected adapter's
-    /// tentative `169.254.x.x` address is not counted. Interfaces that are
+    /// tentative `169.254.x.x` address is not counted. Like the rest of this
+    /// value it is a snapshot: an address listed at capture that becomes
+    /// usable later is not added, and that change alone raises no
+    /// [`NetworkEvent::PhysicalChanged`]. Its new on-link route still wins
+    /// over full mode's halves. Interfaces that are
     /// not hardware count, such as a bridge made by a container or virtual
     /// machine program. The service refuses routes that would take one of
     /// these into the tunnel; the rule is
