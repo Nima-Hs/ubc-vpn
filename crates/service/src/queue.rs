@@ -165,16 +165,29 @@ mod tests {
         };
         queue.log(&line(1));
         assert!(queue.undone(why.clone(), ConnState::Disconnected));
-        for _ in 3..EVENT_QUEUE {
+        for _ in 4..EVENT_QUEUE {
             assert!(queue.state(ConnState::Connecting));
         }
+        // Exactly room for both, at the end.
+        assert!(queue.undone(why.clone(), ConnState::Disconnected));
         assert!(!queue.undone(why.clone(), ConnState::Disconnected));
-        assert!(queue.state(ConnState::Connecting), "the last room is kept");
         drop(queue);
         let taken: Vec<Event> = std::iter::from_fn(|| taking.next()).collect();
-        assert_eq!(taken[0], Event::SwitchUndone(why));
-        assert_eq!(taken[1], Event::StateChanged(ConnState::Disconnected));
+        let pair = [
+            Event::SwitchUndone(why.clone()),
+            Event::StateChanged(ConnState::Disconnected),
+        ];
+        assert_eq!(taken[..2], pair);
+        assert_eq!(taken[EVENT_QUEUE - 2..EVENT_QUEUE], pair);
         assert_eq!(taken.len(), EVENT_QUEUE + 1);
         assert!(matches!(taken[EVENT_QUEUE], Event::Log(_)));
+
+        // With room for one only, neither is queued, and the room is kept.
+        let (queue, _taking) = super::queue();
+        for _ in 1..EVENT_QUEUE {
+            assert!(queue.state(ConnState::Connecting));
+        }
+        assert!(!queue.undone(why, ConnState::Disconnected));
+        assert!(queue.state(ConnState::Connecting), "the last room is kept");
     }
 }
