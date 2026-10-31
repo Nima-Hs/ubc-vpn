@@ -166,8 +166,8 @@ impl Machine {
     /// was checked before it was admitted.
     ///
     /// A switch whose steps all worked but whose checks failed is undone:
-    /// see [`Self::undo_switch`]. Any other failure is returned, and the
-    /// caller tears everything down.
+    /// see [`Self::undo_switch`]. A step that fails is returned, and the
+    /// caller tears everything down: what it left is not known.
     pub(crate) fn change_tunnel(&mut self, mode: TunnelMode) -> Result<Changed, Failure> {
         let tunnel = self.applied.tunnel.as_ref().ok_or_else(lost)?;
         let interface = tunnel.assigned().interface.clone();
@@ -192,10 +192,9 @@ impl Machine {
         };
         match checked {
             Ok(checked) => self.say_unconfirmed(checked, true),
-            Err((ErrorCode::VerificationFailed, why)) => {
-                return self.undo_switch(&interface, mode, why);
-            }
-            Err(failure) => return Err(failure),
+            // Every step worked, so what to undo is known. A step that
+            // failed returned above, and the caller tears everything down.
+            Err((_, why)) => return self.undo_switch(&interface, mode, why),
         }
         self.logs.at_about(LogLevel::Info, SWITCHED, MODE_CHANGED);
         self.tunnel_info().map(Changed::Applied).ok_or_else(lost)
