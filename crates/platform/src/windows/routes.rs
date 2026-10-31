@@ -37,7 +37,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, IpDadStateDeprecated, IpDadStateDuplicate, IpDadStatePreferred,
-    IpDadStateTentative, MIB_IPPROTO_NETMGMT, RouterDiscoveryDisabled, SOCKADDR_INET,
+    IpDadStateTentative, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, RouterDiscoveryDisabled, SOCKADDR_INET,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
@@ -207,22 +207,27 @@ fn up_interfaces() -> Result<HashSet<u64>> {
 
 /// An IPv4 address of the system's table, with what decides whether it is
 /// used, for [`usable_networks`]. Its interface is up when `up` holds it.
+fn address_row(row: &MIB_UNICASTIPADDRESS_ROW, up: &HashSet<u64>) -> Option<AddressRow> {
+    Some(AddressRow {
+        addr: addr_of(&row.Address)?,
+        prefix_len: row.OnLinkPrefixLength,
+        state: dad_state(row.DadState),
+        interface_up: up.contains(&value(&row.InterfaceLuid)),
+    })
+}
+
+/// Windows' duplicate address detection state as [`DadState`]. One this
+/// code does not know is not valid.
 // The states are constants of the API, named as Windows names them.
 #[allow(non_upper_case_globals)]
-fn address_row(row: &MIB_UNICASTIPADDRESS_ROW, up: &HashSet<u64>) -> Option<AddressRow> {
-    let state = match row.DadState {
+fn dad_state(state: NL_DAD_STATE) -> DadState {
+    match state {
         IpDadStatePreferred => DadState::Preferred,
         IpDadStateDeprecated => DadState::Deprecated,
         IpDadStateTentative => DadState::Tentative,
         IpDadStateDuplicate => DadState::Duplicate,
         _ => DadState::Invalid,
-    };
-    Some(AddressRow {
-        addr: addr_of(&row.Address)?,
-        prefix_len: row.OnLinkPrefixLength,
-        state,
-        interface_up: up.contains(&value(&row.InterfaceLuid)),
-    })
+    }
 }
 
 /// The route the system would use to reach `dest`.
@@ -995,6 +1000,24 @@ mod tests {
         let (v4, v6) = halves();
         assert_eq!(v4.map(|p| p.to_string()), FULL_TUNNEL_V4);
         assert_eq!(v6.map(|p| p.to_string()), FULL_TUNNEL_V6);
+    }
+
+    // Each of Windows' states is read as itself, so the rule that only a
+    // preferred or deprecated address counts sees what Windows said.
+    #[test]
+    fn each_windows_dad_state_is_read_as_itself() {
+        use windows_sys::Win32::Networking::WinSock::IpDadStateInvalid;
+        let read = [
+            (IpDadStatePreferred, DadState::Preferred),
+            (IpDadStateDeprecated, DadState::Deprecated),
+            (IpDadStateTentative, DadState::Tentative),
+            (IpDadStateDuplicate, DadState::Duplicate),
+            (IpDadStateInvalid, DadState::Invalid),
+            (99, DadState::Invalid),
+        ];
+        for (state, expected) in read {
+            assert_eq!(dad_state(state), expected, "{state}");
+        }
     }
 
     // Security rule, on the real tables: every network the machine counts
