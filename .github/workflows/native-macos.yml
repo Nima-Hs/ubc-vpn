@@ -6,6 +6,7 @@ on:
       - native/macos/**
       - native/probe/**
       - native/check-patches.sh
+      - rust-toolchain.toml
       - .github/workflows/native-macos.yml
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - native/macos/**
       - native/probe/**
       - native/check-patches.sh
+      - rust-toolchain.toml
       - .github/workflows/native-macos.yml
   workflow_dispatch:
 

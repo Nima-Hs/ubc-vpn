@@ -6,6 +6,7 @@ on:
       - native/windows/**
       - native/probe/**
       - native/check-patches.sh
+      - rust-toolchain.toml
       - .github/workflows/native-windows.yml
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - native/windows/**
       - native/probe/**
       - native/check-patches.sh
+      - rust-toolchain.toml
       - .github/workflows/native-windows.yml
   workflow_dispatch:
 
