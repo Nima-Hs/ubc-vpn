@@ -565,3 +565,36 @@ fn an_unusable_keyring_is_said_and_the_rest_works() {
     keyring().set_unusable(false);
     assert!(machine.stored().profile(&lab).is_ok());
 }
+
+// Each command is reached from the command line the app runs, spelled
+// exactly so, and does there what it does when called directly: here, with
+// nothing typed, the same answer. Any other spelling is not it.
+#[test]
+fn every_command_line_reaches_its_command() {
+    let spellings = [
+        (&["profiles", "list", "--json"][..], Command::List),
+        (&["profiles", "create", "--json"], Command::Create),
+        (&["profiles", "rename", "--json"], Command::Rename),
+        (&["profiles", "update", "--json"], Command::Update),
+        (&["profiles", "delete", "--json"], Command::Delete),
+        (&["profiles", "switch", "--json"], Command::Switch),
+        (&["profile", "set-routes", "--json"], Command::SetRoutes),
+        (&["password", "forget", "--json"], Command::ForgetPassword),
+        (&["settings", "set-startup", "--json"], Command::SetStartup),
+        (&["settings", "set-tunnel", "--json"], Command::SetTunnel),
+    ];
+    for (args, command) in spellings {
+        assert_eq!(Command::parse(args), Some(command), "{args:?}");
+        let machine = Machine::new();
+        let direct = machine.run(command, "");
+        let platform = || Ok(Fake::new().platform(&machine.root));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let typed = crate::run_typed(args, &platform, &mut "".as_bytes(), &mut out, &mut err);
+        let line = String::from_utf8(out).unwrap();
+        assert_eq!(typed.map(|status| (status, line)), Some(direct), "{args:?}");
+        // Without `--json`, or with more after it, it is none of them.
+        assert_eq!(Command::parse(&args[..2]), None, "{args:?}");
+        let more = [args, &["x"]].concat();
+        assert_eq!(Command::parse(&more), None, "{args:?}");
+    }
+}

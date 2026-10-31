@@ -396,6 +396,30 @@ fn watch_for_a_stop(dev: bool, err: &mut dyn Write) -> interrupt::Progress {
     progress
 }
 
+/// Runs one of the commands that read a line from `input`: the profiles
+/// commands, setting how UBC VPN starts and the tunnel mode, and the
+/// settings commands. Returns the exit status, or `None` when `args` is
+/// none of these. A `settings` command that is none of them is a usage
+/// error.
+fn run_typed(
+    args: &[&str],
+    platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Option<u8> {
+    if let Some(command) = profiles::Command::parse(args) {
+        return Some(profiles::run(command, platform, input, out, err));
+    }
+    if let ["settings", rest @ ..] = args {
+        return Some(match settings::Command::parse(rest) {
+            Some(command) => settings::run(command, platform, input, out, err),
+            None => say(err, HELP, USAGE),
+        });
+    }
+    None
+}
+
 fn main() -> ExitCode {
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     // An argument that is not Unicode is no command this program has.
@@ -427,19 +451,13 @@ fn main() -> ExitCode {
         let status = bridge::run(&chosen, input, limits, &mut out, &mut err);
         return ExitCode::from(status);
     }
-    // So do the profiles commands, and setting how UBC VPN starts.
-    if let Some(command) = profiles::Command::parse(args) {
+    // So do the profiles and settings commands. Standard input is let go
+    // of at once when it is none of them.
+    let typed = {
         let mut input = std::io::stdin().lock();
-        let status = profiles::run(command, &chosen, &mut input, &mut out, &mut err);
-        return ExitCode::from(status);
-    }
-    // The settings commands read standard input too.
-    if let ["settings", rest @ ..] = args {
-        let Some(command) = settings::Command::parse(rest) else {
-            return ExitCode::from(say(&mut err, HELP, USAGE));
-        };
-        let mut input = std::io::stdin().lock();
-        let status = settings::run(command, &chosen, &mut input, &mut out, &mut err);
+        run_typed(args, &chosen, &mut input, &mut out, &mut err)
+    };
+    if let Some(status) = typed {
         return ExitCode::from(status);
     }
     if let Some(Connecting {

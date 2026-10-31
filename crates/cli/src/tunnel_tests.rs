@@ -425,3 +425,41 @@ fn the_profiles_view_says_whether_the_policy_allows_full_mode() {
     let unsaid = Scene::new(Some(&settings), "");
     assert_eq!(listed(&unsaid).full_tunnel, FullTunnel::Allowed);
 }
+
+/// Runs `args` as the program reads its command line, with `typed` on
+/// standard input. `None` when it is no command that reads a line.
+fn typed_command(scene: &Scene, args: &[&str], typed: &str) -> Option<(u8, String)> {
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = crate::run_typed(args, &platform, &mut typed.as_bytes(), &mut out, &mut err)?;
+    Some((status, String::from_utf8(out).unwrap()))
+}
+
+// `settings set-tunnel --json` from the command line, as the app spells
+// it: the mode is saved and the reply is one line of the documented shape.
+// A mode that is not one is refused, and so is any other spelling, and
+// neither saves anything.
+#[test]
+fn set_tunnel_runs_through_its_command_line() {
+    let scene = Scene::usual();
+    let set_tunnel = ["settings", "set-tunnel", "--json"];
+    let before = settings_text(&scene);
+    let refused = typed_command(&scene, &set_tunnel, r#"{"mode":"all"}"#);
+    let bad = (1, "{\"error\":\"bad_input\"}\n".to_string());
+    assert_eq!(refused, Some(bad));
+    for misspelt in [
+        &["settings", "set-tunnel"][..],
+        &["settings", "set-tunnel", "--json", "full"],
+        &["settings", "--json", "set-tunnel"],
+    ] {
+        let usage = typed_command(&scene, misspelt, FULL);
+        assert_eq!(usage, Some((crate::USAGE, String::new())), "{misspelt:?}");
+    }
+    assert_eq!(typed_command(&scene, &["set-tunnel", "--json"], FULL), None);
+    assert_eq!(settings_text(&scene), before, "something was saved");
+
+    let saved = typed_command(&scene, &set_tunnel, FULL);
+    let reply = r#"{"type":"ok","tunnel":"full","live":{"result":"next_connect"}}"#;
+    assert_eq!(saved, Some((0, format!("{reply}\n"))));
+    assert_eq!(saved_mode(&scene), "full");
+}
