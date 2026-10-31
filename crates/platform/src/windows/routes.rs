@@ -216,6 +216,15 @@ fn address_row(row: &MIB_UNICASTIPADDRESS_ROW, up: &HashSet<u64>) -> Option<Addr
     })
 }
 
+/// Every IPv4 address among `rows`, used or not, whatever its state and
+/// its interface's: see [`PhysicalNetwork::own_addresses`], whose every use
+/// is weaker with fewer.
+fn own_addresses(rows: &[MIB_UNICASTIPADDRESS_ROW]) -> Vec<Ipv4Addr> {
+    rows.iter()
+        .filter_map(|row| addr_of(&row.Address))
+        .collect()
+}
+
 /// Windows' duplicate address detection state as [`DadState`]. One this
 /// code does not know is not valid.
 // The states are constants of the API, named as Windows names them.
@@ -463,11 +472,7 @@ impl Routes for WinRoutes {
         let interface = alias(luid)?;
         let next_hop = addr_of(&route.NextHop).filter(|hop| !hop.is_unspecified());
         let addresses = address_table()?;
-        // Every address, used or not: see `PhysicalNetwork::own_addresses`.
-        let own_addresses = addresses
-            .iter()
-            .filter_map(|row| addr_of(&row.Address))
-            .collect();
+        let own_addresses = own_addresses(&addresses);
         let up = up_interfaces()?;
         let rows = addresses.iter().filter_map(|row| address_row(row, &up));
         let mut on_link = usable_networks(rows);
@@ -1018,6 +1023,66 @@ mod tests {
         for (state, expected) in read {
             assert_eq!(dad_state(state), expected, "{state}");
         }
+    }
+
+    /// A row of the address table as Windows gives it: `addr`/`len` on the
+    /// interface `luid`, in `state`.
+    fn address(addr: [u8; 4], len: u8, luid: u64, state: NL_DAD_STATE) -> MIB_UNICASTIPADDRESS_ROW {
+        // SAFETY: plain data for which all zeroes is valid.
+        let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
+        row.Address = v4(Ipv4Addr::from(addr));
+        row.OnLinkPrefixLength = len;
+        row.InterfaceLuid = net_luid(luid);
+        row.DadState = state;
+        row
+    }
+
+    // Security rule: an address is on an up interface only when Windows
+    // lists that interface as up, so one on an interface that is down, or
+    // missing from the table, is left out.
+    #[test]
+    fn an_address_is_up_only_when_its_interface_is() {
+        let row = address([10, 200, 0, 10], 24, 7, IpDadStatePreferred);
+        let read = |up: &[u64]| address_row(&row, &up.iter().copied().collect()).unwrap();
+        let expected = AddressRow {
+            addr: Ipv4Addr::new(10, 200, 0, 10),
+            prefix_len: 24,
+            state: DadState::Preferred,
+            interface_up: true,
+        };
+        assert_eq!(read(&[7]), expected);
+        assert_eq!(read(&[3, 7, 9]), expected);
+        let down = AddressRow {
+            interface_up: false,
+            ..expected
+        };
+        assert_eq!(read(&[]), down);
+        assert_eq!(read(&[3, 9]), down);
+    }
+
+    // Security rule: the machine's own addresses are every IPv4 address
+    // Windows lists, in every state, used or not. Each use of them refuses
+    // a match or notices a missing one, so fewer would weaken it.
+    #[test]
+    fn every_listed_address_is_one_of_the_machines_own() {
+        use windows_sys::Win32::Networking::WinSock::IpDadStateInvalid;
+        let states = [
+            IpDadStatePreferred,
+            IpDadStateDeprecated,
+            IpDadStateTentative,
+            IpDadStateDuplicate,
+            IpDadStateInvalid,
+        ];
+        let rows: Vec<_> = (0u8..)
+            .zip(states)
+            .map(|(n, state)| address([169, 254, 0, n + 1], 16, u64::from(n), state))
+            .collect();
+        let own: Vec<Ipv4Addr> = (1..=5).map(|n| Ipv4Addr::new(169, 254, 0, n)).collect();
+        assert_eq!(own_addresses(&rows), own);
+        // An IPv6 row is not an IPv4 address.
+        let mut v6_row = rows[0];
+        v6_row.Address = v6(Ipv6Addr::LOCALHOST);
+        assert!(own_addresses(&[v6_row]).is_empty());
     }
 
     // Security rule, on the real tables: every network the machine counts
