@@ -616,6 +616,33 @@ fn what_a_failing_switch_added_is_removed_by_name() {
     }
 }
 
+// Security rule: the catch-all and the halves are recorded as gone only
+// once they are removed. So when a switch to split fails to remove one,
+// teardown tries again to remove it by name, before the removals that need
+// no memory.
+#[test]
+fn what_a_failing_switch_could_not_remove_is_removed_again_by_name() {
+    for op in [Op::ClearCatchAllDns, Op::RemoveFullTunnel] {
+        let (rig, mut alice) = home_rig();
+        assert_eq!(mode_of(&alice.connect_ends(good_full())), TunnelMode::Full);
+        let before = rig.fake.calls().len();
+        rig.fake.set_failure(op, Some(Error::Unsupported));
+        assert_eq!(alice.ask(set_tunnel(TunnelMode::Split)), ACCEPTED);
+        let state = alice.state();
+        rig.fake.set_failure(op, None);
+        assert!(
+            failed_with(&state, ErrorCode::Internal),
+            "{op:?}: {state:?}"
+        );
+        let calls = rig.fake.calls()[before..].to_vec();
+        let tries = calls.iter().filter(|call| **call == op).count();
+        assert_eq!(tries, 2, "{op:?} was not tried again by name: {calls:?}");
+        let again = calls.iter().rposition(|call| *call == op).unwrap();
+        assert!(again < at(&calls, Op::RemoveAllRoutes), "{calls:?}");
+        assert!(rig.is_clean(), "{op:?} left something behind");
+    }
+}
+
 // Security rule: a check that full mode is gone after a switch to split.
 // If an address outside the chosen subnets still uses the tunnel, the
 // switch failed: it is undone, and full mode, put back, is checked again.
