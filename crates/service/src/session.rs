@@ -71,6 +71,16 @@ pub(crate) enum Admitted {
     Unchanged(TunnelInfo),
 }
 
+/// What came of a change to the live tunnel that kept it up.
+pub(crate) enum Changed {
+    /// Applied and checked: the tunnel carries the change.
+    Applied(TunnelInfo),
+    /// Applied, but it failed its checks, so it was undone and the tunnel
+    /// checked again as it was. Said to the owner's connections, with the
+    /// reason, before the state.
+    Undone(TunnelInfo, ErrorInfo),
+}
+
 /// What a change of routes is checked against while connected.
 struct Live {
     /// The gateway the connection reaches.
@@ -666,7 +676,9 @@ impl Machine {
             Command::Connect(params, cancel, hidden, answered) => {
                 self.connect(params, &cancel, hidden, &answered)
             }
-            Command::UpdateRoutes(routes) => self.update(|machine| machine.change_routes(routes)),
+            Command::UpdateRoutes(routes) => {
+                self.update(|machine| machine.change_routes(routes).map(Changed::Applied))
+            }
             Command::SetTunnel(mode) => self.update(|machine| machine.change_tunnel(mode)),
             Command::Disconnect => {
                 self.publish(ConnState::Disconnecting);
@@ -839,14 +851,12 @@ impl Machine {
 
     /// Applies a change to the live tunnel, of its routes or of its mode,
     /// with `change`. Connected again with the change when every step and
-    /// check passed; otherwise the connection is closed and everything
-    /// removed, as for a connect that fails. A tunnel that ended while the
-    /// change waited has been reported already, and there is nothing to
-    /// change.
-    fn update(
-        &mut self,
-        change: impl FnOnce(&mut Self) -> Result<TunnelInfo, (ErrorCode, String)>,
-    ) {
+    /// check passed, or as it was when the change was undone and checked
+    /// again ([`Changed::Undone`]); otherwise the connection is closed and
+    /// everything removed, as for a connect that fails. A tunnel that ended
+    /// while the change waited has been reported already, and there is
+    /// nothing to change.
+    fn update(&mut self, change: impl FnOnce(&mut Self) -> Result<Changed, (ErrorCode, String)>) {
         if self.applied.tunnel.is_none() {
             let mut gate = lock(&self.gate);
             if gate.phase == Phase::Updating {
@@ -855,7 +865,11 @@ impl Machine {
             return;
         }
         match change(self) {
-            Ok(tunnel) => {
+            Ok(changed) => {
+                let (tunnel, undone) = match changed {
+                    Changed::Applied(tunnel) => (tunnel, None),
+                    Changed::Undone(tunnel, why) => (tunnel, Some(why)),
+                };
                 {
                     // A disconnect that came meanwhile keeps its own phase.
                     let mut gate = lock(&self.gate);
@@ -864,7 +878,14 @@ impl Machine {
                     }
                     gate.live = self.live(tunnel.clone());
                 }
-                self.publish(ConnState::Connected { tunnel });
+                let state = ConnState::Connected { tunnel };
+                match undone {
+                    None => self.publish(state),
+                    Some(why) => {
+                        self.say(&state, None);
+                        self.hub.publish_undone(&why, state);
+                    }
+                }
             }
             Err((code, message)) => {
                 let idle = |phase: &mut Phase| {

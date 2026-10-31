@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use ubc_vpn_core::protocol::{LastError, LogLine, ServerMessage, encode};
+use ubc_vpn_core::protocol::{ErrorInfo, LastError, LogLine, ServerMessage, encode};
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::{Connection, UserId};
 
@@ -146,12 +146,30 @@ impl Hub {
     /// is full is closed. `failure` is what to remember of a state that is
     /// a failure, already cleaned.
     pub(crate) fn publish(&self, state: ConnState, failure: Option<LastError>) {
+        self.queue(state, failure, |events, state| events.state(state));
+    }
+
+    /// The same as [`Self::publish`], with the state a switch of tunnel mode
+    /// left after it was undone, and `why` it was undone queued just before
+    /// it, so that no connection hears the one without the other.
+    pub(crate) fn publish_undone(&self, why: &ErrorInfo, state: ConnState) {
+        self.queue(state, None, |events, state| {
+            events.undone(why.clone(), state)
+        });
+    }
+
+    fn queue(
+        &self,
+        state: ConnState,
+        failure: Option<LastError>,
+        put: impl Fn(&Queue, ConnState) -> bool,
+    ) {
         let mut inner = lock(&self.0);
         for client in &mut inner.clients {
             let queued = client
                 .events
                 .as_ref()
-                .map(|events| events.state(state.clone()));
+                .map(|events| put(events, state.clone()));
             if queued == Some(false) {
                 client.events = None;
                 client.conn.close();

@@ -27,7 +27,7 @@ use ubc_vpn_core::protocol::{
     ClientKind, ConnectParams, Event, Hello, HelloReply, Outcome, PROTOCOL_VERSION, Request,
     ServerMessage, decode, encode,
 };
-pub use ubc_vpn_core::protocol::{LogCursor, LogLine, LogsParams};
+pub use ubc_vpn_core::protocol::{ErrorInfo, LogCursor, LogLine, LogsParams};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::RouteSet;
 pub use ubc_vpn_engine::fake::{FakeEngine, Script};
@@ -255,6 +255,7 @@ impl Rig {
             conn,
             hello,
             events: VecDeque::new(),
+            undone: VecDeque::new(),
             logged: VecDeque::new(),
             lines: Vec::new(),
             id: 0,
@@ -294,6 +295,8 @@ pub struct Peer {
     pub conn: Connection,
     pub hello: HelloReply,
     events: VecDeque<ConnState>,
+    /// Why switches of tunnel mode were undone, as said, oldest first.
+    undone: VecDeque<ErrorInfo>,
     logged: VecDeque<LogLine>,
     /// Every line received after the handshake, as sent.
     pub lines: Vec<String>,
@@ -317,6 +320,7 @@ impl Peer {
             match self.read().expect("a response before the close") {
                 ServerMessage::Event(Event::StateChanged(state)) => self.events.push_back(state),
                 ServerMessage::Event(Event::Log(line)) => self.logged.push_back(line),
+                ServerMessage::Event(Event::SwitchUndone(why)) => self.undone.push_back(why),
                 ServerMessage::Response(response) => {
                     assert_eq!(response.id, self.id);
                     return match response.outcome {
@@ -337,9 +341,17 @@ impl Peer {
             match self.read() {
                 Some(ServerMessage::Event(Event::StateChanged(state))) => return state,
                 Some(ServerMessage::Event(Event::Log(line))) => self.logged.push_back(line),
+                Some(ServerMessage::Event(Event::SwitchUndone(why))) => self.undone.push_back(why),
                 other => panic!("expected a state event, got {other:?}"),
             }
         }
+    }
+
+    /// Why the oldest switch of tunnel mode not yet looked at was undone,
+    /// if one was. It is said just before the state the undoing left, so
+    /// read that state first.
+    pub fn undone(&mut self) -> Option<ErrorInfo> {
+        self.undone.pop_front()
     }
 
     /// The next log event. State events on the way are kept for `state`.
@@ -353,6 +365,7 @@ impl Peer {
                 Some(ServerMessage::Event(Event::StateChanged(state))) => {
                     self.events.push_back(state);
                 }
+                Some(ServerMessage::Event(Event::SwitchUndone(why))) => self.undone.push_back(why),
                 other => panic!("expected a log event, got {other:?}"),
             }
         }
@@ -392,7 +405,8 @@ impl Peer {
     pub fn is_quiet(&mut self) -> bool {
         let short = Some(Duration::from_millis(300));
         self.conn.set_read_timeout(short).unwrap();
-        let nothing_kept = self.events.is_empty() && self.logged.is_empty();
+        let nothing_kept =
+            self.events.is_empty() && self.logged.is_empty() && self.undone.is_empty();
         let quiet = nothing_kept && self.conn.read_line() == Err(Error::TimedOut);
         self.conn.set_read_timeout(Some(WAIT)).unwrap();
         quiet

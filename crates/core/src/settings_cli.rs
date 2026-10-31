@@ -184,7 +184,9 @@ pub enum LiveRoutes {
     /// are used at the next connect.
     NextConnect,
     /// The service refused to change the connection. It keeps the routes
-    /// it had; the saved ones are used at the next connect.
+    /// it had; the saved ones are used at the next connect. A switch of
+    /// tunnel mode that was applied, failed its checks and was undone is
+    /// one too: the connection stays up in the mode it had.
     Refused {
         /// Why, for the client to act on.
         code: ErrorCode,

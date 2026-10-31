@@ -7,7 +7,8 @@
 //! Messages are JSON, one per line. The client opens with a [`Hello`] and the
 //! service answers with a [`HelloReply`]. After that the client sends
 //! [`Request`]s and the service sends [`ServerMessage`]s: one response per
-//! request, plus events whenever the connection state changes.
+//! request, plus events whenever the connection state changes, and when a
+//! switch of tunnel mode was undone ([`Event::SwitchUndone`]).
 //!
 //! # The service's log
 //!
@@ -98,7 +99,7 @@ use crate::state::{ConnState, TunnelMode};
 
 /// Bumped whenever the wire format changes in a way an older peer could not
 /// understand. A client and a service with different versions refuse to talk.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The longest line either side accepts, newline included. The service drops a
 /// connection that sends more.
@@ -413,6 +414,13 @@ pub enum ResponseBody {
 pub enum Event {
     /// The connection state changed.
     StateChanged(ConnState),
+    /// A switch of tunnel mode (`set_tunnel`) was applied, failed its
+    /// checks, and was undone: the connection is up in the mode it had,
+    /// which the [`Event::StateChanged`] sent next reports. Says why, for the
+    /// client that asked, as a refusal would. A switch whose undoing failed
+    /// or could not be checked closes the connection instead, and only the
+    /// state says so.
+    SwitchUndone(ErrorInfo),
     /// The service logged a line. Sent only to a connection that asked with
     /// `watch_logs`, and dropped when that connection is slow.
     Log(LogLine),
@@ -894,7 +902,7 @@ mod tests {
     fn request_wire_format_is_stable() {
         // If the snapshot below has to change, so does this number: an older
         // peer could no longer read the message.
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
         let line = encode(&connect()).unwrap();
         assert_eq!(
             line,
@@ -1022,6 +1030,14 @@ mod tests {
             let line = encode(&message).unwrap();
             assert_eq!(decode::<ServerMessage>(&line).unwrap(), message);
         }
+        let undone = ServerMessage::Event(Event::SwitchUndone(ErrorInfo {
+            code: ErrorCode::VerificationFailed,
+            message: "Kept split tunnel.".to_string(),
+        }));
+        let line = encode(&undone).unwrap();
+        let expected = r#"{"type":"event","data":{"kind":"switch_undone","value":{"code":"verification_failed","message":"Kept split tunnel."}}}"#;
+        assert_eq!(line.trim_end(), expected);
+        assert_eq!(decode::<ServerMessage>(&line).unwrap(), undone);
     }
 
     // Security rule: the service accepts exactly the expected fields. A request
