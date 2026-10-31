@@ -183,30 +183,6 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn.example.test" \
             -keyout gateway/key.pem -out gateway/cert.pem
 
-      # TEMPORARY DIAGNOSTIC, to be removed before review: start the gateway
-      # as the tests do and show where it hangs on macOS 15.
-      - name: "Diagnostic: start the gateway by hand"
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        timeout-minutes: 3
-        working-directory: ${{ runner.temp }}
-        env:
-          PYTHON: ${{ steps.python.outputs.python-path }}
-          SCRIPT: ${{ github.workspace }}/crates/engine/tests/gateway/fake_gateway.py
-        run: |
-          sw_vers
-          ls -l gateway
-          cat > diag.py <<'EOF'
-          import faulthandler, runpy, sys, time
-          faulthandler.dump_traceback_later(15, exit=True)
-          print("python up", time.time(), file=sys.stderr, flush=True)
-          sys.argv = sys.argv[1:]
-          runpy.run_path(sys.argv[0], run_name="__main__")
-          EOF
-          start=$SECONDS
-          ( sleep 25 ) | "$PYTHON" -I diag.py "$SCRIPT" gateway/cert.pem gateway/key.pem accept gateway/diag.log | head -1
-          echo "exit ${PIPESTATUS[*]} after $((SECONDS - start)) s"
-
       # One test needs a gateway whose certificate this machine's own store
       # trusts, to show that the engine asks its judge all the same. So a
       # throwaway authority is added to the store of this runner, which is
