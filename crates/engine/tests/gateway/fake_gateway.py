@@ -68,6 +68,7 @@ import http.server
 import json
 import os
 import socket
+import socketserver
 import ssl
 import sys
 import threading
@@ -391,6 +392,14 @@ def listen_udp():
 
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer's own version also asks for this machine's full name
+        # (socket.getfqdn), which nothing here uses. On some machines that
+        # lookup takes longer than a test waits for the gateway to start, as
+        # on GitHub's macOS 15 runners. So bind only, and name the address.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         # A client that gives up during the handshake, as one does when the

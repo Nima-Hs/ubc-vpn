@@ -67,12 +67,15 @@ jobs:
           path: ${{ env.ARTIFACT }}.tar.gz
           if-no-files-found: error
 
-  # Runs on a different machine and an older macOS than the build, so the
-  # build directory does not exist and nothing can be loaded from it.
+  # Runs on a different machine than the build, so the build directory does
+  # not exist and nothing can be loaded from it. macOS 15 is the oldest
+  # Apple-silicon image GitHub offers, the same as the build's, so no
+  # machine here is as old as the macOS 13 we support; the libraries' minimum
+  # is checked from their headers instead, here and in bundle.sh.
   probe:
     name: Probe the build
     needs: build
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       APP: ${{ github.workspace }}/moved/app
     steps:
@@ -92,6 +95,23 @@ jobs:
           for lib in /opt/homebrew/lib/lib{openconnect,gnutls,nettle,hogweed,gmp}.dylib; do
             if [ -e "$lib" ]; then
               echo "$lib: macOS $(otool -l "$lib" | awk '$1 == "minos" { print $2; exit }')"
+            fi
+          done
+      # Every library in the artifact this job was handed declares the oldest
+      # macOS we support (MACOS_MIN in versions.env) as its minimum. bundle.sh
+      # checks the same before packing; this checks what arrived.
+      - name: Every library declares the oldest supported macOS
+        run: |
+          min=$(sed -n 's/^MACOS_MIN=\([0-9.]*\)$/\1/p' native/macos/versions.env)
+          [[ $min =~ ^[0-9]+\.[0-9]+$ ]]
+          libs=("$APP"/lib/*.*.dylib)
+          [ -e "${libs[0]}" ]
+          for lib in "${libs[@]}"; do
+            minos=$(otool -l "$lib" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
+            echo "$(basename "$lib"): macOS $minos"
+            if [ "$minos" != "$min" ]; then
+              echo "$lib declares macOS $minos, not $min."
+              exit 1
             fi
           done
       # Shows the build carries our patch. The probe cannot: it always makes
