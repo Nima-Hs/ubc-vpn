@@ -73,7 +73,7 @@ The service runs as root, so:
 
 ## Not covered
 
-- **Nothing has been run on macOS 13 itself.** The workflow builds on macOS 15 and runs the probe on macOS 14, the oldest Apple-silicon machine GitHub offers. That the libraries work on macOS 13 rests on the static checks above.
+- **Nothing has been run on macOS 13 itself.** The workflow builds and runs the probe on macOS 15, the oldest Apple-silicon machine GitHub offers. That the libraries work on macOS 13 rests on the static checks above, which the probe job repeats on the artifact it is handed.
 - Intel Macs.
 - Signing or notarizing with a real identity.
 - The probe accepts any certificate, so certificate checking against the Keychain is not exercised.
