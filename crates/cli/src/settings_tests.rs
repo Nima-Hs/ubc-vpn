@@ -147,6 +147,24 @@ fn only_the_three_spellings_are_commands() {
     }
 }
 
+// A settings command is reached from the command line the app runs, the
+// words after `settings` read as the command: `settings get --json`
+// answers as `get` does.
+#[test]
+fn a_settings_command_line_reaches_its_command() {
+    let machine = Machine::new();
+    let platform = || Ok(Fake::new().platform(&machine.root));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let args = ["settings", "get", "--json"];
+    let typed = crate::run_typed(&args, &platform, &mut "".as_bytes(), &mut out, &mut err);
+    let line = String::from_utf8(out).unwrap();
+    assert_eq!((typed, line.lines().count()), (Some(0), 1), "{line:?}");
+    assert_eq!(
+        typed.map(|status| (status, line)),
+        Some(machine.run(Command::Get, ""))
+    );
+}
+
 // No settings file: `get` answers with the defaults, and `set-routes` makes
 // the file and its folder.
 #[test]
