@@ -170,6 +170,18 @@ jobs:
         with:
           python-version: "3.13.16"
           update-environment: false
+      # The first start of a freshly unpacked Python, with its TLS libraries,
+      # can take longer on macOS than the tests give a gateway to start, as
+      # the system looks the new files over. So start it once here, loading
+      # what the gateway loads, and show how long that took; the tests then
+      # time the gateway itself.
+      - name: Start the gateway's Python once
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          start=$SECONDS
+          "$PYTHON" -I -c 'import http.server, json, os, socket, ssl, sys, threading, time; print(ssl.OPENSSL_VERSION)'
+          echo "First start took $((SECONDS - start)) s."
 
       # Made for this run and gone with the runner: never committed, never
       # uploaded. The gateway's request logs go to the same folder.
