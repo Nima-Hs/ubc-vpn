@@ -1,32 +1,48 @@
 #!/usr/bin/env bash
-# Installs packages that tests need, at pinned versions, from a dated
-# snapshot of the Ubuntu archive. Used by the native Linux workflow's probe
-# and by the engine's ocserv tests (crates/engine/tests/ocserv/start.sh).
+# Installs packages that CI needs, at pinned versions, from a dated snapshot
+# of the Ubuntu archive: ocserv for the native Linux workflow's probe and the
+# engine's ocserv tests (crates/engine/tests/ocserv/start.sh), and the D-Bus
+# headers and pkg-config that building the command-line client on Linux
+# needs (its keyring links the system's libdbus-1 at run time).
 #
-# Only for a throwaway CI runner on Ubuntu 22.04: it fetches package lists
-# as root and installs packages. Never run it on a machine that is kept.
+# Only for a throwaway CI runner on Ubuntu 22.04 or 24.04: it fetches
+# package lists as root and installs packages. Never run it on a machine
+# that is kept.
 #
 # Usage: test-packages.sh <folder> <package>...
 #   <folder> is a scratch folder for the snapshot's source list. Each
-#   package must be one pinned below.
+#   package must be one pinned below for the runner's Ubuntu release.
 set -euo pipefail
 
 # Everything comes from this dated snapshot, the one native/linux/build.sh
-# uses, and each package at exactly this version.
+# uses, and each package at exactly the version pinned for the runner's
+# release. libdbus-1-dev needs the system's libdbus-1-3 at its own version:
+# if the runner's image has another, apt stops, and the snapshot and these
+# pins are moved together.
 APT_SNAPSHOT=20261011T000000Z
-declare -A PINNED=(
+declare -A PINNED_jammy=(
     [ocserv]=1.1.3-1
     [pkg-config]=0.29.2-1ubuntu3
+    [libdbus-1-dev]=1.12.20-2ubuntu4.1
+)
+declare -A PINNED_noble=(
+    [pkg-config]=1.8.1-2build1
+    [libdbus-1-dev]=1.14.10-4ubuntu4.1
 )
 
 fail() { echo "error: $*" >&2; exit 1; }
 [ $# -ge 2 ] || fail "usage: test-packages.sh <folder> <package>..."
 dir=$(cd "$1" && pwd)
 shift
-grep -q '^DISTRIB_CODENAME=jammy$' /etc/lsb-release || fail "this is not Ubuntu 22.04"
+codename=$(sed -n 's/^DISTRIB_CODENAME=//p' /etc/lsb-release)
+case "$codename" in
+    jammy | noble) ;;
+    *) fail "this is not Ubuntu 22.04 or 24.04" ;;
+esac
+declare -n PINNED="PINNED_$codename"
 wanted=()
 for package in "$@"; do
-    [ -n "${PINNED[$package]:-}" ] || fail "$package is not a pinned test package"
+    [ -n "${PINNED[$package]:-}" ] || fail "$package is not a pinned test package on $codename"
     wanted+=("$package=${PINNED[$package]}")
 done
 
@@ -35,9 +51,9 @@ done
 snapshot_url="https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT"
 sources="$dir/snapshot.list"
 cat > "$sources" <<EOF
-deb $snapshot_url jammy main universe
-deb $snapshot_url jammy-updates main universe
-deb $snapshot_url jammy-security main universe
+deb $snapshot_url $codename main universe
+deb $snapshot_url $codename-updates main universe
+deb $snapshot_url $codename-security main universe
 EOF
 apt_opts=(-o "Dir::Etc::sourcelist=$sources" -o "Dir::Etc::sourceparts=-")
 # The snapshot service fails now and then for a while: apt retries each

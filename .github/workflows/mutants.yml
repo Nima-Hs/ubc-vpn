@@ -180,6 +180,14 @@ jobs:
           version=${BASH_REMATCH[1]}
           cargo install --locked "cargo-mutants@$version"
           test "$(cargo mutants --version)" = "cargo-mutants $version"
+      # The command-line client's keyring links the system's libdbus-1 on
+      # Linux: its headers and pkg-config, at the versions pinned in
+      # test-packages.sh, which comes from the branch this runs from.
+      - name: Install the pinned D-Bus headers
+        if: runner.os == 'Linux'
+        run: |
+          mkdir "$RUNNER_TEMP/packages"
+          bash tools/native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
       # As in platform-windows.yml: the library native/windows/wintun.pin
       # names, checked against its digest, kept outside the checkout, loaded
       # by test code only, and never uploaded.

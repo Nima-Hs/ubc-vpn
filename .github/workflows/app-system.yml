@@ -14,6 +14,7 @@ on:
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml
+      - native/linux/test-packages.sh
       - .github/workflows/app-system.yml
       # Last, so it wins: a change to Markdown files alone starts nothing.
       # None is built, tested or shipped. Any other file still counts.
@@ -26,6 +27,7 @@ on:
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml
+      - native/linux/test-packages.sh
       - .github/workflows/app-system.yml
       - "!**/*.md"
   workflow_dispatch:
@@ -74,6 +76,14 @@ jobs:
           key: app-system
           # Pull requests restore main's caches but save none of their own.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The command-line client's keyring links the system's libdbus-1 on
+      # Linux: its headers and pkg-config, at the versions pinned in
+      # test-packages.sh, from its dated Ubuntu snapshot.
+      - name: Install the pinned D-Bus headers
+        if: runner.os == 'Linux'
+        run: |
+          mkdir "$RUNNER_TEMP/packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
       # Each program is built by itself (-p), as a release is, so that
       # neither is given features only the other asked for.
       - name: Build the service and the client in dev mode

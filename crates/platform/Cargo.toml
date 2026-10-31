@@ -50,4 +50,8 @@ rustix = { version = "1.1.5", default-features = false, features = ["pty"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["async-secret-service", "crypto-rust", "async-io"], optional = true }
+# Secret Service through the system's libdbus-1, loaded at run time: never
+# turn on a `vendored` feature, which would compile it in (see
+# .claude/rules/dependencies.md). The zbus backend's crates are unmaintained
+# and no keyring backend uses their successor, zbus 6, yet.
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"], optional = true }

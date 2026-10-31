@@ -144,6 +144,15 @@ jobs:
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
 
+      # The command-line client's keyring links the system's libdbus-1 on
+      # Linux: its headers and pkg-config, at the versions pinned in
+      # test-packages.sh, from its dated Ubuntu snapshot.
+      - name: Install the pinned D-Bus headers
+        if: runner.os == 'Linux'
+        run: |
+          mkdir "$RUNNER_TEMP/dbus-packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/dbus-packages" pkg-config libdbus-1-dev
+
       # The binding as it ships, then as the tests see it: `fake` makes the
       # binding reachable from the tests and never ships.
       - name: Lint
