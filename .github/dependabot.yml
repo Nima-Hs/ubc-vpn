@@ -20,6 +20,15 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    groups:
+      # react-dom refuses to run with any react version but its own, so bumping
+      # one without the other breaks the app. Their types move with them.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
     ignore:
       # Node's types must match the Node the app runs on (app/.node-version),
       # so only patch and minor updates within that major are offered.
