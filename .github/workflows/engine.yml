@@ -170,18 +170,6 @@ jobs:
         with:
           python-version: "3.13.16"
           update-environment: false
-      # The first start of a freshly unpacked Python, with its TLS libraries,
-      # can take longer on macOS than the tests give a gateway to start, as
-      # the system looks the new files over. So start it once here, loading
-      # what the gateway loads, and show how long that took; the tests then
-      # time the gateway itself.
-      - name: Start the gateway's Python once
-        env:
-          PYTHON: ${{ steps.python.outputs.python-path }}
-        run: |
-          start=$SECONDS
-          "$PYTHON" -I -c 'import http.server, json, os, socket, ssl, sys, threading, time; print(ssl.OPENSSL_VERSION)'
-          echo "First start took $((SECONDS - start)) s."
 
       # Made for this run and gone with the runner: never committed, never
       # uploaded. The gateway's request logs go to the same folder.
@@ -194,6 +182,30 @@ jobs:
           mkdir gateway
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn.example.test" \
             -keyout gateway/key.pem -out gateway/cert.pem
+
+      # TEMPORARY DIAGNOSTIC, to be removed before review: start the gateway
+      # as the tests do and show where it hangs on macOS 15.
+      - name: "Diagnostic: start the gateway by hand"
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 3
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          SCRIPT: ${{ github.workspace }}/crates/engine/tests/gateway/fake_gateway.py
+        run: |
+          sw_vers
+          ls -l gateway
+          cat > diag.py <<'EOF'
+          import faulthandler, runpy, sys, time
+          faulthandler.dump_traceback_later(15, exit=True)
+          print("python up", time.time(), file=sys.stderr, flush=True)
+          sys.argv = sys.argv[1:]
+          runpy.run_path(sys.argv[0], run_name="__main__")
+          EOF
+          start=$SECONDS
+          ( sleep 25 ) | "$PYTHON" -I diag.py "$SCRIPT" gateway/cert.pem gateway/key.pem accept gateway/diag.log | head -1
+          echo "exit ${PIPESTATUS[*]} after $((SECONDS - start)) s"
 
       # One test needs a gateway whose certificate this machine's own store
       # trusts, to show that the engine asks its judge all the same. So a
