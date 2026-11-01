@@ -424,6 +424,10 @@ fn every_state_is_printed_exactly() {
         ],
         mode: ubc_vpn_core::state::TunnelMode::Split,
     };
+    let full = ubc_vpn_core::state::TunnelInfo {
+        mode: ubc_vpn_core::state::TunnelMode::Full,
+        ..tunnel.clone()
+    };
     let failed = ConnState::Failed {
         code: ErrorCode::VerificationFailed,
         // Whatever an OS error may hold, the terminal gets no control codes
@@ -460,9 +464,37 @@ fn every_state_is_printed_exactly() {
         ),
         (
             ConnState::Connected { tunnel },
-            "Connected (utun4 as 10.255.0.2)\n  Subnets: 10.19.0.0/16, 198.19.0.0/16\n  \
+            "Connected (utun4 as 10.255.0.2)\n  \
+             Tunnel: split (only the chosen UBC subnets and domains)\n  \
+             Subnets: 10.19.0.0/16, 198.19.0.0/16\n  \
              DNS domains: dept.example.test, cs.example.test\n",
             r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","198.19.0.0/16"],"dns_domains":["dept.example.test","cs.example.test"],"mode":"split"}}"#,
+        ),
+        // In full mode the chosen subnets and domains are not all the tunnel
+        // carries, and the words say so.
+        (
+            ConnState::Connected {
+                tunnel: full.clone(),
+            },
+            "Connected (utun4 as 10.255.0.2)\n  \
+             Tunnel: full (all IPv4 traffic and every name lookup; IPv6 is blocked)\n  \
+             Subnets: 10.19.0.0/16, 198.19.0.0/16, and all other IPv4 traffic\n  \
+             DNS domains: dept.example.test, cs.example.test, and every other name\n",
+            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","198.19.0.0/16"],"dns_domains":["dept.example.test","cs.example.test"],"mode":"full"}}"#,
+        ),
+        // No domains is said as none, not as an empty line.
+        (
+            ConnState::Connected {
+                tunnel: ubc_vpn_core::state::TunnelInfo {
+                    dns_domains: Vec::new(),
+                    ..full
+                },
+            },
+            "Connected (utun4 as 10.255.0.2)\n  \
+             Tunnel: full (all IPv4 traffic and every name lookup; IPv6 is blocked)\n  \
+             Subnets: 10.19.0.0/16, 198.19.0.0/16, and all other IPv4 traffic\n  \
+             DNS domains: none, and every other name\n",
+            r#"{"state":"connected","tunnel":{"interface":"utun4","address":"10.255.0.2","subnets":["10.19.0.0/16","198.19.0.0/16"],"dns_domains":[],"mode":"full"}}"#,
         ),
     ];
     for (state, words, json) in states {

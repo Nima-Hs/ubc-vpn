@@ -490,3 +490,36 @@ fn set_tunnel_runs_through_its_command_line() {
     assert_eq!(saved, Some((0, format!("{reply}\n"))));
     assert_eq!(saved_mode(&scene), "full");
 }
+
+// The issue's other half: after a switch while connected, the words of
+// `status` say which mode the connection is in, not only its JSON.
+#[test]
+fn status_says_the_mode_after_a_switch() {
+    let scene = Scene::usual();
+    connect(&scene);
+    let mode_line = |scene: &Scene| {
+        let (status, out, err) = scene.rig.run(&["status"]);
+        assert_eq!((status, err.as_str()), (0, ""), "{out}");
+        out.lines()
+            .find(|line| line.starts_with("  Tunnel: "))
+            .map(str::to_string)
+    };
+    let split = "  Tunnel: split (only the chosen UBC subnets and domains)";
+    assert_eq!(mode_line(&scene).as_deref(), Some(split));
+
+    let set_tunnel = ["settings", "set-tunnel", "--json"];
+    let (status, out) = typed_command(&scene, &set_tunnel, FULL).unwrap();
+    assert_eq!(status, 0, "{out}");
+    assert!(out.contains(r#""live":{"result":"applied"}"#), "{out}");
+    let full = "  Tunnel: full (all IPv4 traffic and every name lookup; IPv6 is blocked)";
+    assert_eq!(mode_line(&scene).as_deref(), Some(full));
+    let (_, out, _) = scene.rig.run(&["status"]);
+    assert!(
+        out.contains("  Subnets: 10.255.0.0/24, and all other IPv4 traffic\n"),
+        "{out}"
+    );
+
+    let (status, out) = typed_command(&scene, &set_tunnel, SPLIT).unwrap();
+    assert_eq!(status, 0, "{out}");
+    assert_eq!(mode_line(&scene).as_deref(), Some(split));
+}
