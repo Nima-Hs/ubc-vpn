@@ -1,5 +1,6 @@
-//! The state folder without ownership checks: what the fake uses, and what
-//! macOS and Linux use until their checks are written (see [`crate::StateDir`]).
+//! The state folder's plain file calls: all of it for the fake and tests,
+//! and the writing on every OS once the folder's checks have passed (see
+//! [`crate::StateDir`]).
 
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -27,10 +28,12 @@ pub(crate) fn write(path: &Path, fresh: &Path, bytes: &[u8]) -> Result<()> {
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(fresh)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // Only the service may read what it keeps.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(fresh)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);

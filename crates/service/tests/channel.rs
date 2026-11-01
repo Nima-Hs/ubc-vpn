@@ -525,7 +525,7 @@ fn the_owner_is_never_written_through_a_link() {
 
 /// A checked state folder, as dev mode opens it, at the rig's state folder,
 /// and a way to let everyone change it, as a standard user could have.
-#[cfg(all(windows, feature = "dev-mode"))]
+#[cfg(feature = "dev-mode")]
 mod checked {
     use super::*;
     use ubc_vpn_platform::Mode;
@@ -539,6 +539,7 @@ mod checked {
     }
 
     /// Grants Everyone modify on the folder and what it holds.
+    #[cfg(windows)]
     pub fn open_to_everyone(rig: &Rig) {
         let granted = std::process::Command::new("icacls")
             .arg(rig.state_dir())
@@ -547,12 +548,27 @@ mod checked {
             .expect("icacls runs");
         assert!(granted.status.success(), "{granted:?}");
     }
+
+    /// Lets everyone write to the folder.
+    #[cfg(unix)]
+    pub fn open_to_everyone(rig: &Rig) {
+        use std::os::unix::fs::PermissionsExt;
+        let open = std::fs::Permissions::from_mode(0o777);
+        std::fs::set_permissions(rig.state_dir(), open).expect("open the folder");
+    }
+
+    /// What the platform says of such a folder.
+    pub const REFUSED: &str = if cfg!(windows) {
+        "not safe to use"
+    } else {
+        "the state folder can be changed by other users"
+    };
 }
 
 // Security rule: the owner is read through the state folder's checks, not
 // around them. A folder anyone may change stops the service, even when it
 // holds a well-formed owner.
-#[cfg(all(windows, feature = "dev-mode"))]
+#[cfg(feature = "dev-mode")]
 #[test]
 fn a_state_folder_others_may_change_is_not_read() {
     let mut rig = Rig::stopped(policy('A', ""));
@@ -563,7 +579,7 @@ fn a_state_folder_others_may_change_is_not_read() {
     rig.stop();
     checked::open_to_everyone(&rig);
     let refused = rig.start_with(state).unwrap_err();
-    assert!(refused.contains("not safe to use"), "{refused}");
+    assert!(refused.contains(checked::REFUSED), "{refused}");
     assert!(!refused.contains(".."), "{refused}");
     assert_eq!(rig.raw("alice").err(), Some(Error::NotFound));
 }
@@ -571,7 +587,7 @@ fn a_state_folder_others_may_change_is_not_read() {
 // Security rule: the owner is written through the same checks. A claim made
 // after the folder was opened to others is refused, and nobody owns the
 // service.
-#[cfg(all(windows, feature = "dev-mode"))]
+#[cfg(feature = "dev-mode")]
 #[test]
 fn a_state_folder_others_may_change_is_not_written() {
     let mut rig = Rig::stopped(policy('A', ""));

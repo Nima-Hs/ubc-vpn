@@ -69,6 +69,7 @@
 //! clients outside such a sandbox.
 
 pub(crate) mod interrupt;
+pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
 mod tests;
