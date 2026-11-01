@@ -14,9 +14,24 @@ declare const __DEMO__: boolean;
 declare const __LOGS__: boolean;
 declare const __SETTINGS__: boolean;
 
+/**
+ * Asks the main process, and always answers with a promise, as `VpnApi`
+ * promises. A value Electron cannot send is refused as a rejected promise:
+ * from Electron 45 `ipcRenderer.invoke` throws at once instead, which would
+ * reach the page as an exception where it expects a rejection. Only used
+ * here, with the fixed channels below.
+ */
+function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
+    try {
+        return ipcRenderer.invoke(channel, ...args);
+    } catch (error) {
+        return Promise.reject(error);
+    }
+}
+
 const api: VpnApi = {
     platform: process.platform,
-    getSnapshot: () => ipcRenderer.invoke(IPC.getSnapshot),
+    getSnapshot: () => invoke(IPC.getSnapshot),
     onSnapshot: (listener) => {
         const handler = (_event: unknown, snapshot: Snapshot) => listener(snapshot);
         ipcRenderer.on(IPC.snapshot, handler);
@@ -24,21 +39,21 @@ const api: VpnApi = {
             ipcRenderer.off(IPC.snapshot, handler);
         };
     },
-    connect: () => ipcRenderer.invoke(IPC.connect),
-    disconnect: () => ipcRenderer.invoke(IPC.disconnect),
-    answerPrompt: (id, value) => ipcRenderer.invoke(IPC.answerPrompt, id, value),
-    cancelLogin: () => ipcRenderer.invoke(IPC.cancelLogin),
-    setTunnel: (mode) => ipcRenderer.invoke(IPC.setTunnel, mode),
-    getSettings: () => ipcRenderer.invoke(IPC.getSettings),
-    checkRoutes: (input) => ipcRenderer.invoke(IPC.checkRoutes, input),
-    saveRoutes: (input) => ipcRenderer.invoke(IPC.saveRoutes, input),
-    retry: () => ipcRenderer.invoke(IPC.retry),
-    minimizeWindow: () => ipcRenderer.invoke(IPC.minimizeWindow),
-    closeWindow: () => ipcRenderer.invoke(IPC.closeWindow),
+    connect: () => invoke(IPC.connect),
+    disconnect: () => invoke(IPC.disconnect),
+    answerPrompt: (id, value) => invoke(IPC.answerPrompt, id, value),
+    cancelLogin: () => invoke(IPC.cancelLogin),
+    setTunnel: (mode) => invoke(IPC.setTunnel, mode),
+    getSettings: () => invoke(IPC.getSettings),
+    checkRoutes: (input) => invoke(IPC.checkRoutes, input),
+    saveRoutes: (input) => invoke(IPC.saveRoutes, input),
+    retry: () => invoke(IPC.retry),
+    minimizeWindow: () => invoke(IPC.minimizeWindow),
+    closeWindow: () => invoke(IPC.closeWindow),
     ...(__LOGS__ && {
         logs: {
-            open: () => ipcRenderer.invoke(LOGS_IPC.open),
-            close: () => ipcRenderer.invoke(LOGS_IPC.close),
+            open: () => invoke(LOGS_IPC.open),
+            close: () => invoke(LOGS_IPC.close),
             onUpdate: (listener: (update: LogUpdate) => void) => {
                 const handler = (_event: unknown, update: LogUpdate) => listener(update);
                 ipcRenderer.on(LOGS_IPC.update, handler);
@@ -46,25 +61,23 @@ const api: VpnApi = {
                     ipcRenderer.off(LOGS_IPC.update, handler);
                 };
             },
-            copyReport: () => ipcRenderer.invoke(LOGS_IPC.copyReport),
+            copyReport: () => invoke(LOGS_IPC.copyReport),
         },
     }),
     ...(__SETTINGS__ && {
         profiles: {
-            list: () => ipcRenderer.invoke(PROFILES_IPC.list),
+            list: () => invoke(PROFILES_IPC.list),
             setStartup: (start: StartMode, autoConnect: boolean) =>
-                ipcRenderer.invoke(PROFILES_IPC.setStartup, start, autoConnect),
-            forgetPassword: (id: ProfileId | null) =>
-                ipcRenderer.invoke(PROFILES_IPC.forgetPassword, id),
-            create: (name: string) => ipcRenderer.invoke(PROFILES_IPC.create, name),
-            rename: (id: ProfileId, name: string) =>
-                ipcRenderer.invoke(PROFILES_IPC.rename, id, name),
+                invoke(PROFILES_IPC.setStartup, start, autoConnect),
+            forgetPassword: (id: ProfileId | null) => invoke(PROFILES_IPC.forgetPassword, id),
+            create: (name: string) => invoke(PROFILES_IPC.create, name),
+            rename: (id: ProfileId, name: string) => invoke(PROFILES_IPC.rename, id, name),
             update: (
                 id: ProfileId,
                 change: { username?: string | null; save_password?: boolean },
-            ) => ipcRenderer.invoke(PROFILES_IPC.update, id, change),
-            remove: (id: ProfileId) => ipcRenderer.invoke(PROFILES_IPC.remove, id),
-            switchTo: (id: ProfileId) => ipcRenderer.invoke(PROFILES_IPC.switchTo, id),
+            ) => invoke(PROFILES_IPC.update, id, change),
+            remove: (id: ProfileId) => invoke(PROFILES_IPC.remove, id),
+            switchTo: (id: ProfileId) => invoke(PROFILES_IPC.switchTo, id),
             onChange: (listener: (view: ProfilesView) => void) => {
                 const handler = (_event: unknown, view: ProfilesView) => listener(view);
                 ipcRenderer.on(PROFILES_IPC.changed, handler);
@@ -76,9 +89,9 @@ const api: VpnApi = {
     }),
     ...(__DEMO__ && {
         demo: {
-            listScenarios: () => ipcRenderer.invoke(DEMO_IPC.listScenarios),
-            setScenario: (name: string) => ipcRenderer.invoke(DEMO_IPC.setScenario, name),
-            loginItem: () => ipcRenderer.invoke(DEMO_PROFILES_IPC.loginItem),
+            listScenarios: () => invoke(DEMO_IPC.listScenarios),
+            setScenario: (name: string) => invoke(DEMO_IPC.setScenario, name),
+            loginItem: () => invoke(DEMO_PROFILES_IPC.loginItem),
         },
     }),
 };

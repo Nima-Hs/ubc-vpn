@@ -344,15 +344,51 @@ test("the window renders, locked down", async () => {
 });
 
 test("a login answer is checked before the main process takes it", async () => {
+    // What the main process's handler is given, and whether it took it: its
+    // check throws for anything it refuses. Put back at the end.
+    await app.evaluate(({ ipcMain }) => {
+        type Handler = (event: unknown, ...args: unknown[]) => unknown;
+        const invoke = (ipcMain as unknown as { _invokeHandlers: Map<string, Handler> })
+            ._invokeHandlers;
+        const original = invoke.get("login:answer") as Handler;
+        const seen: string[] = [];
+        Object.assign(globalThis, { answerSeen: seen, answerHandler: original });
+        // Awaited, so a refusal is caught whether the check throws or rejects.
+        invoke.set("login:answer", async (event, ...args) => {
+            try {
+                const result = await original(event, ...args);
+                seen.push(JSON.stringify(["taken", ...args]));
+                return result;
+            } catch (error) {
+                seen.push(JSON.stringify(["refused", typeof args[0], typeof args[1]]));
+                throw error;
+            }
+        });
+    });
     // The one function that takes arguments. Anything but a prompt id and
-    // text is refused, whatever the page sends.
+    // text is refused, whatever the page sends. A value Electron cannot send
+    // at all is refused before it leaves the page: as a rejected promise up
+    // to Electron 44, and thrown at once by `ipcRenderer.invoke` from 45,
+    // which the preload turns back into a rejected promise. Both count.
     const sent = await page.evaluate(async () => {
         const answer = window.ubcVpn.answerPrompt as (...args: unknown[]) => Promise<void>;
-        const outcome = (...args: unknown[]) =>
-            answer(...args).then(
-                () => "taken",
-                () => "refused",
-            );
+        const outcome = async (...args: unknown[]) => {
+            let call: unknown;
+            try {
+                call = answer(...args);
+            } catch {
+                return "thrown";
+            }
+            if (!(call instanceof Promise)) {
+                return "no promise";
+            }
+            try {
+                await call;
+                return "taken";
+            } catch {
+                return "refused";
+            }
+        };
         return {
             proper: await outcome(1, "an answer"),
             noText: await outcome(1, { toString: () => "an answer" }),
@@ -360,26 +396,49 @@ test("a login answer is checked before the main process takes it", async () => {
             tooLong: await outcome(1, "x".repeat(5000)),
         };
     });
+    const seen = await app.evaluate(({ ipcMain }) => {
+        type Handler = (event: unknown, ...args: unknown[]) => unknown;
+        const kept = globalThis as unknown as { answerSeen: string[]; answerHandler: Handler };
+        (ipcMain as unknown as { _invokeHandlers: Map<string, Handler> })._invokeHandlers.set(
+            "login:answer",
+            kept.answerHandler,
+        );
+        return kept.answerSeen;
+    });
+    // Refused as a rejected promise, never as an exception the page did not expect.
     expect(sent).toEqual({
         proper: "taken",
         noText: "refused",
         noId: "refused",
         tooLong: "refused",
     });
+    // Only the proper answer was taken. The one that could not be sent never
+    // reached the main process; the others reached it and were refused.
+    expect(seen).toEqual([
+        JSON.stringify(["taken", 1, "an answer"]),
+        JSON.stringify(["refused", "string", "string"]),
+        JSON.stringify(["refused", "number", "string"]),
+    ]);
     // Routes are checked the same way before anything is started for them.
     const routes = await page.evaluate(async () => {
         const save = window.ubcVpn.saveRoutes as (...args: unknown[]) => Promise<unknown>;
         const check = window.ubcVpn.checkRoutes as (...args: unknown[]) => Promise<unknown>;
-        const outcome = (call: Promise<unknown>) =>
-            call.then(
-                () => "taken",
-                () => "refused",
-            );
+        // Thrown or rejected, a refusal is a refusal.
+        const outcome = async (call: () => Promise<unknown>) => {
+            try {
+                await call();
+                return "taken";
+            } catch {
+                return "refused";
+            }
+        };
         return {
-            proper: await outcome(check({ subnets: ["203.0.113.0/24"], dns_domains: [] })),
-            extraField: await outcome(save({ subnets: [], dns_domains: [], path: "/etc/passwd" })),
-            notLists: await outcome(save({ subnets: "203.0.113.0/24", dns_domains: [] })),
-            notText: await outcome(check({ subnets: [42], dns_domains: [] })),
+            proper: await outcome(() => check({ subnets: ["203.0.113.0/24"], dns_domains: [] })),
+            extraField: await outcome(() =>
+                save({ subnets: [], dns_domains: [], path: "/etc/passwd" }),
+            ),
+            notLists: await outcome(() => save({ subnets: "203.0.113.0/24", dns_domains: [] })),
+            notText: await outcome(() => check({ subnets: [42], dns_domains: [] })),
         };
     });
     expect(routes).toEqual({
