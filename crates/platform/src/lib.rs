@@ -492,15 +492,16 @@ pub trait Routes: Send + Sync {
     /// [`Routes::uses_interface`] for an IPv6 destination: which interface
     /// the OS would use to reach `dest`, and whether that is `interface`.
     ///
-    /// It is the longest-prefix match over the OS's IPv6 forwarding table,
-    /// not a question to the OS's own best-route lookup: on Windows that
-    /// lookup fails for a destination the IPv6 halves cover, since the
-    /// tunnel has no IPv6 source address.
+    /// It is the choice of the OS's IPv6 forwarding table, by the same rule
+    /// as [`Routes::uses_interface`] (longest prefix, then lowest route plus
+    /// interface metric, on interfaces that are up with IPv6 bound), not a
+    /// question to the OS's own best-route lookup: on Windows that lookup
+    /// fails for a destination the IPv6 halves cover, since the tunnel has
+    /// no IPv6 source address.
     ///
-    /// It fails closed on a tie: `Yes` only when every route of the longest
-    /// matching prefix length goes through `interface`. `No` when any of
-    /// them goes elsewhere, or when no route matches. `Unknown` when the
-    /// table cannot be read.
+    /// It fails closed on a tie: `Yes` only when every winning route goes
+    /// through `interface`, `No` only when none does or no route matches,
+    /// and `Unknown` when they disagree or the table cannot be read.
     fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified;
 }
 
