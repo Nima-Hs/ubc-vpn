@@ -135,12 +135,15 @@ jobs:
           }
       # A test that is skipped passes. So prove from the log that each test
       # needing elevation, a second user, the loopback network or a console
-      # of its own really ran.
+      # of its own really ran. Each name must match a whole line, so that
+      # "full tunnel" is not satisfied by "full tunnel foreign". The log was
+      # written by PowerShell, whose line ends carry a carriage return.
       - name: The elevated tests really ran
         shell: bash
         run: |
-          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row" "service manager" "service manager slow start" dns "dns policy" "dns policy empty" "dns foreign" "dns effective" "dns owner" "dns volatile" "dns catch all" "full tunnel" "full tunnel no ipv6" "full tunnel foreign" "full tunnel unreachable neighbour" events "events late" "events since capture" "events ipv6" "program folder" "program file" "program link" "program add" install "install unconfigured" "install while starting"; do
-            if ! grep -q "RAN: $test" test.log; then
+          tr -d '\r' < test.log > ran.log
+          for test in suite users dev remote console "interrupt" "interrupt unheard" "interrupt sent" "state fresh" "state squat" routes physical crash ipv6 "orphan row" "interface metric" "service manager" "service manager slow start" dns "dns policy" "dns policy empty" "dns foreign" "dns effective" "dns owner" "dns volatile" "dns catch all" "full tunnel" "full tunnel no ipv6" "full tunnel foreign" "full tunnel unreachable neighbour" events "events late" "events since capture" "events ipv6" "program folder" "program file" "program link" "program add" install "install unconfigured" "install while starting"; do
+            if ! grep -qxF "RAN: $test" ran.log; then
               echo "The elevated test '$test' did not run."
               exit 1
             fi
