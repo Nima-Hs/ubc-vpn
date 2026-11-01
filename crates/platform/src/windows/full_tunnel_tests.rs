@@ -11,8 +11,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ubc_vpn_core::routes::Ipv4Net;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, CreateIpNetEntry2, DeleteIpForwardEntry2, DeleteIpNetEntry2,
-    GetIpNetEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2, MIB_IPNET_ROW2, SetIpNetEntry2,
+    CreateIpForwardEntry2, DeleteIpForwardEntry2, DeleteIpNetEntry2, GetIpNetEntry2,
+    InitializeIpForwardEntry, MIB_IPFORWARD_ROW2, MIB_IPNET_ROW2,
 };
 use windows_sys::Win32::Networking::WinSock::NlnsUnreachable;
 
@@ -146,26 +146,27 @@ fn full_mode_takes_everything_but_the_gateway_and_the_local_network() {
 struct Neighbour(MIB_IPNET_ROW2);
 
 impl Neighbour {
-    /// Marks `addr` on the interface `luid` unreachable, as the cache does
-    /// for an address that did not answer, such as after a scan of the
-    /// network.
+    /// Makes the cache mark `addr` on the interface `luid` unreachable the
+    /// way a scan of the network does: by sending to it while nothing
+    /// answers there. An entry made by hand is kept as permanent instead.
     fn unreachable(luid: u64, addr: Ipv4Addr) -> Self {
         // SAFETY: plain data for which all zeroes is valid.
         let mut row: MIB_IPNET_ROW2 = unsafe { std::mem::zeroed() };
         row.Address = v4(addr);
         row.InterfaceLuid.Value = luid;
-        row.State = NlnsUnreachable;
-        // SAFETY: the row is valid and initialised.
-        let made = checked(unsafe { CreateIpNetEntry2(&row) });
-        assert!(
-            matches!(made, Ok(()) | Err(Error::AlreadyExists)),
-            "{made:?}"
-        );
-        if made.is_err() {
-            // SAFETY: as above.
-            checked(unsafe { SetIpNetEntry2(&row) }).expect("mark it unreachable");
+        // SAFETY: the row names an entry; a missing one is fine.
+        let _ = unsafe { DeleteIpNetEntry2(&row) };
+        let entry = Self(row);
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("a socket");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let _ = socket.send_to(b"probe", (addr, 9));
+            if entry.state() == Some(NlnsUnreachable) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
-        Self(row)
+        entry
     }
 
     /// The state the cache holds for it now.
