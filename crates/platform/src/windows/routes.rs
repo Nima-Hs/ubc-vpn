@@ -12,8 +12,14 @@
 //! IPv6 address, the two IPv6 halves, which make IPv6 fail at once. The OS's
 //! best-route lookup fails for a destination those cover (there is no
 //! source address), so IPv6 checks match the forwarding table themselves.
+//!
+//! IPv4 checks match the forwarding table too, for another reason: the
+//! best-route lookup skips an on-link route when the neighbour cache marks
+//! the destination unreachable, and falls back to a less specific route, so
+//! its answer depends on which neighbours answered lately rather than on the
+//! routes. See [`table_through`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(test)]
 use std::path::Path;
@@ -29,10 +35,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToAlias, CreateIpForwardEntry2,
     CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable,
     GetBestRoute2, GetIfEntry2, GetIfTable2, GetIpForwardTable2, GetIpInterfaceEntry,
-    GetUnicastIpAddressTable, IF_TYPE_PROP_VIRTUAL, InitializeIpForwardEntry,
+    GetIpInterfaceTable, GetUnicastIpAddressTable, IF_TYPE_PROP_VIRTUAL, InitializeIpForwardEntry,
     InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
-    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
-    MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE,
+    MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH};
 use windows_sys::Win32::Networking::WinSock::{
@@ -205,6 +211,108 @@ fn up_interfaces() -> Result<HashSet<u64>> {
     Ok(up.map(|row| value(&row.InterfaceLuid)).collect())
 }
 
+/// The interfaces an IPv4 route can be used on now, each with its IPv4
+/// interface metric: those that are up and have IPv4 bound. A route on any
+/// other interface carries nothing.
+fn usable_interfaces() -> Result<HashMap<u64, u32>> {
+    let up = up_interfaces()?;
+    let mut table: *mut MIB_IPINTERFACE_TABLE = null_mut();
+    // SAFETY: the out pointer is valid; the table is freed by `Table`.
+    checked(unsafe { GetIpInterfaceTable(AF_INET, &mut table) })?;
+    let table = Table(table);
+    // SAFETY: on success the table holds `NumEntries` initialised rows.
+    let rows = unsafe {
+        std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
+    };
+    let ipv4 = rows
+        .iter()
+        .map(|row| (value(&row.InterfaceLuid), row.Metric));
+    Ok(usable(ipv4, &up))
+}
+
+/// Of the interfaces with IPv4 bound, as (LUID, interface metric), those
+/// that are up.
+fn usable(ipv4: impl Iterator<Item = (u64, u32)>, up: &HashSet<u64>) -> HashMap<u64, u32> {
+    ipv4.filter(|(luid, _)| up.contains(luid)).collect()
+}
+
+/// An IPv4 route as route selection sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct V4Route {
+    dest: Ipv4Net,
+    luid: u64,
+    /// The route's own metric, which Windows adds to its interface's.
+    metric: u32,
+}
+
+/// A system route as a [`V4Route`]; `None` for one of another family.
+fn v4_route(row: &MIB_IPFORWARD_ROW2) -> Option<V4Route> {
+    Some(V4Route {
+        dest: row_dest(row)?,
+        luid: value(&row.InterfaceLuid),
+        metric: row.Metric,
+    })
+}
+
+/// Whether the route Windows' table chooses for `dest` goes through
+/// `wanted`, judged from the routes alone, as Windows chooses with every
+/// neighbour reachable:
+///
+/// - only routes on an interface in `interfaces` count: those up with IPv4
+///   bound, each mapped to its interface metric;
+/// - the longest prefix that holds `dest` wins, whatever its metric;
+/// - among those, the lowest sum of route and interface metric wins, which
+///   is the metric Windows documents for `MIB_IPFORWARD_ROW2`.
+///
+/// Several winners of equal metric could each be used: `Yes` only when all
+/// go through `wanted`, `No` only when none does, and `Unknown` when they
+/// disagree, so a tie never passes a check either way. No route at all is
+/// `No`.
+///
+/// This is not `GetBestRoute2`. That lookup skips an on-link route when the
+/// neighbour cache marks the destination unreachable, as after something
+/// scanned the local network, and falls back to a less specific route such
+/// as a half of full mode. Its answer then depends on which neighbours
+/// answered lately, not on the routes the product set and checks.
+fn table_through(
+    routes: &[V4Route],
+    interfaces: &HashMap<u64, u32>,
+    dest: Ipv4Addr,
+    wanted: u64,
+) -> Verified {
+    let candidates: Vec<(V4Route, u64)> = routes
+        .iter()
+        .filter(|route| route.dest.contains_addr(dest))
+        .filter_map(|route| {
+            let interface = interfaces.get(&route.luid)?;
+            Some((*route, u64::from(route.metric) + u64::from(*interface)))
+        })
+        .collect();
+    let Some(longest) = candidates.iter().map(|(r, _)| r.dest.prefix_len()).max() else {
+        return Verified::No;
+    };
+    let longest: Vec<_> = candidates
+        .into_iter()
+        .filter(|(route, _)| route.dest.prefix_len() == longest)
+        .collect();
+    let Some(lowest) = longest.iter().map(|(_, metric)| *metric).min() else {
+        return Verified::No;
+    };
+    let chosen = longest.iter().filter(|(_, metric)| *metric == lowest);
+    let (mut through, mut elsewhere) = (false, false);
+    for (route, _) in chosen {
+        match route.luid == wanted {
+            true => through = true,
+            false => elsewhere = true,
+        }
+    }
+    match (through, elsewhere) {
+        (true, false) => Verified::Yes,
+        (false, true) => Verified::No,
+        _ => Verified::Unknown,
+    }
+}
+
 /// An IPv4 address of the system's table, with what decides whether it is
 /// used, for [`usable_networks`]. Its interface is up when `up` holds it.
 fn address_row(row: &MIB_UNICASTIPADDRESS_ROW, up: &HashSet<u64>) -> Option<AddressRow> {
@@ -240,7 +348,7 @@ fn dad_state(state: NL_DAD_STATE) -> DadState {
 }
 
 /// The route the system would use to reach `dest`.
-fn best_route(dest: Ipv4Addr) -> Result<MIB_IPFORWARD_ROW2> {
+pub(super) fn best_route(dest: Ipv4Addr) -> Result<MIB_IPFORWARD_ROW2> {
     // SAFETY: both rows are plain data for which all zeroes is valid.
     let (mut route, mut source): (MIB_IPFORWARD_ROW2, SOCKADDR_INET) =
         unsafe { std::mem::zeroed() };
@@ -582,8 +690,10 @@ impl Routes for WinRoutes {
         self.remove(|_| true)
     }
 
+    /// The forwarding table's choice, by [`table_through`], not
+    /// `GetBestRoute2`'s, whose answer changes with neighbour reachability.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
-        let Ok(route) = best_route(dest) else {
+        let (Ok(table), Ok(interfaces)) = (route_table(), usable_interfaces()) else {
             return Verified::Unknown;
         };
         let wanted = match luid(interface) {
@@ -592,10 +702,8 @@ impl Routes for WinRoutes {
             Err(Error::NotFound) => return Verified::No,
             Err(_) => return Verified::Unknown,
         };
-        match value(&route.InterfaceLuid) == wanted {
-            true => Verified::Yes,
-            false => Verified::No,
-        }
+        let routes: Vec<V4Route> = table.iter().filter_map(v4_route).collect();
+        table_through(&routes, &interfaces, dest, wanted)
     }
 
     fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block> {
@@ -990,6 +1098,159 @@ mod tests {
         assert_eq!(longest_match_through(&narrower, dest, tunnel), Verified::No);
         // Nothing matches.
         assert_eq!(longest_match_through(&[], dest, tunnel), Verified::No);
+    }
+
+    const WIFI: u64 = 9;
+    const WIRED: u64 = 11;
+    const TUNNEL_LUID: u64 = 7;
+
+    fn route(dest: &str, luid: u64, metric: u32) -> V4Route {
+        V4Route {
+            dest: dest.parse().unwrap(),
+            luid,
+            metric,
+        }
+    }
+
+    /// Full mode on a home network, all made up: the local network
+    /// 10.200.0.0/24 on Wi-Fi with the router at .1 and the machine at .10,
+    /// the gateway's host route, and the halves on the tunnel with metric 0
+    /// on an interface of low metric, as the product adds them.
+    fn full_mode_table() -> (Vec<V4Route>, HashMap<u64, u32>) {
+        let routes = vec![
+            route("0.0.0.0/0", WIFI, 0),
+            route("10.200.0.0/24", WIFI, 256),
+            route("10.200.0.10/32", WIFI, 256),
+            route("10.200.0.255/32", WIFI, 256),
+            route("192.0.2.1/32", WIFI, 0),
+            route("0.0.0.0/1", TUNNEL_LUID, 0),
+            route("128.0.0.0/1", TUNNEL_LUID, 0),
+            route("198.18.0.5/32", TUNNEL_LUID, 256),
+        ];
+        let interfaces = HashMap::from([(WIFI, 35), (TUNNEL_LUID, 5)]);
+        (routes, interfaces)
+    }
+
+    fn addr(text: &str) -> Ipv4Addr {
+        text.parse().unwrap()
+    }
+
+    // Security rule, the issue's case: a network the machine is on stays
+    // off the tunnel in full mode, at every address in it, because its
+    // on-link route is more specific than the halves. Its route's metric is
+    // far higher than theirs, and neighbour reachability, which made the
+    // best-route lookup answer with the 128.0.0.0/1 half for an unanswered
+    // address, is not part of the table.
+    #[test]
+    fn the_local_network_beats_the_halves_whatever_the_metrics() {
+        let (routes, interfaces) = full_mode_table();
+        let through = |dest: &str, luid| table_through(&routes, &interfaces, addr(dest), luid);
+        for dest in ["10.200.0.1", "10.200.0.2", "10.200.0.200", "10.200.0.10"] {
+            assert_eq!(through(dest, WIFI), Verified::Yes, "{dest}");
+            assert_eq!(through(dest, TUNNEL_LUID), Verified::No, "{dest}");
+        }
+        assert_eq!(through("192.0.2.1", WIFI), Verified::Yes, "the gateway");
+        for dest in ["1.1.1.1", "200.1.1.1", "10.200.1.2"] {
+            assert_eq!(through(dest, TUNNEL_LUID), Verified::Yes, "{dest}");
+            assert_eq!(through(dest, WIFI), Verified::No, "{dest}");
+        }
+    }
+
+    // Among routes of the longest prefix, the lowest sum of route and
+    // interface metric wins. A tie between interfaces is `Unknown` for
+    // either of them, never `Yes` or `No`, and `No` for a third.
+    #[test]
+    fn the_lowest_total_metric_wins_and_a_tie_between_interfaces_is_unknown() {
+        let routes = [route("0.0.0.0/0", WIFI, 0), route("0.0.0.0/0", WIRED, 10)];
+        let dest = addr("203.0.113.9");
+        let lower_wifi = HashMap::from([(WIFI, 35), (WIRED, 30)]);
+        assert_eq!(
+            table_through(&routes, &lower_wifi, dest, WIFI),
+            Verified::Yes
+        );
+        assert_eq!(
+            table_through(&routes, &lower_wifi, dest, WIRED),
+            Verified::No
+        );
+        let lower_wired = HashMap::from([(WIFI, 35), (WIRED, 20)]);
+        assert_eq!(
+            table_through(&routes, &lower_wired, dest, WIRED),
+            Verified::Yes
+        );
+        assert_eq!(
+            table_through(&routes, &lower_wired, dest, WIFI),
+            Verified::No
+        );
+        // The route's own metric counts too: 0 + 40 against 10 + 30.
+        let tied = HashMap::from([(WIFI, 40), (WIRED, 30)]);
+        assert_eq!(table_through(&routes, &tied, dest, WIFI), Verified::Unknown);
+        assert_eq!(
+            table_through(&routes, &tied, dest, WIRED),
+            Verified::Unknown
+        );
+        assert_eq!(
+            table_through(&routes, &tied, dest, TUNNEL_LUID),
+            Verified::No
+        );
+        // Two equal routes through the same interface agree.
+        let same = [route("0.0.0.0/0", WIFI, 0), route("0.0.0.0/0", WIFI, 0)];
+        assert_eq!(table_through(&same, &tied, dest, WIFI), Verified::Yes);
+        // Metrics that would overflow 32 bits still add up.
+        let huge = [route("0.0.0.0/0", WIFI, u32::MAX)];
+        let interfaces = HashMap::from([(WIFI, u32::MAX)]);
+        assert_eq!(table_through(&huge, &interfaces, dest, WIFI), Verified::Yes);
+    }
+
+    // An interface counts only when it is up and has IPv4 bound, with the
+    // interface metric Windows gives it.
+    #[test]
+    fn an_interface_is_usable_only_when_up_with_ipv4() {
+        let ipv4 = [(WIFI, 35), (TUNNEL_LUID, 5)];
+        let up = HashSet::from([WIFI, WIRED]);
+        let found = usable(ipv4.into_iter(), &up);
+        assert_eq!(found, HashMap::from([(WIFI, 35)]));
+    }
+
+    // A route on an interface that is down, or has no IPv4, carries
+    // nothing, however specific: the next route that holds the address
+    // decides. No route at all is `No`.
+    #[test]
+    fn only_routes_on_usable_interfaces_count() {
+        let (routes, mut interfaces) = full_mode_table();
+        let through = |interfaces: &HashMap<u64, u32>, dest: &str, luid| {
+            table_through(&routes, interfaces, addr(dest), luid)
+        };
+        interfaces.remove(&TUNNEL_LUID);
+        assert_eq!(through(&interfaces, "1.1.1.1", TUNNEL_LUID), Verified::No);
+        assert_eq!(through(&interfaces, "1.1.1.1", WIFI), Verified::Yes);
+        let mut lan_down = full_mode_table().1;
+        lan_down.remove(&WIFI);
+        assert_eq!(through(&lan_down, "10.200.0.2", WIFI), Verified::No);
+        assert_eq!(through(&lan_down, "10.200.0.2", TUNNEL_LUID), Verified::Yes);
+        assert_eq!(
+            through(&HashMap::new(), "10.200.0.2", WIFI),
+            Verified::No,
+            "no usable route"
+        );
+        assert_eq!(
+            table_through(&[], &interfaces, addr("1.1.1.1"), WIFI),
+            Verified::No
+        );
+    }
+
+    // A system route is read with its destination, interface and own
+    // metric; an IPv6 one is not an IPv4 route.
+    #[test]
+    fn a_system_route_is_read_with_its_metric() {
+        // SAFETY: plain data for which all zeroes is valid.
+        let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+        row.DestinationPrefix.Prefix = v4(addr("10.200.0.0"));
+        row.DestinationPrefix.PrefixLength = 24;
+        row.InterfaceLuid = net_luid(WIFI);
+        row.Metric = 256;
+        assert_eq!(v4_route(&row), Some(route("10.200.0.0/24", WIFI, 256)));
+        row.DestinationPrefix.Prefix = v6(Ipv6Addr::UNSPECIFIED);
+        assert_eq!(v4_route(&row), None);
     }
 
     #[test]
