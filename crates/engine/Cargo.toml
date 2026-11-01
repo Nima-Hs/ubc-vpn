@@ -36,7 +36,7 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [build-dependencies]
-cc = { version = "=1.8.0", optional = true }
+cc = { version = "=1.10.0", optional = true }
 serde_json = { version = "1.0.154", optional = true }
 
 [dev-dependencies]
