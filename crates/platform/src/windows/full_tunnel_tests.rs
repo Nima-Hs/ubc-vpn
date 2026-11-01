@@ -14,7 +14,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     CreateIpForwardEntry2, DeleteIpForwardEntry2, DeleteIpNetEntry2, GetIpNetEntry2,
     InitializeIpForwardEntry, MIB_IPFORWARD_ROW2, MIB_IPNET_ROW2,
 };
-use windows_sys::Win32::Networking::WinSock::NlnsUnreachable;
+use windows_sys::Win32::Networking::WinSock::{NlnsIncomplete, NlnsUnreachable};
 
 use super::routes::{WinRoutes, best_route, checked, luid, v4, v6, value};
 use super::routes_tests::{Cleanup, Outsider, ran, state_dir, step, turn, wintun};
@@ -146,9 +146,11 @@ fn full_mode_takes_everything_but_the_gateway_and_the_local_network() {
 struct Neighbour(MIB_IPNET_ROW2);
 
 impl Neighbour {
-    /// Makes the cache mark `addr` on the interface `luid` unreachable the
-    /// way a scan of the network does: by sending to it while nothing
+    /// Makes the cache mark `addr` on the interface `luid` as not answering
+    /// the way a scan of the network does: by sending to it while nothing
     /// answers there. An entry made by hand is kept as permanent instead.
+    /// The runner's cache keeps it incomplete while sends go on, and may
+    /// not reach unreachable before the deadline; either state is enough.
     fn unreachable(luid: u64, addr: Ipv4Addr) -> Self {
         // SAFETY: plain data for which all zeroes is valid.
         let mut row: MIB_IPNET_ROW2 = unsafe { std::mem::zeroed() };
@@ -186,7 +188,8 @@ impl Drop for Neighbour {
 }
 
 // The neighbour-unreachable case, on the runner's own network: an address
-// on the local network that the neighbour cache marks unreachable. Windows'
+// on the local network that did not answer, which the neighbour cache marks
+// incomplete and then unreachable. Windows'
 // best-route lookup then skips the on-link route and answers with a half of
 // full mode. The check judges the routing table, where the on-link route is
 // more specific than the halves, so the address stays on the local network.
@@ -238,7 +241,9 @@ fn an_unreachable_neighbour_stays_on_the_local_network_in_full_mode() {
         "NEIGHBOUR state {state:?}, best route {looked_up:?}, \
          local network {lan_luid}, tunnel {tunnel_luid}"
     );
-    assert_eq!(state, Some(NlnsUnreachable), "not marked unreachable");
+    // Still being resolved, or given up on: either way nothing answered.
+    let unanswered = [Some(NlnsIncomplete), Some(NlnsUnreachable)];
+    assert!(unanswered.contains(&state), "the neighbour answered");
     assert_eq!(
         looked_up,
         Ok(tunnel_luid),
