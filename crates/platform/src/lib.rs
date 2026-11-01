@@ -417,6 +417,17 @@ pub trait Routes: Send + Sync {
 
     /// Asks the OS which interface it would really use to reach `dest`, and
     /// whether that is `interface`.
+    ///
+    /// It judges the routing table, not passing state: the answer must not
+    /// change with whether a neighbour on the local network answered lately.
+    /// On Windows it is therefore the forwarding table's choice (longest
+    /// prefix, then lowest route plus interface metric, on interfaces that
+    /// are up), not the OS's best-route lookup, which skips an on-link route
+    /// for a neighbour the cache marks unreachable and falls back to a less
+    /// specific route such as a half of full mode. There, equally good
+    /// routes through `interface` and elsewhere are `Unknown`.
+    ///
+    /// It fails closed: `Unknown` when the table cannot be read.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified;
 
     /// What full mode can do about IPv6 on this machine now, read-only, for
