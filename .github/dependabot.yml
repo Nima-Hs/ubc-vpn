@@ -10,6 +10,14 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    groups:
+      # One pull request a week for every minor and patch update, rather than
+      # one each: they all change Cargo.lock, so each merge made the next one
+      # rebase and run its checks again. Major updates still come one by one,
+      # and security updates are never grouped.
+      rust:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /app
@@ -29,6 +37,12 @@ updates:
           - "react-dom"
           - "@types/react"
           - "@types/react-dom"
+      # Every other minor and patch update in one pull request a week, for the
+      # same reason as the Rust group. A dependency joins the first group that
+      # matches it, so react keeps its own group above.
+      app:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
       # Node's types must match the Node the app runs on (app/.node-version),
       # so only patch and minor updates within that major are offered.
@@ -52,6 +66,11 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+    groups:
+      # As for the Rust group above.
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: pre-commit
     directory: /
