@@ -50,6 +50,7 @@ use ubc_vpn_core::routes::Ipv4Net;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod interrupt;
+mod on_link;
 #[cfg(feature = "secrets")]
 pub mod secrets;
 mod state_plain;
@@ -218,16 +219,31 @@ impl PhysicalNetwork {
         self.next_hop
     }
 
-    /// Every IPv4 address the machine had at capture, on any interface.
-    /// No tunnel of ours existed then, so none of them is the tunnel's.
+    /// Every IPv4 address the machine had at capture, on any interface,
+    /// used or not, such as a disconnected adapter's tentative one. No
+    /// tunnel of ours existed then, so none of them is the tunnel's.
+    ///
+    /// Unlike [`on_link`](Self::on_link), unused addresses are kept: every
+    /// use of this list refuses something that matches it (the gateway or
+    /// the tunnel's address being one of the machine's own) or notices an
+    /// address it lacks (a change of network), and an address that could
+    /// become usable later must still count for those.
     pub fn own_addresses(&self) -> &[Ipv4Addr] {
         &self.own_addresses
     }
 
     /// The networks the machine was directly on at capture: for every
-    /// interface, the network of each of its addresses, which is the address
-    /// with its prefix and the host bits cleared. Interfaces that are not
-    /// hardware count, such as a bridge made by a container or virtual
+    /// interface that is up, the network of each address it uses, which is
+    /// the address with its prefix and the host bits cleared. An address
+    /// still being checked for duplicates, a duplicate one, or any address
+    /// on an interface that is down is not used and has no on-link route,
+    /// so it puts the machine on no network: a disconnected adapter's
+    /// tentative `169.254.x.x` address is not counted. Like the rest of this
+    /// value it is a snapshot: an address listed at capture that becomes
+    /// usable later is not added, and that change alone raises no
+    /// [`NetworkEvent::PhysicalChanged`]. Its new on-link route still wins
+    /// over full mode's halves. Interfaces that are
+    /// not hardware count, such as a bridge made by a container or virtual
     /// machine program. The service refuses routes that would take one of
     /// these into the tunnel; the rule is
     /// [`check_against_local`](ubc_vpn_core::routes::check_against_local).

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use ubc_vpn_core::routes::Ipv4Net;
 
+use crate::on_link::{AddressRow, DadState, usable_networks};
 use crate::{
     Connection, Dns, Error, FULL_TUNNEL_V4, Ipv6Block, Listener, NetworkEvent, NetworkEvents,
     Paths, PhysicalNetwork, Platform, RawConnection, Result, Routes, SplitDns, Subscription,
@@ -137,6 +138,9 @@ struct State {
     foreign: Vec<(String, Ipv4Net)>,
     own_addresses: Vec<Ipv4Addr>,
     on_link: Vec<Ipv4Net>,
+    /// Addresses the OS lists but does not use, such as a disconnected
+    /// adapter's tentative link-local one: no route comes with them.
+    unused: Vec<AddressRow>,
     subscribers: HashMap<u64, Sender<NetworkEvent>>,
     next_subscriber: u64,
     listeners: HashMap<String, Endpoint>,
@@ -181,6 +185,7 @@ impl Default for State {
             foreign: Vec::new(),
             own_addresses: vec![OWN_ADDRESS],
             on_link: home.into_iter().collect(),
+            unused: Vec::new(),
             subscribers: HashMap::new(),
             next_subscriber: 0,
             listeners: HashMap::new(),
@@ -426,6 +431,20 @@ impl Fake {
         state.on_link = on_link.to_vec();
     }
 
+    /// Gives the machine an address the OS lists but does not use, as
+    /// Windows lists a disconnected adapter's tentative `169.254.x.x`
+    /// address: the next [`Routes::capture_physical`] counts it among the
+    /// machine's own addresses but not its networks, and no route comes
+    /// with it, so an address in it leaves as any other would.
+    pub fn add_unused_address(&self, addr: Ipv4Addr, prefix_len: u8) {
+        self.state().unused.push(AddressRow {
+            addr,
+            prefix_len,
+            state: DadState::Tentative,
+            interface_up: false,
+        });
+    }
+
     /// Adds a route as somebody other than the product would. No operation
     /// of the product removes it.
     pub fn add_foreign_route(&self, interface: &str, net: Ipv4Net) {
@@ -584,11 +603,23 @@ impl Routes for Fake {
             let late = "captured while tunnel routes are applied";
             return Err(Error::Failed(late.to_string()));
         }
+        // The networks the machine is on as the OS lists them: each one's
+        // address in use on an interface that is up, beside the unused ones,
+        // which the rule leaves out.
+        let used = state.on_link.iter().map(|net| AddressRow {
+            addr: net.addr(),
+            prefix_len: net.prefix_len(),
+            state: DadState::Preferred,
+            interface_up: true,
+        });
+        let unused = state.unused.iter().copied();
+        let mut own_addresses = state.own_addresses.clone();
+        own_addresses.extend(state.unused.iter().map(|row| row.addr));
         Ok(PhysicalNetwork {
             interface: PHYSICAL_INTERFACE.to_string(),
             next_hop: Some(state.router),
-            own_addresses: state.own_addresses.clone(),
-            on_link: state.on_link.clone(),
+            own_addresses,
+            on_link: usable_networks(used.chain(unused)),
         })
     }
 
@@ -1466,6 +1497,21 @@ mod tests {
         let physical = fake.capture_physical(GATEWAY).unwrap();
         assert_eq!(physical.own_addresses(), own);
         assert_eq!(physical.on_link(), [bridge]);
+    }
+
+    // An address the OS does not use is one of the machine's own, but puts
+    // it on no network, and no route comes with it.
+    #[test]
+    fn an_unused_address_is_the_machines_own_but_no_network() {
+        let fake = Fake::new();
+        let unused = Ipv4Addr::new(169, 254, 10, 20);
+        fake.add_unused_address(unused, 16);
+        let physical = fake.capture_physical(GATEWAY).unwrap();
+        assert_eq!(physical.own_addresses(), [OWN_ADDRESS, unused]);
+        assert_eq!(physical.on_link(), ["192.168.0.0/24".parse().unwrap()]);
+        fake.add_full_tunnel(TUNNEL).unwrap();
+        let neighbour = Ipv4Addr::new(169, 254, 10, 21);
+        assert_eq!(fake.uses_interface(neighbour, TUNNEL), Verified::Yes);
     }
 
     // An OS that cannot honour split DNS refuses, and nothing is changed.
