@@ -171,8 +171,9 @@ fn connect_logs_in_asks_only_what_it_must_and_connects() {
     assert_eq!((code, err.as_str()), (0, ""), "{out}");
     assert_eq!(
         out,
-        "Connected (fake0 as 10.255.0.2)\n  Subnets: 10.255.0.0/24\n  \
-         DNS domains: dept.example.test\n"
+        "Connected (fake0 as 10.255.0.2)\n  \
+         Tunnel: split (only the chosen UBC subnets and domains)\n  \
+         Subnets: 10.255.0.0/24\n  DNS domains: dept.example.test\n"
     );
     // The saved username answered for itself; the rest was asked once each.
     assert_eq!(typist.asked, [PromptKind::Password, PromptKind::Code]);

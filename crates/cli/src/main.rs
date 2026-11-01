@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{ClientKind, RequestBody, ResponseBody, encode};
-use ubc_vpn_core::state::ConnState;
+use ubc_vpn_core::state::{ConnState, TunnelMode};
 use ubc_vpn_engine::LoginEngine;
 use ubc_vpn_platform::interrupt::Stop;
 use ubc_vpn_platform::{Mode, Platform};
@@ -67,7 +67,7 @@ Usage: ubc-vpn <command>
 Commands:
   connect [--profile <id>] [--json]  Log in and connect the VPN with a profile
   disconnect        Disconnect the VPN
-  status [--json]   Show whether the VPN is connected
+  status [--json]   Show whether the VPN is connected, and in split or full mode
   logs [--json] [--follow]  Show what the service has logged
   diagnostics [--json]      Show the service's version, state and last failure
   diagnostics --host <name> [--json]  Show whether the VPN carries a host's traffic
@@ -102,7 +102,8 @@ reply says so. Like set-routes, it then asks the service to switch a
 connected VPN, and claims nothing. Switching keeps the VPN up and never
 interrupts UBC traffic, but connections to non-UBC sites may be reset. The
 service may refuse full mode for this network, and says why; the mode stays
-saved and is tried at the next connect, which uses the saved mode.
+saved and is tried at the next connect, which uses the saved mode. status
+says which mode the connection is in.
 
 Passwords are saved only in the OS keyring, never in the settings file.
 A profile's saved password is forgotten when the profile is deleted, when
@@ -597,14 +598,39 @@ fn describe(state: &ConnState) -> String {
         ConnState::Failed { message, .. } => format!("Failed: {}", clean(message)),
         ConnState::Connected { tunnel } => {
             let subnets: Vec<String> = tunnel.subnets.iter().map(ToString::to_string).collect();
+            let subnets = listed(&subnets.join(", "));
+            let domains = listed(&clean(&tunnel.dns_domains.join(", ")));
+            // In full mode the chosen subnets and domains are still applied,
+            // but they are no longer all the tunnel carries. Say so, so the
+            // lists are not read as the only traffic that goes through.
+            let (mode, subnets, domains) = match tunnel.mode {
+                TunnelMode::Split => (
+                    "split (only the chosen UBC subnets and domains)",
+                    subnets,
+                    domains,
+                ),
+                TunnelMode::Full => (
+                    "full (all IPv4 traffic and every name lookup; IPv6 is blocked)",
+                    format!("{subnets}, and all other IPv4 traffic"),
+                    format!("{domains}, and every other name"),
+                ),
+            };
             format!(
-                "Connected ({} as {})\n  Subnets: {}\n  DNS domains: {}",
+                "Connected ({} as {})\n  Tunnel: {mode}\n  Subnets: {subnets}\n  \
+                 DNS domains: {domains}",
                 clean(&tunnel.interface),
                 clean(&tunnel.address),
-                subnets.join(", "),
-                clean(&tunnel.dns_domains.join(", "))
             )
         }
+    }
+}
+
+/// A list of the tunnel's subnets or domains as shown, or "none" when it is
+/// empty, so that an empty list does not read as a line cut short.
+fn listed(joined: &str) -> String {
+    match joined.is_empty() {
+        true => "none".to_string(),
+        false => joined.to_string(),
     }
 }
 
