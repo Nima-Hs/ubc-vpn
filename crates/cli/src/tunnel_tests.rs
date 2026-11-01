@@ -193,6 +193,33 @@ fn a_mode_the_service_refuses_leaves_the_connection_as_it_was() {
     assert_eq!(live_mode(&scene), Some(TunnelMode::Split));
 }
 
+// A switch the service applied, but undid when it failed its checks, is
+// reported as refused, with the service's reason: the connection stays up
+// in the mode it had. The mode stays saved, as for any refusal.
+#[test]
+fn a_switch_the_service_undid_is_refused() {
+    let scene = Scene::usual();
+    connect(&scene);
+    // Somebody else's route takes the home network, and its router, into the
+    // tunnel, which only full mode's checks look at.
+    let stolen = "192.168.0.0/25".parse().unwrap();
+    scene.rig.fake.add_foreign_route("fake0", stolen);
+    let undone = reply(&scene, FULL);
+    let TunnelReply::Ok {
+        tunnel: TunnelMode::Full,
+        live: LiveRoutes::Refused { code, message },
+    } = undone
+    else {
+        panic!("not refused: {undone:?}");
+    };
+    assert_eq!(code, ErrorCode::VerificationFailed);
+    assert!(message.contains("goes through the tunnel"), "{message}");
+    assert!(message.ends_with("in split tunnel."), "{message}");
+    assert_eq!(saved_mode(&scene), "full");
+    assert_eq!(live_mode(&scene), Some(TunnelMode::Split));
+    scene.rig.fake.remove_foreign_route("fake0", stolen);
+}
+
 // Input that is not a mode is refused, and nothing is saved.
 #[test]
 fn input_that_is_not_a_mode_is_refused() {

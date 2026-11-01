@@ -78,8 +78,10 @@ fn change(
 
 /// Waits for the state the change ends in. The service reports the
 /// connection again with the change when it is applied, or the end of the
-/// connection when it could not be. A state reported before, without the
-/// change, is passed over.
+/// connection when it could not be. A switch of tunnel mode that failed its
+/// checks and was undone is said as such, just before the state, and is
+/// reported as refused. A state reported before, without the change, is
+/// passed over.
 fn outcome(client: &mut Client, done: &dyn Fn(&TunnelInfo) -> bool, unsaid: &str) -> LiveRoutes {
     let deadline = Instant::now() + client.limits().outcome;
     loop {
@@ -87,8 +89,17 @@ fn outcome(client: &mut Client, done: &dyn Fn(&TunnelInfo) -> bool, unsaid: &str
             Ok(event) => event,
             Err(_) => return unknown(unsaid),
         };
-        let Event::StateChanged(state) = event else {
-            continue;
+        let state = match event {
+            Event::StateChanged(state) => state,
+            // The switch was applied, failed its checks and was undone: the
+            // connection is up as it was, which is a refusal to the user.
+            Event::SwitchUndone(why) => {
+                return LiveRoutes::Refused {
+                    code: why.code,
+                    message: tidy(&why.message),
+                };
+            }
+            Event::Log(_) => continue,
         };
         match state {
             ConnState::Connected { tunnel } if done(&tunnel) => return LiveRoutes::Applied,

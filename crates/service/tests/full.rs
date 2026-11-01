@@ -616,22 +616,222 @@ fn what_a_failing_switch_added_is_removed_by_name() {
     }
 }
 
+// Security rule: the catch-all and the halves are recorded as gone only
+// once they are removed. So when a switch to split fails to remove one,
+// teardown tries again to remove it by name, before the removals that need
+// no memory.
+#[test]
+fn what_a_failing_switch_could_not_remove_is_removed_again_by_name() {
+    for op in [Op::ClearCatchAllDns, Op::RemoveFullTunnel] {
+        let (rig, mut alice) = home_rig();
+        assert_eq!(mode_of(&alice.connect_ends(good_full())), TunnelMode::Full);
+        let before = rig.fake.calls().len();
+        rig.fake.set_failure(op, Some(Error::Unsupported));
+        assert_eq!(alice.ask(set_tunnel(TunnelMode::Split)), ACCEPTED);
+        let state = alice.state();
+        rig.fake.set_failure(op, None);
+        assert!(
+            failed_with(&state, ErrorCode::Internal),
+            "{op:?}: {state:?}"
+        );
+        let calls = rig.fake.calls()[before..].to_vec();
+        let tries = calls.iter().filter(|call| **call == op).count();
+        assert_eq!(tries, 2, "{op:?} was not tried again by name: {calls:?}");
+        let again = calls.iter().rposition(|call| *call == op).unwrap();
+        assert!(again < at(&calls, Op::RemoveAllRoutes), "{calls:?}");
+        assert!(rig.is_clean(), "{op:?} left something behind");
+    }
+}
+
 // Security rule: a check that full mode is gone after a switch to split.
 // If an address outside the chosen subnets still uses the tunnel, the
-// switch failed, and nothing is left.
+// switch failed: it is undone, and full mode, put back, is checked again.
+// The connection stays up in full mode, with every half and the catch-all
+// in place, and the switch is said to be undone, with the reason.
 #[test]
-fn a_switch_to_split_that_leaves_traffic_in_the_tunnel_fails() {
+fn a_switch_to_split_that_leaves_traffic_in_the_tunnel_is_undone() {
     let (rig, mut alice) = home_rig();
     assert_eq!(mode_of(&alice.connect_ends(good_full())), TunnelMode::Full);
     // Somebody else's route keeps the upper half in the tunnel.
     rig.fake.add_foreign_route("fake0", net("128.0.0.0/2"));
+    let before = rig.fake.calls().len();
+    assert_eq!(alice.ask(set_tunnel(TunnelMode::Split)), ACCEPTED);
+    let state = alice.state();
+    assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+    let why = alice.undone().expect("the switch is said to be undone");
+    assert_eq!(why.code, ErrorCode::VerificationFailed);
+    assert!(why.message.contains("128.0.0.0/1"), "{why:?}");
+    assert!(why.message.ends_with("in full tunnel."), "{why:?}");
+    let calls = rig.fake.calls()[before..].to_vec();
+    let removed = at(&calls, Op::RemoveFullTunnel);
+    let put_back = at(&calls, Op::AddFullTunnel);
+    assert!(removed < put_back, "{calls:?}");
+    assert!(put_back < at(&calls, Op::SetCatchAllDns), "{calls:?}");
+    let checked = calls[put_back..]
+        .iter()
+        .position(|op| *op == Op::VerifyCatchAllDns);
+    assert!(
+        checked.is_some(),
+        "full mode was not checked again: {calls:?}"
+    );
+    let applied = rig.fake.applied();
+    assert_eq!(applied.full_tunnel, halves(Ipv6Block::Blocked));
+    assert_eq!(applied.catch_all_dns, Some(vec![DNS_SERVER]));
+    assert_eq!(rig.spy.opens().len(), 1, "the tunnel was opened again");
+    assert!(alice.is_quiet(), "a state was reported");
+    rig.fake.remove_foreign_route("fake0", net("128.0.0.0/2"));
+    assert_eq!(alice.ask(set_tunnel(TunnelMode::Split)), ACCEPTED);
+    assert_eq!(mode_of(&alice.state()), TunnelMode::Split);
+    assert_eq!(alice.undone(), None);
+}
+
+/// Split-connected on a home network, with a route somebody else added
+/// that takes a host-only network into the tunnel: split mode does not
+/// mind, but full mode's check that every network the machine is on stays
+/// off the tunnel fails.
+fn split_connected_with_a_stolen_network() -> (Rig, Peer) {
+    let (rig, alice, _) = split_connected();
+    rig.fake.add_foreign_route("fake0", net("172.31.130.0/25"));
+    (rig, alice)
+}
+
+// Security rule: a switch to full that fails its checks is undone: the
+// catch-all and the halves are removed, split mode is checked again, the
+// IPv6 halves and the catch-all included, and the connection stays up in
+// split mode. The switch is said to be undone, with the reason, before the
+// state; the tunnel is never reopened.
+#[test]
+fn a_failed_switch_to_full_is_undone_and_stays_connected() {
+    let (rig, mut alice) = split_connected_with_a_stolen_network();
+    let split_dns = rig.fake.applied().split_dns;
+    let before = rig.fake.calls().len();
+    assert_eq!(alice.ask(set_tunnel(TunnelMode::Full)), ACCEPTED);
+    let state = alice.state();
+    assert_eq!(mode_of(&state), TunnelMode::Split, "{state:?}");
+    let why = alice.undone().expect("the switch is said to be undone");
+    assert_eq!(why.code, ErrorCode::VerificationFailed);
+    let reason = "172.31.130.0/24, a network this computer is on, goes through the tunnel.";
+    assert!(why.message.starts_with(reason), "{why:?}");
+    assert!(why.message.ends_with("in split tunnel."), "{why:?}");
+    let applied = rig.fake.applied();
+    assert_eq!(applied.full_tunnel, None, "the halves were left");
+    assert_eq!(applied.catch_all_dns, None, "the catch-all was left");
+    assert_eq!(applied.split_dns, split_dns);
+    let calls = rig.fake.calls()[before..].to_vec();
+    let cleared = at(&calls, Op::ClearCatchAllDns);
+    assert!(at(&calls, Op::SetCatchAllDns) < cleared, "{calls:?}");
+    assert!(cleared < at(&calls, Op::RemoveFullTunnel), "{calls:?}");
+    let checked = &calls[cleared..];
+    for check in [Op::VerifyRoute, Op::VerifyRouteV6, Op::VerifyCatchAllDns] {
+        assert!(
+            checked.contains(&check),
+            "{check:?} not asked again: {calls:?}"
+        );
+    }
+    assert_eq!(
+        alice.ask(RequestBody::Status),
+        Ok(ResponseBody::Status(state))
+    );
+    assert_eq!(rig.spy.opens().len(), 1, "the tunnel was opened again");
+    assert!(alice.is_quiet(), "a state was reported");
+    let log: Vec<String> = alice
+        .whole_log()
+        .iter()
+        .map(|l| l.text.as_str().to_string())
+        .collect();
+    assert!(log.iter().any(|l| l.contains("was undone")), "{log:?}");
+    // The connection works on as before: another switch is admitted.
+    rig.fake
+        .remove_foreign_route("fake0", net("172.31.130.0/25"));
+    assert_eq!(alice.ask(set_tunnel(TunnelMode::Full)), ACCEPTED);
+    assert_eq!(mode_of(&alice.state()), TunnelMode::Full);
+}
+
+// Security rule: fail closed. A failed switch whose undoing fails at a
+// step is not kept: the connection is closed and everything removed, and
+// nothing is said to be undone.
+#[test]
+fn a_failed_switch_whose_undoing_fails_tears_everything_down() {
+    let unknown = Some(Error::Unsupported);
+    // The switch to full needs neither: only undoing it does.
+    for op in [Op::ClearCatchAllDns, Op::RemoveFullTunnel] {
+        let (rig, mut alice) = split_connected_with_a_stolen_network();
+        rig.fake.set_failure(op, unknown.clone());
+        assert_eq!(alice.ask(set_tunnel(TunnelMode::Full)), ACCEPTED);
+        let state = alice.state();
+        rig.fake.set_failure(op, None);
+        assert!(
+            failed_with(&state, ErrorCode::Internal),
+            "{op:?}: {state:?}"
+        );
+        assert!(message_of(&state).contains("Undoing the switch failed too"));
+        assert_eq!(alice.undone(), None, "{op:?}");
+        rig.fake
+            .remove_foreign_route("fake0", net("172.31.130.0/25"));
+        assert!(rig.is_clean(), "{op:?} left something behind");
+    }
+    // The switch to split needs neither: only undoing it does.
+    for op in [Op::AddFullTunnel, Op::SetCatchAllDns] {
+        let (rig, mut alice) = home_rig();
+        assert_eq!(mode_of(&alice.connect_ends(good_full())), TunnelMode::Full);
+        rig.fake.add_foreign_route("fake0", net("128.0.0.0/2"));
+        rig.fake.set_failure(op, unknown.clone());
+        assert_eq!(alice.ask(set_tunnel(TunnelMode::Split)), ACCEPTED);
+        let state = alice.state();
+        rig.fake.set_failure(op, None);
+        assert!(
+            failed_with(&state, ErrorCode::Internal),
+            "{op:?}: {state:?}"
+        );
+        assert_eq!(alice.undone(), None, "{op:?}");
+        rig.fake.remove_foreign_route("fake0", net("128.0.0.0/2"));
+        assert!(rig.is_clean(), "{op:?} left something behind");
+    }
+}
+
+// Security rule: fail closed. A failed switch is kept undone only once the
+// mode it had passes its checks again. One that does not, or whose checks
+// cannot tell, closes the connection and removes everything.
+#[test]
+fn a_failed_switch_whose_undoing_fails_its_checks_tears_everything_down() {
+    // The lower half cannot be told about: the switch to full is not
+    // confirmed, and neither is split mode after it, which must see the
+    // half no longer go through the tunnel.
+    let (rig, mut alice, _) = split_connected();
+    rig.fake.cannot_tell_route_to(Ipv4Addr::new(1, 0, 0, 0));
+    assert_eq!(alice.ask(set_tunnel(TunnelMode::Full)), ACCEPTED);
+    let state = alice.state();
+    assert!(
+        failed_with(&state, ErrorCode::VerificationFailed),
+        "{state:?}"
+    );
+    let why = message_of(&state);
+    assert!(why.starts_with("0.0.0.0/1 is not routed"), "{why}");
+    assert!(
+        why.contains("Undoing the switch failed too: 0.0.0.0/1 still"),
+        "{why}"
+    );
+    assert_eq!(alice.undone(), None);
+    assert!(rig.is_clean());
+
+    // The switch to split leaves the upper half in the tunnel; full mode,
+    // put back, cannot tell about the router.
+    let (rig, mut alice) = home_rig();
+    assert_eq!(mode_of(&alice.connect_ends(good_full())), TunnelMode::Full);
+    rig.fake.add_foreign_route("fake0", net("128.0.0.0/2"));
+    rig.fake.cannot_tell_route_to(HOME_ROUTER);
     assert_eq!(alice.ask(set_tunnel(TunnelMode::Split)), ACCEPTED);
     let state = alice.state();
     assert!(
         failed_with(&state, ErrorCode::VerificationFailed),
         "{state:?}"
     );
-    assert!(message_of(&state).contains("128.0.0.0/1"), "{state:?}");
+    let why = message_of(&state);
+    assert!(
+        why.contains("Undoing the switch failed too: The router"),
+        "{why}"
+    );
+    assert_eq!(alice.undone(), None);
     rig.fake.remove_foreign_route("fake0", net("128.0.0.0/2"));
     assert!(rig.is_clean());
 }
