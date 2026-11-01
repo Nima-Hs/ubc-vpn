@@ -83,10 +83,13 @@ describe("the environment end-to-end tests give the apps they launch", () => {
             expect(text, `${file} starts something itself`).not.toMatch(starts);
             expect(text, `${file} hands on the environment`).not.toMatch(handsOn);
         }
-        // Every spec that starts an app does it through launch.ts.
+        // Every spec that starts an app does it through launch.ts: itself, or
+        // through fixture.ts, which starts the spec's app with launch.ts.
+        const fixture = readFileSync(join(folder, "fixture.ts"), "utf8");
+        expect(fixture, "fixture.ts").toMatch(/from "\.\/launch"/);
         for (const spec of specs) {
             const text = readFileSync(join(folder, spec), "utf8");
-            expect(text, spec).toMatch(/from "\.\/launch"/);
+            expect(text, spec).toMatch(/from "\.\/(launch|fixture)"/);
         }
     });
 });
