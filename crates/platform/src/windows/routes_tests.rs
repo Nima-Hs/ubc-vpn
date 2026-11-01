@@ -2,18 +2,19 @@
 //! and the library CI downloads; without them they are skipped with a
 //! message, unless `UBC_VPN_REQUIRE_ELEVATED` is set, as it is in CI.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use ubc_vpn_core::routes::Ipv4Net;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2,
-    InitializeIpForwardEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
-    MIB_UNICASTIPADDRESS_ROW,
+    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, GetIpInterfaceEntry,
+    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
+    MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
 };
-use windows_sys::Win32::Networking::WinSock::IpDadStatePreferred;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, IpDadStatePreferred};
 
+use super::full_tunnel_tests::foreign_v6;
 use super::routes::{WinRoutes, addr_of, address_table, checked, luid, v4, value};
 use super::wintun::Wintun;
 use crate::suite::{self, Foreign};
@@ -464,4 +465,90 @@ fn a_killed_service_leaves_what_start_up_removes() {
     }
     assert!(gone(), "the killed process's adapter is still there");
     ran("crash");
+}
+
+/// Gives the adapter `name` the interface metric `metric` for `family`,
+/// chosen by hand rather than by Windows, as an administrator would.
+fn set_interface_metric(name: &str, family: u16, metric: u32) {
+    // SAFETY: plain data for which all zeroes is valid; then initialised.
+    let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
+    // SAFETY: the pointer is to a valid row.
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = family;
+    row.InterfaceLuid.Value = luid(name).expect("the interface");
+    // SAFETY: the row names the interface and is valid for the call.
+    checked(unsafe { GetIpInterfaceEntry(&mut row) }).expect("read the interface");
+    row.UseAutomaticMetric = false;
+    row.Metric = metric;
+    if family == AF_INET {
+        // Documented: must be zero when setting an IPv4 interface.
+        row.SitePrefixLength = 0;
+    }
+    // SAFETY: the row was read back for this interface and is valid.
+    checked(unsafe { SetIpInterfaceEntry(&mut row) }).expect("set the metric");
+}
+
+// Between equal routes on two interfaces, the one whose interface metric
+// Windows has in effect for that family is lower wins; swapped, the other
+// wins. The routes' own metrics are the same, so only the interface metric
+// tells them apart. Each IPv6 metric is the reverse of its IPv4 one, so an
+// IPv6 answer that used the IPv4 metrics, or no metric, is caught.
+#[test]
+fn the_interface_metric_decides_between_equal_routes() {
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let (first, second) = ("ubc-vpn-metric0", "ubc-vpn-metric1");
+    let dir = state_dir("metric");
+    let _first = wintun.adapter(first);
+    let _second = wintun.adapter(second);
+    let _cleanup = Cleanup(vec![dir.clone()]);
+    let routes = WinRoutes::unchecked(&dir);
+    for (adapter, n) in [(first, 6), (second, 7)] {
+        routes
+            .configure_tunnel(adapter, Ipv4Addr::new(198, 18, 0, n), 1400)
+            .unwrap();
+    }
+    let net: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+    let dest = Ipv4Addr::new(203, 0, 113, 9);
+    let net_v6 = Ipv6Addr::new(0x2001, 0xdb8, 0x5, 0, 0, 0, 0, 0);
+    let dest_v6 = Ipv6Addr::new(0x2001, 0xdb8, 0x5, 0, 0, 0, 0, 9);
+    let rows_v6 = [first, second].map(|adapter| foreign_v6(adapter, net_v6, 48));
+
+    step("equal routes on two adapters");
+    Outsider.add_route(first, net);
+    Outsider.add_route(second, net);
+    for row in &rows_v6 {
+        // SAFETY: the row is valid and initialised.
+        checked(unsafe { CreateIpForwardEntry2(row) }).expect("an IPv6 route");
+    }
+    let mut seen = Vec::new();
+    for (low, high) in [(first, second), (second, first)] {
+        set_interface_metric(low, AF_INET, 10);
+        set_interface_metric(high, AF_INET, 50);
+        set_interface_metric(low, AF_INET6, 50);
+        set_interface_metric(high, AF_INET6, 10);
+        seen.push((
+            low,
+            [
+                routes.uses_interface(dest, low),
+                routes.uses_interface(dest, high),
+                routes.uses_interface_v6(dest_v6, high),
+                routes.uses_interface_v6(dest_v6, low),
+            ],
+        ));
+    }
+    Outsider.remove_route(first, net);
+    Outsider.remove_route(second, net);
+    for row in &rows_v6 {
+        // SAFETY: as above.
+        let _ = unsafe { DeleteIpForwardEntry2(row) };
+    }
+    step("the routes are gone");
+
+    println!("METRIC {seen:?}");
+    for (low, verified) in seen {
+        let expected = [Verified::Yes, Verified::No, Verified::Yes, Verified::No];
+        assert_eq!(verified, expected, "{low} has the lower IPv4 metric");
+    }
+    ran("interface metric");
 }
