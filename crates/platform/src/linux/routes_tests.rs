@@ -412,7 +412,9 @@ fn passes_the_shared_route_suite_on_a_tun_device() {
 #[test]
 fn passes_the_shared_live_route_change_check() {
     let test = "passes_the_shared_live_route_change_check";
+    let _back = super::dns_tests::AsItWas::now();
     as_root("live route change", test, || {
+        let _stub = super::dns_tests::stub_mode();
         let tun = Tun::open("uvt-live0");
         let routes = LinuxRoutes;
         routes
