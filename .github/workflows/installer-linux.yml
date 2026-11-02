@@ -1,13 +1,16 @@
 name: Installer (Linux)
 
-# Builds the Linux .deb with the service, the command-line client and
-# libopenconnect, installs it as root on a runner, checks what landed where,
-# who can change it and that the service answers a standard user, installs
-# it again over itself, removes it, purges it, and checks nothing is left.
-# The rules come from docs/architecture.md, "What the installers must do".
+# Builds the Linux .deb and .rpm with the service, the command-line client
+# and libopenconnect. Installs the .deb as root on a runner, checks what
+# landed where, who can change it and that the service answers a standard
+# user, installs it again over itself, removes it, purges it, and checks
+# nothing is left. Then installs both packages in containers of the other
+# systems they are for. The rules come from docs/architecture.md, "What the
+# installers must do".
 #
-# Nothing is signed. The .deb and the source of its LGPL library are kept as
-# artifacts for a few days, for trying by hand; they are not a release.
+# Nothing is signed. The packages and the source of their LGPL library are
+# kept as artifacts for a few days, for trying by hand; they are not a
+# release.
 
 on:
   pull_request:
@@ -81,7 +84,7 @@ jobs:
           retention-days: 1
 
   package:
-    name: Build the .deb
+    name: Build the packages
     needs: native
     # The oldest supported system, so the programs need no newer glibc than
     # it has.
@@ -109,27 +112,29 @@ jobs:
           tar -xzf "$RUNNER_TEMP/download/libopenconnect-linux-x64.tar.gz" -C "$RUNNER_TEMP/native"
 
       # The client's keyring links the system's libdbus-1: its headers and
-      # pkg-config. fpm writes the .deb with the ar, tar and xz it finds on
-      # PATH: binutils, tar and xz-utils, with the libraries of theirs that
-      # do the work. All at the versions pinned in test-packages.sh, from
-      # its dated Ubuntu snapshot; the runner's newer copies of the tools,
-      # if it has any, are downgraded to their pins, and the script stops on
-      # any version that differs. This job keeps its own cache of them,
-      # saved below; the script checks every package again regardless.
+      # pkg-config. rpm's rpmbuild builds the .rpm. fpm writes the .deb with
+      # the ar, tar and xz it finds on PATH: binutils, tar and xz-utils,
+      # with the libraries of theirs that do the work. All at the versions
+      # pinned in test-packages.sh, from its dated Ubuntu snapshot; the
+      # runner's newer copies of the tools, if it has any, are downgraded
+      # to their pins, and the script stops on any version that differs.
+      # This job keeps its own cache of them, saved below; the script checks
+      # every package again regardless.
       - name: Restore the pinned packages
         id: packages
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /var/tmp/ubc-vpn-test-packages
-          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev-packaging-tools
-      - name: Install the pinned D-Bus headers and packaging tools
+          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev-rpm-packaging-tools
+      - name: Install the pinned D-Bus headers, rpm and packaging tools
         working-directory: .
         env:
           TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
         run: |
           mkdir "$RUNNER_TEMP/packages" "$RUNNER_TEMP/tools"
-          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev rpm
           bash native/linux/test-packages.sh "$RUNNER_TEMP/tools" $PACKAGING_TOOLS
+          rpmbuild --version
       - name: Save the pinned packages
         if: steps.packages.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -175,21 +180,22 @@ jobs:
       # the PATH pnpm gives it.
       - name: fpm finds the pinned ar, tar and xz
         run: pnpm exec bash ../packaging/linux/check-tools.sh $PACKAGING_TOOLS
-      - name: Build the .deb
+      - name: Build the .deb and the .rpm
         run: pnpm package:linux
-      - name: The app is fused and licensed, the .deb is as it should be, and there is no updater
+      - name: The app is fused and licensed, the packages are as they should be, and there is no updater
         run: pnpm check:package:linux
 
-      - name: Note the .deb's SHA-256
+      - name: Note the packages' SHA-256
         run: |
           cd dist
           sha256sum ubc-vpn_*_amd64.deb | tee ubc-vpn.deb.sha256
+          sha256sum ubc-vpn-*.x86_64.rpm | tee ubc-vpn.rpm.sha256
           dpkg-deb --info ubc-vpn_*_amd64.deb
-          {
-            echo "### $(ls ubc-vpn_*_amd64.deb)"
-            echo
-            echo "SHA-256: \`$(cut -d ' ' -f 1 ubc-vpn.deb.sha256)\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          rpm --query --info --package ubc-vpn-*.x86_64.rpm
+          for sum in ubc-vpn.deb.sha256 ubc-vpn.rpm.sha256; do
+            read -r hash file < "$sum"
+            printf '### %s\n\nSHA-256: `%s`\n\n' "$file" "$hash" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Keep the .deb
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -200,7 +206,16 @@ jobs:
             app/dist/ubc-vpn.deb.sha256
           if-no-files-found: error
           retention-days: 7
-      # For the job below only.
+      - name: Keep the .rpm
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-linux-x64-rpm-unsigned
+          path: |
+            app/dist/ubc-vpn-*.x86_64.rpm
+            app/dist/ubc-vpn.rpm.sha256
+          if-no-files-found: error
+          retention-days: 7
+      # For the jobs below only.
       - name: Pass the stage on
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -305,3 +320,76 @@ jobs:
       - name: What the service logged
         if: failure()
         run: sudo journalctl -u ubc-vpn.service -o cat --no-pager | tail -n 200 || true
+
+  # The packages in containers of the other systems they are for, where
+  # systemd does not run. Each system's own package manager resolves what
+  # the package depends on from that system's archive, so the names must be
+  # right there; the files must land as packaged and staged; the scripts
+  # must leave out the service and say so; and removing the package must
+  # leave nothing. Ubuntu 24.04 is the job above. The images are pinned by
+  # digest, as in native-linux.yml; GitHub runs each container as root on a
+  # runner it throws away.
+  containers:
+    name: Install in ${{ matrix.name }}
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu 22.04
+            image: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+            kind: deb
+          - name: debian 12
+            image: debian@sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858
+            kind: deb
+          - name: fedora
+            image: fedora@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+            kind: rpm
+    env:
+      CHECK: packaging/linux/tests/installer.sh
+      KIND: ${{ matrix.kind }}
+      UBC_VPN_TEST_THROWAWAY_MACHINE: "1"
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ubc-vpn-linux-x64-${{ matrix.kind }}-unsigned
+          path: ${{ runner.temp }}/package
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-stage-linux
+          path: ${{ runner.temp }}/stage
+      # What the checks need besides the base image: rpm2cpio comes with
+      # rpm, and cpio, cmp and find are added on Fedora.
+      - name: Install
+        run: |
+          cd "$RUNNER_TEMP/package"
+          sha256sum --check "ubc-vpn.$KIND.sha256"
+          package="$RUNNER_TEMP/package/$(ls ubc-vpn*."$KIND")"
+          echo "PACKAGE=$package" >> "$GITHUB_ENV"
+          if [ "$KIND" = deb ]; then
+            apt-get update -qq
+            apt-get install -y --no-install-recommends "$package" 2>&1 | tee "$RUNNER_TEMP/install.log"
+          else
+            dnf install -y cpio diffutils findutils
+            dnf install -y "$package" 2>&1 | tee "$RUNNER_TEMP/install.log"
+          fi
+      - name: Without systemd, the service is left out and the files land
+        run: |
+          bash "$CHECK" service-skipped "$RUNNER_TEMP/install.log"
+          bash "$CHECK" installed "$PACKAGE"
+          bash "$CHECK" as-staged "$RUNNER_TEMP/stage"
+      - name: Removing it leaves nothing
+        run: |
+          if [ "$KIND" = deb ]; then
+            apt-get purge -y ubc-vpn
+          else
+            dnf remove -y ubc-vpn
+          fi
+          bash "$CHECK" gone
