@@ -293,9 +293,10 @@ fn texted_codes_are_a_refusal_then_a_second_login() {
         engine.login(&gateway, &mut Prompts::new(&mut ask), &Cancel::new(), &logs)
     };
     assert_eq!(login("someone@sms").err(), Some(LoginError::WrongPassword));
-    // Refused as a gateway that texts the codes refuses it.
+    // Refused as a gateway that texts the codes refuses it. The rest of
+    // its words go: "pass" marks a secret to the redaction.
     let lines = said.lock().unwrap().join("\n");
-    assert!(lines.contains("New SMS passcodes sent."), "{lines}");
+    assert!(lines.contains("The gateway said: New SMS"), "{lines}");
     // However the library writes the `@`, each was sent once.
     let either = |name: &str| sent(&stand_in, name) + sent(&stand_in, &name.replace("%40", "@"));
     assert_eq!(either("someone%40sms"), 1);
