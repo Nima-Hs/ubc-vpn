@@ -22,12 +22,13 @@ diff <(pacman -Q | sed -n 's/^\(mingw-w64-ucrt-x86_64-[^ ]*\) \(.*\)$/\1-\2-any.
     <(cut -d' ' -f3 "$here/packages.lock" | sort) ||
     die "the installed MinGW packages (<) are not those in packages.lock (>); run setup.sh"
 
-# Every build tool in tools.lock must be installed at that version. The rest of
-# MSYS2 (the shell, coreutils, pacman) is whatever the machine has.
-missing=$(comm -23 \
-    <(cut -d' ' -f3 "$here/tools.lock" | sed -E 's/-(x86_64|any)\.pkg\.tar\.zst$//' | sort) \
-    <(pacman -Q | sed 's/ /-/' | sort))
-[ -z "$missing" ] || die "not installed at the version in tools.lock; run setup.sh:"$'\n'"$missing"
+# The rest of MSYS2 must be exactly the pinned base (base-packages.txt, from the
+# archive in base.lock) plus the build tools in tools.lock, each at that
+# version. An MSYS2 installed some other way fails here; base.sh makes one.
+diff <(pacman -Q | grep -v '^mingw-w64-' | sed 's/ /-/' | sort) \
+    <({ cat "$here/base-packages.txt" &&
+        cut -d' ' -f3 "$here/tools.lock" | sed -E 's/-(x86_64|any)\.pkg\.tar\.zst$//'; } | sort) ||
+    die "the installed MSYS packages (<) are not the pinned base and tools (>); install with base.sh and setup.sh"
 
 # Sets version, pkgfile and pkgsha for an installed MinGW package.
 locked() {
