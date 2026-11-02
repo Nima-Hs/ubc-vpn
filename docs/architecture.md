@@ -364,6 +364,7 @@ A trial packaged the app with pnpm and `electron-builder` on all three OSes, ins
 **Linux**
 
 - The app lands in `/opt/UBC VPN`, owned by root. The path contains a space, so every script and unit file quotes it.
+- `ubc-vpn-service install` registers the service as the systemd unit `ubc-vpn` (`packaging/linux/ubc-vpn.service`, written to `/etc/systemd/system`), which starts it from `/opt/UBC VPN/resources/bin` and refuses to register it anywhere else. The unit runs it as root with only `CAP_NET_ADMIN` and `CAP_CHOWN`, the file system read-only apart from `/run/ubc-vpn` and `/var/lib/ubc-vpn`, and no device but `/dev/net/tun`; it explains each setting. A stop sends `SIGTERM` to the service alone and gives teardown 30 seconds.
 - Our install and removal scripts are added to the ones `electron-builder` supplies, not put in their place. The supplied scripts set up the sandbox helper and the AppArmor profile the sandbox needs on Ubuntu 24.04.
 - Removing the `.rpm` must delete the app's own folders, which are otherwise left behind empty.
 - The `.rpm` is built without the links `rpmbuild` adds under `/usr/lib/.build-id`. Every Electron app would own the same ones, so two such packages could not be installed together.

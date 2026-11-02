@@ -1,0 +1,10 @@
+install
+running
+owner
+stranger refused
+reinstall keeps state
+device under the unit
+stop tears down
+uninstall keeps data when asked
+planted state emptied
+uninstall leaves nothing

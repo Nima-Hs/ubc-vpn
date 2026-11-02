@@ -1,0 +1,119 @@
+# The UBC VPN service on Linux. `ubc-vpn-service install` writes this file,
+# as it is, to /etc/systemd/system/ubc-vpn.service (root, 0644), and
+# `uninstall` removes it. Never edit the installed copy: the next install
+# replaces it. Every setting has the reason for it on the line above.
+
+[Unit]
+# The name systemctl shows beside the unit.
+Description=UBC VPN Service
+# Where to read about it.
+Documentation=https://github.com/Nima-Hs/ubc-vpn
+# Started after resolved and D-Bus, so it stops before them: teardown asks
+# resolved, through D-Bus, to remove the split DNS it set.
+After=network.target dbus.service systemd-resolved.service
+# Restarted at most twice after it fails, like the Windows service: three
+# starts in ten minutes, then it stays stopped until the next install or
+# `systemctl reset-failed`.
+StartLimitIntervalSec=10min
+# See StartLimitIntervalSec.
+StartLimitBurst=3
+
+[Service]
+# Started once the program is running: a start that cannot run the program,
+# such as a path that is wrong, fails the start itself.
+Type=exec
+# Quoted, because the folder's name has a space. Where the Linux packages put
+# the service; `install` refuses to register a service anywhere else.
+ExecStart="/opt/UBC VPN/resources/bin/ubc-vpn-service"
+# Restarted after it fails, not after an ordinary stop.
+Restart=on-failure
+# Five seconds between restarts, as on Windows.
+RestartSec=5s
+# A stop sends SIGTERM to the service alone, which then removes its routes
+# and DNS. The busctl it starts for that must not get SIGTERM too, so only
+# what is left once the service has ended is killed.
+KillMode=mixed
+# Teardown removes the routes and DNS before it closes the tunnel, and may
+# wait on the gateway to close it. Set outright: the default differs between
+# systems. The same as the Windows service's shutdown time.
+TimeoutStopSec=30s
+# /run/ubc-vpn, root's, which holds the channel's socket. systemd makes it
+# afresh on every start and removes it on stop, so no socket is left behind.
+RuntimeDirectory=ubc-vpn
+# Every user's client must reach the socket inside: the channel requires the
+# folder to be root's with mode 0755, and refuses anything else.
+RuntimeDirectoryMode=0755
+# /var/lib/ubc-vpn, root's, which holds state.json. The only folder on disk
+# the service may write to.
+StateDirectory=ubc-vpn
+# Nobody else needs to look in, and the service refuses a folder others may
+# change. `install` makes it with the same mode.
+StateDirectoryMode=0700
+# Files the service and libopenconnect make are its own. The service sets
+# the modes of the files others need, the socket included, outright.
+UMask=0077
+
+# Hardening. The service runs as root, but can do little more than the
+# tunnel needs.
+
+# Only what the service uses: CAP_NET_ADMIN for the tun device, routes,
+# links and resolved's check of busctl's caller; CAP_CHOWN to hand the
+# channel's socket to the owner, and to take it back. Nothing else, so not
+# even root can read or change files it does not own.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
+# Nothing it starts can gain privileges, through setuid programs or
+# otherwise.
+NoNewPrivileges=yes
+# The whole system is read-only to it, apart from the runtime and state
+# folders above, which systemd makes writable. It needs no other.
+ProtectSystem=strict
+# Home folders are hidden: the service never reads a user's files.
+ProtectHome=yes
+# A /tmp of its own, so it cannot meet other users' files there.
+PrivateTmp=yes
+# Only the devices allowed below, and the basic ones every program uses
+# (/dev/null and the like).
+DevicePolicy=closed
+# The tun device, for the tunnel. Not PrivateDevices=yes, which would hide
+# it. /dev/vhost-net stays closed, so libopenconnect does without it, and
+# no descriptor of it can outlive the tunnel in a program the service starts.
+DeviceAllow=/dev/net/tun rw
+# Other users' processes are hidden in /proc. The service reads only its own
+# entry: /proc/self/fd, to seal what libopenconnect left open.
+ProtectProc=invisible
+# Only the processes in /proc, none of the system's settings and details.
+ProcSubset=pid
+# The kernel's settings in /proc/sys and /sys are read-only. It changes them
+# through netlink only.
+ProtectKernelTunables=yes
+# It cannot load kernel modules. The kernel still loads tun by itself when
+# the device is first opened.
+ProtectKernelModules=yes
+# It cannot read the kernel's log.
+ProtectKernelLogs=yes
+# It cannot change control groups.
+ProtectControlGroups=yes
+# It cannot set the clock.
+ProtectClock=yes
+# It cannot change the host name.
+ProtectHostname=yes
+# Unix sockets for the channel and D-Bus, netlink for routes and links, and
+# IPv4 and IPv6 for the gateway. No other kind of socket.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+# It makes no namespaces.
+RestrictNamespaces=yes
+# It cannot switch to another kind of system call table.
+LockPersonality=yes
+# Only the system's own kind of system calls, not those of another
+# architecture.
+SystemCallArchitectures=native
+# It needs no real-time scheduling.
+RestrictRealtime=yes
+# It cannot make setuid or setgid files.
+RestrictSUIDSGID=yes
+# No memory both writable and executable: nothing it loads compiles code.
+MemoryDenyWriteExecute=yes
+
+[Install]
+# Started with the system, once it is ready for users.
+WantedBy=multi-user.target
