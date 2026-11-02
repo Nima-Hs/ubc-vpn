@@ -221,11 +221,14 @@ if [ -n "$listing" ]; then
     fi
     # apt prints only an MD5 sum here, so each package's size and SHA-256
     # are read from the checked lists, by the path apt would fetch it from.
-    # Every entry for that path must agree.
-    hex=' '
+    # Every entry for that path must agree. apt writes some characters of
+    # the path as %XX, which are decoded first.
+    hex='\x'
     while read -r uri name size _; do
         uri=${uri//\'/}
-        expected=$(signed_entry "${uri#"$snapshot_url/"}")
+        path=${uri#"$snapshot_url/"}
+        path=$(printf '%b' "${path//%/$hex}")
+        expected=$(signed_entry "$path")
         [ -n "$expected" ] && [ "$(wc -l <<<"$expected")" = 1 ] ||
             fail "the signed lists give no single size and SHA-256 for $name"
         read -r want_size want_sha256 <<<"$expected"
