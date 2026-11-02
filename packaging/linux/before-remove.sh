@@ -30,4 +30,4 @@ fi
 # unit, and removes /etc/ubc-vpn and /var/lib/ubc-vpn, as the Windows
 # uninstaller does. The user's own settings stay. Nothing of this script's
 # environment reaches it.
-env -i "$SERVICE" uninstall
+/usr/bin/env -i "$SERVICE" uninstall

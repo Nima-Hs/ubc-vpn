@@ -110,4 +110,4 @@ fi
 # (so it is never one of dpkg's conffiles), registers the unit and starts
 # it. It checks the service's folder first, and stops if anyone but root
 # could change it. Nothing of this script's environment reaches it.
-env -i "$SERVICE" install --policy "$POLICY" $fresh
+/usr/bin/env -i "$SERVICE" install --policy "$POLICY" $fresh
