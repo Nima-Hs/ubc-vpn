@@ -7,6 +7,7 @@
 //! `SKIPPED, needs root` without it, and CI runs them under `sudo` with
 //! `UBC_VPN_REQUIRE_ROOT` set, which turns a skip into a failure.
 
+mod program;
 mod state;
 
 use std::ffi::OsString;
