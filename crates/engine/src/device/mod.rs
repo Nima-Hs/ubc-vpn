@@ -19,6 +19,8 @@ use crate::TunnelError;
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as os;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::seal_vhost;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

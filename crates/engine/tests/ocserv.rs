@@ -16,10 +16,11 @@
 //!   every check the tunnel engine makes of it.
 //! - [`TunnelEngine::open`] with the session from that login connects, and
 //!   the gateway takes the session and assigns an address (the library
-//!   says so), then the engine stops at the device step. On macOS and Linux
-//!   it makes no device yet, so it returns `Failed` there: no packet goes
-//!   through a tunnel here, and nothing shows the main loop, a close or a
-//!   log-off against a real gateway.
+//!   says so). Where `UBC_VPN_TEST_DEVICE` is set, which the workflow does
+//!   only when it runs this as root, the engine then makes a real device,
+//!   runs the main loop and logs off, and the device is gone afterwards.
+//!   Otherwise the engine may not make a device and returns `Failed` at
+//!   that step. No packet goes through a tunnel here.
 
 #![cfg(all(feature = "libopenconnect", feature = "fake"))]
 
@@ -33,8 +34,8 @@ use ubc_vpn_core::policy::{Pin, Policy};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_engine::ffi::{Callbacks, Handle, Library};
 use ubc_vpn_engine::{
-    Cancel, Gateway, LogSink, LoginEngine, LoginError, OpenConnect, Prompt, Prompts, Role, Session,
-    TunnelEngine, TunnelError, check_assignment, prepare_environment,
+    Cancel, CloseMode, Gateway, LogSink, LoginEngine, LoginError, OpenConnect, Prompt, Prompts,
+    Role, Session, TunnelEngine, TunnelError, TunnelEvent, check_assignment, prepare_environment,
 };
 
 const HOST: &str = "vpn.example.test";
@@ -129,7 +130,7 @@ fn login(
 
 // The whole way a real gateway allows here: a login, a tunnel connection
 // made with its cookie, an assignment that passes the tunnel engine's
-// checks, and the engine itself up to the device step.
+// checks, and the engine itself, with a real device where the run allows.
 #[test]
 fn a_real_gateway_takes_the_login_and_the_cookie_for_a_tunnel() {
     let (engine, library, _guard) = engine();
@@ -195,24 +196,39 @@ fn a_real_gateway_takes_the_login_and_the_cookie_for_a_tunnel() {
     assert_eq!(routes, ["10.13.0.0/16"]);
     println!("ocserv assigned {assigned:?}");
 
-    // The engine itself, with the same session, up to the device step,
-    // which it does not take on this system yet. The library says "CSTP
-    // connected" only once the gateway has answered the CONNECT with 200 and
-    // its assignment has been read; the engine's sink keeps the cookie out
-    // of what it says.
-    let (events, _received) = mpsc::channel();
+    // The engine itself, with the same session: up to the device step, or
+    // where it may make a device, a tunnel on a real one until it is closed.
+    // The library says "CSTP connected" only once the gateway has answered
+    // the CONNECT with 200 and its assignment has been read; the engine's
+    // sink keeps the cookie out of what it says.
+    let (events, received) = mpsc::channel();
     let said = Arc::new(Mutex::new(Vec::new()));
     let kept = Arc::clone(&said);
     let logs = LogSink::new(ubc_vpn_engine::LogLevel::Info, move |_, line| {
         kept.lock().unwrap().push(line.to_string());
     });
     let opened = engine.open(&gateway, &session, &Cancel::new(), events, logs);
-    let said = said.lock().unwrap().join("\n");
+    let device = std::env::var_os("UBC_VPN_TEST_DEVICE").is_some();
     match opened {
-        Err(error) if cfg!(not(windows)) => assert_eq!(error, TunnelError::Failed, "{said}"),
-        Ok(tunnel) => drop(tunnel),
-        Err(error) => panic!("{error:?}\n{said}"),
+        Ok(tunnel) if device => {
+            let name = tunnel.assigned().interface.clone();
+            let link = Path::new("/sys/class/net").join(&name);
+            assert!(name.starts_with("ubcvpn") && link.exists(), "{name:?}");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            assert!(received.try_recv().is_err(), "the tunnel ended by itself");
+            tunnel.close(CloseMode::LogOff);
+            assert!(!link.exists(), "{name:?} is left after closing");
+            assert_eq!(received.try_recv(), Ok(TunnelEvent::Closed));
+            println!("ocserv's tunnel ran on {name}, which is gone");
+        }
+        Err(error) if !device => {
+            let said = said.lock().unwrap().join("\n");
+            assert_eq!(error, TunnelError::Failed, "{said}");
+        }
+        Ok(_) => panic!("a device was made where none may be"),
+        Err(error) => panic!("{error:?}\n{}", said.lock().unwrap().join("\n")),
     }
+    let said = said.lock().unwrap().join("\n");
     let lines: Vec<&str> = said.lines().collect();
     let connected = lines.contains(&"Got CONNECT response: HTTP/1.1 200 CONNECTED")
         && lines.iter().any(|line| line.starts_with("CSTP connected."));

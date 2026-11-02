@@ -1,1 +1,4 @@
-tunnel refuses at the device step
+tunnel makes and removes a device
+tunnel logs off only when asked
+tunnel reports a lost gateway
+tunnel gives a child no device descriptor

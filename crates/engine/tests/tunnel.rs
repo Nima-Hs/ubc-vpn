@@ -5,9 +5,10 @@
 //! (see `gateway/mod.rs`). All cookies are made up.
 //!
 //! The tests that create a tunnel device run only where
-//! `UBC_VPN_TEST_DEVICE` is set: in the engine workflow, on a Windows runner,
-//! as administrator, with `wintun.dll` beside the test program. Each removes
-//! its device on every path, and the workflow checks that none is left.
+//! `UBC_VPN_TEST_DEVICE` is set: in the engine workflow, on a Windows runner
+//! as administrator with `wintun.dll` beside the test program, and on a Linux
+//! runner as root. Each removes its device on every path and checks that it
+//! is gone.
 
 #![cfg(all(feature = "libopenconnect", feature = "fake"))]
 
@@ -403,17 +404,42 @@ fn a_tunnel_asks_for_no_dtls_and_tries_none() {
     println!("RAN: tunnel asks for no dtls");
 }
 
-// Until the engine opens the device itself on macOS and Linux, a tunnel
-// that got that far is refused there, and no device is made. Everything
-// before it ran: the cookie went to the gateway.
-#[cfg(not(windows))]
+// Until the engine opens the device itself on macOS, a tunnel that got that
+// far is refused there, and no device is made. Everything before it ran:
+// the cookie went to the gateway.
+#[cfg(target_os = "macos")]
 #[test]
 fn elsewhere_than_windows_the_device_step_refuses() {
     let (engine, library, _guard) = engine();
     let Some(stand_in) = StandIn::start("accept") else {
         return;
     };
-    let gateway = gateway(stand_in.port, &pin_of(library, &stand_in));
+    refused_at_the_device_step(engine, library, &stand_in);
+}
+
+// On Linux only an administrator may make a tunnel device, and the ordinary
+// test run is not one: a tunnel that got that far is refused, and no device
+// is made. Everything before it ran: the cookie went to the gateway. (Named
+// so the root run's "device" filter leaves it out.)
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_without_root_the_tunnel_is_refused_at_the_last_step() {
+    use std::os::unix::fs::MetadataExt;
+    let (engine, library, _guard) = engine();
+    let uid = std::fs::metadata("/proc/self").map(|meta| meta.uid());
+    if uid.as_ref().is_ok_and(|uid| *uid == 0) {
+        println!("SKIPPED: this runs as root, which may make a device");
+        return;
+    }
+    let Some(stand_in) = StandIn::start("accept") else {
+        return;
+    };
+    refused_at_the_device_step(engine, library, &stand_in);
+}
+
+#[cfg(not(windows))]
+fn refused_at_the_device_step(engine: &OpenConnect, library: Library, stand_in: &StandIn) {
+    let gateway = gateway(stand_in.port, &pin_of(library, stand_in));
     let opened = open(
         engine,
         &gateway,
@@ -421,23 +447,26 @@ fn elsewhere_than_windows_the_device_step_refuses() {
         &Cancel::new(),
     );
     assert_eq!(failed(&opened), TunnelError::Failed);
-    assert_eq!(connects(&stand_in), (1, 1));
+    assert_eq!(connects(stand_in), (1, 1));
     assert!(opened.events.try_recv().is_err());
     println!("RAN: tunnel refuses at the device step");
 }
 
-/// Tests that make a device, which run only where the workflow allows it.
-#[cfg(windows)]
+/// Tests that make a device, which run only where the workflow allows it:
+/// as administrator on Windows, as root on Linux.
+#[cfg(any(windows, target_os = "linux"))]
 mod device {
     use super::*;
     use ubc_vpn_engine::CloseMode;
 
+    #[cfg(windows)]
     #[link(name = "iphlpapi")]
     unsafe extern "system" {
         fn ConvertInterfaceAliasToLuid(alias: *const u16, luid: *mut u64) -> u32;
     }
 
     /// Whether the system has an interface of this name.
+    #[cfg(windows)]
     fn exists(name: &str) -> bool {
         let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let mut luid = 0;
@@ -446,8 +475,52 @@ mod device {
         unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &mut luid) == 0 }
     }
 
+    /// Whether the system has an interface of this name.
+    #[cfg(target_os = "linux")]
+    fn exists(name: &str) -> bool {
+        Path::new("/sys/class/net").join(name).exists()
+    }
+
+    /// Whether the engine's device exists now. On Windows the adapter is
+    /// named after the gateway's host.
+    #[cfg(windows)]
+    fn made() -> bool {
+        exists(HOST)
+    }
+
+    /// Whether any device of the engine's exists now: any link named
+    /// `ubcvpn` and a number.
+    #[cfg(target_os = "linux")]
+    fn made() -> bool {
+        let Ok(links) = std::fs::read_dir("/sys/class/net") else {
+            return false;
+        };
+        links
+            .flatten()
+            .any(|link| ours(&link.file_name().to_string_lossy()))
+    }
+
+    /// Whether a link name is one the engine makes: `ubcvpn` and a number,
+    /// which is all the service's split DNS changes.
+    #[cfg(target_os = "linux")]
+    fn ours(name: &str) -> bool {
+        name.strip_prefix("ubcvpn")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// What a process's descriptors are open on, from `/proc/<pid>/fd`.
+    #[cfg(target_os = "linux")]
+    fn open_files(pid: &str) -> Vec<String> {
+        let dir = std::fs::read_dir(format!("/proc/{pid}/fd")).expect("the process's descriptors");
+        dir.flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .map(|target| target.to_string_lossy().into_owned())
+            .collect()
+    }
+
     // The engine's own question, which a close waits on, gets the system's
     // answer: an interface every Windows has is there, a made-up one is not.
+    #[cfg(windows)]
     #[test]
     fn the_engine_asks_the_system_about_interfaces() {
         use ubc_vpn_engine::ffi::interface_exists;
@@ -565,6 +638,8 @@ mod device {
         assert_eq!(assigned.mtu, 1300);
         assert_eq!(assigned.split_includes.len(), 2);
         assert!(!assigned.interface.is_empty());
+        #[cfg(target_os = "linux")]
+        assert!(ours(&assigned.interface), "{:?}", assigned.interface);
         assert_eq!(connects(&stand_in), (1, 1));
         // The tunnel runs by itself, and nothing ends it.
         std::thread::sleep(Duration::from_secs(2));
@@ -699,7 +774,7 @@ mod device {
             let watcher = std::thread::spawn(move || {
                 let start = std::time::Instant::now();
                 while start.elapsed() < Duration::from_secs(20) {
-                    if exists(HOST) {
+                    if made() {
                         watching.cancel();
                         return;
                     }
@@ -709,7 +784,7 @@ mod device {
             watcher.join().expect("the watcher ends");
             match &opened.result {
                 Err(TunnelError::Cancelled) => {
-                    assert!(!exists(HOST), "the adapter is left");
+                    assert!(!made(), "the device is left");
                     let logged_off = |stand_in: &StandIn| disconnects(stand_in) == 1;
                     let sent = logged(&stand_in, Duration::from_secs(5), logged_off);
                     assert!(sent, "{:?}", stand_in.requests());
@@ -749,5 +824,48 @@ mod device {
         assert_eq!(connects(&stand_in), (1, 1));
         end(first, Some(CloseMode::LogOff));
         end(opened(engine, &gateway), Some(CloseMode::LogOff));
+    }
+
+    // Security rule: a program the process starts while a tunnel runs holds
+    // no descriptor of the device, nor the vhost-net one the library may
+    // open for it. Either would keep the device after the tunnel ended.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_process_holds_no_descriptor_of_the_device() {
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("accept") else {
+            return;
+        };
+        let opened = opened(engine, &local(library, &stand_in));
+        let held = open_files("self");
+        assert!(held.iter().any(|file| file == "/dev/net/tun"), "{held:?}");
+        let vhost = held.iter().any(|file| file == "/dev/vhost-net");
+        println!("the library uses vhost-net: {vhost}");
+        // Where the workflow knows the runner has vhost-net, it must be in
+        // use, or this test would stop covering the descriptor it seals.
+        if std::env::var_os("UBC_VPN_TEST_EXPECT_VHOST").is_some() {
+            assert!(vhost, "vhost-net was expected but not used: {held:?}");
+        }
+        // The shell lists its own descriptors, which are what it was given:
+        // its input is /dev/null. The descriptor that read the folder is
+        // closed before it is read.
+        let listed = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                r#"for fd in /proc/$$/fd/*; do readlink "$fd" || :; done"#,
+            ])
+            .output()
+            .expect("the shell runs");
+        assert!(listed.status.success(), "{listed:?}");
+        let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+        assert!(listed.lines().any(|line| line == "/dev/null"), "{listed}");
+        for file in ["/dev/net/tun", "/dev/vhost-net"] {
+            assert!(!listed.lines().any(|line| line == file), "{file}: {listed}");
+        }
+        end(opened, Some(CloseMode::LogOff));
+        println!("RAN: tunnel gives a child no device descriptor");
     }
 }
