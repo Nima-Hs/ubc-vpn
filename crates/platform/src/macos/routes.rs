@@ -138,8 +138,8 @@ pub(super) fn boot() -> Result<Boot> {
 /// Whether a route of the table is one that decides where traffic goes:
 /// see "Which routes count".
 pub(super) fn counts(route: &Route) -> bool {
-    let left_out = libc::RTF_IFSCOPE | libc::RTF_WASCLONED | libc::RTF_LLINFO;
-    route.flags & left_out == 0
+    let left_out = [libc::RTF_IFSCOPE, libc::RTF_WASCLONED, libc::RTF_LLINFO];
+    left_out.iter().all(|flag| route.flags & flag == 0)
 }
 
 /// The routes the kernel would choose between for `dest`: of those that

@@ -1168,6 +1168,67 @@ fn an_add_over_a_route_already_there_writes_no_row() {
     );
 }
 
+/// The route somebody else adds while an add is between its row and its
+/// route: the destination, the interface's index and the router.
+static RACE: Mutex<Option<(Ipv4Net, u16, Option<Ipv4Addr>)>> = Mutex::new(None);
+
+// Somebody else adds a route to the same destination after the table was
+// read and the row written, before the route went in. The kernel refuses
+// ours; the row is withdrawn, and their route is not ours. An identical one
+// counts as added; one elsewhere is `AlreadyExists`.
+#[test]
+fn an_add_that_loses_a_race_withdraws_its_row() {
+    alone_as_root(
+        "an_add_that_loses_a_race_withdraws_its_row",
+        "routes race",
+        || {
+            let device = utun();
+            let dir = state_dir("race");
+            let _cleanup = Cleanup(vec![dir.clone()]);
+            let routes = MacRoutes::unchecked(&dir);
+            routes
+                .configure_tunnel(&device.name, ip("198.18.0.7"), 1300)
+                .expect("configure");
+            let physical = routes.capture_physical(ip("192.0.2.1")).expect("capture");
+            let wire = physical.interface().to_string();
+            let (tunnel_index, wire_index) = (index_of(&device.name), index_of(&wire));
+            let (identical, elsewhere) = (net("198.51.100.0/24"), net("203.0.113.0/24"));
+            BEFORE_ADD.with(|hook| {
+                hook.set(Some(|| {
+                    let (net, index, router) = lock(&RACE).expect("a race to run");
+                    let added = route_socket::change(Change::Add, net, index, router, 0);
+                    added.expect("somebody else's route");
+                }));
+            });
+            *lock(&RACE) = Some((identical, tunnel_index, None));
+            let over_identical = routes.add_tunnel_routes(&device.name, &[identical]);
+            *lock(&RACE) = Some((elsewhere, wire_index, router_of(&wire)));
+            let over_elsewhere = routes.add_tunnel_routes(&device.name, &[elsewhere]);
+            BEFORE_ADD.with(|hook| hook.set(None));
+            assert_eq!(over_identical, Ok(()));
+            assert_eq!(over_elsewhere, Err(Error::AlreadyExists));
+            assert_eq!(journal_rows(&dir), [], "a row stayed for a route that lost");
+            let theirs = [
+                (identical, tunnel_index, None),
+                (elsewhere, wire_index, router_of(&wire)),
+            ];
+            for (net, index, router) in theirs {
+                assert_eq!(routes_to(net), [(index, router, false)], "{net}");
+            }
+            routes.remove_all().expect("remove all");
+            for (net, index, router) in theirs {
+                assert_eq!(
+                    routes_to(net),
+                    [(index, router, false)],
+                    "{net} was removed"
+                );
+            }
+            Outsider.remove_route(&device.name, identical);
+            Outsider.remove_route(&wire, elsewhere);
+        },
+    );
+}
+
 // Removing some routes removes those and leaves the rest of ours: another
 // gateway's route through the same router, and another of the tunnel's.
 #[test]
@@ -1291,6 +1352,13 @@ fn refuses_to_treat_the_physical_interface_as_the_tunnel() {
             let routes = MacRoutes::unchecked(&dir);
             let physical = routes.capture_physical(ip("192.0.2.1")).expect("capture");
             let wire = physical.interface();
+            // Only a point-to-point interface has another end.
+            let addresses = find(wire).expect("the physical interface").v4;
+            assert!(
+                !addresses.is_empty(),
+                "the physical interface has no address"
+            );
+            assert!(addresses.iter().all(|a| a.peer.is_none()), "{addresses:?}");
             let configured = routes.configure_tunnel(wire, ip("198.51.100.7"), 1300);
             assert!(
                 matches!(configured, Err(Error::Failed(_))),

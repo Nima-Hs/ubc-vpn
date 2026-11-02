@@ -16,12 +16,14 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::net::Ipv4Addr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::ops::BitOr;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use libc::{c_int, c_ulong};
 use rustix::io::{FdFlags, fcntl_setfd};
+use rustix::net::{AddressFamily, SocketType};
 use ubc_vpn_core::routes::Ipv4Net;
 
 use crate::{Error, Result};
@@ -38,7 +40,7 @@ const RTAX_MAX: usize = 8;
 /// An ioctl's number, as `_IOC` in `<sys/ioccom.h>` makes it: the
 /// direction, the size of the argument, the group and the number.
 pub(super) const fn ioc(direction: c_ulong, group: u8, number: u8, size: usize) -> c_ulong {
-    direction | (((size as c_ulong) & 0x1fff) << 16) | ((group as c_ulong) << 8) | number as c_ulong
+    direction + (((size as c_ulong) & 0x1fff) << 16) + ((group as c_ulong) << 8) + number as c_ulong
 }
 pub(super) const IOC_IN: c_ulong = 0x8000_0000;
 pub(super) const IOC_INOUT: c_ulong = 0xc000_0000;
@@ -80,10 +82,21 @@ pub(super) struct Interface {
 }
 
 impl Interface {
+    /// The interface `name`, before anything else about it is read.
+    fn named(name: String) -> Self {
+        Self {
+            name,
+            index: 0,
+            flags: 0,
+            mtu: 0,
+            v4: Vec::new(),
+            v6: Vec::new(),
+        }
+    }
+
     /// Whether it is up and running: only then does anything go out of it.
     pub(super) fn is_up(&self) -> bool {
-        let both = libc::IFF_UP | libc::IFF_RUNNING;
-        self.flags & both == both
+        self.flags & libc::IFF_UP != 0 && self.flags & libc::IFF_RUNNING != 0
     }
 
     #[cfg(test)]
@@ -199,7 +212,6 @@ fn parse_route(message: &[u8]) -> Result<Route> {
     let flags = header.rtm_flags;
     let dest = addresses[RTAX_DST].and_then(inet).ok_or_else(unreadable)?;
     let mask = match addresses[RTAX_NETMASK] {
-        _ if flags & libc::RTF_HOST != 0 => u32::MAX,
         None => u32::MAX,
         Some(mask) => mask_of(mask),
     };
@@ -348,29 +360,35 @@ pub(super) fn message(
     flags: c_int,
 ) -> Vec<u8> {
     let host = dest.prefix_len() == 32;
-    let mut flags = flags | libc::RTF_UP | libc::RTF_STATIC;
-    if host {
-        flags |= libc::RTF_HOST;
-    }
-    let mut addrs = libc::RTA_DST | libc::RTA_GATEWAY;
-    let mut body = Vec::new();
-    body.extend_from_slice(bytes_of(&sockaddr_in(dest.addr())));
-    match router {
-        Some(router) => {
-            flags |= libc::RTF_GATEWAY;
-            body.extend_from_slice(bytes_of(&sockaddr_in(router)));
-        }
-        None => body.extend_from_slice(bytes_of(&sockaddr_dl(index))),
-    }
+    let host_flag = if host { libc::RTF_HOST } else { 0 };
+    let gateway_flag = if router.is_some() {
+        libc::RTF_GATEWAY
+    } else {
+        0
+    };
+    let flags = all(&[
+        flags,
+        libc::RTF_UP,
+        libc::RTF_STATIC,
+        host_flag,
+        gateway_flag,
+    ]);
+    // Each socket address with its `RTA_*` bit, in the order of the bits.
+    let mut addresses = vec![(libc::RTA_DST, bytes_of(&sockaddr_in(dest.addr())).to_vec())];
+    let gateway = match router {
+        Some(router) => bytes_of(&sockaddr_in(router)).to_vec(),
+        None => bytes_of(&sockaddr_dl(index)).to_vec(),
+    };
+    addresses.push((libc::RTA_GATEWAY, gateway));
     if !host {
-        addrs |= libc::RTA_NETMASK;
         let netmask = Ipv4Addr::from(mask(dest.prefix_len()));
-        body.extend_from_slice(bytes_of(&sockaddr_in(netmask)));
+        addresses.push((libc::RTA_NETMASK, bytes_of(&sockaddr_in(netmask)).to_vec()));
     }
     if router.is_some() && change == Change::Add {
-        addrs |= libc::RTA_IFP;
-        body.extend_from_slice(bytes_of(&sockaddr_dl(index)));
+        addresses.push((libc::RTA_IFP, bytes_of(&sockaddr_dl(index)).to_vec()));
     }
+    let addrs = all(&addresses.iter().map(|(bit, _)| *bit).collect::<Vec<_>>());
+    let body: Vec<u8> = addresses.into_iter().flat_map(|(_, bytes)| bytes).collect();
     // SAFETY: plain data, for which all zeroes is valid.
     let mut header: libc::rt_msghdr = unsafe { zeroed() };
     header.rtm_msglen = (HEADER + body.len()) as u16;
@@ -400,22 +418,25 @@ pub(super) fn change(
     flags: c_int,
 ) -> Result<()> {
     let message = message(change, dest, index, router, flags);
-    // SAFETY: no pointers are passed.
-    let socket = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_INET) };
-    if socket < 0 {
-        return Err(os_error("socket", io::Error::last_os_error()));
+    let socket = new_socket(AddressFamily::ROUTE, SocketType::RAW)?;
+    // The kernel takes a route message whole or refuses it.
+    match rustix::io::write(&socket, &message) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(os_error("route", error.into())),
     }
-    // SAFETY: the descriptor was just opened, and nothing else owns it.
-    let socket = unsafe { OwnedFd::from_raw_fd(socket) };
+}
+
+/// The flags or bits in `each`, together.
+fn all(each: &[c_int]) -> c_int {
+    each.iter().copied().fold(0, BitOr::bitor)
+}
+
+/// A new socket, closed in any program this one starts.
+fn new_socket(family: AddressFamily, kind: SocketType) -> Result<OwnedFd> {
+    let socket =
+        rustix::net::socket(family, kind, None).map_err(|e| os_error("socket", e.into()))?;
     fcntl_setfd(&socket, FdFlags::CLOEXEC).map_err(|e| os_error("fcntl", e.into()))?;
-    // SAFETY: the buffer is live and holds the length passed.
-    let written =
-        unsafe { libc::write(socket.as_raw_fd(), message.as_ptr().cast(), message.len()) };
-    match usize::try_from(written) {
-        Ok(n) if n == message.len() => Ok(()),
-        Ok(_) => Err(Error::Failed("a route message was cut short".to_string())),
-        Err(_) => Err(os_error("route", io::Error::last_os_error())),
-    }
+    Ok(socket)
 }
 
 /// Frees what `getifaddrs` returned when dropped.
@@ -459,10 +480,9 @@ pub(super) fn interfaces() -> Result<Vec<Interface>> {
         // SAFETY: the name is a NUL-terminated string in the entry.
         let name = unsafe { CStr::from_ptr(entry.ifa_name) };
         let name = name.to_string_lossy().into_owned();
-        let interface = found.entry(name.clone()).or_insert_with(|| Interface {
-            name,
-            ..Interface::default()
-        });
+        let interface = found
+            .entry(name.clone())
+            .or_insert_with(|| Interface::named(name));
         interface.flags = entry.ifa_flags as c_int;
         // SAFETY: as above.
         let Some(address) = (unsafe { address_bytes(entry.ifa_addr) }) else {
@@ -519,21 +539,9 @@ fn request<T>(name: &str) -> Result<T> {
 }
 
 /// A socket to send interface requests on, for IPv4 or IPv6.
-fn request_socket(family: c_int) -> Result<OwnedFd> {
-    // SAFETY: no pointers are passed.
-    let socket = unsafe { libc::socket(family, libc::SOCK_DGRAM, 0) };
-    if socket < 0 {
-        return Err(os_error("socket", io::Error::last_os_error()));
-    }
-    // SAFETY: the descriptor was just opened, and nothing else owns it.
-    let socket = unsafe { OwnedFd::from_raw_fd(socket) };
-    fcntl_setfd(&socket, FdFlags::CLOEXEC).map_err(|e| os_error("fcntl", e.into()))?;
-    Ok(socket)
-}
-
 /// Sends the interface request `request` with the ioctl `number`.
-fn ioctl<T>(family: c_int, call: &str, number: c_ulong, request: &mut T) -> Result<()> {
-    let socket = request_socket(family)?;
+fn ioctl<T>(family: AddressFamily, call: &str, number: c_ulong, request: &mut T) -> Result<()> {
+    let socket = new_socket(family, SocketType::DGRAM)?;
     // SAFETY: `request` is a live value of the type the ioctl's number
     // encodes the size of, for the call to read and write.
     let status = unsafe {
@@ -552,7 +560,12 @@ fn ioctl<T>(family: c_int, call: &str, number: c_ulong, request: &mut T) -> Resu
 /// Brings the interface up, or takes it down.
 pub(super) fn set_up(name: &str, up: bool) -> Result<()> {
     let mut flags: libc::ifreq = request(name)?;
-    ioctl(libc::AF_INET, "SIOCGIFFLAGS", SIOCGIFFLAGS, &mut flags)?;
+    ioctl(
+        AddressFamily::INET,
+        "SIOCGIFFLAGS",
+        SIOCGIFFLAGS,
+        &mut flags,
+    )?;
     // SAFETY: the call filled in the flags.
     let before = unsafe { flags.ifr_ifru.ifru_flags };
     let after = if up {
@@ -564,14 +577,19 @@ pub(super) fn set_up(name: &str, up: bool) -> Result<()> {
         return Ok(());
     }
     flags.ifr_ifru.ifru_flags = after;
-    ioctl(libc::AF_INET, "SIOCSIFFLAGS", SIOCSIFFLAGS, &mut flags)
+    ioctl(
+        AddressFamily::INET,
+        "SIOCSIFFLAGS",
+        SIOCSIFFLAGS,
+        &mut flags,
+    )
 }
 
 /// Sets the interface's largest packet size.
 pub(super) fn set_mtu(name: &str, mtu: u16) -> Result<()> {
     let mut request: libc::ifreq = request(name)?;
     request.ifr_ifru.ifru_mtu = c_int::from(mtu);
-    ioctl(libc::AF_INET, "SIOCSIFMTU", SIOCSIFMTU, &mut request)
+    ioctl(AddressFamily::INET, "SIOCSIFMTU", SIOCSIFMTU, &mut request)
 }
 
 /// Gives the interface the address `addr` with this prefix length and, on
@@ -588,14 +606,24 @@ pub(super) fn add_address(
         request.ifra_broadaddr = sockaddr(peer);
     }
     request.ifra_mask = sockaddr(Ipv4Addr::from(mask(prefix_len)));
-    ioctl(libc::AF_INET, "SIOCAIFADDR", SIOCAIFADDR, &mut request)
+    ioctl(
+        AddressFamily::INET,
+        "SIOCAIFADDR",
+        SIOCAIFADDR,
+        &mut request,
+    )
 }
 
 /// Takes the address `addr` off the interface.
 pub(super) fn remove_address(name: &str, addr: Ipv4Addr) -> Result<()> {
     let mut request: libc::ifreq = request(name)?;
     request.ifr_ifru.ifru_addr = sockaddr(addr);
-    ioctl(libc::AF_INET, "SIOCDIFADDR", SIOCDIFADDR, &mut request)
+    ioctl(
+        AddressFamily::INET,
+        "SIOCDIFADDR",
+        SIOCDIFADDR,
+        &mut request,
+    )
 }
 
 /// Takes the IPv6 address `address`, as the kernel listed it, off the
@@ -604,7 +632,7 @@ pub(super) fn remove_ipv6(name: &str, address: &libc::sockaddr_in6) -> Result<()
     let mut request: libc::in6_ifreq = request(name)?;
     request.ifr_ifru.ifru_addr = *address;
     ioctl(
-        libc::AF_INET6,
+        AddressFamily::INET6,
         "SIOCDIFADDR_IN6",
         SIOCDIFADDR_IN6,
         &mut request,
