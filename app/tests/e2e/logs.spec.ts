@@ -40,9 +40,39 @@ test("logs: lines are shown oldest first, and the list keeps to the newest", asy
     await expect(logLines().last()).toBeInViewport({ ratio: 0.9 });
     await shoot("logs-following");
 
-    // Scrolled up to read, the list stays put while lines arrive, and offers a way back.
+    // Started up the log, if only a little, the list stops following at
+    // once: a key or wheel scrolls in an animation, and its first steps are
+    // still near the end. A line arriving then must not pull it back (#326).
     const list = page.getByRole("log", { name: "Log lines" });
+    const nudge = await list.evaluate(async (element) => {
+        const nextLine = () =>
+            new Promise<void>((done) => {
+                const watch = new MutationObserver(() => {
+                    watch.disconnect();
+                    done();
+                });
+                watch.observe(element, { childList: true, subtree: true });
+            });
+        // Just after a line, so the next one comes only after the scroll is seen.
+        await nextLine();
+        await new Promise<void>((done) => {
+            element.addEventListener("scroll", () => done(), { once: true });
+            element.scrollBy({ top: -10, behavior: "instant" });
+        });
+        const nudged = element.scrollTop;
+        await nextLine();
+        return { nudged, after: element.scrollTop };
+    });
+    expect(nudge.after).toBe(nudge.nudged);
+    await expect(page.getByRole("button", { name: "Newest lines" })).toBeVisible();
+    // End goes back to the newest, and the list follows again.
     await list.focus();
+    await page.keyboard.press("End");
+    await expect(page.getByRole("button", { name: "Newest lines" })).toHaveCount(0);
+    await expect(logLines().last()).toBeInViewport({ ratio: 0.9 });
+
+    // Scrolled up to read, the list stays put while lines arrive, and offers a way back.
+    // Home reaches the top at once, on every system.
     await page.keyboard.press("Home");
     await expect(logLines().first()).toBeInViewport({ ratio: 1 });
     const before = await logLines().count();
