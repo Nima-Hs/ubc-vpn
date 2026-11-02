@@ -352,12 +352,10 @@ impl Routes for LinuxRoutes {
         }
         let device = self::tunnel(tunnel)?;
         let addresses = netlink::addresses(AF_INET).map_err(os)?;
-        // Issue #146: before anything changes.
-        if let Some(net) = local_network_holding(address, device.index, &addresses) {
-            let message = format!(
-                "the tunnel's address {address} is inside {net}, a network this machine is on"
-            );
-            return Err(Error::Failed(message));
+        // Issue #146: refused as outside what the operation accepts, before
+        // anything changes.
+        if local_network_holding(address, device.index, &addresses).is_some() {
+            return Err(Error::InvalidInput);
         }
         netlink::set_mtu(device.index, mtu).map_err(os)?;
         // Before the device comes up, which is when the kernel would give it

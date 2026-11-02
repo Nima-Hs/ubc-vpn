@@ -388,15 +388,21 @@ fn refuses_a_tunnel_address_inside_a_network_the_machine_is_on() {
         let address = |c, d| Ipv4Addr::new(198, 18, c, d);
         Outsider.add_address(&other.name, address(5, 1));
         Outsider.add_address(&tun.name, address(7, 99));
+        let mtu = || {
+            let path = format!("/sys/class/net/{}/mtu", tun.name);
+            std::fs::read_to_string(path)
+                .expect("the packet size")
+                .trim()
+                .to_string()
+        };
+        assert_eq!(mtu(), "1500", "a new device's packet size");
 
         for (inside, what) in [(address(5, 7), "a neighbour's"), (address(5, 1), "its own")] {
             let refused = routes.configure_tunnel(&tun.name, inside, 1300);
-            let Err(Error::Failed(message)) = refused else {
-                panic!("{what} address was accepted: {refused:?}");
-            };
-            assert!(message.contains("198.18.5.0/24"), "{message}");
+            assert_eq!(refused, Err(Error::InvalidInput), "{what} address");
             let left = Outsider.addresses(&tun.name);
             assert_eq!(left, [address(7, 99)], "a refusal changed the tunnel");
+            assert_eq!(mtu(), "1500", "a refusal changed the packet size");
         }
         let down = tun.link().expect("the tunnel");
         assert_eq!(down.flags & IFF_UP, 0, "a refusal brought the tunnel up");
