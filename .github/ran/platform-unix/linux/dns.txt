@@ -1,0 +1,5 @@
+dns
+dns unsupported
+dns resolv.conf mode
+dns foreign
+dns refused domain
