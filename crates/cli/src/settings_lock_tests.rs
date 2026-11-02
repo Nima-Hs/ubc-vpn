@@ -180,7 +180,7 @@ fn a_lock_held_too_long_is_given_up_on() {
     let folder = Folder::new();
     let dir = folder.dir();
     let held = change(&dir).expect("the lock is free");
-    let (wait, started) = (Duration::from_millis(300), Instant::now());
+    let (wait, started) = (Duration::from_millis(500), Instant::now());
     // On a thread of its own, so that a wait with no end fails this test
     // and does not hang it.
     let (waiting, (done, ended)) = (dir.clone(), channel());
@@ -190,10 +190,91 @@ fn a_lock_held_too_long_is_given_up_on() {
     let waited = started.elapsed();
     assert_eq!(refused, HELD);
     assert!(waited >= wait, "{waited:?}");
+    // One holder that does not let go is waited for once, not as long as a
+    // queue that keeps moving.
+    assert!(waited < wait * 5, "{waited:?}");
     drop(held);
     assert_eq!(tries(&dir), Ok(false));
     // The real wait is long enough for a save and short enough to bear.
     assert_eq!(WAIT, Duration::from_secs(5));
+}
+
+// The failure in issue #302: several changes start at once, each holding
+// the lock for a moment, and the last in the queue waits for all the others.
+// Together they take longer than the wait, though none of them is stuck.
+// Every one of them gets its turn: the wait is for one holder, and starts
+// again each time the lock changes hands.
+#[test]
+fn changes_queued_behind_each_other_all_get_their_turn() {
+    let folder = Folder::new();
+    let (wait, hold, changes) = (Duration::from_secs(1), Duration::from_millis(300), 6);
+    // Six holds of 300 ms: whichever change comes last waits 1.5 s.
+    let ended: Vec<_> = (0..changes)
+        .map(|_| {
+            let (dir, (done, ended)) = (folder.dir(), channel());
+            std::thread::spawn(move || {
+                let changing = change_within(&dir, wait);
+                let unlocked = changing
+                    .as_ref()
+                    .map(|c| c.unlocked())
+                    .map_err(Clone::clone);
+                std::thread::sleep(hold);
+                drop(changing);
+                let _ = done.send(unlocked);
+            });
+            ended
+        })
+        .collect();
+    for ended in ended {
+        let had = ended.recv_timeout(Duration::from_secs(20));
+        assert_eq!(had, Ok(Ok(false)), "a change did not get its turn");
+    }
+}
+
+// A holder that keeps the lock and keeps saying it is a new one is not
+// waited for without end: past six times the wait, the change gives up.
+#[test]
+fn a_lock_that_changes_hands_for_ever_is_given_up_on() {
+    let folder = Folder::new();
+    let dir = folder.dir();
+    let base = std::time::SystemTime::UNIX_EPOCH;
+    let next = AtomicUsize::new(0);
+    // A new holder at every try.
+    let for_ever = move || {
+        let n = next.fetch_add(1, Ordering::SeqCst) as u64;
+        Ok(Tried::Busy(Some(base + Duration::from_secs(n))))
+    };
+    let started = Instant::now();
+    // On a thread of its own, so that a wait with no end fails this test
+    // and does not hang it.
+    let (done, ended) = channel();
+    std::thread::spawn(move || {
+        let _ = done.send(change_with(&dir, SHORT, for_ever).map(|c| c.unlocked()));
+    });
+    let refused = ended.recv_timeout(Duration::from_secs(4));
+    let waited = started.elapsed();
+    assert_eq!(refused, Ok(HELD));
+    assert!(waited >= SHORT * 6, "{waited:?}");
+    assert!(waited < Duration::from_secs(4), "{waited:?}");
+}
+
+// Each change that takes the lock marks the lock file's time as it does,
+// which is how the others see the lock change hands. Only the time: the file
+// stays empty.
+#[test]
+fn whoever_takes_the_lock_marks_the_time() {
+    let folder = Folder::new();
+    let lock = folder.dir().join("settings.json.lock");
+    assert_eq!(tries(&folder.dir()), Ok(false));
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(48 * 3600);
+    let file = std::fs::File::options().write(true).open(&lock).unwrap();
+    file.set_modified(long_ago).unwrap();
+    drop(file);
+    let held = change(&folder.dir()).expect("the lock is free");
+    let marked = std::fs::metadata(&lock).unwrap().modified().unwrap();
+    assert!(marked > long_ago + Duration::from_secs(3600), "{marked:?}");
+    drop(held);
+    assert_eq!(std::fs::read(&lock).unwrap(), b"");
 }
 
 /// What a lock that is held lets go of. The test hears when it is dropped.
@@ -217,7 +298,7 @@ fn a_lock_that_cannot_be_had_does_not_stop_the_change() {
         change_with(&dir, SHORT, attempt).map(|changing| changing.unlocked())
     };
     assert_eq!(with(|| Ok(Tried::Held(Box::new(())))), Ok(false));
-    assert_eq!(with(|| Ok(Tried::Busy)), HELD);
+    assert_eq!(with(|| Ok(Tried::Busy(None))), HELD);
     // There is nothing to wait for then, so it does not wait: with a wait
     // far longer than a loaded machine could take over one try, the answer
     // still comes long before it is up.
@@ -234,7 +315,7 @@ fn a_lock_that_cannot_be_had_does_not_stop_the_change() {
     // A try that is busy at first and then succeeds is tried again.
     let tries = AtomicUsize::new(0);
     let third_time = move || match tries.fetch_add(1, Ordering::SeqCst) {
-        0 | 1 => Ok(Tried::Busy),
+        0 | 1 => Ok(Tried::Busy(None)),
         _ => Ok(Tried::Held(Box::new(()))),
     };
     let had = change_with(&dir, Duration::from_secs(2), third_time);
