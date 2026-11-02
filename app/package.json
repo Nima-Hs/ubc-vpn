@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/Nima-Hs/ubc-vpn",
   "main": "out/main/index.js",
   "packageManager": "pnpm@12.6.0",
   "engines": {
@@ -27,7 +28,7 @@
     "icons": "node scripts/make-icons.mjs",
     "package:win": "node node_modules/electron/install.js && pnpm build && pnpm check:build && electron-builder --win --publish never",
     "package:mac": "node scripts/not-built-yet.mjs macOS",
-    "package:linux": "node scripts/not-built-yet.mjs Linux",
+    "package:linux": "node node_modules/electron/install.js && pnpm build && pnpm check:build && electron-builder --linux --config electron-builder.linux.yml --publish never",
     "check:package:win": "node scripts/check-package.mjs win dist/win-unpacked dist",
     "check:package:mac": "node scripts/check-package.mjs mac dist/mac-arm64 dist",
     "check:package:linux": "node scripts/check-package.mjs linux dist/linux-unpacked dist"

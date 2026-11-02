@@ -195,6 +195,21 @@ If it stops because your Visual Studio has another compiler or runtime version, 
 
 `.github/workflows/installer-windows.yml` stages and builds it, installs it silently on a GitHub runner, checks what landed where and who can change it, that the service runs and answers a standard user, installs it again over itself, removes it, and checks nothing is left. Other jobs build setup programs with one step made to fail and check each undoes everything, and the main job checks that declining the licence page, a folder holding another product and `/D=` all leave things as they were. Those checks are in `packaging/windows/tests/installer.ps1`. They install for the whole machine, so they run only on the runner; do not run them on your own computer.
 
+## The Linux packages
+
+The `.deb` is built with the same electron-builder, with the settings in `app/electron-builder.linux.yml`. It installs the app in `/opt/UBC VPN`, and in `resources/bin` the service, the command-line client and `libopenconnect.so.5`, which it gathers from `app/stage/`. Our install and removal scripts are in `packaging/linux/`; the two that run after a step hold electron-builder's own scripts unchanged, and electron-builder fills them in, so a shell variable in them is written without braces. On Linux, with the app's packages installed as in Setup, Rust, the D-Bus headers, and an unpacked `libopenconnect-linux-x64` build, from the repository root:
+
+```sh
+packaging/linux/stage.sh <native-folder> <native-build> <sources-archive>   # checks the library against its manifest, builds the programs with the real engine and no rpath, gathers the library and the policy
+cd app
+pnpm package:linux         # builds the app, then dist/ubc-vpn_<version>_amd64.deb
+pnpm check:package:linux   # fuses, licence files, the .deb's scripts, dependencies and links, and no updater files
+```
+
+`<native-build>` says where the library was built, and goes into `SOURCES.txt`. electron-builder downloads fpm itself the first time, checked against a SHA-256 that the pinned electron-builder carries. Nothing is signed.
+
+`.github/workflows/installer-linux.yml` builds the library and the `.deb`, installs it as root on a GitHub runner, checks what landed where, who can change it, that no program has an rpath, and that the service runs and answers a standard user, installs it again over itself, removes it and purges it, and checks nothing is left. Those checks are in `packaging/linux/tests/installer.sh`. They install packages and a root service and add a user, so they run only on the runner; do not run them on your own computer.
+
 ## Workflow
 
 Branch from `main`, commit using Conventional Commits, and open a pull request whose title follows the same format. The full conventions are in [workflow](.claude/rules/workflow.md), [dependencies](.claude/rules/dependencies.md) and [security](.claude/rules/security.md).

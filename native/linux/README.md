@@ -78,7 +78,9 @@ On Ubuntu 24.04 and later, and Debian 13, the package is `libgnutls30t64`, which
 
 ### Where the library is found at run time
 
-Install it in the app's private folder, never in a system library path, and link each program that uses it with an rpath relative to itself. With programs in `bin/` and the library in `lib/`:
+The service and the command-line client do not link the library. The engine loads it at run time by its full path, beside the program, so the packages put it in `/opt/UBC VPN/resources/bin` with them, and neither program has an rpath or runpath: one would make the loader search a folder before the service has checked its own. `.github/workflows/installer-linux.yml` checks the installed files with `readelf -d`.
+
+A program that does link it, such as the probe, is linked with an rpath relative to itself instead, and the library is still installed in the app's private folder, never in a system library path. With programs in `bin/` and the library in `lib/`:
 
 ```sh
 RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN/../lib'

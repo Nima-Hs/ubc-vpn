@@ -1,0 +1,287 @@
+name: Installer (Linux)
+
+# Builds the Linux .deb with the service, the command-line client and
+# libopenconnect, installs it as root on a runner, checks what landed where,
+# who can change it and that the service answers a standard user, installs
+# it again over itself, removes it, purges it, and checks nothing is left.
+# The rules come from docs/architecture.md, "What the installers must do".
+#
+# Nothing is signed. The .deb and the source of its LGPL library are kept as
+# artifacts for a few days, for trying by hand; they are not a release.
+
+on:
+  pull_request:
+    paths:
+      - app/**
+      - packaging/linux/**
+      - packaging/windows/policy.json
+      - crates/**
+      - native/linux/**
+      - native/check-patches.sh
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/installer-linux.yml
+      # Last, so it wins: a change to Markdown files alone starts nothing.
+      - "!**/*.md"
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - packaging/linux/**
+      - packaging/windows/policy.json
+      - crates/**
+      - native/linux/**
+      - native/check-patches.sh
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/installer-linux.yml
+      - "!**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The same build as the Native library (Linux) workflow's: native/linux/
+  # build.sh in the same pinned image. The two digests below must stay the
+  # ones in native-linux.yml. Built here, so the source the packages point
+  # to is from the same run as the library in them.
+  native:
+    name: Build libopenconnect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
+      - name: Build libopenconnect
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_IMAGE: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+        run: bash native/linux/build.sh out
+      # A tarball, to keep the library's symbolic links.
+      - name: Pack
+        run: tar -C out -czf libopenconnect-linux-x64.tar.gz .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libopenconnect-linux-x64
+          path: libopenconnect-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Build the .deb
+    needs: native
+    # The oldest supported system, so the programs need no newer glibc than
+    # it has.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-linux-x64
+          path: ${{ runner.temp }}/download
+      - name: Unpack the library
+        run: |
+          mkdir "$RUNNER_TEMP/native"
+          tar -xzf "$RUNNER_TEMP/download/libopenconnect-linux-x64.tar.gz" -C "$RUNNER_TEMP/native"
+
+      # The client's keyring links the system's libdbus-1: its headers and
+      # pkg-config, at the versions pinned in test-packages.sh, from its
+      # dated Ubuntu snapshot. The cache ci.yml and native-linux.yml keep is
+      # only read here; the script checks every package again regardless.
+      - name: Restore the pinned packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev
+      - name: Install the pinned D-Bus headers
+        working-directory: .
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
+        run: |
+          mkdir "$RUNNER_TEMP/packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        working-directory: .
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        working-directory: .
+        timeout-minutes: 4
+        run: rustup toolchain install
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+
+      - name: Stage the programs and the library
+        working-directory: .
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          version=$(node -p "require('./app/package.json').version")
+          packaging/linux/stage.sh "$RUNNER_TEMP/native" \
+            "run $GITHUB_RUN_ID of the Installer (Linux) workflow, from commit $GITHUB_SHA: $RUN_URL" \
+            "$RUNNER_TEMP/sources/ubc-vpn-$version-linux-x64-sources.tar.gz"
+
+      # electron-builder downloads fpm itself, checked against a checksum
+      # this version of it carries.
+      - name: Build the .deb
+        run: pnpm package:linux
+      - name: The app is fused and licensed, the .deb is as it should be, and there is no updater
+        run: pnpm check:package:linux
+
+      - name: Note the .deb's SHA-256
+        run: |
+          cd dist
+          sha256sum ubc-vpn_*_amd64.deb | tee ubc-vpn.deb.sha256
+          dpkg-deb --info ubc-vpn_*_amd64.deb
+          {
+            echo "### $(ls ubc-vpn_*_amd64.deb)"
+            echo
+            echo "SHA-256: \`$(cut -d ' ' -f 1 ubc-vpn.deb.sha256)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the .deb
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-linux-x64-deb-unsigned
+          path: |
+            app/dist/ubc-vpn_*_amd64.deb
+            app/dist/ubc-vpn.deb.sha256
+          if-no-files-found: error
+          retention-days: 7
+      # For the job below only.
+      - name: Pass the stage on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-stage-linux
+          path: app/stage
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep the source of the LGPL library
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-linux-x64-sources
+          path: ${{ runner.temp }}/sources/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # Installs, updates, removes and purges the .deb as root, on GitHub's
+  # runner, which systemd runs and which is thrown away after the job. The
+  # job uses no secrets.
+  install:
+    name: Install the .deb
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHECK: packaging/linux/tests/installer.sh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Install the app's packages, for its package check
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ubc-vpn-linux-x64-deb-unsigned
+          path: ${{ runner.temp }}/deb
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-stage-linux
+          path: ${{ runner.temp }}/stage
+      - name: Find the .deb
+        run: |
+          cd "$RUNNER_TEMP/deb"
+          sha256sum --check ubc-vpn.deb.sha256
+          echo "DEB=$RUNNER_TEMP/deb/$(ls ubc-vpn_*_amd64.deb)" >> "$GITHUB_ENV"
+
+      - name: Install
+        run: |
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" prepare
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" install "$DEB"
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" remember-files "$RUNNER_TEMP/files.txt"
+      - name: Every file is installed as packaged and staged
+        run: |
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" installed "$DEB"
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" as-staged "$RUNNER_TEMP/stage"
+      - name: Only root can change the installed app
+        run: sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" who-can-change
+      - name: No rpath or runpath
+        run: sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" no-rpath
+      - name: The installed app is fused, licensed and has no updater
+        working-directory: app
+        run: node scripts/check-package.mjs linux "/opt/UBC VPN"
+      - name: The service is installed, running and answers a standard user
+        run: |
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" service
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" status-as-user
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" remember-state "$RUNNER_TEMP/state.sha256"
+
+      # Installing over an existing install is how an update arrives: the
+      # old version's scripts keep the service and its data, and the new
+      # one's brings the unit up to date and starts it again; the owner in
+      # state.json survives.
+      - name: Install again over it
+        run: |
+          sudo dpkg -i "$DEB"
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" no-conffiles
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" installed "$DEB"
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" who-can-change
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" service
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
+      - name: The scripts are safe to run twice
+        run: |
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" scripts-twice
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
+      - name: Remove
+        run: |
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" remove
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" removed "$RUNNER_TEMP/files.txt"
+      - name: Purge
+        run: |
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" purge
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" purged "$RUNNER_TEMP/files.txt"
+
+      - name: What the service logged
+        if: failure()
+        run: sudo journalctl -u ubc-vpn.service -o cat --no-pager | tail -n 200 || true

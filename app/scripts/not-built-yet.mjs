@@ -1,5 +1,5 @@
-// Stands in for `pnpm package:mac` and `pnpm package:linux` until those
-// packages are built (electron-builder.mac.yml, electron-builder.linux.yml).
+// Stands in for `pnpm package:mac` until that package is built
+// (electron-builder.mac.yml).
 //
 //   node scripts/not-built-yet.mjs <system name>
 
