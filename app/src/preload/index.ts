@@ -69,6 +69,7 @@ const api: VpnApi = {
             list: () => invoke(PROFILES_IPC.list),
             setStartup: (start: StartMode, autoConnect: boolean) =>
                 invoke(PROFILES_IPC.setStartup, start, autoConnect),
+            setUpdates: (autoUpdate: boolean) => invoke(PROFILES_IPC.setUpdates, autoUpdate),
             forgetPassword: (id: ProfileId | null) => invoke(PROFILES_IPC.forgetPassword, id),
             create: (name: string) => invoke(PROFILES_IPC.create, name),
             rename: (id: ProfileId, name: string) => invoke(PROFILES_IPC.rename, id, name),

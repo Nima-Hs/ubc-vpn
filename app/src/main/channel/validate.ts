@@ -353,7 +353,7 @@ function isProfileView(value: unknown): value is ProfileView {
     );
 }
 
-/** Whether a parsed line is the answer to a `profiles` command, `set-startup` or `password forget`. */
+/** Whether a parsed line is the answer to a `profiles` command, `set-startup`, `set-updates` or `password forget`. */
 export function isProfilesView(value: unknown): value is ProfilesView {
     if (!isObject(value) || !isObject(value.global) || !Array.isArray(value.profiles)) {
         return false;
@@ -364,6 +364,7 @@ export function isProfilesView(value: unknown): value is ProfilesView {
         typeof global.start === "string" &&
         Object.hasOwn(START_MODES, global.start) &&
         typeof global.auto_connect === "boolean" &&
+        typeof global.auto_update === "boolean" &&
         isProfileId(global.active_profile) &&
         isTunnelMode(global.tunnel) &&
         profiles.length > 0 &&

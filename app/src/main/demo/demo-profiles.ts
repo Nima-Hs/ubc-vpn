@@ -48,7 +48,13 @@ const lab = (): ProfileView => ({
 
 function fresh(): ProfilesView {
     return {
-        global: { start: "off", auto_connect: false, active_profile: CAMPUS, tunnel: "split" },
+        global: {
+            start: "off",
+            auto_connect: false,
+            active_profile: CAMPUS,
+            tunnel: "split",
+            auto_update: true,
+        },
         profiles: [campus()],
         keyring: "available",
         policy_readable: true,
@@ -192,6 +198,11 @@ export function createDemoProfiles(
         setStartup: (start: StartMode, autoConnect: boolean) =>
             change(() => {
                 view = { ...view, global: { ...view.global, start, auto_connect: autoConnect } };
+                return null;
+            }),
+        setUpdates: (autoUpdate: boolean) =>
+            change(() => {
+                view = { ...view, global: { ...view.global, auto_update: autoUpdate } };
                 return null;
             }),
         forgetPassword: (id: ProfileId | null) =>

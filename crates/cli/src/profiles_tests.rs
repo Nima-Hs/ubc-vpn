@@ -194,6 +194,11 @@ fn profiles_are_made_renamed_switched_and_shown() {
         (startup.global.start, startup.global.auto_connect),
         (StartMode::Tray, true)
     );
+    assert!(startup.global.auto_update);
+    let updates = machine.changed(Command::SetUpdates, r#"{"auto_update":false}"#);
+    assert!(!updates.global.auto_update);
+    assert_eq!(updates.global.start, StartMode::Tray);
+    assert!(!machine.stored().global.auto_update);
 }
 
 // A change the rules refuse says why, exits with status 1 and changes
@@ -583,6 +588,7 @@ fn every_command_line_reaches_its_command() {
         (&["profile", "set-routes", "--json"], Command::SetRoutes),
         (&["password", "forget", "--json"], Command::ForgetPassword),
         (&["settings", "set-startup", "--json"], Command::SetStartup),
+        (&["settings", "set-updates", "--json"], Command::SetUpdates),
         (&["settings", "set-tunnel", "--json"], Command::SetTunnel),
     ];
     for (args, command) in spellings {

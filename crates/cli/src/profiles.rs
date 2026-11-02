@@ -1,7 +1,8 @@
 //! The profiles commands, for the app: `profiles list`, `create`, `rename`,
 //! `update`, `delete` and `switch`; `profile set-routes`; `password forget`;
-//! `settings set-startup`; and `settings set-tunnel`. Each is spelled with
-//! `--json`, reads at most one line on standard input, and writes one line.
+//! `settings set-startup`; `settings set-updates`; and `settings set-tunnel`.
+//! Each is spelled with `--json`, reads at most one line on standard input,
+//! and writes one line.
 //! The rules are in `ubc_vpn_core::profiles`; this file reads the file,
 //! calls one, and saves the result.
 //!
@@ -32,7 +33,7 @@ use ubc_vpn_core::policy::{FullTunnel, Policy};
 use ubc_vpn_core::profiles::{
     Keyring, Login, MaybeProfile, NewProfile, Password, ProfileFailure, ProfileFailureCode,
     ProfileRef, ProfileRoutes, ProfileView, Profiles, ProfilesView, RenameProfile, Startup,
-    UpdateProfile,
+    UpdateProfile, Updates,
 };
 use ubc_vpn_core::protocol::{decode, encode};
 use ubc_vpn_core::routes::RouteSet;
@@ -70,6 +71,8 @@ pub enum Command {
     ForgetPassword,
     /// `settings set-startup --json`
     SetStartup,
+    /// `settings set-updates --json`
+    SetUpdates,
     /// `settings set-tunnel --json`
     SetTunnel,
 }
@@ -87,6 +90,7 @@ impl Command {
             ["profile", "set-routes", "--json"] => Self::SetRoutes,
             ["password", "forget", "--json"] => Self::ForgetPassword,
             ["settings", "set-startup", "--json"] => Self::SetStartup,
+            ["settings", "set-updates", "--json"] => Self::SetUpdates,
             ["settings", "set-tunnel", "--json"] => Self::SetTunnel,
             _ => return None,
         })
@@ -227,6 +231,7 @@ enum Asked {
     Routes(ProfileRoutes),
     Forget(MaybeProfile),
     Startup(Startup),
+    Updates(Updates),
     Tunnel(TunnelInput),
 }
 
@@ -246,6 +251,7 @@ fn asked(command: Command, stdin: &mut dyn BufRead) -> Result<Asked, SettingsFai
         Command::SetRoutes => Asked::Routes(decode(&text).map_err(bad)?),
         Command::ForgetPassword => Asked::Forget(decode(&text).map_err(bad)?),
         Command::SetStartup => Asked::Startup(decode(&text).map_err(bad)?),
+        Command::SetUpdates => Asked::Updates(decode(&text).map_err(bad)?),
         Command::SetTunnel => Asked::Tunnel(decode(&text).map_err(bad)?),
     })
 }
@@ -363,6 +369,10 @@ fn apply(
         }
         Asked::Startup(startup) => {
             profiles.set_startup(startup.start, startup.auto_connect);
+            Ok(Made::Profiles)
+        }
+        Asked::Updates(updates) => {
+            profiles.set_updates(updates.auto_update);
             Ok(Made::Profiles)
         }
         // Without a policy that can be read nothing forbids it here; the

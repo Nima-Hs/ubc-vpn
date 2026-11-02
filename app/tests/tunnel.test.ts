@@ -39,7 +39,13 @@ const ID = "0123456789abcdef0123456789abcdef";
 const NUL = String.fromCharCode(0);
 
 const VIEW: ProfilesView = {
-    global: { start: "off", auto_connect: false, active_profile: ID, tunnel: "split" },
+    global: {
+        start: "off",
+        auto_connect: false,
+        active_profile: ID,
+        tunnel: "split",
+        auto_update: true,
+    },
     profiles: [
         {
             id: ID,

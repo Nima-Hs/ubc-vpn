@@ -43,6 +43,8 @@ export const SET_TUNNEL_TIMEOUT_MS = 150_000;
 export interface ProfilesService {
     list(): Promise<ProfilesResult>;
     setStartup(start: StartMode, autoConnect: boolean): Promise<ProfilesResult>;
+    /** Saves "Automatic updates", on or off. */
+    setUpdates(autoUpdate: boolean): Promise<ProfilesResult>;
     forgetPassword(id: ProfileId | null): Promise<ProfilesResult>;
     /** A new profile with this name and nothing else: no username, no routes, no saved password. */
     create(name: string): Promise<ProfilesResult>;
@@ -72,6 +74,7 @@ export interface ProfileChange {
 export const PROFILES_ARGS = {
     list: ["profiles", "list", "--json"],
     setStartup: ["settings", "set-startup", "--json"],
+    setUpdates: ["settings", "set-updates", "--json"],
     forgetPassword: ["password", "forget", "--json"],
     create: ["profiles", "create", "--json"],
     rename: ["profiles", "rename", "--json"],
@@ -104,6 +107,7 @@ function shownView(view: ProfilesView): ProfilesView {
             auto_connect: view.global.auto_connect,
             active_profile: view.global.active_profile,
             tunnel: view.global.tunnel,
+            auto_update: view.global.auto_update,
         },
         profiles: view.profiles.map((profile) => ({
             id: profile.id,
@@ -170,6 +174,10 @@ export class ProfilesRunner implements ProfilesService {
 
     setStartup(start: StartMode, autoConnect: boolean): Promise<ProfilesResult> {
         return this.change(PROFILES_ARGS.setStartup, { start, auto_connect: autoConnect });
+    }
+
+    setUpdates(autoUpdate: boolean): Promise<ProfilesResult> {
+        return this.change(PROFILES_ARGS.setUpdates, { auto_update: autoUpdate });
     }
 
     forgetPassword(id: ProfileId | null): Promise<ProfilesResult> {

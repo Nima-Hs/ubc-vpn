@@ -31,6 +31,7 @@ const INPUTS = {
     "profile set-routes": ["id", "subnets", "dns_domains"],
     "password forget": ["id"],
     "settings set-startup": ["start", "auto_connect"],
+    "settings set-updates": ["auto_update"],
     "settings set-tunnel": ["mode"],
 };
 

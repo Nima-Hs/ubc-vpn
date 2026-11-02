@@ -7,7 +7,8 @@ import { join } from "node:path";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import { afterEach, describe, expect, it } from "vitest";
 import { PROFILES_ARGS, ProfilesRunner } from "../src/main/channel/profiles";
-import { takeProfile, takeStartup } from "../src/main/profiles/checks";
+import { isProfilesView } from "../src/main/channel/validate";
+import { takeProfile, takeStartup, takeUpdates } from "../src/main/profiles/checks";
 
 const ID = "0123456789abcdef0123456789abcdef";
 // A character that reverses text direction, and a NUL, written by code
@@ -18,7 +19,13 @@ const LF = String.fromCharCode(10);
 const OTHER = "fedcba9876543210fedcba9876543210";
 
 const VIEW: ProfilesView = {
-    global: { start: "off", auto_connect: false, active_profile: ID, tunnel: "split" },
+    global: {
+        start: "off",
+        auto_connect: false,
+        active_profile: ID,
+        tunnel: "split",
+        auto_update: true,
+    },
     profiles: [
         {
             id: ID,
@@ -90,6 +97,25 @@ describe("the profiles commands", () => {
             `args:${JSON.stringify(PROFILES_ARGS.setStartup)}`,
             `input:${JSON.stringify({ start: "tray", auto_connect: true })}`,
         ]);
+    });
+
+    it("saves Automatic updates as the contract names it, and nothing else", async () => {
+        const changed = { ...VIEW, global: { ...VIEW.global, auto_update: false } };
+        const { runner, received } = client({ "settings set-updates": { line: changed } });
+        await expect(runner.setUpdates(false)).resolves.toEqual({ ok: true, value: changed });
+        expect(received()).toEqual([
+            `args:${JSON.stringify(PROFILES_ARGS.setUpdates)}`,
+            `input:${JSON.stringify({ auto_update: false })}`,
+        ]);
+    });
+
+    it("needs Automatic updates in every view, as on or off", () => {
+        expect(isProfilesView(VIEW)).toBe(true);
+        const { auto_update: _, ...without } = VIEW.global;
+        expect(isProfilesView({ ...VIEW, global: without })).toBe(false);
+        expect(isProfilesView({ ...VIEW, global: { ...VIEW.global, auto_update: "yes" } })).toBe(
+            false,
+        );
     });
 
     it("forgets a profile's saved password by its id, or the active one's", async () => {
@@ -219,6 +245,14 @@ describe("what the Settings screen may ask the main process", () => {
         ];
         for (const [args, platform] of refused) {
             expect(() => takeStartup(args, platform), JSON.stringify(args)).toThrow("refused");
+        }
+    });
+
+    it("is on or off for Automatic updates, and nothing else", () => {
+        expect(takeUpdates([true])).toBe(true);
+        expect(takeUpdates([false])).toBe(false);
+        for (const args of [[], ["true"], [1], [true, true], [{ auto_update: true }], [null]]) {
+            expect(() => takeUpdates(args), JSON.stringify(args)).toThrow("refused");
         }
     });
 

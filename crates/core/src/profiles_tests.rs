@@ -67,6 +67,7 @@ fn a_user_with_no_file_has_one_empty_profile() {
     assert_eq!(first.routes, RouteSet::default());
     assert_eq!(fresh.global.start, StartMode::Off);
     assert!(!fresh.global.auto_connect);
+    assert!(fresh.global.auto_update);
     assert_eq!(fresh.check(), Ok(()));
 }
 
@@ -130,7 +131,7 @@ fn version_2_has_a_stable_shape() {
     let compact: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
         compact.to_string(),
-        r#"{"global":{"active_profile":"00000000000000000000000000000001","auto_connect":false,"start":"off","tunnel":"split"},"profiles":[{"duo_method":"push","id":"00000000000000000000000000000001","name":"UBC VPN","routes":{"dns_domains":[],"subnets":[]},"save_password":false,"username":null}],"version":2}"#
+        r#"{"global":{"active_profile":"00000000000000000000000000000001","auto_connect":false,"auto_update":true,"start":"off","tunnel":"split"},"profiles":[{"duo_method":"push","id":"00000000000000000000000000000001","name":"UBC VPN","routes":{"dns_domains":[],"subnets":[]},"save_password":false,"username":null}],"version":2}"#
     );
 }
 
@@ -533,6 +534,36 @@ fn switching_and_routes_need_a_profile_that_exists() {
         (all.global.start, all.global.auto_connect),
         (StartMode::Tray, true)
     );
+    all.set_updates(false);
+    assert!(!all.global.auto_update);
+    assert_eq!(all.global.start, StartMode::Tray);
+}
+
+// "Automatic updates" is on by default: in a file from before the setting,
+// and in fresh settings. Only an explicit false turns it off.
+#[test]
+fn automatic_updates_start_on() {
+    let mut file: Value = serde_json::from_str(&untouched().to_text()).unwrap();
+    let global = file["global"].as_object_mut().unwrap();
+    assert_eq!(global.remove("auto_update"), Some(Value::Bool(true)));
+    let before = file.to_string();
+    assert!(
+        Profiles::read(Some(&before))
+            .unwrap()
+            .profiles
+            .global
+            .auto_update
+    );
+    assert!(Profiles::fresh(id(5)).global.auto_update);
+    file["global"]["auto_update"] = Value::Bool(false);
+    let off = file.to_string();
+    assert!(
+        !Profiles::read(Some(&off))
+            .unwrap()
+            .profiles
+            .global
+            .auto_update
+    );
 }
 
 // The commands and the app that do not know profiles yet see the active
@@ -571,6 +602,11 @@ fn the_app_lines_have_a_stable_shape() {
     let startup: Startup = serde_json::from_str(r#"{"start":"tray","auto_connect":true}"#).unwrap();
     assert_eq!(startup.start, StartMode::Tray);
     assert!(serde_json::from_str::<Startup>(r#"{"start":"later","auto_connect":true}"#).is_err());
+    let updates: Updates = serde_json::from_str(r#"{"auto_update":false}"#).unwrap();
+    assert!(!updates.auto_update);
+    assert!(serde_json::from_str::<Updates>(r#"{"auto_update":"no"}"#).is_err());
+    assert!(serde_json::from_str::<Updates>(r#"{"auto_update":true,"x":1}"#).is_err());
+    assert!(serde_json::from_str::<Updates>("{}").is_err());
     let failure = ProfileFailure {
         error: ProfileFailureCode::NameTaken,
     };

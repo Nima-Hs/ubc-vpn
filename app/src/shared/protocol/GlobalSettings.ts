@@ -24,4 +24,10 @@ active_profile: ProfileId,
  * version knows, it reads as split: the narrower of the two, so a
  * damaged file never sends more through the tunnel than was chosen.
  */
-tunnel: TunnelMode, };
+tunnel: TunnelMode, 
+/**
+ * Whether the app downloads updates by itself and offers to install
+ * them ("Automatic updates"). When off, it only says one exists. Left
+ * out, as in a file from before it, it is on.
+ */
+auto_update: boolean, };

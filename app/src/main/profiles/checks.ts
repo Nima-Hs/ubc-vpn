@@ -25,6 +25,15 @@ export function takeStartup(
     return [start as StartMode, autoConnect];
 }
 
+/** Takes "Automatic updates" from the interface: one argument, on or off, or a refusal. */
+export function takeUpdates(args: readonly unknown[]): boolean {
+    const [autoUpdate] = args;
+    if (args.length !== 1 || typeof autoUpdate !== "boolean") {
+        throw new Error("refused");
+    }
+    return autoUpdate;
+}
+
 /**
  * The longest name or username the screen may send. The client's own rules
  * are stricter (a name is 1 to 64 characters); this only keeps a request

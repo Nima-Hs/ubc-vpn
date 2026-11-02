@@ -4,7 +4,7 @@
 // screen have any of it: see `__SETTINGS__` in `electron.vite.config.ts`.
 //
 // The main process gets all of it from the command-line client (`profiles`,
-// `settings set-startup` and `password forget`, `crates/cli/src/profiles.rs`);
+// `settings set-startup`, `settings set-updates` and `password forget`, `crates/cli/src/profiles.rs`);
 // the lines are the types in `protocol/`. A saved password never crosses:
 // only whether one is saved.
 
@@ -26,6 +26,8 @@ export interface ProfilesApi {
     list(): Promise<ProfilesResult>;
     /** How UBC VPN starts when the user signs in, and whether it then connects. */
     setStartup(start: StartMode, autoConnect: boolean): Promise<ProfilesResult>;
+    /** Whether the app downloads updates by itself and offers to install them. */
+    setUpdates(autoUpdate: boolean): Promise<ProfilesResult>;
     /** Forgets a profile's saved password; the active profile's when `id` is `null`. */
     forgetPassword(id: ProfileId | null): Promise<ProfilesResult>;
     /** A new profile with this name and nothing else yet. */
@@ -47,6 +49,7 @@ export interface ProfilesApi {
 export const PROFILES_IPC = {
     list: "profiles:list",
     setStartup: "profiles:set-startup",
+    setUpdates: "profiles:set-updates",
     forgetPassword: "profiles:forget-password",
     create: "profiles:create",
     rename: "profiles:rename",

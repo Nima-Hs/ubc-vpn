@@ -8,7 +8,15 @@ import type { BrowserWindow } from "electron";
 import type { ProfilesService } from "../channel/profiles";
 import { handleFromInterface } from "../ipc";
 import { type LoginItem, loginItemFor } from "../startup";
-import { takeId, takeName, takeProfile, takeRename, takeStartup, takeUpdate } from "./checks";
+import {
+    takeId,
+    takeName,
+    takeProfile,
+    takeRename,
+    takeStartup,
+    takeUpdate,
+    takeUpdates,
+} from "./checks";
 
 /** Where the choice of starting at sign-in goes: the OS, or a record of it. */
 export interface LoginItems {
@@ -34,6 +42,7 @@ export function watchProfiles(
     return {
         list: () => tell(profiles.list()),
         setStartup: (start, autoConnect) => tell(profiles.setStartup(start, autoConnect)),
+        setUpdates: (autoUpdate) => tell(profiles.setUpdates(autoUpdate)),
         forgetPassword: (id) => tell(profiles.forgetPassword(id)),
         create: (name) => tell(profiles.create(name)),
         rename: (id, name) => tell(profiles.rename(id, name)),
@@ -63,6 +72,9 @@ export function registerProfiles(
         }
         return result;
     });
+    handleFromInterface(window, devServerUrl, PROFILES_IPC.setUpdates, (...args) =>
+        profiles.setUpdates(takeUpdates(args)),
+    );
     handleFromInterface(window, devServerUrl, PROFILES_IPC.forgetPassword, (...args) =>
         profiles.forgetPassword(takeProfile(args)),
     );

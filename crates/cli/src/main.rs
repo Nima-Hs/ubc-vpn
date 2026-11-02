@@ -62,6 +62,7 @@ Commands:
   settings set-routes --json     Check them and, if they pass, save them
   settings reset [--force] --json  Start afresh when the settings cannot be read
   settings set-startup --json    Set how UBC VPN starts when you sign in
+  settings set-updates --json    Set whether the app updates itself
   settings set-tunnel --json     Send UBC traffic only, or all of it, through the VPN
   profiles list --json           Show the profiles and which saves its password
   profiles create|rename|update|delete|switch --json  Change the profiles

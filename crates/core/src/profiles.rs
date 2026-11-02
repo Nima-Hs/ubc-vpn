@@ -4,11 +4,13 @@
 //! saved in the OS keyring, and the routes and DNS domains to send through
 //! the tunnel. The gateway is the policy's, the same for every profile. What
 //! the profiles share is in [`GlobalSettings`]: how UBC VPN starts when the
-//! user signs in, whether it connects by itself, and which profile is used.
+//! user signs in, whether it connects by itself, whether the app installs
+//! updates by itself, and which profile is used.
 //!
 //! ```json
 //! { "version": 2,
-//!   "global": { "start": "off", "auto_connect": false, "active_profile": "<id>" },
+//!   "global": { "start": "off", "auto_connect": false, "auto_update": true,
+//!               "active_profile": "<id>" },
 //!   "profiles": [ { "id": "<id>", "name": "UBC VPN", "username": null,
 //!                   "duo_method": "push", "routes": { "subnets": [], "dns_domains": [] },
 //!                   "save_password": false } ] }
@@ -173,10 +175,20 @@ pub struct GlobalSettings {
     /// damaged file never sends more through the tunnel than was chosen.
     #[serde(default, deserialize_with = "lenient_tunnel")]
     pub tunnel: TunnelMode,
+    /// Whether the app downloads updates by itself and offers to install
+    /// them ("Automatic updates"). When off, it only says one exists. Left
+    /// out, as in a file from before it, it is on.
+    #[serde(default = "on")]
+    pub auto_update: bool,
     /// Fields this version does not know, kept as they are.
     #[serde(flatten)]
     #[cfg_attr(test, ts(skip))]
     pub other: Map<String, Value>,
+}
+
+/// The default of a setting that starts on.
+fn on() -> bool {
+    true
 }
 
 /// Reads a tunnel mode, taking anything that is not one as split.
@@ -347,6 +359,7 @@ impl Profiles {
                 auto_connect: false,
                 active_profile: id,
                 tunnel: TunnelMode::Split,
+                auto_update: true,
                 other: Map::new(),
             },
             profiles: vec![profile],
@@ -705,6 +718,11 @@ impl Profiles {
         self.global.auto_connect = auto_connect;
     }
 
+    /// Sets whether the app downloads and offers updates by itself.
+    pub fn set_updates(&mut self, auto_update: bool) {
+        self.global.auto_update = auto_update;
+    }
+
     /// Sets split or full for every profile. Whether full may be had is the
     /// policy's to say, and the caller's to ask before this.
     pub fn set_tunnel(&mut self, mode: TunnelMode) {
@@ -968,6 +986,15 @@ pub struct Startup {
     pub start: StartMode,
     /// Whether it connects once it has started.
     pub auto_connect: bool,
+}
+
+/// The input of `settings set-updates`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct Updates {
+    /// Whether the app downloads and offers updates by itself.
+    pub auto_update: bool,
 }
 
 /// The answer to a change of the profiles that was refused.
