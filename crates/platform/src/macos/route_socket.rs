@@ -222,7 +222,9 @@ fn parse_route(message: &[u8]) -> Result<Route> {
         None
     } else {
         // A route through a router that is not an IPv4 address is not one
-        // this code understands.
+        // this code understands. It is still an IPv4 route, and leaving it
+        // out could hide the one that decides a destination, so the whole
+        // table is unreadable instead and every check fails closed.
         let gateway = addresses[RTAX_GATEWAY].and_then(inet);
         Some(gateway.ok_or_else(unreadable)?)
     };

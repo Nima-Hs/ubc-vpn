@@ -346,8 +346,9 @@ fn interfaces() -> Vec<Interface> {
     ]
 }
 
-// Scoped routes, cloned routes and neighbour entries do not decide where
-// traffic goes; the longest prefix of the rest does. A route out of an
+// Scoped routes and cloned routes, neighbour entries among them, do not
+// decide where traffic goes; the longest prefix of the rest does, a static
+// host route onto the link included. A route out of an
 // interface that is down never counts.
 #[test]
 fn only_routes_that_count_decide_and_the_longest_prefix_wins() {
@@ -363,12 +364,20 @@ fn only_routes_that_count_decide_and_the_longest_prefix_wins() {
             Some("192.0.2.1"),
             gateway | libc::RTF_WASCLONED,
         ),
-        // A neighbour on the local network.
+        // A neighbour on the local network, which ARP learnt: a clone.
         route(
             "198.51.100.10/32",
             4,
             None,
-            libc::RTF_LLINFO | libc::RTF_HOST,
+            libc::RTF_LLINFO | libc::RTF_HOST | libc::RTF_WASCLONED,
+        ),
+        // A host route added by hand straight onto the link: the kernel
+        // marks it RTF_LLINFO too, but it is not a clone, and it decides.
+        route(
+            "198.51.100.11/32",
+            4,
+            None,
+            libc::RTF_LLINFO | libc::RTF_HOST | libc::RTF_STATIC,
         ),
         route("203.0.113.0/24", 9, None, libc::RTF_IFSCOPE),
         // Out of an interface that is down.
@@ -381,6 +390,11 @@ fn only_routes_that_count_decide_and_the_longest_prefix_wins() {
     };
     assert_eq!(via("198.51.100.9"), [9], "a cloned route decided");
     assert_eq!(via("198.51.100.10"), [9], "a neighbour entry decided");
+    assert_eq!(
+        via("198.51.100.11"),
+        [4],
+        "a static host route onto the link did not decide"
+    );
     assert_eq!(via("203.0.113.9"), [4], "a scoped route decided");
     assert_eq!(
         via("198.18.0.9"),
@@ -1482,4 +1496,135 @@ fn the_mark_survives_the_route_being_used() {
             assert_eq!(routes_to(net), [], "the route used was not removed");
         },
     );
+}
+
+// A gateway on the local link: its route has no router, and the kernel
+// marks it RTF_LLINFO as it does every host route onto the link. It is
+// still ours, so `remove_all` removes it. Somebody else's host route to the
+// gateway is seen before the add, so it is never replaced: an identical
+// one is left alone and not ours, one through a router is `AlreadyExists`.
+#[test]
+fn an_on_link_gateway_route_is_seen_and_removed() {
+    alone_as_root(
+        "an_on_link_gateway_route_is_seen_and_removed",
+        "routes on-link gateway",
+        || {
+            let dir = state_dir("on-link");
+            let _cleanup = Cleanup(vec![dir.clone()]);
+            let routes = MacRoutes::unchecked(&dir);
+            let physical = routes.capture_physical(ip("192.0.2.1")).expect("capture");
+            let wire = physical.interface().to_string();
+            let wire_index = index_of(&wire);
+            let on_link = crate::PhysicalNetwork {
+                next_hop: None,
+                ..physical.clone()
+            };
+            let (gateway, host) = (ip("192.0.2.1"), net("192.0.2.1/32"));
+
+            // Ours.
+            routes.add_gateway_route(gateway, &on_link).expect("add");
+            let ours = routes_to(host);
+            assert_eq!(ours, [(wire_index, None, true)], "ours does not count");
+            routes.remove_all().expect("remove all");
+            assert_eq!(routes_to(host), [], "remove_all left our on-link route");
+            assert_eq!(journal_rows(&dir), []);
+
+            // Somebody else's, identical.
+            route_socket::change(Change::Add, host, wire_index, None, 0).expect("theirs");
+            routes
+                .add_gateway_route(gateway, &on_link)
+                .expect("add over theirs");
+            assert_eq!(journal_rows(&dir), [], "a row for their route");
+            routes.remove_all().expect("remove all");
+            let theirs = routes_to(host);
+            assert_eq!(theirs, [(wire_index, None, false)], "theirs went");
+            let _ = route_socket::change(Change::Delete, host, wire_index, None, 0);
+
+            // Somebody else's, through a router.
+            if let Some(router) = physical.next_hop() {
+                let routed = route_socket::change(Change::Add, host, wire_index, Some(router), 0);
+                routed.expect("theirs through the router");
+                let refused = routes.add_gateway_route(gateway, &on_link);
+                assert_eq!(refused, Err(Error::AlreadyExists), "replaced theirs");
+                let kept = routes_to(host);
+                assert_eq!(kept, [(wire_index, Some(router), false)], "theirs went");
+                let _ = route_socket::change(Change::Delete, host, wire_index, Some(router), 0);
+            }
+        },
+    );
+}
+
+// Somebody's host route straight onto the physical link, inside a subnet
+// the tunnel carries, wins by the longest prefix: the check must not answer
+// `Yes` for the tunnel while traffic to that address leaves by the link.
+#[test]
+fn a_host_route_onto_the_link_decides() {
+    alone_as_root(
+        "a_host_route_onto_the_link_decides",
+        "routes host route onto the link",
+        || {
+            let device = utun();
+            let dir = state_dir("onto-link");
+            let _cleanup = Cleanup(vec![dir.clone()]);
+            let routes = MacRoutes::unchecked(&dir);
+            routes
+                .configure_tunnel(&device.name, ip("198.18.0.10"), 1300)
+                .expect("configure");
+            let physical = routes.capture_physical(ip("192.0.2.1")).expect("capture");
+            let wire = physical.interface().to_string();
+            let host = net("198.51.100.9/32");
+            routes
+                .add_tunnel_routes(&device.name, &[net("198.51.100.0/24")])
+                .expect("the tunnel route");
+            route_socket::change(Change::Add, host, index_of(&wire), None, 0)
+                .expect("their host route");
+            let tunnel = routes.uses_interface(ip("198.51.100.9"), &device.name);
+            let link = routes.uses_interface(ip("198.51.100.9"), &wire);
+            let _ = route_socket::change(Change::Delete, host, index_of(&wire), None, 0);
+            assert_eq!(
+                tunnel,
+                Verified::No,
+                "the tunnel, while the kernel uses {wire}"
+            );
+            assert_eq!(link, Verified::Yes);
+        },
+    );
+}
+
+// A route scoped to an interface is used only by a program bound to it.
+// One on the tunnel decides nothing, is not in the way of an add, and is
+// not removed.
+#[test]
+fn a_scoped_route_decides_nothing() {
+    alone_as_root("a_scoped_route_decides_nothing", "routes scoped", || {
+        let device = utun();
+        let dir = state_dir("scoped");
+        let _cleanup = Cleanup(vec![dir.clone()]);
+        let routes = MacRoutes::unchecked(&dir);
+        routes
+            .configure_tunnel(&device.name, ip("198.18.0.11"), 1300)
+            .expect("configure");
+        let index = index_of(&device.name);
+        let net = net("198.51.100.0/24");
+        let scoped = libc::RTF_IFSCOPE;
+        route_socket::change(Change::Add, net, index, None, scoped).expect("a scoped route");
+        let is_scoped = |r: &Route| r.dest == net && r.flags & scoped != 0;
+        let listed = route_socket::table().expect("the table");
+        assert!(
+            listed.iter().any(is_scoped),
+            "the scoped route is not listed"
+        );
+        let answer = routes.uses_interface(ip("198.51.100.9"), &device.name);
+        assert_eq!(answer, Verified::No, "a scoped route decided");
+        routes
+            .add_tunnel_routes(&device.name, &[net])
+            .expect("add beside it");
+        assert_eq!(routes_to(net), [(index, None, true)], "ours is not there");
+        assert_eq!(journal_rows(&dir).len(), 1);
+        routes.remove_all().expect("remove all");
+        let left = route_socket::table().expect("the table");
+        let _ = route_socket::change(Change::Delete, net, index, None, scoped);
+        assert!(left.iter().any(is_scoped), "the scoped route was removed");
+        assert_eq!(routes_to(net), [], "ours stayed");
+    });
 }

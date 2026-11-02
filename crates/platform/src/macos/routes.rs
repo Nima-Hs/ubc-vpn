@@ -15,15 +15,20 @@
 //!   a route the first time a destination is used, to cache things about
 //!   it. They follow the route they came from, may outlive a change to it
 //!   for a moment, and the kernel deletes one by itself when a route is
-//!   added in its place.
-//! - **Neighbour entries** (`RTF_LLINFO`): the link-layer addresses of
-//!   machines on the local network, which say whether a neighbour answered
-//!   lately, not where traffic goes.
+//!   added in its place. Neighbour entries, the link-layer addresses of
+//!   machines on the local network that ARP learnt, are clones too, so they
+//!   are left out with them.
+//!
+//! `RTF_LLINFO` alone does not leave a route out. The kernel sets it on
+//! every host route straight onto an Ethernet-like interface, also one
+//! added by hand (`route add -host … -interface en0`) or by this product
+//! for a gateway on the local link. Such a route is not a clone and the
+//! kernel forwards by it, so it counts.
 //!
 //! What is left is matched as the kernel does: the longest prefix wins.
 //! Without scoping and cloning there is one route per destination and
 //! prefix, so there are no metrics to compare. A route out of an interface
-//! that is not up and running never counts.
+//! that is not up never counts.
 //!
 //! # Which routes are ours
 //!
@@ -35,6 +40,13 @@
 //! an add reads the table first only to tell an identical route, which is
 //! left alone and not ours, from one elsewhere, which is
 //! [`Error::AlreadyExists`].
+//!
+//! The kernel deletes a route by its destination and mask alone, not its
+//! next hop or interface (`RTM_DELETE`). So a removal reads the table first
+//! and deletes only when the route there is identical and marked. Between
+//! that read and the delete, a route that another program running as root
+//! put in place of ours would be deleted instead. The window is a few
+//! system calls long, and only an administrator's program can use it.
 //!
 //! # The boot the journal belongs to
 //!
@@ -138,7 +150,7 @@ pub(super) fn boot() -> Result<Boot> {
 /// Whether a route of the table is one that decides where traffic goes:
 /// see "Which routes count".
 pub(super) fn counts(route: &Route) -> bool {
-    let left_out = [libc::RTF_IFSCOPE, libc::RTF_WASCLONED, libc::RTF_LLINFO];
+    let left_out = [libc::RTF_IFSCOPE, libc::RTF_WASCLONED];
     left_out.iter().all(|flag| route.flags & flag == 0)
 }
 
@@ -390,7 +402,7 @@ impl Routes for MacRoutes {
             .flat_map(|i| i.v4.iter().map(|a| a.addr))
             .collect();
         // macOS lists no duplicate-address state for IPv4 here: every
-        // address of an interface that is up and running is in use.
+        // address of an interface that is up is in use.
         let rows = interfaces.iter().flat_map(|i| {
             i.v4.iter().map(|a| AddressRow {
                 addr: a.addr,
