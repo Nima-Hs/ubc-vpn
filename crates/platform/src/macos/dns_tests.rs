@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
 use super::dns::{
-    Effective, Entry, MOST_DOMAINS, PRODUCT_SERVICE, Resolver, SessionDns, TEST_SERVICE, check,
-    key_of,
+    Effective, Entry, MOST_DOMAINS, PRODUCT_SERVICE, Resolver, SCUTIL, SessionDns, TEST_SERVICE,
+    check, key_of, platform_service, quiet,
 };
 use super::dynamic_store::{Store, Value};
 use super::routes::MacRoutes;
@@ -562,6 +562,10 @@ fn the_platform_uses_this_dns_under_the_tests_id() {
     // Never changed: a later version must find an earlier one's entry.
     assert_eq!(PRODUCT_SERVICE, "io.github.nima-hs.ubc-vpn");
     assert_eq!(TEST_SERVICE, "io.github.nima-hs.ubc-vpn.test");
+    // Security rule: a test, even one run as root where the product is in
+    // use, never reads, sets or removes the product's entry.
+    assert_eq!(key_of(platform_service()), key_of(TEST_SERVICE));
+    assert_ne!(key_of(platform_service()), key_of(PRODUCT_SERVICE));
     let bad = split([192, 0, 2, 53], &["--x"]);
     let good = split([192, 0, 2, 53], &["suite.example"]);
     let modes = [
@@ -739,12 +743,16 @@ fn a_second_resolver_for_the_domain_is_not_exact() {
         domains: vec!["suite.example".to_string()],
     };
     assert!(shown.sends(&both), "two identical entries agree");
-    let text = text.replacen(
-        "nameserver[1] : 192.0.2.54",
-        "nameserver[1] : 192.0.2.99",
-        1,
-    );
-    let shown = Effective::parse(&text).expect("readable");
+    // Whichever comes first: the order does not make either one ours.
+    let old = "nameserver[1] : 192.0.2.54";
+    let new = "nameserver[1] : 192.0.2.99";
+    let first_differs = text.replacen(old, new, 1);
+    let shown = Effective::parse(&first_differs).expect("readable");
+    assert!(!shown.sends(&both), "the first sends elsewhere");
+    let (at, _) = text.match_indices(old).nth(1).expect("a second entry");
+    let second_differs = format!("{}{new}{}", &text[..at], &text[at + old.len()..]);
+    let shown = Effective::parse(&second_differs).expect("readable");
+    assert_eq!(shown.main[1].nameservers[1], "192.0.2.54", "the first kept");
     assert!(!shown.sends(&both), "the second sends elsewhere");
 }
 
@@ -767,6 +775,30 @@ fn refuses_text_it_cannot_read() {
     ] {
         assert!(Effective::parse(text).is_err(), "{text:?}");
     }
+}
+
+// Security rule: nothing from the environment reaches the system's tools,
+// and they start in `/`. A tool run as scutil is run shows no variable and
+// that folder, where the control, run as this process would by default,
+// shows this process's variables. Needs no root and changes nothing.
+#[test]
+fn nothing_from_the_environment_reaches_scutil() {
+    let scutil = quiet(SCUTIL, &["--dns"]);
+    assert_eq!(scutil.get_program(), "/usr/sbin/scutil");
+    assert_eq!(scutil.get_current_dir(), Some(Path::new("/")));
+
+    let inherited = Command::new("/usr/bin/env").output().expect("run env");
+    let inherited = String::from_utf8_lossy(&inherited.stdout).into_owned();
+    assert!(inherited.contains("PATH="), "the control saw nothing");
+    let given = quiet("/usr/bin/env", &[]).output().expect("run env");
+    assert!(given.status.success());
+    let given = String::from_utf8_lossy(&given.stdout).into_owned();
+    assert_eq!(given, "", "the environment reached the tool");
+
+    let folder = quiet("/bin/pwd", &[]).output().expect("run pwd");
+    assert_eq!(String::from_utf8_lossy(&folder.stdout), "/\n");
+    // And scutil itself runs so.
+    assert!(Effective::now().is_ok(), "scutil --dns could not be read");
 }
 
 // The test's own reading of a query and its answer, without a device.

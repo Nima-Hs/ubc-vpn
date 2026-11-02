@@ -55,7 +55,7 @@ const SETTLE: Duration = Duration::from_secs(5);
 const SCUTIL_LIMIT: Duration = Duration::from_secs(10);
 /// The most of its output that is read.
 const MOST_OUTPUT: u64 = 4 << 20;
-const SCUTIL: &str = "/usr/sbin/scutil";
+pub(super) const SCUTIL: &str = "/usr/sbin/scutil";
 
 const SERVERS: &str = "ServerAddresses";
 const DOMAINS: &str = "SupplementalMatchDomains";
@@ -90,35 +90,56 @@ impl SessionDns {
         key_of(self.service)
     }
 
-    /// Runs `act` with the session, opening it first if need be. A call
-    /// that fails closes the session and tries once more with a new one, in
-    /// case configd started again and the old one is gone.
-    fn with_store<T>(&self, act: impl Fn(&Store) -> Result<T>) -> Result<T> {
+    /// Runs `act` with the session, opening it first if need be.
+    ///
+    /// Closing the session removes the entry it set. So only a change, which
+    /// replaces or removes that entry anyway, passes [`Use::Change`]: when
+    /// its call fails, the session is closed and the call tried once more
+    /// with a new one, in case configd started again and the old one is
+    /// gone. A check passes [`Use::Check`] and never closes the session: a
+    /// failed check leaves the split DNS as it was, and fails.
+    fn with_store<T>(&self, how: Use, act: impl Fn(&Store) -> Result<T>) -> Result<T> {
         let mut held = lock(&self.store);
-        for attempt in 0..2 {
-            let store = match held.take() {
-                Some(store) => store,
-                None => Store::session(&format!("ubc-vpn {}", self.service))?,
-            };
-            match act(&store) {
-                Ok(done) => {
-                    *held = Some(store);
-                    return Ok(done);
-                }
-                Err(error) if attempt == 1 || error == Error::PermissionDenied => {
-                    return Err(error);
-                }
-                Err(_) => continue,
+        let open = || Store::session(&format!("ubc-vpn {}", self.service));
+        if held.is_none() {
+            *held = Some(open()?);
+        }
+        let store = held.as_ref().expect("the session was just opened");
+        match act(store) {
+            Ok(done) => Ok(done),
+            Err(error) if how == Use::Check || error == Error::PermissionDenied => Err(error),
+            Err(_) => {
+                // Replacing it closes the old session.
+                *held = Some(open()?);
+                act(held.as_ref().expect("the session was just opened"))
             }
         }
-        unreachable!("the second attempt returns")
     }
 
     /// The entry this service has now, read from the store.
-    fn entry(&self) -> Result<Option<Entry>> {
-        let value = self.with_store(|store| store.get(&self.key()))?;
+    fn entry(&self, how: Use) -> Result<Option<Entry>> {
+        let value = self.with_store(how, |store| store.get(&self.key()))?;
         Ok(value.map(|value| Entry::of(&value)))
     }
+
+    /// The key the session sets, for tests to check which one it is.
+    #[cfg(test)]
+    pub(super) fn service(&self) -> &'static str {
+        self.service
+    }
+}
+
+/// What a call to the store is for. See [`SessionDns::with_store`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Use {
+    Change,
+    Check,
+}
+
+/// The service id the platform's DNS uses in this build.
+#[cfg(test)]
+pub(super) fn platform_service() -> &'static str {
+    PRODUCT.service()
 }
 
 pub(super) fn key_of(service: &str) -> String {
@@ -377,14 +398,26 @@ fn indexed(name: &str, prefix: &str) -> Option<usize> {
     rest.strip_suffix(']')?.parse().ok()
 }
 
-/// What `scutil --dns` writes, run with no environment.
-fn scutil_dns() -> Result<String> {
-    let mut child = Command::new(SCUTIL)
-        .arg("--dns")
+/// `program` with `args`, as the system's own tools are run here.
+///
+/// Security rule: nothing from the environment reaches it, and it starts
+/// in `/`, so neither a variable nor the folder the service was started in
+/// can change what it does. Nothing comes in, and only its output is read.
+pub(super) fn quiet(program: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(args)
         .env_clear()
+        .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// What `scutil --dns` writes, run as [`quiet`] runs a tool.
+fn scutil_dns() -> Result<String> {
+    let mut child = quiet(SCUTIL, &["--dns"])
         .spawn()
         .map_err(|error| Error::Failed(format!("could not run scutil: {error}")))?;
     let output = child.stdout.take();
@@ -443,14 +476,14 @@ impl Dns for SessionDns {
     fn set_split_dns(&self, _tunnel: &str, dns: &SplitDns) -> Result<()> {
         check(dns)?;
         let wanted = Entry::wanted(dns);
-        self.with_store(|store| store.set(&self.key(), &wanted.value()))?;
+        self.with_store(Use::Change, |store| store.set(&self.key(), &wanted.value()))?;
         settle(|now| now.sends(dns));
         Ok(())
     }
 
     fn clear_split_dns(&self) -> Result<()> {
-        let was = self.entry()?;
-        self.with_store(|store| store.remove(&self.key()))?;
+        let was = self.entry(Use::Change)?;
+        self.with_store(Use::Change, |store| store.remove(&self.key()))?;
         if let Some(was) = was {
             settle(|now| !now.still_sends(&was.domains, &was.servers));
         }
@@ -458,7 +491,7 @@ impl Dns for SessionDns {
     }
 
     fn split_dns_matches(&self, dns: &SplitDns) -> Verified {
-        match self.entry() {
+        match self.entry(Use::Check) {
             Ok(Some(entry)) if entry == Entry::wanted(dns) => {}
             Ok(_) => return Verified::No,
             Err(_) => return Verified::Unknown,
