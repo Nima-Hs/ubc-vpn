@@ -292,8 +292,11 @@
 //!   visible for some tens of milliseconds more, so wait, for a bounded
 //!   time, until the system no longer has it. On macOS and Linux the library never closes
 //!   a device it opened itself when no script is set, so there the engine
-//!   must open the device and hand it over with `openconnect_setup_tun_fd`.
-//!   Until it does, a tunnel there is refused at the device step.
+//!   opens the device and hands it over with `openconnect_setup_tun_fd`, and
+//!   the handle closes it after the library has freed the handle, which is
+//!   after the main loop has returned. Until the device is opened (the
+//!   `device` module's placeholders), a tunnel there is refused at the
+//!   device step.
 //! - Bound the library's own silent reconnects with a short reconnect
 //!   timeout in the main loop, so a dead tunnel is reported and not hidden.
 //! - Never retry after a pin mismatch or a refused session, and never try to
@@ -326,6 +329,8 @@ use ubc_vpn_core::protocol::{ErrorCode, is_plausible_cookie, is_plausible_gatewa
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::Ipv4Net;
 
+#[cfg(all(feature = "libopenconnect", unix))]
+mod device;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 // Private in anything that ships; see "The binding is private" above.

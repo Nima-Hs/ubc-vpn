@@ -382,6 +382,45 @@ fn freeing_a_handle_leaves_standard_input_open() {
     assert!(open(), "freeing the handle closed standard input");
 }
 
+// Security rule: a tunnel device handed to the library stays open while the
+// handle lives and is closed once the handle is freed. The library never
+// closes one when no script is set, and closing it is what removes the
+// device. A socket pair stands in for the device: the other end reads the
+// end of the stream only once the descriptor is closed. A second device is
+// refused, and closed at once.
+#[cfg(unix)]
+#[test]
+fn a_handed_over_device_is_closed_with_the_handle_and_not_before() {
+    use std::io::{ErrorKind, Read};
+    use std::os::unix::net::UnixStream;
+    let read = |peer: &mut UnixStream| {
+        let mut byte = [0; 1];
+        peer.read(&mut byte).map_err(|error| error.kind())
+    };
+    let (library, _guard) = library();
+    let (handle, _) = handle(library, 8443, &yes(), Box::new(|_| true), Box::new(answer));
+    let (device, mut peer) = UnixStream::pair().unwrap();
+    peer.set_nonblocking(true).unwrap();
+    assert_eq!(handle.setup_tun_fd(device.into()), 0);
+    assert_eq!(
+        read(&mut peer),
+        Err(ErrorKind::WouldBlock),
+        "closed too soon"
+    );
+    let (second, mut second_peer) = UnixStream::pair().unwrap();
+    second_peer.set_nonblocking(true).unwrap();
+    assert_eq!(handle.setup_tun_fd(second.into()), -16);
+    assert_eq!(read(&mut second_peer), Ok(0), "a second device was kept");
+    assert_eq!(read(&mut peer), Err(ErrorKind::WouldBlock), "replaced");
+    drop(handle);
+    assert_eq!(
+        read(&mut peer),
+        Ok(0),
+        "left open after the handle was freed"
+    );
+    println!("RAN: handle closes a handed-over device");
+}
+
 // The callbacks are freed when the handle is, and not before: the library
 // may still call them while it frees the handle.
 #[test]

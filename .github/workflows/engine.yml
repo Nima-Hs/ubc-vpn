@@ -325,6 +325,9 @@ jobs:
             grep -q '^RAN: tunnel reports a lost gateway' test.log
           else
             grep -q '^RAN: tunnel refuses at the device step' test.log
+            # openconnect_setup_tun_fd resolved in the pinned library and
+            # took a descriptor, which the handle closed when it was freed.
+            grep -q '^RAN: handle closes a handed-over device' test.log
           fi
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests

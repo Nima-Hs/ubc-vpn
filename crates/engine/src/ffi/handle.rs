@@ -13,6 +13,8 @@ use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::net::SocketAddrV4;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -451,6 +453,13 @@ pub struct Handle<'a> {
     pipe: CommandPipe,
     /// Holds the pipe for other threads while the handle is alive.
     stopper: Stopper,
+    /// The tunnel device handed over with [`setup_tun_fd`](Self::setup_tun_fd).
+    /// The library uses it until the handle is freed, and never closes it
+    /// when no script is set. So the handle owns it and closes it in `drop`,
+    /// after the library has freed the handle, which on a tunnel is after
+    /// the main loop has returned. Closing it removes the device.
+    #[cfg(unix)]
+    device: Cell<Option<OwnedFd>>,
 }
 
 /// Tells a handle to stop what it is waiting for, from any thread, with no
@@ -511,6 +520,8 @@ impl<'a> Handle<'a> {
             context,
             pipe: CommandPipe(0),
             stopper: Stopper::default(),
+            #[cfg(unix)]
+            device: Cell::new(None),
         };
         if raw.is_null() {
             return None;
@@ -665,6 +676,34 @@ impl<'a> Handle<'a> {
         unsafe { copied((self.library.get_ifname)(self.raw)) }
     }
 
+    /// `openconnect_setup_tun_fd`: hands the library a tunnel device the
+    /// engine opened itself, with no script. Zero on success, or a negative
+    /// errno. macOS and Linux only.
+    ///
+    /// The handle keeps `device` and closes it when it is dropped, after the
+    /// library has freed the handle; the library makes it close-on-exec and
+    /// non-blocking. It is kept even when the library fails: by then the
+    /// library may hold its number. A handle takes one device; a second is
+    /// refused with `-EBUSY` and closed at once, unseen by the library.
+    #[cfg(unix)]
+    pub fn setup_tun_fd(&self, device: OwnedFd) -> c_int {
+        /// `EBUSY`, which is 16 on macOS and on Linux.
+        const EBUSY: c_int = 16;
+        let held = self.device.take();
+        if held.is_some() {
+            self.device.set(held);
+            return -EBUSY;
+        }
+        let fd = device.as_raw_fd();
+        // Before the call, so the descriptor stays open for as long as the
+        // library may use the number: until `drop` has freed the handle.
+        self.device.set(Some(device));
+        // SAFETY: `raw` is a live handle used on its own thread, and `fd` is
+        // an open descriptor that the handle owns and keeps open until the
+        // library has freed the handle.
+        unsafe { (self.library.setup_tun_fd)(self.raw, fd) }
+    }
+
     /// `openconnect_mainloop`: runs the tunnel until it ends, and answers
     /// with why, as a negative errno. Gives up reconnecting after
     /// `reconnect_timeout` seconds, trying every `reconnect_interval`.
@@ -697,6 +736,11 @@ impl Drop for Handle<'_> {
             // goes last.
             unsafe { (self.library.vpninfo_free)(self.raw) };
         }
+        // Only now, with nothing left in the library that could use its
+        // number: the library never closes a device it was handed when no
+        // script is set. Closing it removes the device.
+        #[cfg(unix)]
+        drop(self.device.take());
         // SAFETY: `context` came from `Box::into_raw` in `new`, and nothing
         // can reach it now that the handle is gone.
         drop(unsafe { Box::from_raw(self.context) });

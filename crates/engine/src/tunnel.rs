@@ -7,18 +7,21 @@
 //! documentation. There is no `unsafe` here: every call into the library
 //! goes through the `ffi` module.
 //!
-//! The tunnel device is created on Windows only for now. On macOS and Linux
-//! the library never closes a device it opened itself when no script is set
+//! On Windows the library creates the tunnel device. On macOS and Linux the
+//! library never closes a device it opened itself when no script is set
 //! (`os_shutdown_tun` in `tun.c` closes the descriptor only when there is a
-//! script), so the device would outlive the tunnel. There the engine will
-//! open the device itself and hand it over with `openconnect_setup_tun_fd`;
-//! until that is written, opening refuses at the device step.
+//! script), so the device would outlive the tunnel. There the engine opens
+//! the device itself (the `device` module) and hands it over with
+//! `openconnect_setup_tun_fd`; the handle keeps the descriptor and closes it
+//! once the library has freed the handle. Until the device is opened, which
+//! is all placeholders for now, opening refuses at the device step.
 //!
 //! Once the tunnel is open, the thread runs the library's main loop until
 //! the tunnel ends: closed through a command on the command pipe, refused by
-//! the gateway, or lost. The loop removes the device as it ends; the thread
-//! then frees the handle, waits for the device to be gone, and sends the
-//! tunnel's one event.
+//! the gateway, or lost. On Windows the loop removes the device as it ends;
+//! on macOS and Linux freeing the handle closes its descriptor, which
+//! removes it. The thread then waits for the device to be gone, and sends
+//! the tunnel's one event.
 
 use std::cell::Cell;
 use std::ffi::{CString, c_int};
@@ -376,6 +379,8 @@ impl Job {
         // The tunnel runs here until it ends. A close writes its command to
         // the pipe, and the loop removes the device as it returns.
         let result = handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
+        // On macOS and Linux this also closes the device's descriptor, which
+        // the library does not, and so removes the device.
         drop(handle);
         wait_until_gone(&device);
         drop(slot);
@@ -451,15 +456,25 @@ fn device(
     }
 }
 
-/// Not yet: see the module documentation. The library would leave the
-/// device behind when the tunnel ends.
+/// Opens the tunnel device, hands it to the library with no script, and
+/// names it in `assigned`. The handle keeps the descriptor from then on and
+/// closes it when it is dropped, which removes the device on every path: a
+/// failure here is followed by dropping the handle.
 #[cfg(not(windows))]
 fn device(
-    _handle: &Handle<'_>,
-    _assigned: Assigned,
-    _cancel: &Cancel,
+    handle: &Handle<'_>,
+    mut assigned: Assigned,
+    cancel: &Cancel,
 ) -> Result<Assigned, TunnelError> {
-    Err(TunnelError::Failed)
+    if cancel.is_cancelled() {
+        return Err(TunnelError::Cancelled);
+    }
+    let (fd, name) = crate::device::open()?;
+    if name.is_empty() || handle.setup_tun_fd(fd) != 0 {
+        return Err(TunnelError::Failed);
+    }
+    assigned.interface = name;
+    Ok(assigned)
 }
 
 /// The longest a closed device is waited for to disappear.
@@ -480,8 +495,8 @@ fn wait_until_gone(name: &str) {
 }
 
 #[cfg(not(windows))]
-fn wait_until_gone(_name: &str) {
-    // Nothing yet: no device is made here (see the module documentation).
+fn wait_until_gone(name: &str) {
+    crate::device::wait_until_gone(name);
 }
 
 /// An open tunnel: what it was assigned, and the thread that owns it.
