@@ -135,7 +135,7 @@ jobs:
       # needing root really ran.
       - name: The root-only tests really ran
         run: |
-          tests=("squatted socket" narrowing suite dev)
+          tests=("squatted socket" narrowing suite dev "state folder")
           # macOS alone lets a file's owner mark it unchangeable.
           if [ "$RUNNER_OS" = macOS ]; then tests+=(flags "flags loop"); fi
           for test in "${tests[@]}"; do

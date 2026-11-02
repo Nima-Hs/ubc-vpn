@@ -1055,9 +1055,11 @@ pub struct Paths {
 ///   changes its access list to make it pass: an administrator must remove
 ///   such a folder.
 ///
-/// On Windows these checks are in force. On macOS and Linux they are not
-/// written yet: the folder is only created, and that platform's author must
-/// add the same rule (owned by root, writable by root alone).
+/// On macOS and Linux the rule is the same. Installed, the folder, every
+/// folder above it and the file read are real (no links), root's, and
+/// writable by root alone. In dev mode the folder and the file are the
+/// current user's and writable by them alone. Files are written with mode
+/// 0600.
 #[derive(Debug, Clone)]
 pub struct StateDir {
     mode: Mode,
@@ -1071,12 +1073,12 @@ impl StateDir {
         let path = paths.state_dir.clone();
         #[cfg(windows)]
         os::state::prepare(mode, &path)?;
-        #[cfg(not(windows))]
-        state_plain::prepare(&path)?;
+        #[cfg(unix)]
+        unix::state::prepare(mode, &path)?;
         Ok(Self {
             mode,
             path,
-            checked: cfg!(windows),
+            checked: true,
         })
     }
 
@@ -1102,9 +1104,12 @@ impl StateDir {
     /// ordinary users create files in it.
     pub fn temp_dir(&self) -> Result<PathBuf> {
         let path = self.path.join("temp");
-        #[cfg(windows)]
         if self.checked {
+            #[cfg(windows)]
             os::state::prepare(self.mode, &path)?;
+            // Nothing uses it on macOS and Linux yet, so it is made closed.
+            #[cfg(unix)]
+            unix::state::prepare_private(self.mode, &self.path, &path)?;
             return Ok(path);
         }
         state_plain::prepare(&path)?;
@@ -1114,12 +1119,12 @@ impl StateDir {
     /// The file's whole contents, or `None` when there is no such file.
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let file = self.file(name)?;
-        #[cfg(windows)]
         if self.checked {
+            #[cfg(windows)]
             return os::state::read(self.mode, &self.path, &file);
+            #[cfg(unix)]
+            return unix::state::read(self.mode, &self.path, &file);
         }
-        // Read on every OS, though only Windows acts on them yet.
-        let _ = (self.mode, self.checked);
         state_plain::read(&file)
     }
 
@@ -1128,10 +1133,14 @@ impl StateDir {
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let file = self.file(name)?;
         let fresh = self.path.join(format!(".{name}.new"));
-        #[cfg(windows)]
         if self.checked {
             // Held open until the file is in place.
+            #[cfg(windows)]
             let _held = os::state::check_folder(self.mode, &self.path)?;
+            // Once the folder passes, only root, or in dev mode the current
+            // user, can put anything in it.
+            #[cfg(unix)]
+            unix::state::check_folder(self.mode, &self.path)?;
             return state_plain::write(&file, &fresh, bytes);
         }
         state_plain::write(&file, &fresh, bytes)
