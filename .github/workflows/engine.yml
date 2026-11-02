@@ -361,8 +361,12 @@ jobs:
           tests=$(program tunnel)
           test -x "$tests"
           status=0
+          # GitHub's Linux runners have vhost-net, which the library then
+          # uses: the test that seals it must see it in use.
+          expect=()
+          if [ "$RUNNER_OS" = Linux ]; then expect=(UBC_VPN_TEST_EXPECT_VHOST=1); fi
           sudo env UBC_VPN_TEST_PYTHON="$UBC_VPN_TEST_PYTHON" UBC_VPN_TEST_GATEWAY_DIR="$UBC_VPN_TEST_GATEWAY_DIR" \
-            UBC_VPN_TEST_REQUIRE_GATEWAY=1 UBC_VPN_TEST_DEVICE=1 \
+            UBC_VPN_TEST_REQUIRE_GATEWAY=1 UBC_VPN_TEST_DEVICE=1 "${expect[@]}" \
             "$tests" device --nocapture 2>&1 | tee device.log || status=$?
           if [ "$RUNNER_OS" = Linux ]; then
             lib=$(program ubc_vpn_engine)
@@ -375,7 +379,8 @@ jobs:
               UBC_VPN_TEST_DEVICE=1 "$ocserv" a_real_gateway_takes_the_login --nocapture 2>&1 \
               | tee -a device.log || status=$?
           fi
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/target" "$UBC_VPN_TEST_GATEWAY_DIR"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/target" "$UBC_VPN_TEST_GATEWAY_DIR" \
+            ${UBC_VPN_TEST_OCSERV_DIR:+"$UBC_VPN_TEST_OCSERV_DIR"}
           [ "$status" = 0 ]
           # A test that is skipped passes, so each one that must run is
           # named in .github/ran/engine-device/<os>.

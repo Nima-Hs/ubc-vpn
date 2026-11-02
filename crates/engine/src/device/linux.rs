@@ -113,20 +113,35 @@ fn ours(field: &[u8; NAME_SIZE]) -> Option<String> {
 /// ended. Fails if the process's descriptors cannot be read or changed.
 pub(crate) fn seal_vhost() -> Result<(), TunnelError> {
     let entries = std::fs::read_dir("/proc/self/fd").map_err(|_| TunnelError::Failed)?;
+    let mut listed = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| TunnelError::Failed)?;
-        let Some(fd) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
-            return Err(TunnelError::Failed);
+        let fd = entry.file_name().to_str().and_then(|n| n.parse().ok());
+        listed.push((fd, std::fs::read_link(entry.path())));
+    }
+    seal_listed(listed, set_cloexec)
+}
+
+/// The decision [`seal_vhost`] makes for each descriptor it listed: its
+/// number and what reading its link gave. Seals every one open on
+/// `/dev/vhost-net`, and fails on anything it cannot tell, so a descriptor
+/// it could not read is never left inheritable.
+fn seal_listed(
+    listed: Vec<(Option<c_int>, std::io::Result<std::path::PathBuf>)>,
+    mut seal: impl FnMut(c_int) -> Result<(), TunnelError>,
+) -> Result<(), TunnelError> {
+    for (fd, target) in listed {
+        let fd = fd.ok_or(TunnelError::Failed)?;
+        let target = match target {
+            Ok(target) => target,
+            // Closed since it was listed, as the descriptor that read the
+            // folder always is: no longer anything a child could get.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(TunnelError::Failed),
         };
-        // The descriptor that read the folder is gone by now, and so may be
-        // others another thread closed: they cannot be the library's.
-        let Ok(target) = std::fs::read_link(entry.path()) else {
-            continue;
-        };
-        if target.as_os_str() != "/dev/vhost-net" {
-            continue;
+        if target.as_os_str() == "/dev/vhost-net" {
+            seal(fd)?;
         }
-        set_cloexec(fd)?;
     }
     Ok(())
 }
@@ -268,6 +283,52 @@ mod tests {
             "{name:?} is left after its descriptor closed"
         );
         println!("RAN: device is close-on-exec and goes on close");
+    }
+
+    // Security rule: every vhost-net descriptor is sealed, one closed since
+    // it was listed is passed over, and one whose link cannot be read for
+    // any other reason fails the whole call: it might be the vhost-net one.
+    #[test]
+    fn a_descriptor_that_cannot_be_read_fails_the_seal() {
+        use std::io::{Error, ErrorKind};
+        use std::path::PathBuf;
+        let link = |path: &str| Ok(PathBuf::from(path));
+        let sealing = |listed| {
+            let mut sealed = Vec::new();
+            let result = seal_listed(listed, |fd| {
+                sealed.push(fd);
+                Ok(())
+            });
+            (result, sealed)
+        };
+        let good = vec![
+            (Some(3), link("/dev/net/tun")),
+            (Some(4), Err(Error::from(ErrorKind::NotFound))),
+            (Some(5), link("/dev/vhost-net")),
+            (Some(6), link("anon_inode:[eventfd]")),
+            (Some(7), link("/dev/vhost-net")),
+        ];
+        assert_eq!(sealing(good), (Ok(()), vec![5, 7]));
+        for refused in [
+            Error::from(ErrorKind::PermissionDenied),
+            Error::from_raw_os_error(13),
+            Error::other("unknown"),
+        ] {
+            let listed = vec![(Some(3), Err(refused)), (Some(5), link("/dev/vhost-net"))];
+            assert_eq!(sealing(listed).0, Err(TunnelError::Failed));
+        }
+        let unnumbered = vec![(None, link("/dev/vhost-net"))];
+        assert_eq!(sealing(unnumbered).0, Err(TunnelError::Failed));
+        let failing = seal_listed(vec![(Some(5), link("/dev/vhost-net"))], |_| {
+            Err(TunnelError::Failed)
+        });
+        assert_eq!(failing, Err(TunnelError::Failed));
+    }
+
+    // The real listing of this process passes: nothing in it is refused.
+    #[test]
+    fn this_process_can_be_sealed() {
+        assert_eq!(seal_vhost(), Ok(()));
     }
 
     // A made-up link is gone at once; waiting for it returns without

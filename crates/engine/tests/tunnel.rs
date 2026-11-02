@@ -844,6 +844,11 @@ mod device {
         assert!(held.iter().any(|file| file == "/dev/net/tun"), "{held:?}");
         let vhost = held.iter().any(|file| file == "/dev/vhost-net");
         println!("the library uses vhost-net: {vhost}");
+        // Where the workflow knows the runner has vhost-net, it must be in
+        // use, or this test would stop covering the descriptor it seals.
+        if std::env::var_os("UBC_VPN_TEST_EXPECT_VHOST").is_some() {
+            assert!(vhost, "vhost-net was expected but not used: {held:?}");
+        }
         // The shell lists its own descriptors, which are what it was given:
         // its input is /dev/null. The descriptor that read the folder is
         // closed before it is read.
