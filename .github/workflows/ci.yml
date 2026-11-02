@@ -41,14 +41,34 @@ jobs:
           key: ci
           # Pull requests restore main's caches but save none of their own.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The snapshot's signed package lists and the packages, as
+      # test-packages.sh last fetched them on this branch or main, so that a
+      # run need not ask the snapshot, which is down now and then. The
+      # script checks them all against the archive's signature again before
+      # it installs anything, and stops if one does not match.
+      - name: Restore the pinned packages
+        id: packages-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-${{ matrix.os }}-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev
       # The command-line client's keyring links the system's libdbus-1 on
       # Linux: its headers and pkg-config, at the versions pinned in
       # test-packages.sh, from its dated Ubuntu snapshot.
       - name: Install the pinned D-Bus headers
         if: runner.os == 'Linux'
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
         run: |
           mkdir "$RUNNER_TEMP/packages"
           bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
+      - name: Save the pinned packages
+        if: runner.os == 'Linux' && steps.packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: ${{ steps.packages-cache.outputs.cache-primary-key }}
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Generated from crates/core by the tests. Deleting them first means a stale or
