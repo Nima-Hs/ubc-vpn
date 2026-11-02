@@ -306,6 +306,8 @@ impl Real {
 #[cfg(any(feature = "real-engine", all(test, unix)))]
 fn program_dir() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|_| LIBRARY_FAILED.to_string())?;
+    #[cfg(unix)]
+    let exe = std::fs::canonicalize(&exe).map_err(|_| LIBRARY_FAILED.to_string())?;
     let dir = exe.parent().ok_or(LIBRARY_FAILED)?;
     Ok(dir.to_path_buf())
 }
@@ -506,11 +508,6 @@ fn run(
     err: &mut dyn Write,
 ) -> u8 {
     let json = match args {
-        #[cfg(target_os = "macos")]
-        ["help" | "--help" | "-h"] => {
-            return say(out, &format!("{HELP}\n  extra  A macOS-only line"), 0);
-        }
-        #[cfg(not(target_os = "macos"))]
         ["help" | "--help" | "-h"] => return say(out, HELP, 0),
         ["version" | "--version" | "-V"] => return say(out, &format!("ubc-vpn {VERSION}"), 0),
         ["disconnect"] => {
