@@ -818,8 +818,8 @@ describe("where the app keeps its own profile", () => {
 
     it("leaves the settings file to the client: the app's own code writes no file at all", () => {
         // The app uses the file system in two places: reading its own
-        // interface files to serve them, and saving a downloaded update in
-        // a folder of its own. Nothing can create, read or write
+        // interface files to serve them, and saving, copying and starting a
+        // downloaded update in a folder of its own. Nothing can create, read or write
         // settings.json, in the profile folder or anywhere else.
         const root = join(__dirname, "..", "src");
         const users = (readdirSync(root, { recursive: true }) as string[])
@@ -828,14 +828,21 @@ describe("where the app keeps its own profile", () => {
                 /["']node:fs|["']fs["']|require\(/.test(readFileSync(join(root, name), "utf8")),
             )
             .map((name) => name.replaceAll("\\", "/"));
-        expect(users).toEqual(["main/security.ts", "main/update/download.ts"]);
+        expect(users).toEqual([
+            "main/security.ts",
+            "main/update/download.ts",
+            "main/update/install.ts",
+        ]);
         const imports = readFileSync(join(root, "main/security.ts"), "utf8").match(
             /import \{([^}]*)\} from "node:fs[^"]*"/g,
         );
         expect(imports).toEqual(['import { readFile } from "node:fs/promises"']);
-        // The updates folder is the only one it names; it never names the settings.
+        // The updates folder is the only one they name; they never name the settings.
         const download = readFileSync(join(root, "main/update/download.ts"), "utf8");
-        expect(download).not.toMatch(/settings\.json|userData|profileFolder|[^L]APPDATA/);
+        const install = readFileSync(join(root, "main/update/install.ts"), "utf8");
+        for (const text of [download, install]) {
+            expect(text).not.toMatch(/settings\.json|userData|profileFolder|[^L]APPDATA/);
+        }
         expect(download).toContain('"updates"');
     });
 

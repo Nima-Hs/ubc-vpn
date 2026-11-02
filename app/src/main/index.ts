@@ -33,6 +33,13 @@ import {
 import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray/icon";
 import { appImage, createTray, followStateOnTaskbar } from "./tray/tray";
 import { TunnelSwitch } from "./tunnel-switch";
+import {
+    disconnectAndWait,
+    type Launcher,
+    launchWindows,
+    restartToUpdate,
+    takeResume,
+} from "./update/install";
 import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
 import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
@@ -191,8 +198,66 @@ async function start(): Promise<void> {
         app.getVersion(),
         mayUpdate({ packaged: app.isPackaged, release: __RELEASE__, demo: __DEMO__ }),
     );
-    registerUpdates(window, devServerUrl, updater);
+    const isConnected = () => {
+        const state = link.getState();
+        return state.link === "ready" && state.conn.state === "connected";
+    };
+    const isDisconnected = () => {
+        const state = link.getState();
+        return state.link === "ready" && state.conn.state === "disconnected";
+    };
+    // Only Windows can install yet; elsewhere no update is ever ready.
+    const launch: Launcher =
+        process.platform === "win32"
+            ? launchWindows(process.env.SystemRoot ?? "C:\\Windows")
+            : async () => "failed";
+    registerUpdates(window, devServerUrl, updater, async () => {
+        const folder = updater.folder();
+        if (folder === null) {
+            return;
+        }
+        await restartToUpdate(updater, {
+            folder,
+            connected: isConnected,
+            disconnect: () =>
+                disconnectAndWait({
+                    disconnect: () => controller.disconnect(),
+                    isDisconnected,
+                    subscribe: (listener) => controller.subscribe(listener),
+                }),
+            launch,
+            // As the tray connects: the window first, as a login may ask something.
+            reconnect: () => connectFromTray(show, () => controller.connect()),
+            quit,
+        });
+    });
     updater.start();
+    // Back from an update that was installed while connected: connect again,
+    // once the service has said where it stands.
+    const updatesFolder = updater.folder();
+    if (updatesFolder !== null) {
+        void takeResume(updatesFolder).then((reconnect) => {
+            if (!reconnect) {
+                return;
+            }
+            const once = (): boolean => {
+                if (link.getState().link === "starting") {
+                    return false;
+                }
+                if (isDisconnected()) {
+                    connectFromTray(show, () => controller.connect());
+                }
+                return true;
+            };
+            if (!once()) {
+                const stop = controller.subscribe(() => {
+                    if (once()) {
+                        stop();
+                    }
+                });
+            }
+        });
+    }
     // The Settings screen and the profiles. Every view of the profiles that a
     // change answers with goes to the window and to the tray menu, so both
     // show them as they are, whichever made the change. Only an installed
