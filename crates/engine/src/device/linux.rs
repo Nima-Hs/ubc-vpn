@@ -223,8 +223,12 @@ mod tests {
     /// What the shell started from this process was given: the targets
     /// of its descriptors.
     fn a_childs_files() -> Vec<String> {
+        // The descriptor that read the folder is closed before it is read.
         let listed = std::process::Command::new("/bin/sh")
-            .args(["-c", r#"for fd in /proc/$$/fd/*; do readlink "$fd"; done"#])
+            .args([
+                "-c",
+                r#"for fd in /proc/$$/fd/*; do readlink "$fd" || :; done"#,
+            ])
             .output()
             .expect("the shell runs");
         assert!(listed.status.success(), "{listed:?}");

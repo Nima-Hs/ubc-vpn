@@ -845,9 +845,13 @@ mod device {
         let vhost = held.iter().any(|file| file == "/dev/vhost-net");
         println!("the library uses vhost-net: {vhost}");
         // The shell lists its own descriptors, which are what it was given:
-        // its input is /dev/null.
+        // its input is /dev/null. The descriptor that read the folder is
+        // closed before it is read.
         let listed = std::process::Command::new("/bin/sh")
-            .args(["-c", r#"for fd in /proc/$$/fd/*; do readlink "$fd"; done"#])
+            .args([
+                "-c",
+                r#"for fd in /proc/$$/fd/*; do readlink "$fd" || :; done"#,
+            ])
             .output()
             .expect("the shell runs");
         assert!(listed.status.success(), "{listed:?}");
