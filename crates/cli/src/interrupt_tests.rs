@@ -15,9 +15,9 @@ use ubc_vpn_platform::Error;
 use ubc_vpn_platform::interrupt::Stop;
 
 use crate::connect::{Ask, Ended, start, undo};
-use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, pin};
 use crate::interrupt::{Progress, serve};
 use crate::terminal::Terminal;
+use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, pin};
 
 /// What the handler of requests did, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]

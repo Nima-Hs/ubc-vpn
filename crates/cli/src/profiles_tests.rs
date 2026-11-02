@@ -50,7 +50,7 @@ impl Machine {
     }
 
     fn write_settings(&self, text: &str) {
-        crate::tests::settings_folder(&self.root.join("settings"));
+        crate::test_support::settings_folder(&self.root.join("settings"));
         std::fs::write(self.settings_file(), text).unwrap();
     }
 
@@ -502,7 +502,7 @@ fn a_cleaned_username_loses_its_saved_password() {
 fn a_new_username_from_a_connect_forgets_the_old_ones_password() {
     let machine = Machine::new();
     let dir = machine.root.join("settings");
-    crate::tests::settings_folder(&dir);
+    crate::test_support::settings_folder(&dir);
     crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("user@app")).unwrap();
     save_password(&ProfileId::first(), "user@app");
     crate::settings::remember_username(&dir, None, &ProfileId::first(), Some("user@app")).unwrap();

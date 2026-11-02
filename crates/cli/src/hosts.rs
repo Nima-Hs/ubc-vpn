@@ -233,3 +233,7 @@ fn verdict(report: &HostCoverage) -> String {
         false => "Covered: yes.".to_string(),
     }
 }
+
+#[cfg(test)]
+#[path = "hosts_tests.rs"]
+mod tests;

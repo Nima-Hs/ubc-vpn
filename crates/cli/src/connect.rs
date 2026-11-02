@@ -705,3 +705,7 @@ fn follow(client: &mut Client, during: &ConnState) -> Result<ConnState, Stop> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "connect_tests.rs"]
+mod tests;

@@ -13,8 +13,8 @@ use ubc_vpn_platform::terminal::MAX_HIDDEN_LINE_BYTES;
 
 use crate::FAILED;
 use crate::connect::{Ask, CANCELLED};
-use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene};
 use crate::terminal::{ReadLine, Terminal, read_shown};
+use crate::test_support::{CODE, PASSWORD, ROUTES, Scene};
 
 /// What was typed, or how the read failed.
 type Typed = Result<&'static str, Error>;

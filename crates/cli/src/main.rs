@@ -18,40 +18,18 @@ mod bridge;
 mod client;
 mod connect;
 mod connect_json;
-#[cfg(test)]
-mod connect_json_tests;
-#[cfg(test)]
-mod connect_tests;
 mod hosts;
-#[cfg(test)]
-mod hosts_tests;
 mod interrupt;
-#[cfg(test)]
-mod interrupt_tests;
 mod keys;
 mod live;
-#[cfg(test)]
-mod live_tests;
 mod logs;
 mod passwords;
-#[cfg(test)]
-mod passwords_tests;
 mod profiles;
-#[cfg(test)]
-mod profiles_tests;
 mod settings;
 mod settings_lock;
-#[cfg(test)]
-mod settings_lock_tests;
-#[cfg(test)]
-mod settings_tests;
 mod terminal;
 #[cfg(test)]
-mod terminal_tests;
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-mod tunnel_tests;
+mod test_support;
 
 /// Exit codes. Scripts and the app tell failures apart by these.
 const FAILED: u8 = 1;
@@ -685,3 +663,7 @@ fn explain(error: &ClientError) -> (u8, String) {
         ClientError::Lost(why) => (FAILED, format!("Lost contact with the service: {why}.")),
     }
 }
+
+#[cfg(test)]
+#[path = "status_tests.rs"]
+mod tests;

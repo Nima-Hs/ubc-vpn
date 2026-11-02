@@ -126,3 +126,7 @@ fn unknown(message: &str) -> LiveRoutes {
 fn tidy(message: &str) -> String {
     clean(message).chars().take(MAX_MESSAGE_CHARS).collect()
 }
+
+#[cfg(test)]
+#[path = "live_tests.rs"]
+mod tests;

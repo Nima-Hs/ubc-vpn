@@ -7,11 +7,11 @@ use ubc_vpn_core::state::ConnState;
 use ubc_vpn_platform::fake::Op;
 
 use crate::client::{Client, Limits};
-use crate::connect_tests::{CODE, PASSWORD, Scene, Typist};
 use crate::settings::{Command, run};
+use crate::test_support::{CODE, PASSWORD, Scene, Typist};
 
 /// The saved routes are 10.255.0.0/24 and dept.example.test (see
-/// `connect_tests.rs`). These add 198.51.100.0/24.
+/// `test_support.rs`). These add 198.51.100.0/24.
 const WIDER: &str =
     r#"{"subnets":["10.255.0.0/24","198.51.100.0/24"],"dns_domains":["dept.example.test"]}"#;
 

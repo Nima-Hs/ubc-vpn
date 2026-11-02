@@ -15,7 +15,7 @@ use ubc_vpn_platform::fake::Fake;
 
 use crate::settings::{Command, DURING_A_SAVE, remember_username, run};
 use crate::settings_lock::{Tried, WAIT, change, change_with, change_within};
-use crate::tests::settings_folder;
+use crate::test_support::settings_folder;
 
 const ROUTES: &str = r#"{"subnets":["10.19.0.0/16"],"dns_domains":["dept.example.test"]}"#;
 const SHORT: Duration = Duration::from_millis(100);
@@ -44,7 +44,7 @@ impl Folder {
     }
 
     fn value(&self) -> serde_json::Value {
-        crate::tests::as_v1(&self.text())
+        crate::test_support::as_v1(&self.text())
     }
 
     /// Runs a settings command here, on this thread.

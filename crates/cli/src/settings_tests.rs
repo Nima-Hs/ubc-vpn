@@ -55,7 +55,7 @@ impl Machine {
     }
 
     fn write_settings(&self, text: &str) {
-        crate::tests::settings_folder(&self.root.join("settings"));
+        crate::test_support::settings_folder(&self.root.join("settings"));
         std::fs::write(self.settings_file(), text).unwrap();
     }
 
@@ -210,7 +210,7 @@ fn set_routes_replaces_the_routes_and_keeps_everything_else() {
         RoutesReply::Ok { .. }
     ));
     let after: serde_json::Value =
-        crate::tests::as_v1(&std::fs::read_to_string(machine.settings_file()).unwrap());
+        crate::test_support::as_v1(&std::fs::read_to_string(machine.settings_file()).unwrap());
     let expected = serde_json::json!({
         "username": "jdoe",
         "save_password": true,
@@ -976,7 +976,7 @@ fn a_settings_folder_that_is_a_link_is_judged_by_where_it_leads() {
 
     let machine = Machine::new();
     let real = machine.root.join("elsewhere");
-    crate::tests::settings_folder(&real);
+    crate::test_support::settings_folder(&real);
     std::fs::write(real.join("settings.json"), r#"{"username":"jdoe"}"#).unwrap();
     std::os::unix::fs::symlink(&real, machine.root.join("settings")).unwrap();
     assert_eq!(machine.view().settings.username.as_deref(), Some("jdoe"));

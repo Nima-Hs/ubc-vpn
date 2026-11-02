@@ -13,11 +13,11 @@ use ubc_vpn_engine::fake::{FakeEngine, Script};
 use ubc_vpn_platform::secrets::{FakeSecrets, Saved};
 
 use crate::connect::{Ended, LOGIN_REFUSED};
-use crate::connect_tests::{
-    CODE, PASSWORD, ROUTES, Scene, Typist, pin, returning, saved, settings_text,
-};
 use crate::interrupt::Progress;
 use crate::passwords::{NO_KEYRING, NOT_SAVED, NOT_SET_ASIDE, SET_ASIDE, UNTRIED};
+use crate::test_support::{
+    CODE, PASSWORD, ROUTES, Scene, Typist, pin, returning, saved, settings_text,
+};
 use crate::{FAILED, keys};
 
 /// A password nobody types, left in the keyring from before.

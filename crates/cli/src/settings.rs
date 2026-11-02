@@ -633,3 +633,7 @@ pub(crate) fn sweep(dir: &Path, stale: Duration) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;

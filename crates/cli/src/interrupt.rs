@@ -216,3 +216,7 @@ pub fn serve(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "interrupt_tests.rs"]
+mod tests;

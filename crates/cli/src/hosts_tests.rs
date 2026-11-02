@@ -7,13 +7,13 @@ use std::net::IpAddr;
 use ubc_vpn_core::coverage::{HostCoverage, TunnelKnown};
 use ubc_vpn_core::protocol::decode;
 
-use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist};
 use crate::hosts::{Args, check, plain_host};
-use crate::tests::Rig;
+use crate::test_support::Rig;
+use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist};
 use crate::{FAILED, NOT_OWNER, USAGE};
 
 /// The saved routes are `10.255.0.0/24` and the DNS domain
-/// `dept.example.test` (see `connect_tests.rs`). These hosts are made up.
+/// `dept.example.test` (see `test_support.rs`). These hosts are made up.
 const OUTSIDE: &str = "ssh.elsewhere.example";
 const INSIDE: &str = "build.dept.example.test";
 
