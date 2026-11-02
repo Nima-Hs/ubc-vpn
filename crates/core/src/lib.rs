@@ -5,6 +5,7 @@
 
 pub mod bridge;
 pub mod coverage;
+pub mod duo;
 pub mod login;
 pub mod policy;
 pub mod profiles;

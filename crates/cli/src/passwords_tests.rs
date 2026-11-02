@@ -9,14 +9,14 @@ use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::profiles::{ProfileId, Profiles};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
-use ubc_vpn_engine::fake::{FakeEngine, Script};
+use ubc_vpn_engine::fake::FakeEngine;
 use ubc_vpn_platform::secrets::{FakeSecrets, Saved};
 
 use crate::connect::{Ended, LOGIN_REFUSED};
 use crate::interrupt::Progress;
 use crate::passwords::{NO_KEYRING, NOT_SAVED, NOT_SET_ASIDE, SET_ASIDE, UNTRIED};
 use crate::test_support::{
-    CODE, PASSWORD, ROUTES, Scene, Typist, pin, returning, saved, settings_text,
+    CODE, PASSWORD, ROUTES, Scene, Typist, gateway_script, pin, returning, saved, settings_text,
 };
 use crate::{FAILED, keys};
 
@@ -37,7 +37,7 @@ fn saving() -> Scene {
 /// The same, with a gateway that asks for no one-time code.
 fn saving_without_a_code() -> Scene {
     let mut scene = saving();
-    scene.gateway = FakeEngine::new(Script::new(pin()));
+    scene.gateway = FakeEngine::new(gateway_script());
     scene
 }
 
@@ -281,7 +281,7 @@ fn a_refused_password_the_keyring_will_not_forget_is_put_in_doubt() {
 fn a_username_to_check_takes_its_saved_password_with_it() {
     let mut scene = saving();
     put(&ProfileId::first(), "alice", PASSWORD, false);
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     script.form.truncate(1);
     script.form[0].1 = Secret::new("alice.dept@app");
     scene.gateway = FakeEngine::new(script);
@@ -512,6 +512,13 @@ fn usernames_are_the_same_only_letter_for_letter() {
     assert!(!same_username("\u{212A}en", "ken"));
     assert!(!same_username("ZOË", "zoë"));
     assert!(!same_username("alice", "alice2"));
+    // The account, not the method: a password saved for `alice.dept@app`
+    // before the method was a setting is `alice.dept`'s, whatever method.
+    assert!(same_username("alice.dept", "alice.dept@app"));
+    assert!(same_username("alice.dept@call", "Alice.Dept@phone"));
+    assert!(same_username("alice.dept", "alice.dept@123456"));
+    assert!(!same_username("alice.dept", "alice.dept@other"));
+    assert!(!same_username("alice", "alice.dept@app"));
 }
 
 /// Tries for the settings lock for a moment. `Err(Unwritable)` is "held by
@@ -609,15 +616,39 @@ fn a_connect_with_a_profile_uses_that_profiles_password() {
     assert!(typist.asked.is_empty());
 }
 
-// `connect` takes `--profile <id>` and `--json`, each once, in either
-// order. Anything else, an id that cannot be one included, is wrong usage.
+// `connect` takes `--profile <id>`, `--duo <method>` and `--json`, each
+// once, in any order. Anything else, an id or a method that cannot be one
+// included, is wrong usage.
 #[test]
 fn connect_takes_a_profile_and_json_in_either_order() {
     use crate::{Connecting, connect_args};
+    use ubc_vpn_core::duo::DuoMethod;
     let id = "1a".repeat(16);
     let lab = Some(id.parse::<ProfileId>().unwrap());
     let read = |args: &[&str]| connect_args(args);
-    let plain = |profile: Option<ProfileId>, json| Some(Connecting { profile, json });
+    let plain = |profile: Option<ProfileId>, json| {
+        Some(Connecting {
+            profile,
+            duo: None,
+            json,
+        })
+    };
+    for (word, method) in [
+        ("push", DuoMethod::Push),
+        ("call", DuoMethod::Call),
+        ("sms", DuoMethod::Sms),
+        ("passcode", DuoMethod::Passcode),
+    ] {
+        let with = Some(Connecting {
+            profile: lab.clone(),
+            duo: Some(method),
+            json: true,
+        });
+        assert_eq!(
+            read(&["connect", "--duo", word, "--profile", &id, "--json"]),
+            with
+        );
+    }
     assert_eq!(read(&["connect"]), plain(None, false));
     assert_eq!(read(&["connect", "--json"]), plain(None, true));
     assert_eq!(
@@ -633,8 +664,47 @@ fn connect_takes_a_profile_and_json_in_either_order() {
         &["connect", "--json", "--json"],
         &["connect", "--profile", &id, "--profile", &id],
         &["connect", "now"],
+        &["connect", "--duo"],
+        &["connect", "--duo", "app"],
+        &["connect", "--duo", "Push"],
+        &["connect", "--duo", "push", "--duo", "call"],
         &["status"],
     ] {
         assert_eq!(read(wrong), None, "{wrong:?}");
     }
+}
+
+// Security rule: a Duo passcode is a code entered, so a saved password
+// refused with one may have been right: it is kept in doubt, not forgotten,
+// and not sent again. The username and passcode are made up.
+#[test]
+fn a_saved_password_refused_with_a_passcode_is_kept_in_doubt() {
+    let mut scene = returning(&format!(
+        r#"{{"username":"alice@000000","save_password":true,{ROUTES}}}"#
+    ));
+    let mut script = gateway_script();
+    script.form[0].1 = Secret::new("alice@135790");
+    scene.gateway = FakeEngine::new(script);
+    put(&ProfileId::first(), "alice", PASSWORD, false);
+    // A passcode the gateway does not take.
+    let mut typist = Typist::typing(&[Some("246813")]);
+    assert_eq!(scene.connect(&mut typist).0, LOGIN_REFUSED);
+    assert_eq!(typist.asked, [PromptKind::Code]);
+    let doubted = ("alice".to_string(), PASSWORD.to_string(), true);
+    assert_eq!(entry(), Some(doubted));
+}
+
+// A password saved for `alice@app`, before the method was a setting, is
+// still the profile's once its username reads as `alice` with `push`.
+#[test]
+fn a_password_saved_with_the_old_suffix_is_still_sent() {
+    let scene = returning(&format!(
+        r#"{{"username":"alice@app","save_password":true,{ROUTES}}}"#
+    ));
+    put(&ProfileId::first(), "alice@app", PASSWORD, false);
+    let mut typist = Typist::typing(&[Some(CODE)]);
+    let (code, _, err) = scene.connect(&mut typist);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(typist.asked, [PromptKind::Code]);
+    assert_eq!(passwords_sent(&scene), [PASSWORD]);
 }

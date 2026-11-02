@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::redact::Secret;
-use ubc_vpn_engine::fake::{FakeEngine, Script};
+use ubc_vpn_engine::fake::FakeEngine;
 use ubc_vpn_engine::{Cancel, LoginEngine, Prompt};
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::interrupt::Stop;
@@ -17,7 +17,7 @@ use ubc_vpn_platform::interrupt::Stop;
 use crate::connect::{Ask, Ended, start, undo};
 use crate::interrupt::{Progress, serve};
 use crate::terminal::Terminal;
-use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, pin};
+use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, gateway_script, pin};
 
 /// What the handler of requests did, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +200,7 @@ fn start_typing_the_username(scene: &Scene, steps: &Watching) -> (bool, bool) {
     let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
     let accepted = start(
         &platform,
-        None,
+        crate::connect::Which::default(),
         &engines,
         &mut typist,
         &cancel,
@@ -360,7 +360,7 @@ fn the_request_is_marked_as_sent_before_it_leaves() {
         let (cancel, limits, mut err) = (Cancel::new(), brief(), Vec::new());
         let accepted = start(
             &platform,
-            None,
+            crate::connect::Which::default(),
             &engines,
             &mut typist,
             &cancel,
@@ -412,7 +412,7 @@ fn a_stop_after_the_outcome_is_reported_leaves_the_vpn_alone() {
 fn a_stop_while_connecting_disconnects_and_says_nothing() {
     let mut scene = Scene::usual();
     // The service's own gateway is slow to open the tunnel.
-    let slow = FakeEngine::new(Script::new(pin()));
+    let slow = FakeEngine::new(gateway_script());
     slow.hold();
     scene.service = None;
     scene.service = Some(scene.rig.service_on(slow.clone()));

@@ -86,12 +86,69 @@ const MARKERS: [&str; 11] = [
 /// in a hex dump. The service must therefore never ask `libopenconnect` for
 /// output that dumps request or response bodies, and must drop the library's
 /// debug-level lines altogether in release builds.
+///
+/// A Duo passcode in a username is masked first, wherever it is on the line:
+/// see [`mask_codes`].
 pub fn redact_line(line: &str) -> String {
+    let line = mask_codes(line);
     let lower = line.to_ascii_lowercase();
     match MARKERS.iter().filter_map(|m| lower.find(m)).min() {
         Some(at) => format!("{}{REDACTED}", &line[..at]),
-        None => line.to_string(),
+        None => line,
     }
+}
+
+/// The fewest digits after an `@` that [`mask_codes`] masks: as many as a
+/// Duo passcode has.
+pub const MASKED_DIGITS: usize = 6;
+
+/// `line` with the digits masked wherever an `@`, or `%40` as a URL writes
+/// it, is followed by [`MASKED_DIGITS`] digits or more.
+///
+/// A username sent as `user@123456` carries a Duo passcode, which is as
+/// secret as the password. This masks it on a line that carries no marker,
+/// such as a gateway's "Login failed for user@123456". It also masks some
+/// digits that are no passcode, which is cheap.
+///
+/// One pass, in time linear in the length of the line: the text comes from
+/// a gateway, so its length is not ours to choose. It works on bytes and
+/// cuts only next to ASCII ones, so a character is never split.
+pub fn mask_codes(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    // What is copied to `out` already, and where the scan is.
+    let (mut copied, mut at) = (0, 0);
+    while at < bytes.len() {
+        let width = match bytes[at] {
+            b'@' => 1,
+            b'%' if bytes
+                .get(at + 1..at + 3)
+                .is_some_and(|hex| hex.eq_ignore_ascii_case(b"40")) =>
+            {
+                3
+            }
+            _ => {
+                at += 1;
+                continue;
+            }
+        };
+        let start = at + width;
+        let digits = bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits >= MASKED_DIGITS {
+            out.push_str(&line[copied..start]);
+            out.push_str(REDACTED);
+            copied = start + digits;
+            at = copied;
+        } else {
+            // A run too short is not looked at again from its sign.
+            at = start + digits;
+        }
+    }
+    out.push_str(&line[copied..]);
+    out
 }
 
 #[cfg(test)]
@@ -204,6 +261,64 @@ mod tests {
     fn matching_is_case_insensitive() {
         assert_eq!(redact_line("COOKIE: abc"), REDACTED);
         assert_eq!(redact_line("got Token=xyz"), format!("got {REDACTED}"));
+    }
+
+    // Security rule: a Duo passcode in a username is masked on any line,
+    // with a marker or without, written with `@` or as a URL writes it.
+    // Codes are made up.
+    #[test]
+    fn a_passcode_in_a_username_is_masked() {
+        let leaks = [
+            (
+                "Login failed for user.dept@123456",
+                "Login failed for user.dept@[redacted]",
+            ),
+            ("user@123456", "user@[redacted]"),
+            ("a@123456 and b@7654321.", "a@[redacted] and b@[redacted]."),
+            ("form user%40123456&x=1", "form user%40[redacted]&x=1"),
+            ("form user%4012345678", "form user%40[redacted]"),
+        ];
+        for (line, masked) in leaks {
+            assert_eq!(mask_codes(line), masked, "{line:?}");
+            assert_eq!(redact_line(line), masked, "{line:?}");
+        }
+        // Before a marker the code is masked too; after it, everything goes.
+        let both = redact_line("user@123456 username=user@123456");
+        assert_eq!(both, format!("user@{REDACTED} {REDACTED}"));
+        // Fewer digits than a passcode, or none, are left.
+        for line in [
+            "user@app",
+            "user@12345",
+            "mail me@example.test",
+            "50% off",
+            "%4",
+        ] {
+            assert_eq!(mask_codes(line), line, "{line:?}");
+        }
+        // Text that is not ASCII is passed over whole.
+        assert_eq!(mask_codes("é@ü@123456"), format!("é@ü@{REDACTED}"));
+        // A sign at the very end, or half of `%40`, is left as it is.
+        for line in ["user@", "user%", "user%4", "%%40", "@@@"] {
+            assert_eq!(mask_codes(line), line, "{line:?}");
+        }
+        assert_eq!(mask_codes("%%40123456"), format!("%%40{REDACTED}"));
+        assert_eq!(mask_codes("@12345@123456"), format!("@12345@{REDACTED}"));
+    }
+
+    // A gateway chooses how long its lines are: masking a long line full of
+    // signs takes one pass, not one pass per sign. A scan per sign of these
+    // 256 KiB lines took minutes; one pass takes milliseconds.
+    #[test]
+    fn masking_takes_time_in_proportion_to_the_line() {
+        let started = std::time::Instant::now();
+        for unit in ["@", "%40", "@1", "%4"] {
+            let line = unit.repeat((1 << 18) / unit.len());
+            assert_eq!(mask_codes(&line), line);
+        }
+        let line = "@123456".repeat(1 << 15);
+        assert_eq!(mask_codes(&line).matches(REDACTED).count(), 1 << 15);
+        let spent = started.elapsed();
+        assert!(spent < std::time::Duration::from_secs(10), "{spent:?}");
     }
 
     #[test]

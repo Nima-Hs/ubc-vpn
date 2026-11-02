@@ -61,7 +61,7 @@ export const PROFILES = {
     rename: "Rename",
     username: "CWL username",
     usernameHint:
-        "As you type it at UBC's login, for example name@app. Changing it forgets the saved password.",
+        "Your CWL username and department, for example name.dept, without the @ part. Changing it forgets the saved password.",
     saveUsername: "Save username",
     savePassword: "Save password",
     savePasswordHint: (where: string) =>
@@ -109,7 +109,9 @@ export function describeProfileRefusal(
         case "last_profile":
             return PROFILES.lastOne;
         case "bad_username":
-            return "Use your CWL username as you type it at UBC's login, with no spaces.";
+            return "Use your CWL username and department, for example name.dept, with no spaces.";
+        case "username_has_method":
+            return "Leave the @ part out of the username. The Duo method adds it.";
         default:
             return describeProfilesError(error, "change");
     }
@@ -150,6 +152,7 @@ export function describeProfilesError(error: ProfilesError, doing: "read" | "cha
         case "last_profile":
         case "bad_username":
         case "id_taken":
+        case "username_has_method":
         case "keyring_not_cleared":
             // Said by `describeProfileRefusal` where it can happen; plainly here.
             return "The change was not made. Try again.";

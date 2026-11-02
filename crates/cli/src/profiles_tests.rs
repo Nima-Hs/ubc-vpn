@@ -423,7 +423,9 @@ fn version_1_settings_are_kept_when_saved_as_version_2() {
     machine.create("Lab", "user.lab@app");
     let stored = machine.stored();
     let first = stored.profile(&ProfileId::first()).unwrap();
-    assert_eq!(first.username.as_deref(), Some("user.dept@app"));
+    // The method its suffix named is the profile's own.
+    assert_eq!(first.username.as_deref(), Some("user.dept"));
+    assert_eq!(first.duo_method, Some(ubc_vpn_core::duo::DuoMethod::Push));
     assert_eq!(first.routes.subnets[0].to_string(), "10.255.0.0/16");
     let platform = || Ok(Fake::new().platform(&machine.root));
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -435,7 +437,7 @@ fn version_1_settings_are_kept_when_saved_as_version_2() {
         &mut err,
     );
     let view: SettingsView = decode(&String::from_utf8(out).unwrap()).unwrap();
-    assert_eq!(view.settings.username.as_deref(), Some("user.dept@app"));
+    assert_eq!(view.settings.username.as_deref(), Some("user.dept"));
 }
 
 // Security rule: a username today's rules refuse is cleared when read,
@@ -597,4 +599,30 @@ fn every_command_line_reaches_its_command() {
         let more = [args, &["x"]].concat();
         assert_eq!(Command::parse(&more), None, "{args:?}");
     }
+}
+
+// Security rule: a Duo passcode stored in a username by an older version
+// leaves the file at the next `profiles list`, which the app runs at every
+// start, though listing changes nothing else. The code is made up.
+#[test]
+fn listing_removes_a_stored_passcode_from_the_file() {
+    let machine = Machine::new();
+    machine.write_settings(r#"{"username":"alice@246802","save_password":false}"#);
+    let view = machine.list();
+    let first = &view.profiles[0].profile;
+    assert_eq!(first.username.as_deref(), Some("alice"));
+    assert_eq!(
+        first.duo_method,
+        Some(ubc_vpn_core::duo::DuoMethod::Passcode)
+    );
+    let text = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert!(!text.contains("246802"), "{text}");
+    assert!(text.contains(r#""duo_method": "passcode""#), "{text}");
+    // A file with nothing to drop is not written by a listing.
+    let before = std::fs::read_to_string(machine.settings_file()).unwrap();
+    machine.list();
+    assert_eq!(
+        std::fs::read_to_string(machine.settings_file()).unwrap(),
+        before
+    );
 }

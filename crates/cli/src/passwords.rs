@@ -2,7 +2,8 @@
 //! it after the gateway has answered.
 //!
 //! - **Bound to its username.** A password is sent only for the username it
-//!   was saved for, compared without regard to the case of ASCII letters. One saved for another
+//!   was saved for, compared without regard to the case of ASCII letters,
+//!   or to a Duo method's suffix. One saved for another
 //!   username, or for a profile that has none, is forgotten and the user is
 //!   asked.
 //! - **Never sent twice in a row after a refusal.** The gateway does not say
@@ -23,6 +24,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use ubc_vpn_core::duo;
 use ubc_vpn_core::profiles::{Password, Profile, ProfileId};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
@@ -45,8 +47,12 @@ pub(crate) const NOT_SAVED: &str = "The password could not be saved in the keyri
 /// letters. Anything else must be the same character: full Unicode case
 /// folding would take the Kelvin sign for a `k`, and a password saved for
 /// one name would be sent for another.
+///
+/// Both are compared without a Duo method's suffix ([`duo::account`]): a
+/// password saved before the method was a setting, for `user.dept@app`, is
+/// the same account's as `user.dept`'s, and changing the method keeps it.
 pub(crate) fn same_username(username: &str, saved_for: &str) -> bool {
-    username.eq_ignore_ascii_case(saved_for)
+    duo::account(username).eq_ignore_ascii_case(duo::account(saved_for))
 }
 
 /// What a connect found in the keyring before logging in.

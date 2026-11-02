@@ -97,7 +97,9 @@ fn version_1_settings_become_one_profile_and_lose_nothing() {
     let profile = read.active();
     assert_eq!(profile.id, ProfileId::first());
     assert_eq!(profile.name, FIRST_PROFILE_NAME);
-    assert_eq!(profile.username.as_deref(), Some("user.dept@app"));
+    // The method its suffix named is the profile's own.
+    assert_eq!(profile.username.as_deref(), Some("user.dept"));
+    assert_eq!(profile.duo_method, Some(DuoMethod::Push));
     assert!(profile.save_password);
     assert_eq!(
         profile.routes,
@@ -128,7 +130,7 @@ fn version_2_has_a_stable_shape() {
     let compact: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
         compact.to_string(),
-        r#"{"global":{"active_profile":"00000000000000000000000000000001","auto_connect":false,"start":"off","tunnel":"split"},"profiles":[{"id":"00000000000000000000000000000001","name":"UBC VPN","routes":{"dns_domains":[],"subnets":[]},"save_password":false,"username":null}],"version":2}"#
+        r#"{"global":{"active_profile":"00000000000000000000000000000001","auto_connect":false,"start":"off","tunnel":"split"},"profiles":[{"duo_method":"push","id":"00000000000000000000000000000001","name":"UBC VPN","routes":{"dns_domains":[],"subnets":[]},"save_password":false,"username":null}],"version":2}"#
     );
 }
 
@@ -442,7 +444,7 @@ fn a_rename_keeps_the_id() {
     all.rename(&id(2), "  Robotics lab ").unwrap();
     let lab = all.profile(&id(2)).unwrap();
     assert_eq!(lab.name, "Robotics lab");
-    assert_eq!(lab.username.as_deref(), Some("user.lab@app"));
+    assert_eq!(lab.username.as_deref(), Some("user.lab"));
     // Its own name in another case is no clash.
     all.rename(&id(2), "ROBOTICS LAB").unwrap();
     let before = all.clone();
@@ -475,7 +477,7 @@ fn an_update_says_when_the_saved_password_must_go() {
     );
     assert_eq!(
         all.profile(lab).unwrap().username.as_deref(),
-        Some("other.lab@app")
+        Some("other.lab")
     );
     assert_eq!(all.update(lab, Some(None), None), Ok(Password::Forget));
     assert_eq!(all.profile(lab).unwrap().username, None);
@@ -541,7 +543,7 @@ fn the_view_from_before_profiles_is_the_active_profile() {
     assert_eq!(all.v1_view(), Settings::default());
     all.switch(&id(2)).unwrap();
     let view = all.v1_view();
-    assert_eq!(view.username.as_deref(), Some("user.lab@app"));
+    assert_eq!(view.username.as_deref(), Some("user.lab"));
     assert_eq!(
         view.routes,
         routes(&["10.255.0.0/16"], &["lab.example.test"])
@@ -583,4 +585,245 @@ fn the_app_lines_have_a_stable_shape() {
     let json: Value = serde_json::to_value(&view).unwrap();
     assert_eq!(json["name"], FIRST_PROFILE_NAME);
     assert_eq!(json["password_saved"], true);
+}
+
+// ---- The Duo method ----
+
+/// A version 2 file with one profile whose fields are `profile`.
+fn file_with(profile: &str) -> String {
+    let first = ProfileId::first();
+    let first = first.as_str();
+    format!(
+        r#"{{"version":2,"global":{{"active_profile":"{first}"}},
+        "profiles":[{{"id":"{first}","name":"UBC VPN"{profile}}}]}}"#
+    )
+}
+
+fn read_one(profile: &str) -> (Profile, bool) {
+    let read = Profiles::read(Some(&file_with(profile))).unwrap();
+    (read.profiles.profiles[0].clone(), read.codes_dropped)
+}
+
+// A version 2 file from before the method was a setting has it taken from
+// the username, as `duo::migrate` says; the file format only gains a field.
+#[test]
+fn a_profile_without_a_method_has_it_taken_from_its_username() {
+    let cases = [
+        (
+            r#","username":"user.dept@app""#,
+            Some("user.dept"),
+            Some(DuoMethod::Push),
+        ),
+        (
+            r#","username":"user.dept@phone""#,
+            Some("user.dept"),
+            Some(DuoMethod::Call),
+        ),
+        (
+            r#","username":"user.dept@sms""#,
+            Some("user.dept"),
+            Some(DuoMethod::Sms),
+        ),
+        (
+            r#","username":"user.dept@other""#,
+            Some("user.dept@other"),
+            None,
+        ),
+        (
+            r#","username":"user.dept""#,
+            Some("user.dept"),
+            Some(DuoMethod::Push),
+        ),
+        (r#","username":null"#, None, Some(DuoMethod::Push)),
+        ("", None, Some(DuoMethod::Push)),
+    ];
+    for (fields, username, method) in cases {
+        let (profile, dropped) = read_one(fields);
+        assert_eq!(profile.username.as_deref(), username, "{fields}");
+        assert_eq!(profile.duo_method, method, "{fields}");
+        assert!(!dropped, "{fields}");
+    }
+}
+
+// Security rule: a passcode stored in a username is never kept. Reading
+// drops it and says so, and the file saved after holds no trace of it.
+#[test]
+fn a_stored_passcode_is_dropped() {
+    for fields in [
+        r#","username":"user.dept@123456""#,
+        // Put back by an older version, beside a method.
+        r#","username":"user.dept@123456","duo_method":"push""#,
+    ] {
+        let read = Profiles::read(Some(&file_with(fields))).unwrap();
+        assert!(read.codes_dropped, "{fields}");
+        let profile = &read.profiles.profiles[0];
+        assert_eq!(profile.username.as_deref(), Some("user.dept"));
+        assert_eq!(profile.duo_method, Some(DuoMethod::Passcode));
+        let text = read.profiles.to_text();
+        assert!(!text.contains("123456"), "{text}");
+        assert!(!Profiles::read(Some(&text)).unwrap().codes_dropped);
+    }
+    let v1 = Profiles::read(Some(r#"{"username":"user.dept@654321"}"#)).unwrap();
+    assert!(v1.codes_dropped);
+    assert!(!v1.profiles.to_text().contains("654321"));
+    assert!(!read_one(r#","username":"user.dept@app""#).1);
+}
+
+// `null` is the user's choice to send the username as typed, and stays;
+// a method this version does not know reads as that too.
+#[test]
+fn a_method_in_the_file_is_kept() {
+    let (typed, _) = read_one(r#","username":"user.dept","duo_method":null"#);
+    assert_eq!(typed.duo_method, None);
+    assert_eq!(typed.username.as_deref(), Some("user.dept"));
+    let saved: Value = serde_json::from_str(&{
+        let mut all = untouched();
+        all.profiles[0] = typed;
+        all.to_text()
+    })
+    .unwrap();
+    assert_eq!(saved["profiles"][0]["duo_method"], Value::Null);
+    let (call, _) = read_one(r#","username":"user.dept","duo_method":"call""#);
+    assert_eq!(call.duo_method, Some(DuoMethod::Call));
+    let (newer, _) = read_one(r#","username":"user.dept","duo_method":"totp""#);
+    assert_eq!(newer.duo_method, None);
+    // A username with an `@` beside a method, as an older version could
+    // leave it, is split again.
+    let (both, _) = read_one(r#","username":"user.dept@call","duo_method":"push""#);
+    assert_eq!(both.username.as_deref(), Some("user.dept"));
+    assert_eq!(both.duo_method, Some(DuoMethod::Call));
+    let (odd, _) = read_one(r#","username":"user.dept@other","duo_method":"push""#);
+    assert_eq!(odd.username.as_deref(), Some("user.dept@other"));
+    assert_eq!(odd.duo_method, None);
+}
+
+fn login<'a>(
+    username: Option<Option<&'a str>>,
+    duo_method: Option<Option<DuoMethod>>,
+) -> Login<'a> {
+    Login {
+        username,
+        duo_method,
+    }
+}
+
+// Security rule: the saved password is the account's. Changing only the
+// method keeps it; changing the account forgets it.
+#[test]
+fn changing_the_method_keeps_the_saved_password() {
+    let mut all = two();
+    let lab = &id(2);
+    let lab_profile = |all: &Profiles| all.profile(lab).unwrap().clone();
+    assert_eq!(lab_profile(&all).duo_method, Some(DuoMethod::Push));
+    for method in [DuoMethod::Call, DuoMethod::Sms, DuoMethod::Passcode] {
+        let changed = all.update_with(lab, login(None, Some(Some(method))), None);
+        assert_eq!(changed, Ok(Password::Keep));
+        assert_eq!(lab_profile(&all).duo_method, Some(method));
+    }
+    // The same account typed with a suffix: the suffix becomes the method.
+    let typed = all.update(lab, Some(Some("user.lab@call")), None);
+    assert_eq!(typed, Ok(Password::Keep));
+    assert_eq!(lab_profile(&all).duo_method, Some(DuoMethod::Call));
+    // A plain username keeps the method.
+    assert_eq!(
+        all.update(lab, Some(Some("user.lab")), None),
+        Ok(Password::Keep)
+    );
+    assert_eq!(lab_profile(&all).duo_method, Some(DuoMethod::Call));
+    let other = all.update_with(lab, login(Some(Some("other.lab")), Some(None)), None);
+    assert_eq!(other, Ok(Password::Forget));
+    assert_eq!(lab_profile(&all).duo_method, None);
+}
+
+#[test]
+fn a_username_and_a_method_are_read_together() {
+    let mut all = two();
+    let lab = &id(2);
+    let username = |all: &Profiles| all.profile(lab).unwrap().username.clone();
+    let method = |all: &Profiles| all.profile(lab).unwrap().duo_method;
+    // A passcode typed in the username is dropped.
+    let same = all.update(lab, Some(Some("user.lab@123456")), None);
+    assert_eq!(same, Ok(Password::Keep));
+    assert_eq!(username(&all).as_deref(), Some("user.lab"));
+    assert_eq!(method(&all), Some(DuoMethod::Passcode));
+    // A method given wins over the suffix.
+    let given = login(Some(Some("user.lab@app")), Some(Some(DuoMethod::Sms)));
+    assert_eq!(all.update_with(lab, given, None), Ok(Password::Keep));
+    assert_eq!(method(&all), Some(DuoMethod::Sms));
+    // Any other `@` is sent as typed.
+    let other = all.update(lab, Some(Some("user@example.test")), None);
+    assert_eq!(other, Ok(Password::Forget));
+    assert_eq!(
+        (username(&all).as_deref(), method(&all)),
+        (Some("user@example.test"), None)
+    );
+    // A plain username after one sent as typed gets the default.
+    let back = all.update(lab, Some(Some("user.lab")), None);
+    assert_eq!(back, Ok(Password::Forget));
+    assert_eq!(method(&all), Some(DuoMethod::Push));
+    let before = all.clone();
+    // An `@` the method would be put after is refused.
+    let both = login(Some(Some("user@example.test")), Some(Some(DuoMethod::Push)));
+    assert_eq!(
+        all.update_with(lab, both, None),
+        Err(ProfileFailureCode::UsernameHasMethod)
+    );
+    // Nothing is left of a username that was only a suffix.
+    assert_eq!(
+        all.update(lab, Some(Some("@app")), None),
+        Err(ProfileFailureCode::BadUsername)
+    );
+    assert_eq!(all, before);
+    let mut broken = all.clone();
+    broken.profiles[1].username = Some("user.lab@app".to_string());
+    assert_eq!(broken.check(), Err(ProfileFailureCode::UsernameHasMethod));
+
+    // Made with a suffix, a profile has the method it names; with none,
+    // the default; with one given, that one.
+    let none = RouteSet::default();
+    all.create(id(3), "Three", Some("user.three@sms"), none.clone(), false)
+        .unwrap();
+    all.create(id(4), "Four", None, none.clone(), false)
+        .unwrap();
+    let typed = login(Some(Some("user.five")), Some(None));
+    all.create_with(id(5), "Five", typed, none.clone(), false)
+        .unwrap();
+    let methods: Vec<_> = all.profiles[2..].iter().map(|p| p.duo_method).collect();
+    assert_eq!(methods, [Some(DuoMethod::Sms), Some(DuoMethod::Push), None]);
+    let both = login(Some(Some("user@x.test")), Some(Some(DuoMethod::Call)));
+    assert_eq!(
+        all.create_with(id(6), "Six", both, none, false),
+        Err(ProfileFailureCode::UsernameHasMethod)
+    );
+}
+
+#[test]
+fn the_app_lines_carry_the_method() {
+    let lab = id(2);
+    let lab = lab.as_str();
+    let read = |json: String| {
+        serde_json::from_str::<UpdateProfile>(&json)
+            .unwrap()
+            .duo_method
+    };
+    assert_eq!(read(format!(r#"{{"id":"{lab}"}}"#)), None);
+    assert_eq!(
+        read(format!(r#"{{"id":"{lab}","duo_method":null}}"#)),
+        Some(None)
+    );
+    let call = read(format!(r#"{{"id":"{lab}","duo_method":"call"}}"#));
+    assert_eq!(call, Some(Some(DuoMethod::Call)));
+    let bad = format!(r#"{{"id":"{lab}","duo_method":"totp"}}"#);
+    assert!(serde_json::from_str::<UpdateProfile>(&bad).is_err());
+    let new: NewProfile = serde_json::from_str(r#"{"name":"Lab","duo_method":"sms"}"#).unwrap();
+    assert_eq!(new.duo_method, Some(Some(DuoMethod::Sms)));
+    let new: NewProfile = serde_json::from_str(r#"{"name":"Lab"}"#).unwrap();
+    assert_eq!(new.duo_method, None);
+    let failure = ProfileFailure {
+        error: ProfileFailureCode::UsernameHasMethod,
+    };
+    assert_eq!(
+        serde_json::to_string(&failure).unwrap(),
+        r#"{"error":"username_has_method"}"#
+    );
 }

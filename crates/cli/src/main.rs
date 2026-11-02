@@ -50,7 +50,7 @@ const HELP: &str = "\
 Usage: ubc-vpn <command>
 
 Commands:
-  connect [--profile <id>] [--json]  Log in and connect the VPN with a profile
+  connect [--profile <id>] [--duo <method>] [--json]  Log in and connect the VPN
   disconnect        Disconnect the VPN
   status [--json]   Show whether the VPN is connected, and in split or full mode
   logs [--json] [--follow]  Show what the service has logged
@@ -102,7 +102,17 @@ when the profile saves its password. A saved password the gateway refuses is
 not sent again: it is forgotten, or, when a one-time code was also entered,
 kept but asked for by hand until a login settles it.
 
-connect asks for the password and the one-time code in the terminal. They are
+Each profile saves how a login is confirmed with Duo, as duo_method in
+profiles create and update: push (the default), call, sms or passcode, or
+null to send the username as typed. The username is then the CWL username
+and department alone, such as jdoe.dept, and connect puts the method on it
+for the gateway: @app, @call or @sms, or @ and a passcode. A username given
+with a known suffix, such as jdoe.dept@app, is saved as jdoe.dept with that
+method. connect --duo push|call|sms|passcode uses that method for this
+connect only, and saves nothing.
+
+connect asks for the password and the one-time code in the terminal, and for
+a Duo passcode, 6 digits, at each connect with the passcode method. They are
 never taken from an argument, a variable or a file. Ctrl-C stops a
 connect: at a question nothing has been sent, and after the login the service
 is told to disconnect before the program ends.
@@ -157,18 +167,22 @@ fn dev_flag<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
     (false, args)
 }
 
-/// A `connect` command line: with which profile, and whether for the app.
+/// A `connect` command line: with which profile and Duo method, and whether
+/// for the app.
 #[derive(Debug, PartialEq, Eq)]
 struct Connecting {
     /// The profile `--profile` names, or `None` for the active one.
     profile: Option<ubc_vpn_core::profiles::ProfileId>,
+    /// The method `--duo` names, for this connect only, or `None` for the
+    /// profile's.
+    duo: Option<ubc_vpn_core::duo::DuoMethod>,
     /// Whether `--json` was given.
     json: bool,
 }
 
-/// Reads `connect [--profile <id>] [--json]`, the options in either order,
-/// or `None` when the arguments are not that. An id that cannot be one is
-/// wrong usage.
+/// Reads `connect [--profile <id>] [--duo <method>] [--json]`, the options
+/// in any order, or `None` when the arguments are not that. An id or a
+/// method that cannot be one is wrong usage.
 fn connect_args(args: &[&str]) -> Option<Connecting> {
     let ["connect", rest @ ..] = args else {
         return None;
@@ -176,6 +190,7 @@ fn connect_args(args: &[&str]) -> Option<Connecting> {
     let mut rest = rest;
     let mut found = Connecting {
         profile: None,
+        duo: None,
         json: false,
     };
     loop {
@@ -187,6 +202,11 @@ fn connect_args(args: &[&str]) -> Option<Connecting> {
             }
             ["--profile", id, more @ ..] if found.profile.is_none() => {
                 found.profile = Some(id.parse().ok()?);
+                rest = more;
+            }
+            ["--duo", method, more @ ..] if found.duo.is_none() => {
+                let quoted = serde_json::Value::from(*method);
+                found.duo = Some(serde_json::from_value(quoted).ok()?);
                 rest = more;
             }
             _ => return None,
@@ -241,6 +261,9 @@ fn login_engine(dev: bool, policy: &Policy, real: &Real) -> Result<Box<dyn Login
         code.0.label = "One-time code".to_string();
         code.1 = ubc_vpn_core::redact::Secret::new(DEV_CODE);
         script.form.push(code);
+        // The dev profile has the default method, so its username comes
+        // with the suffix for it.
+        script.form[0].1 = ubc_vpn_core::redact::Secret::new("alice@app");
         return Ok(Box::new(FakeEngine::new(script)));
     }
     let _ = (dev, policy);
@@ -455,36 +478,31 @@ fn main() -> ExitCode {
     }
     if let Some(Connecting {
         profile,
+        duo,
         json: true,
     }) = &connecting
     {
+        let which = connect::Which {
+            profile: profile.as_ref(),
+            duo: *duo,
+        };
         let engines = |policy: &Policy| login_engine(dev, policy, &real);
         let input = std::io::BufReader::new(std::io::stdin());
         let limits = client::Limits::default();
-        let status = connect_json::connect(
-            &chosen,
-            profile.as_ref(),
-            &engines,
-            input,
-            limits,
-            &mut out,
-            &mut err,
-        );
+        let status =
+            connect_json::connect(&chosen, which, &engines, input, limits, &mut out, &mut err);
         return ExitCode::from(status);
     }
-    if let Some(Connecting { profile, .. }) = &connecting {
+    if let Some(Connecting { profile, duo, .. }) = &connecting {
+        let which = connect::Which {
+            profile: profile.as_ref(),
+            duo: *duo,
+        };
         let engines = |policy: &Policy| login_engine(dev, policy, &real);
         let (mut ask, limits) = (terminal::Terminal::real(), client::Limits::default());
         let progress = watch_for_a_stop(dev, &mut err);
         let ended = connect::connect(
-            &chosen,
-            profile.as_ref(),
-            &engines,
-            &mut ask,
-            &progress,
-            limits,
-            &mut out,
-            &mut err,
+            &chosen, which, &engines, &mut ask, &progress, limits, &mut out, &mut err,
         );
         match ended {
             connect::Ended::Status(status) => return ExitCode::from(status),

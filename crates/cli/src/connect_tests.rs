@@ -13,7 +13,8 @@ use crate::client::Limits;
 use crate::connect::{BUSY, CANCELLED, CHECK_USERNAME, Ended, LOGIN_REFUSED, connect, disconnect};
 use crate::interrupt::Progress;
 use crate::test_support::{
-    CODE, COOKIE, PASSWORD, ROUTES, Rig, Scene, Typist, brief, pin, returning, saved, settings_text,
+    CODE, COOKIE, PASSWORD, ROUTES, Rig, Scene, Typist, brief, gateway_script, pin, returning,
+    saved, settings_text,
 };
 use crate::{FAILED, NOT_RUNNING};
 
@@ -70,7 +71,7 @@ fn no_secret_is_ever_printed() {
 #[test]
 fn a_library_that_leaks_secrets_has_them_removed() {
     let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     script.leaks = true;
     scene.gateway = FakeEngine::new(script);
     let mut typist = Typist::typing(&[Some("alice"), Some(PASSWORD)]);
@@ -88,18 +89,19 @@ fn a_library_that_leaks_secrets_has_them_removed() {
 // Security rule: what an engine logs can be text a gateway sent, some of it
 // before its certificate was judged, and connect prints it in the user's
 // terminal. No control character gets there. The careless gateway echoes the
-// username, which is too short for the log sink to hide.
+// username, which is too short for the log sink to hide, and which is sent
+// as typed for its `@`.
 #[test]
 fn engine_lines_are_printed_without_control_characters() {
-    const ESCAPE: &str = "\u{1b}[2";
+    const ESCAPE: &str = "\u{1b}@";
     let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     (script.leaks, script.form[0].1) = (true, Secret::new(ESCAPE));
     scene.gateway = FakeEngine::new(script);
     let mut typist = Typist::typing(&[Some(ESCAPE), Some(PASSWORD)]);
     let (code, _, err) = scene.connect(&mut typist);
     assert_eq!(code, 0, "{err:?}");
-    assert!(err.contains("ubc-vpn: > [2\n"), "{err:?}");
+    assert!(err.contains("ubc-vpn: > @\n"), "{err:?}");
     assert!(!err.chars().any(|c| c.is_control() && c != '\n'), "{err:?}");
 
     // The same for a reason that quotes the settings file. The route error
@@ -194,7 +196,7 @@ fn a_doomed_connect_asks_nothing_and_sends_nothing() {
         let limits = brief();
         let ended = connect(
             &platform,
-            None,
+            crate::connect::Which::default(),
             &none,
             &mut typist,
             &unwatched,
@@ -349,7 +351,7 @@ fn in_dev_mode_a_second_connect_works_after_a_disconnect() {
     scene.service = Some(
         scene
             .rig
-            .service_on(FakeEngine::for_dev_mode(Script::new(pin()))),
+            .service_on(FakeEngine::for_dev_mode(gateway_script())),
     );
     for round in 1..=2 {
         let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE)]);
@@ -427,7 +429,7 @@ fn the_logins_lines_follow_the_connect_request() {
     };
 
     let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     script.leaks = true;
     scene.gateway = FakeEngine::new(script);
     scene.service = None;
@@ -564,8 +566,8 @@ fn an_odd_username_is_used_but_not_kept() {
     let odd = "u".repeat(300);
     let mut scene = returning(&format!("{{{ROUTES}}}"));
     let before = saved(&scene);
-    let mut script = Script::new(pin());
-    script.form[0].1 = Secret::new(odd.as_str());
+    let mut script = gateway_script();
+    script.form[0].1 = Secret::new(format!("{odd}@app"));
     scene.gateway = FakeEngine::new(script);
     let typed: &'static str = Box::leak(odd.into_boxed_str());
     let mut typist = Typist::typing(&[Some(typed), Some(PASSWORD)]);
@@ -633,8 +635,8 @@ fn a_username_that_could_mislead_is_used_but_not_kept() {
     for odd in ["alice\u{202e}ecila", "al\u{200b}ice", "   "] {
         let mut scene = returning(&format!("{{{ROUTES}}}"));
         let before = settings_text(&scene);
-        let mut script = Script::new(pin());
-        script.form[0].1 = Secret::new(odd);
+        let mut script = gateway_script();
+        script.form[0].1 = Secret::new(format!("{odd}@app"));
         scene.gateway = FakeEngine::new(script);
         let mut typist = Typist::typing(&[Some(odd), Some(PASSWORD)]);
         let (code, _, err) = scene.connect(&mut typist);
@@ -676,14 +678,15 @@ fn what_a_failed_login_wrote_is_handed_to_the_service() {
 #[test]
 fn a_refused_username_is_to_be_checked_and_is_forgotten() {
     let mut scene = Scene::usual();
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     script.form.truncate(1);
     script.form[0].1 = Secret::new("alice.dept@app");
     scene.gateway = FakeEngine::new(script);
     let (code, _, err) = scene.connect(&mut Typist::default());
     assert_eq!(code, LOGIN_REFUSED, "{err}");
     assert!(err.contains(CHECK_USERNAME), "{err}");
-    assert!(CHECK_USERNAME.contains("CWL.dept@method"));
+    assert!(CHECK_USERNAME.contains("CWL.dept"));
+    assert!(CHECK_USERNAME.contains("Duo method"));
     assert!(
         saved(&scene).get("username").is_none(),
         "{}",
@@ -727,7 +730,7 @@ fn every_finished_login_says_how_it_ended() {
 #[test]
 fn a_login_the_user_gave_up_hands_over_only_that() {
     let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     script.leaks = true;
     scene.gateway = FakeEngine::new(script);
     let mut typist = Typist::typing(&[Some("alice"), None]);

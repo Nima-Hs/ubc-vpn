@@ -18,7 +18,25 @@ import sys
 ANSWERS = {"username": "someone", "password": "not-a-real-password"}
 
 
+def send_as_typed(client: str) -> None:
+    """Has the active profile send the username as typed, with no Duo method
+    put on it: the test gateway knows "someone", not "someone@app"."""
+    listed = subprocess.run(
+        [client, "profiles", "list", "--json"], capture_output=True, text=True, check=True
+    )
+    active = json.loads(listed.stdout)["global"]["active_profile"]
+    change = json.dumps({"id": active, "duo_method": None}) + "\n"
+    subprocess.run(
+        [client, "profiles", "update", "--json"],
+        input=change,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def main() -> int:
+    send_as_typed(sys.argv[1])
     client = subprocess.Popen(
         [sys.argv[1], "connect", "--json"],
         stdin=subprocess.PIPE,

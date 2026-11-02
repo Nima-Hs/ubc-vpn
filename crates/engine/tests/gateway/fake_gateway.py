@@ -38,6 +38,11 @@ Scenarios, by what the gateway does after showing the login form:
             reply, and the rest as "accept" does
   emptyprobefail answers the first request with an empty reply too, and
             then fails every request with 500, before any form is shown
+  sms       reads the Duo method from the username's suffix, as UBC's
+            gateway does: a username ending in "@sms" is refused with the
+            form again ("New SMS passcodes sent."), as a gateway does that
+            texts passcodes instead; one ending in "@" and 6 to 8 digits is
+            taken; anything else is refused with "Login failed."
 
 Never run a client against "sso" that may have the external-browser login:
 such a client starts a browser on the machine it runs on.
@@ -72,19 +77,21 @@ once: give it a terminal, or a pipe that stays open.
 import http.server
 import json
 import os
+import re
 import socket
 import socketserver
 import ssl
 import sys
 import threading
 import time
+import urllib.parse
 
 # Ends in base64 padding, as ocserv's cookie does: an "=" inside the value.
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef=="
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
     "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended", "end", "expire", "drop",
-    "emptyreply", "usernameagain", "emptyprobe", "emptyprobefail", "echo",
+    "emptyreply", "usernameagain", "emptyprobe", "emptyprobefail", "echo", "sms",
 )
 # The CSTP packet types the gateway reads or sends.
 CSTP_DATA = 0
@@ -198,6 +205,21 @@ SUCCESS = (
 )
 
 
+def sms_reply(body):
+    """What the "sms" scenario answers a login with: see the scenarios. The
+    answers come as a form or, as libopenconnect sends them, as XML."""
+    text = body.decode("utf-8", "replace")
+    found = re.search(r"<username>([^<]*)</username>", text) or re.search(
+        r"(?:^|&)username=([^&]*)", text
+    )
+    username = urllib.parse.unquote(found.group(1)) if found else ""
+    if username.endswith("@sms"):
+        return form("/auth", LOGIN, error="New SMS passcodes sent.")
+    if re.search(r"@[0-9]{6,8}$", username):
+        return SUCCESS
+    return form("/auth", LOGIN, error="Login failed.")
+
+
 def host_scan(base):
     return (
         "<host-scan><host-scan-ticket>FAKE-TICKET</host-scan-ticket>"
@@ -286,6 +308,9 @@ class Gateway(http.server.BaseHTTPRequestHandler):
                 time.sleep(3600)
             elif scenario == "reject":
                 self.reply(form("/auth", LOGIN, error="Login failed."))
+            elif scenario == "sms":
+                reply = sms_reply(body)
+                self.reply(reply, COOKIE if reply == SUCCESS else None)
             elif scenario in ("code", "codeagain"):
                 self.reply(form("/code", CODE, message="Enter the code."))
             else:

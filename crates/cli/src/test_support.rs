@@ -144,6 +144,9 @@ pub(crate) fn tell(conn: &Connection, message: &ServerMessage) -> bool {
     conn.write_line(encode(message).unwrap().trim_end()).is_ok()
 }
 
+/// What the gateway is sent for the username `alice` with the default Duo
+/// method.
+pub(crate) const GATEWAY_USER: &str = "alice@app";
 pub(crate) const PASSWORD: &str = "correct-horse-battery";
 pub(crate) const CODE: &str = "246810";
 pub(crate) const COOKIE: &str = "Zq7-made-up-0123456789";
@@ -201,6 +204,14 @@ pub(crate) fn brief() -> Limits {
     }
 }
 
+/// The pretend gateway's script, taking `alice` with the default Duo
+/// method: [`GATEWAY_USER`].
+pub(crate) fn gateway_script() -> Script {
+    let mut script = Script::new(pin());
+    script.form[0].1 = Secret::new(GATEWAY_USER);
+    script
+}
+
 pub(crate) fn pin() -> ubc_vpn_core::policy::Pin {
     format!("pin-sha256:{}=", "A".repeat(43))
         .try_into()
@@ -222,7 +233,7 @@ impl Scene {
             settings_folder(&rig.root.join("settings"));
             std::fs::write(rig.root.join("settings/settings.json"), text).unwrap();
         }
-        let mut script = Script::new(pin());
+        let mut script = gateway_script();
         let mut code = script.form[1].clone();
         (code.0.kind, code.1) = (PromptKind::Code, Secret::new(CODE));
         script.form.push(code);
@@ -264,12 +275,30 @@ impl Scene {
         typist: &mut dyn Ask,
         progress: &Progress,
     ) -> (Ended, String, String) {
+        self.connect_with(profile, None, typist, progress)
+    }
+
+    /// `connect --profile <profile> --duo <duo>`, each left out for `None`.
+    pub(crate) fn connect_with(
+        &self,
+        profile: Option<&ubc_vpn_core::profiles::ProfileId>,
+        duo: Option<ubc_vpn_core::duo::DuoMethod>,
+        typist: &mut dyn Ask,
+        progress: &Progress,
+    ) -> (Ended, String, String) {
         let platform = || Ok(self.rig.fake.platform(&self.rig.root));
         let engines = |_: &Policy| Ok(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let limits = brief();
         let ended = connect(
-            &platform, profile, &engines, typist, progress, limits, &mut out, &mut err,
+            &platform,
+            crate::connect::Which { profile, duo },
+            &engines,
+            typist,
+            progress,
+            limits,
+            &mut out,
+            &mut err,
         );
         let text = |bytes| String::from_utf8(bytes).unwrap();
         (ended, text(out), text(err))

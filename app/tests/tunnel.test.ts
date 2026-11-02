@@ -45,6 +45,7 @@ const VIEW: ProfilesView = {
             id: ID,
             name: "Campus",
             username: "someone.example",
+            duo_method: "push",
             routes: { subnets: ["198.19.0.0/24"], dns_domains: ["dept.campus.example"] },
             save_password: false,
             password_saved: false,
