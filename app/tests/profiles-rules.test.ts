@@ -165,7 +165,7 @@ describe("what the screen may send for profiles", () => {
         }
     });
 
-    it("changes only a username and whether the password is saved", () => {
+    it("changes only a username, the Duo method and whether the password is saved", () => {
         expect(takeUpdate([ID, { username: "someone" }])).toEqual([ID, { username: "someone" }]);
         expect(takeUpdate([ID, { username: null, save_password: false }])).toEqual([
             ID,
