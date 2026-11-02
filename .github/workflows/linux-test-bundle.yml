@@ -4,12 +4,17 @@ name: Linux test bundle
 # hand, before the Linux packages exist: a release ubc-vpn-service and
 # ubc-vpn for x86-64 with the real engine, our pinned libopenconnect.so.5
 # beside them, the policy the Windows installer ships, the licence texts and
-# the exact source of the LGPL library. Started by hand only.
+# the exact source of the LGPL library. Started by hand, and by a pull
+# request that changes this file, so that a change is tried before it
+# merges.
 #
 # It is not a release and nothing is signed. The bundle is kept as an
 # artifact for a few days, with its SHA-256 in the run's summary.
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/linux-test-bundle.yml
   workflow_dispatch:
 
 permissions:
