@@ -87,6 +87,11 @@ jobs:
     # it has.
     runs-on: ubuntu-22.04
     timeout-minutes: 40
+    env:
+      # The packaging tools in native/linux/test-packages.sh, all of them.
+      PACKAGING_TOOLS: >-
+        binutils binutils-common binutils-x86-64-linux-gnu libbinutils libctf0 libctf-nobfd0
+        tar xz-utils liblzma5
     defaults:
       run:
         working-directory: app
@@ -104,21 +109,33 @@ jobs:
           tar -xzf "$RUNNER_TEMP/download/libopenconnect-linux-x64.tar.gz" -C "$RUNNER_TEMP/native"
 
       # The client's keyring links the system's libdbus-1: its headers and
-      # pkg-config, at the versions pinned in test-packages.sh, from its
-      # dated Ubuntu snapshot. The cache ci.yml and native-linux.yml keep is
-      # only read here; the script checks every package again regardless.
+      # pkg-config. fpm writes the .deb with the ar, tar and xz it finds on
+      # PATH: binutils, tar and xz-utils, with the libraries of theirs that
+      # do the work. All at the versions pinned in test-packages.sh, from
+      # its dated Ubuntu snapshot; the runner's newer copies of the tools,
+      # if it has any, are downgraded to their pins, and the script stops on
+      # any version that differs. This job keeps its own cache of them,
+      # saved below; the script checks every package again regardless.
       - name: Restore the pinned packages
+        id: packages
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /var/tmp/ubc-vpn-test-packages
-          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev
-      - name: Install the pinned D-Bus headers
+          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev-packaging-tools
+      - name: Install the pinned D-Bus headers and packaging tools
         working-directory: .
         env:
           TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
         run: |
-          mkdir "$RUNNER_TEMP/packages"
+          mkdir "$RUNNER_TEMP/packages" "$RUNNER_TEMP/tools"
           bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/tools" $PACKAGING_TOOLS
+      - name: Save the pinned packages
+        if: steps.packages.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: ${{ steps.packages.outputs.cache-primary-key }}
 
       # A stalled download would otherwise hold the job until its own limit.
       - name: Install the pinned Rust toolchain
@@ -154,7 +171,10 @@ jobs:
             "$RUNNER_TEMP/sources/ubc-vpn-$version-linux-x64-sources.tar.gz"
 
       # electron-builder downloads fpm itself, checked against a checksum
-      # this version of it carries.
+      # this version of it carries. fpm must find the pinned tools, with
+      # the PATH pnpm gives it.
+      - name: fpm finds the pinned ar, tar and xz
+        run: pnpm exec bash ../packaging/linux/check-tools.sh $PACKAGING_TOOLS
       - name: Build the .deb
         run: pnpm package:linux
       - name: The app is fused and licensed, the .deb is as it should be, and there is no updater
