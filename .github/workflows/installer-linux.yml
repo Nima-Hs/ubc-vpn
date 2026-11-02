@@ -91,7 +91,7 @@ jobs:
       # The packaging tools in native/linux/test-packages.sh, all of them.
       PACKAGING_TOOLS: >-
         binutils binutils-common binutils-x86-64-linux-gnu libbinutils libctf0 libctf-nobfd0
-        tar xz-utils liblzma5
+        tar xz-utils liblzma5 liblzma-dev
     defaults:
       run:
         working-directory: app

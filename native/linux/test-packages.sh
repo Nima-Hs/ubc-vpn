@@ -37,6 +37,7 @@ declare -A PINNED_jammy=(
     [tar]=1.34+dfsg-1ubuntu0.1.22.04.6
     [xz-utils]=5.2.5-2ubuntu1.1
     [liblzma5]=5.2.5-2ubuntu1.1
+    [liblzma-dev]=5.2.5-2ubuntu1.1
 )
 declare -A PINNED_noble=(
     [pkg-config]=1.8.1-2build1
@@ -45,13 +46,14 @@ declare -A PINNED_noble=(
 # The packaging tools: the ar (binutils), tar and xz (xz-utils) that fpm
 # writes the Linux .deb with, and the libraries of theirs that do the work
 # (liblzma5 compresses for xz). Each binutils package needs the others at
-# its own version, so all are pinned. The runner's image may hold newer
+# its own version, so all are pinned, and liblzma-dev, which the runner's
+# image has, needs liblzma5 at its own. The runner's image may hold newer
 # copies than the snapshot, so these, and only these, may be downgraded to
 # their pins: they are asked for alone, apt may download no other package
 # and remove none, and each must be at its pin afterwards.
 declare -A PACKAGING_TOOLS=(
     [binutils]=1 [binutils-common]=1 [binutils-x86-64-linux-gnu]=1 [libbinutils]=1
-    [libctf0]=1 [libctf-nobfd0]=1 [tar]=1 [xz-utils]=1 [liblzma5]=1
+    [libctf0]=1 [libctf-nobfd0]=1 [tar]=1 [xz-utils]=1 [liblzma5]=1 [liblzma-dev]=1
 )
 # The snapshot's release file for each suite, as fetched from it. A dated
 # snapshot never changes, so the lists must start from exactly these:
@@ -292,8 +294,11 @@ fi
 # lists. Listed as if nothing were downloaded yet, so that every package is
 # checked, cached or not. An empty list, with packages still to install,
 # means something is wrong with the lists.
-listing=$(sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$work/empty/" install -y \
-    --no-install-recommends "${install_opts[@]}" --print-uris "${wanted[@]}" | grep "^'" || true)
+# If apt cannot, its whole plan is shown, such as what it would remove.
+plan=$(sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$work/empty/" install -y \
+    --no-install-recommends "${install_opts[@]}" --print-uris "${wanted[@]}") ||
+    { echo "$plan" >&2; fail "apt cannot install the pinned packages as asked"; }
+listing=$(grep "^'" <<<"$plan" || true)
 uris=$(cut -d "'" -f 2 <<<"$listing")
 [ -n "$uris" ] || all_in_place "$@" || fail "apt would download nothing, yet not every package is installed"
 echo "Packages to download:"
