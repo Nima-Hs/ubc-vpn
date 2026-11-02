@@ -45,6 +45,8 @@ native/windows/stage.sh <folder> target/debug
 
 The macOS and Linux artifacts hold a tarball to unpack, and the tests there build a small stand-in library with the system's C compiler (`cc`). `.github/workflows/engine.yml` has the exact steps.
 
+To build the Windows library yourself rather than download it, install MSYS2 from the dated `msys2-base` archive pinned in `native/windows/base.lock`, not from the MSYS2 installer: from Git Bash, `native/windows/base.sh <new-folder>` downloads it from `repo.msys2.org`, stops if its SHA-256 differs, and unpacks it into that folder. `native/windows/README.md` has the steps after that. The build stops in an MSYS2 that has any package that is not the archive's or a locked one, and `.github/workflows/native-windows.yml` installs MSYS2 the same way.
+
 The engine's login tests talk to a stand-in gateway in `crates/engine/tests/gateway/`, written for the Python version pinned in that workflow, with nothing beyond its standard library. Without it those tests are skipped and say so. To run them, make a throwaway key in a folder outside the repository and name the Python and the folder:
 
 ```sh

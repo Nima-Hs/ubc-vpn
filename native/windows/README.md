@@ -6,14 +6,20 @@ MSYS2 has no OpenConnect package, so it is compiled here with MinGW (UCRT64). Gn
 
 ## Running it
 
-In an [MSYS2](https://www.msys2.org/) UCRT64 shell, from this folder:
+First, from Git Bash, install the pinned MSYS2 base into a new folder:
+
+```sh
+./base.sh /c/msys2-pinned
+```
+
+Then, in that MSYS2's UCRT64 shell (`/c/msys2-pinned/ucrt64.exe`), from this folder:
 
 ```sh
 ./setup.sh
 ./build.sh
 ```
 
-`setup.sh` installs the pinned build tools, compiler and libraries, replacing other versions of those packages if you have them. `build.sh` deletes and recreates `work/` (scratch) and `out/` (the result). It keeps the GnuTLS build in `cache/gnutls` and reuses it until `common.sh`, `gnutls.sh`, a GnuTLS patch or a lock file changes; a first build takes about ten minutes longer.
+`build.sh` stops in any other MSYS2: every installed package must be one of the base's or one of the locked ones. `setup.sh` installs the pinned build tools, compiler and libraries, replacing other versions of those packages if you have them. `build.sh` deletes and recreates `work/` (scratch) and `out/` (the result). It keeps the GnuTLS build in `cache/gnutls` and reuses it until `common.sh`, `gnutls.sh`, a GnuTLS patch or a lock file changes; a first build takes about ten minutes longer.
 
 The `Native library (Windows)` workflow runs the same two scripts on GitHub's Windows runner, then the tests below. Only if all of them pass, and GnuTLS was built in that same run, does it mark the output shippable and upload it as the `libopenconnect-windows-x64` artifact. Builds of `main` always build GnuTLS. A pull request may reuse an earlier build of it to save time; its output is then uploaded as `libopenconnect-windows-x64-reused-gnutls` and stays unshippable.
 
@@ -38,11 +44,16 @@ The `Native library (Windows)` workflow runs the same two scripts on GitHub's Wi
 - **OpenConnect.** `build.sh` names the commit that tag `v9.21` points to and stops if the tag has moved. The build is made from the archive of that commit, with the patches in `patches/openconnect/`. One makes it compile with current MinGW headers. The other stops the library closing file descriptor 0 when a handle is freed that never made a command pipe, stops every handle offering single sign-on to the gateway, and stops a host-scan tag in the reply to an address with no path crashing the library; the macOS and Linux builds apply the same one. The external-browser login is left out, as on Linux and macOS: `--without-external-browser`, and `ac_cv_func_gnutls_hkdf_expand=no`, which turns off HPKE. Without HPKE a gateway's single sign-on form fails at once; with it, the library would listen on local port 29786 for a browser and wait. `build.sh` checks the configuration and the workflow checks the built DLL.
 - **GnuTLS.** `common.sh` names the release and `sources.lock` its SHA-256. It is the release the macOS build uses, with the one patch in `patches/gnutls/`. `gnutls.sh` also requires a signature by the maintainer whose key is in `keys/` and whose full fingerprint it names. That key is one of the four in the keyring gnutls.org publishes for its releases. It expires on 2027-01-01. After that a GnuTLS build stops at the signature check until `keys/gnutls-release.asc` is replaced with the renewed key, or with another maintainer's key and its fingerprint in `gnutls.sh`.
 - **The compiler and the libraries.** `packages.lock` lists every MinGW package file with its SHA-256. `setup.sh` downloads exactly those files from `repo.msys2.org`, which keeps old versions, checks them and installs them. `build.sh` stops if the installed MinGW packages are not exactly the locked ones.
-- **The build tools.** `tools.lock` does the same for autoconf, automake, libtool, make, patch, perl, git and what they need. `build.sh` stops if one is missing or at another version.
+- **The MSYS2 base.** `base.lock` names a dated `msys2-base` archive from `repo.msys2.org` with its SHA-256, and `base.sh` installs MSYS2 from it: the shell, coreutils, tar, curl, gpg, pacman and the rest. `base-packages.txt` lists the packages in it.
+- **The build tools.** `tools.lock` does the same for autoconf, automake, libtool, make, patch, perl, git and what they need. `build.sh` stops unless the installed MSYS packages are exactly the base's and these, each at its version.
 - **The MSYS2 source packages.** `sources.lock` lists each one with its SHA-256.
 - **The licences.** `licences.txt` names the licence we use each component under. `build.sh` stops if something that would ship is not listed.
 
-Not pinned: the MSYS2 base that the tools run on (the shell, coreutils, tar, curl, gpg, pacman). It is whatever the machine has; on the runner that is GitHub's image. It could be pinned by starting from a dated `msys2-base` archive with a known hash instead of the installed MSYS2, which is not done yet. `out/build-packages.txt` records the versions used.
+Not pinned: what runs before MSYS2 does. On the runner that is GitHub's Windows image: Git Bash, which runs `base.sh`, and its `curl`, `sha256sum` and `tar`, which fetch, check and unpack the archive. `base.sh` unpacks nothing unless the SHA-256 matches. `out/build-packages.txt` records the MSYS2 packages used.
+
+The archive's signature is not checked: the keys to check it with would come from the archive itself. The SHA-256 in `base.lock` is what pins it.
+
+To move to a newer base, change `base.lock`, regenerate `base-packages.txt` from the archive's `var/lib/pacman/local/` folder, and expect to update `tools.lock` if a tool needs newer libraries.
 
 To update a library, change its lines in `packages.lock` and `sources.lock` to the new file names and SHA-256s. To accept a new DLL, add it to those, to `licences.txt` and to `dlls.txt`.
 
@@ -85,7 +96,7 @@ What this still leaves:
 
 - **The trace's verdict.** A tampered Process Monitor could report a clean trace. It can no longer change what ships.
 - **GitHub.** We trust its runner images, that a job's outputs and result reach the next job unchanged, and its artifact store to the extent of the checksums above.
-- **The build machine.** It still runs the unpinned MSYS2 base and the runner's own tools while it makes the output and the record.
+- **The build machine.** It still runs the runner's own tools (Git Bash, Rust, Python) while it makes the output and the record. MSYS2 on it is the pinned base.
 - **The artifact's name.** A hostile trace job could upload an artifact of its own named `libopenconnect-windows-x64`. That is safe only because the approve job's upload of the same name then fails, so the run fails, and consumers take artifacts from successful runs only. So never set `overwrite: true` on the final upload, and anything that picks an artifact must keep asking for successful runs only (for example `gh run list --status success`).
 
 ## The output
