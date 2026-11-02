@@ -24,6 +24,7 @@ const VIEW: ProfilesView = {
             id: ID,
             name: "Campus",
             username: "someone.example",
+            duo_method: "push",
             routes: { subnets: ["203.0.113.0/24"], dns_domains: ["campus.example"] },
             save_password: true,
             password_saved: true,
@@ -32,6 +33,7 @@ const VIEW: ProfilesView = {
             id: OTHER,
             name: "Lab",
             username: null,
+            duo_method: "push",
             routes: { subnets: [], dns_domains: [] },
             save_password: false,
             password_saved: false,
@@ -188,6 +190,7 @@ describe("the profiles commands", () => {
                     // A line break and a character that reverses text direction.
                     name: `Campus${LF}fake line${RLO}`,
                     username: `someone${NUL}.example`,
+                    duo_method: "push",
                 },
             ],
         };

@@ -230,6 +230,7 @@ pub(crate) fn read_profiles(dir: &Path) -> Result<Found, SettingsFailureCode> {
     Ok(Found {
         cleaned: !read.cleaned.is_empty(),
         cleaned_passwords,
+        codes_dropped: read.codes_dropped,
         profiles: read.profiles,
     })
 }
@@ -243,6 +244,25 @@ pub(crate) struct Found {
     /// The profiles whose username was cleared on the way, whose saved
     /// passwords go when the settings are next saved.
     pub(crate) cleaned_passwords: Vec<ProfileId>,
+    /// Whether a username in the file held a Duo passcode, which reading
+    /// dropped. The file still holds it until it is saved.
+    pub(crate) codes_dropped: bool,
+}
+
+/// Saves the settings in `dir` again if a username in the file holds a Duo
+/// passcode, so that the file no longer does. Reading drops the code, but
+/// writes nothing. For the commands that only read the settings; one that
+/// changes them saves them anyway. Nothing is said when this fails: the
+/// code is never sent, and the next save drops it.
+pub(crate) fn drop_stored_codes(dir: &Path) {
+    let Ok(_changing) = change(dir) else {
+        return;
+    };
+    if let Ok(found) = read_profiles(dir)
+        && found.codes_dropped
+    {
+        let _ = write_profiles(dir, &found.profiles, &found.cleaned_passwords);
+    }
 }
 
 /// Saves `profiles` in `dir`, having first forgotten the saved passwords of

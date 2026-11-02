@@ -16,7 +16,9 @@ use ubc_vpn_engine::{Cancel, Gateway, LogSink, LoginEngine, LoginError, Prompts,
 use crate::client::ClientError;
 use crate::connect::{BUSY, CANCELLED, LOGIN_REFUSED, start, stop};
 use crate::connect_json::connect;
-use crate::test_support::{CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, pin, saved};
+use crate::test_support::{
+    CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, gateway_script, saved,
+};
 use crate::{FAILED, NOT_OWNER, NOT_RUNNING};
 
 /// What the command writes, line by line, as the app reads it.
@@ -42,7 +44,7 @@ fn drive_through<T: Send + 'static>(
     let input = BufReader::new(input);
     let code = connect(
         &platform,
-        None,
+        crate::connect::Which::default(),
         &engines,
         input,
         brief(),
@@ -135,7 +137,7 @@ fn while_the_login_waits(
 fn the_app_is_asked_and_told_done_once_the_service_accepts() {
     let mut scene = Scene::usual();
     // The service's own gateway is slow to open the tunnel.
-    let slow = FakeEngine::new(Script::new(pin()));
+    let slow = FakeEngine::new(gateway_script());
     slow.hold();
     scene.service = None;
     scene.service = Some(scene.rig.service_on(slow.clone()));
@@ -223,7 +225,7 @@ impl LoginEngine for TooLate {
         self.begun.store(true, Ordering::SeqCst);
         wait_until("the cancel", || cancel.is_cancelled());
         if self.asks {
-            let script = Script::new(pin());
+            let script = gateway_script();
             prompts.ask(&script.form[1].0)?;
         }
         Ok(Session {
@@ -318,11 +320,11 @@ fn every_failure_has_its_code() {
 
     // A username refused before any password: check its form.
     let mut scene = Scene::usual();
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     script.form.truncate(1);
     script.form[0].1 = Secret::new("alice.dept@app");
     scene.gateway = FakeEngine::new(script);
-    let said = "CWL.dept@method";
+    let said = "CWL.dept";
     assert_eq!(fails(&scene, &[], "check_username", LOGIN_REFUSED, said), 0);
 
     let scene = Scene::usual();
@@ -427,7 +429,7 @@ fn a_question_reaches_the_app_clean_and_short_enough() {
     // label and this message.
     let asked = |label: &str, message: &str| {
         let mut scene = Scene::usual();
-        let mut script = Script::new(pin());
+        let mut script = gateway_script();
         script.form[1].0.label = label.to_string();
         script.form[1].0.message = Some(message.to_string());
         scene.gateway = FakeEngine::new(script);
@@ -471,7 +473,7 @@ impl LoginEngine for Panics {
         _: &Cancel,
         _: &LogSink,
     ) -> Result<Session, LoginError> {
-        prompts.ask(&Script::new(pin()).form[1].0)?;
+        prompts.ask(&gateway_script().form[1].0)?;
         panic!("made up, to see how connect --json ends");
     }
 }
@@ -503,7 +505,7 @@ fn a_cancel_before_the_service_is_contacted_claims_nothing() {
         let limits = brief();
         let ended = start(
             &platform,
-            None,
+            crate::connect::Which::default(),
             &engines,
             &mut typist,
             &cancel,
@@ -550,7 +552,7 @@ fn a_reader_that_panics_cancels_the_login() {
     let input = BufReader::new(Broken);
     let code = connect(
         &platform,
-        None,
+        crate::connect::Which::default(),
         &engines,
         input,
         brief(),
@@ -602,4 +604,46 @@ fn the_app_is_not_asked_for_a_saved_password() {
     assert_eq!((code, lines.len()), (0, 2), "{lines:?}");
     assert!(lines[0].contains(r#""kind":"code""#), "{lines:?}");
     assert!(lines.iter().all(|line| !line.contains(PASSWORD)));
+}
+
+// The app's connect, the one it starts by itself at sign-in, for
+// auto-connect and after a session ends, sends the method saved in the
+// profile. One that ignored it would send `alice@app` here and be refused.
+// With the passcode method the code is asked for through the app, as a
+// question of its own before the password, and is never in a line the app
+// is sent.
+#[test]
+fn the_apps_connect_uses_the_saved_method() {
+    let mut scene = Scene::new(
+        Some(&format!(r#"{{"username":"alice@call",{ROUTES}}}"#)),
+        "",
+    );
+    let mut script = gateway_script();
+    script.form[0].1 = Secret::new("alice@call");
+    let mut code = script.form[1].clone();
+    (code.0.kind, code.1) = (ubc_vpn_core::login::PromptKind::Code, Secret::new(CODE));
+    script.form.push(code);
+    scene.gateway = FakeEngine::new(script.clone());
+    let (exit, lines, err) = drive(&scene, answering(&[PASSWORD, CODE]));
+    assert_eq!(exit, 0, "{err} {lines:?}");
+    let sent = scene.gateway.answers();
+    assert_eq!(sent[0].1.expose(), "alice@call");
+
+    let mut scene = Scene::new(
+        Some(&format!(r#"{{"username":"alice@000000",{ROUTES}}}"#)),
+        "",
+    );
+    script.form[0].1 = Secret::new("alice@975310");
+    scene.gateway = FakeEngine::new(script);
+    let (exit, lines, err) = drive(&scene, answering(&["975310", PASSWORD, CODE]));
+    assert_eq!(exit, 0, "{err} {lines:?}");
+    assert!(
+        lines[0].contains(r#""kind":"code","label":"Duo passcode""#),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("975310")),
+        "{lines:?}"
+    );
 }

@@ -423,7 +423,9 @@ fn version_1_settings_are_kept_when_saved_as_version_2() {
     machine.create("Lab", "user.lab@app");
     let stored = machine.stored();
     let first = stored.profile(&ProfileId::first()).unwrap();
-    assert_eq!(first.username.as_deref(), Some("user.dept@app"));
+    // The method its suffix named is the profile's own.
+    assert_eq!(first.username.as_deref(), Some("user.dept"));
+    assert_eq!(first.duo_method, Some(ubc_vpn_core::duo::DuoMethod::Push));
     assert_eq!(first.routes.subnets[0].to_string(), "10.255.0.0/16");
     let platform = || Ok(Fake::new().platform(&machine.root));
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -435,7 +437,7 @@ fn version_1_settings_are_kept_when_saved_as_version_2() {
         &mut err,
     );
     let view: SettingsView = decode(&String::from_utf8(out).unwrap()).unwrap();
-    assert_eq!(view.settings.username.as_deref(), Some("user.dept@app"));
+    assert_eq!(view.settings.username.as_deref(), Some("user.dept"));
 }
 
 // Security rule: a username today's rules refuse is cleared when read,

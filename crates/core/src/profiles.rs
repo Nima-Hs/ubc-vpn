@@ -10,7 +10,7 @@
 //! { "version": 2,
 //!   "global": { "start": "off", "auto_connect": false, "active_profile": "<id>" },
 //!   "profiles": [ { "id": "<id>", "name": "UBC VPN", "username": null,
-//!                   "routes": { "subnets": [], "dns_domains": [] },
+//!                   "duo_method": "push", "routes": { "subnets": [], "dns_domains": [] },
 //!                   "save_password": false } ] }
 //! ```
 //!
@@ -36,6 +36,13 @@
 //!   and becomes "Profile 2" or the like if nothing usable is left or it
 //!   is another's name; a username is cleared, and that profile's saved
 //!   password is forgotten, as it was the old username's.
+//! - **The Duo method is the profile's own,** not part of the username
+//!   ([`crate::duo`]). A profile saved before it was, with no `duo_method`,
+//!   has it taken from its username's suffix as [`duo::migrate`] says; a
+//!   passcode found there is dropped, and [`Read::codes_dropped`] says so,
+//!   so that the file is saved without it. `null` means the username is sent
+//!   as typed. A username that holds an `@` has no method; one that came to
+//!   have both, such as from an older version, is split again on reading.
 //! - **Anything else is unreadable.** A newer version, or a version 2 file
 //!   whose structure is broken, is [`SettingsFailureCode::Unreadable`]: the
 //!   way out is `settings reset`, as for any file that cannot be read.
@@ -59,6 +66,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::duo::{self, DuoMethod, known_suffix, lenient_method};
 use crate::policy::FullTunnel;
 use crate::routes::{Ipv4Net, RouteSet};
 use crate::settings::{Settings, lenient_routes};
@@ -185,9 +193,15 @@ pub struct Profile {
     pub id: ProfileId,
     /// What the user calls it. See [`check_name`].
     pub name: String,
-    /// The username that answers the gateway's question, when saved.
+    /// The username that answers the gateway's question, when saved:
+    /// the CWL username with any department, without the Duo method.
     #[serde(default)]
     pub username: Option<String>,
+    /// How the login is confirmed, put on the username for the gateway.
+    /// `null`: the username is sent as typed. Not a method this version
+    /// knows: `null` too.
+    #[serde(default, deserialize_with = "lenient_method")]
+    pub duo_method: Option<DuoMethod>,
     /// The subnets and DNS domains to send through the tunnel. Kept as
     /// saved: the service checks them again at connect.
     #[serde(default, deserialize_with = "lenient_routes")]
@@ -240,6 +254,10 @@ pub enum ProfileFailureCode {
     /// Another profile has that id already. The caller makes a new random
     /// id and tries again.
     IdTaken,
+    /// The username holds an `@`, and so names its own way to confirm,
+    /// while the profile has a Duo method too. Leave the `@` part out of the
+    /// username, or choose to send it as typed.
+    UsernameHasMethod,
     /// Saving the password was to be turned on, and what the keyring still
     /// holds for the profile could not be removed first: the keyring cannot
     /// be used, or would not remove it. Saving stays off, so nothing left
@@ -267,6 +285,9 @@ pub struct Read {
     /// What was cleaned on the way, if anything. Saved, the file holds the
     /// cleaned values.
     pub cleaned: Vec<Cleaned>,
+    /// Whether a username held a Duo passcode, which was dropped. Save the
+    /// settings, so that the file no longer holds it.
+    pub codes_dropped: bool,
 }
 
 impl Read {
@@ -309,10 +330,12 @@ impl Profiles {
     /// Settings from before profiles, as one active profile with `id`.
     /// `other` are the file's other fields, kept.
     fn from_v1(id: ProfileId, v1: Settings, other: Map<String, Value>) -> Self {
+        let (username, duo_method) = duo::migrate(v1.username.as_deref());
         let profile = Profile {
             id: id.clone(),
             name: FIRST_PROFILE_NAME.to_string(),
-            username: v1.username,
+            username,
+            duo_method,
             routes: v1.routes,
             save_password: v1.save_password,
             other: Map::new(),
@@ -337,6 +360,7 @@ impl Profiles {
     pub fn read(text: Option<&str>) -> Result<Read, SettingsFailureCode> {
         let unreadable = |_| SettingsFailureCode::Unreadable;
         let untouched = |v1, other| Self::from_v1(ProfileId::first(), v1, other);
+        let mut codes_dropped = false;
         let mut profiles = match text {
             None => untouched(Settings::default(), Map::new()),
             Some(text) => {
@@ -349,12 +373,14 @@ impl Profiles {
                     None | Some(Some(1)) => {
                         let v1: Settings = serde_json::from_value(Value::Object(file.clone()))
                             .map_err(unreadable)?;
+                        codes_dropped |= v1.username.as_deref().is_some_and(duo::holds_code);
                         for moved in ["version", "username", "routes", "save_password"] {
                             file.remove(moved);
                         }
                         untouched(v1, file)
                     }
                     Some(Some(2)) => {
+                        codes_dropped |= migrate_methods(&mut file);
                         serde_json::from_value(Value::Object(file)).map_err(unreadable)?
                     }
                     // A newer version, or not a number: not this version's.
@@ -365,18 +391,23 @@ impl Profiles {
         profiles
             .check_structure()
             .map_err(|_| SettingsFailureCode::Unreadable)?;
-        let cleaned = profiles.clean();
+        let cleaned = profiles.clean(&mut codes_dropped);
         // Cleaned, every rule holds; a file that still breaks one is not
         // one this version understands.
         profiles
             .check()
             .map_err(|_| SettingsFailureCode::Unreadable)?;
-        Ok(Read { profiles, cleaned })
+        Ok(Read {
+            profiles,
+            cleaned,
+            codes_dropped,
+        })
     }
 
     /// Makes every name and username one that today's rules accept, and
-    /// says what it changed.
-    fn clean(&mut self) -> Vec<Cleaned> {
+    /// says what it changed. Sets `codes_dropped` when a username that held
+    /// a passcode was split.
+    fn clean(&mut self, codes_dropped: &mut bool) -> Vec<Cleaned> {
         /// A name as today's rules would keep it, or empty when nothing of
         /// it can be kept.
         fn plain(name: &str) -> String {
@@ -410,6 +441,14 @@ impl Profiles {
             let renamed = name != profile.name;
             profile.name = name;
             taken.insert(profile.name.to_lowercase());
+            // A username with an `@` and a method as well: split again, as
+            // one saved before there were methods is.
+            if let (Some(name), Some(_)) = (&profile.username, profile.duo_method)
+                && name.contains('@')
+            {
+                *codes_dropped |= duo::holds_code(name);
+                (profile.username, profile.duo_method) = duo::migrate(Some(name));
+            }
             let username_cleared = profile
                 .username
                 .as_deref()
@@ -474,6 +513,11 @@ impl Profiles {
             {
                 return Err(ProfileFailureCode::BadUsername);
             }
+            if profile.duo_method.is_some()
+                && profile.username.as_deref().is_some_and(|u| u.contains('@'))
+            {
+                return Err(ProfileFailureCode::UsernameHasMethod);
+            }
         }
         Ok(())
     }
@@ -508,9 +552,9 @@ impl Profiles {
         Ok(result)
     }
 
-    /// Makes a profile with a new `id`, which the caller makes at random.
-    /// It is not made active. An id that is taken is refused with
-    /// [`ProfileFailureCode::IdTaken`], and the caller tries another.
+    /// Makes a profile with a new `id`, which the caller makes at random,
+    /// and the Duo method its username names, or the default. See
+    /// [`Profiles::create_with`].
     pub fn create(
         &mut self,
         id: ProfileId,
@@ -519,10 +563,28 @@ impl Profiles {
         routes: RouteSet,
         save_password: bool,
     ) -> Result<(), ProfileFailureCode> {
+        let login = Login {
+            username: Some(username),
+            duo_method: None,
+        };
+        self.create_with(id, name, login, routes, save_password)
+    }
+
+    /// Makes a profile with a new `id`, which the caller makes at random.
+    /// It is not made active. An id that is taken is refused with
+    /// [`ProfileFailureCode::IdTaken`], and the caller tries another. The
+    /// username and the Duo method are read as [`Login`] says, starting
+    /// from no username and the default method.
+    pub fn create_with(
+        &mut self,
+        id: ProfileId,
+        name: &str,
+        login: Login,
+        routes: RouteSet,
+        save_password: bool,
+    ) -> Result<(), ProfileFailureCode> {
         let name = check_name(name)?;
-        if username.is_some_and(|u| !usable_username(u)) {
-            return Err(ProfileFailureCode::BadUsername);
-        }
+        let (username, duo_method) = login.apply(None, Some(DuoMethod::default()))?;
         if self.profiles.len() >= MAX_PROFILES {
             return Err(ProfileFailureCode::TooManyProfiles);
         }
@@ -533,7 +595,8 @@ impl Profiles {
             all.profiles.push(Profile {
                 id,
                 name,
-                username: username.map(str::to_string),
+                username,
+                duo_method,
                 routes,
                 save_password,
                 other: Map::new(),
@@ -552,27 +615,40 @@ impl Profiles {
     }
 
     /// Changes a profile's username, when `username` is given (`Some(None)`
-    /// removes it), and whether it saves its password. The saved password
-    /// is to be forgotten when the username changes or saving is turned
-    /// off: it was the old user's, or the user no longer wants it kept.
+    /// removes it), and whether it saves its password. See
+    /// [`Profiles::update_with`].
     pub fn update(
         &mut self,
         id: &ProfileId,
         username: Option<Option<&str>>,
         save_password: Option<bool>,
     ) -> Result<Password, ProfileFailureCode> {
-        if let Some(Some(name)) = username
-            && !usable_username(name)
-        {
-            return Err(ProfileFailureCode::BadUsername);
-        }
+        let login = Login {
+            username,
+            duo_method: None,
+        };
+        self.update_with(id, login, save_password)
+    }
+
+    /// Changes a profile's username and Duo method, as [`Login`] says, and
+    /// whether it saves its password. The saved password is to be
+    /// forgotten when the username changes or saving is turned off: it was
+    /// the old user's, or the user no longer wants it kept. A change of the
+    /// method alone keeps it: it is the same account.
+    pub fn update_with(
+        &mut self,
+        id: &ProfileId,
+        login: Login,
+        save_password: Option<bool>,
+    ) -> Result<Password, ProfileFailureCode> {
         self.change(|all| {
             let profile = all.profile_mut(id)?;
             let mut forget = false;
-            if let Some(username) = username {
-                forget |= profile.username.as_deref() != username;
-                profile.username = username.map(str::to_string);
-            }
+            let (username, duo_method) =
+                login.apply(profile.username.as_deref(), profile.duo_method)?;
+            forget |= profile.username != username;
+            profile.username = username;
+            profile.duo_method = duo_method;
             if let Some(save) = save_password {
                 forget |= profile.save_password && !save;
                 profile.save_password = save;
@@ -647,6 +723,91 @@ impl Profiles {
     }
 }
 
+/// A change to a profile's username and Duo method. A field left out is
+/// not changed.
+///
+/// - A username that ends in a suffix UBC documents is split as
+///   [`duo::migrate`] splits one: the method it names is taken, and a
+///   passcode in it is dropped.
+/// - A username with any other `@` is sent as typed: it has no method.
+/// - A username with no `@` keeps the method, or gets the default when it
+///   had none.
+/// - A method given here wins over all of these. One given with a
+///   username that holds an `@` is refused with
+///   [`ProfileFailureCode::UsernameHasMethod`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Login<'a> {
+    /// The new username, or `Some(None)` to remove it.
+    pub username: Option<Option<&'a str>>,
+    /// The new method, or `Some(None)` to send the username as typed.
+    pub duo_method: Option<Option<DuoMethod>>,
+}
+
+impl Login<'_> {
+    /// The username and method a profile that has `username` and `method`
+    /// has after this change.
+    fn apply(
+        self,
+        username: Option<&str>,
+        method: Option<DuoMethod>,
+    ) -> Result<(Option<String>, Option<DuoMethod>), ProfileFailureCode> {
+        let (mut username, mut method) = (username.map(str::to_string), method);
+        match self.username {
+            None => {}
+            Some(None) => username = None,
+            Some(Some(typed)) => {
+                if !usable_username(typed) {
+                    return Err(ProfileFailureCode::BadUsername);
+                }
+                (username, method) = match known_suffix(typed) {
+                    Some((account, named)) => (Some(account.to_string()), Some(named)),
+                    None if typed.contains('@') => (Some(typed.to_string()), None),
+                    None => (Some(typed.to_string()), Some(method.unwrap_or_default())),
+                };
+                // What is left once the suffix is off must still be a name.
+                if !username.as_deref().is_some_and(usable_username) {
+                    return Err(ProfileFailureCode::BadUsername);
+                }
+            }
+        }
+        if let Some(chosen) = self.duo_method {
+            method = chosen;
+        }
+        // A method beside an `@` is refused by `Profiles::check`, which
+        // every change passes.
+        Ok((username, method))
+    }
+}
+
+/// Gives every profile in a version 2 file that has no `duo_method` the
+/// one its username names, as [`duo::migrate`] says, before the file is
+/// read. Says whether a username held a passcode, which is dropped.
+fn migrate_methods(file: &mut Map<String, Value>) -> bool {
+    let mut dropped = false;
+    let Some(Value::Array(profiles)) = file.get_mut("profiles") else {
+        return false;
+    };
+    for profile in profiles.iter_mut().filter_map(Value::as_object_mut) {
+        if profile.contains_key("duo_method") {
+            continue;
+        }
+        let username = match profile.get("username") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.clone()),
+            // Not a username: left for the reading to refuse.
+            Some(_) => continue,
+        };
+        dropped |= username.as_deref().is_some_and(duo::holds_code);
+        let (username, method) = duo::migrate(username.as_deref());
+        if let Some(username) = username {
+            profile.insert("username".to_string(), Value::from(username));
+        }
+        let method = serde_json::to_value(method).unwrap_or(Value::Null);
+        profile.insert("duo_method".to_string(), method);
+    }
+    dropped
+}
+
 // The lines the app exchanges with the command-line client about profiles.
 // Each command reads one line and writes one line, as `settings` does.
 
@@ -705,6 +866,11 @@ pub struct NewProfile {
     /// Its username, if known.
     #[serde(default)]
     pub username: Option<String>,
+    /// Its Duo method, or `null` to send the username as typed. Left out,
+    /// it is the one the username's suffix names, or the default.
+    #[serde(default, deserialize_with = "present_method")]
+    #[cfg_attr(test, ts(optional))]
+    pub duo_method: Option<Option<DuoMethod>>,
     /// Its routes as typed, checked as `settings check-routes` checks them.
     #[serde(default)]
     pub routes: Option<RouteInput>,
@@ -736,6 +902,11 @@ pub struct UpdateProfile {
     #[serde(default, deserialize_with = "present")]
     #[cfg_attr(test, ts(optional, type = "string | null"))]
     pub username: Option<Option<String>>,
+    /// Its new Duo method, or `null` to send the username as typed.
+    /// Changing it keeps the saved password.
+    #[serde(default, deserialize_with = "present_method")]
+    #[cfg_attr(test, ts(optional))]
+    pub duo_method: Option<Option<DuoMethod>>,
     /// Whether it saves its password. Turning it off forgets the saved one.
     #[serde(default)]
     #[cfg_attr(test, ts(optional))]
@@ -745,6 +916,13 @@ pub struct UpdateProfile {
 /// Tells a field given as `null` from one left out: `Some(None)` and `None`.
 fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
     Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// Tells a method given as `null` from one left out, as [`present`] does.
+fn present_method<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<DuoMethod>>, D::Error> {
+    Option::<DuoMethod>::deserialize(deserializer).map(Some)
 }
 
 /// The input of `profiles delete` and `profiles switch`.

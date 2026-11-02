@@ -86,12 +86,57 @@ const MARKERS: [&str; 11] = [
 /// in a hex dump. The service must therefore never ask `libopenconnect` for
 /// output that dumps request or response bodies, and must drop the library's
 /// debug-level lines altogether in release builds.
+///
+/// A Duo passcode in a username is masked first, wherever it is on the line:
+/// see [`mask_codes`].
 pub fn redact_line(line: &str) -> String {
+    let line = mask_codes(line);
     let lower = line.to_ascii_lowercase();
     match MARKERS.iter().filter_map(|m| lower.find(m)).min() {
         Some(at) => format!("{}{REDACTED}", &line[..at]),
-        None => line.to_string(),
+        None => line,
     }
+}
+
+/// The fewest digits after an `@` that [`mask_codes`] masks: as many as a
+/// Duo passcode has.
+pub const MASKED_DIGITS: usize = 6;
+
+/// `line` with the digits masked wherever an `@`, or `%40` as a URL writes
+/// it, is followed by [`MASKED_DIGITS`] digits or more.
+///
+/// A username sent as `user@123456` carries a Duo passcode, which is as
+/// secret as the password. This masks it on a line that carries no marker,
+/// such as a gateway's "Login failed for user@123456". It also masks some
+/// digits that are no passcode, which is cheap.
+pub fn mask_codes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    loop {
+        let sign = rest.find('@').into_iter().chain(find_ascii_ci(rest, "%40"));
+        let Some(at) = sign.min() else { break };
+        let width = if rest[at..].starts_with('@') { 1 } else { 3 };
+        let after = &rest[at + width..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..at + width]);
+        rest = match digits >= MASKED_DIGITS {
+            true => {
+                out.push_str(REDACTED);
+                &after[digits..]
+            }
+            false => after,
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Where `needle`, which is ASCII, first starts in `text`, without regard
+/// to the case of ASCII letters.
+fn find_ascii_ci(text: &str, needle: &str) -> Option<usize> {
+    let (text, needle) = (text.as_bytes(), needle.as_bytes());
+    (0..=text.len().checked_sub(needle.len())?)
+        .find(|&at| text[at..at + needle.len()].eq_ignore_ascii_case(needle))
 }
 
 #[cfg(test)]
@@ -204,6 +249,42 @@ mod tests {
     fn matching_is_case_insensitive() {
         assert_eq!(redact_line("COOKIE: abc"), REDACTED);
         assert_eq!(redact_line("got Token=xyz"), format!("got {REDACTED}"));
+    }
+
+    // Security rule: a Duo passcode in a username is masked on any line,
+    // with a marker or without, written with `@` or as a URL writes it.
+    // Codes are made up.
+    #[test]
+    fn a_passcode_in_a_username_is_masked() {
+        let leaks = [
+            (
+                "Login failed for user.dept@123456",
+                "Login failed for user.dept@[redacted]",
+            ),
+            ("user@123456", "user@[redacted]"),
+            ("a@123456 and b@7654321.", "a@[redacted] and b@[redacted]."),
+            ("form user%40123456&x=1", "form user%40[redacted]&x=1"),
+            ("form user%4012345678", "form user%40[redacted]"),
+        ];
+        for (line, masked) in leaks {
+            assert_eq!(mask_codes(line), masked, "{line:?}");
+            assert_eq!(redact_line(line), masked, "{line:?}");
+        }
+        // Before a marker the code is masked too; after it, everything goes.
+        let both = redact_line("user@123456 username=user@123456");
+        assert_eq!(both, format!("user@{REDACTED} {REDACTED}"));
+        // Fewer digits than a passcode, or none, are left.
+        for line in [
+            "user@app",
+            "user@12345",
+            "mail me@example.test",
+            "50% off",
+            "%4",
+        ] {
+            assert_eq!(mask_codes(line), line, "{line:?}");
+        }
+        // Text that is not ASCII is passed over whole.
+        assert_eq!(mask_codes("é@ü@123456"), format!("é@ü@{REDACTED}"));
     }
 
     #[test]

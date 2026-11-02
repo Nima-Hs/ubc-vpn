@@ -5,6 +5,7 @@
 import type { BridgeLine } from "@shared/protocol/BridgeLine";
 import type { CliMessage } from "@shared/protocol/CliMessage";
 import type { ConnState } from "@shared/protocol/ConnState";
+import type { DuoMethod } from "@shared/protocol/DuoMethod";
 import type { ErrorCode } from "@shared/protocol/ErrorCode";
 import type { ErrorInfo } from "@shared/protocol/ErrorInfo";
 import type { LiveRoutes } from "@shared/protocol/LiveRoutes";
@@ -321,8 +322,16 @@ const PROFILE_FAILURE_CODES: Record<ProfileFailureCode, true> = {
     last_profile: true,
     bad_username: true,
     id_taken: true,
+    username_has_method: true,
     keyring_not_cleared: true,
 };
+
+const DUO_METHODS: Record<DuoMethod, true> = { push: true, call: true, sms: true, passcode: true };
+
+/** Whether a value is a Duo method, or `null` for a username sent as typed. */
+export function isDuoMethod(value: unknown): value is DuoMethod | null {
+    return value === null || (typeof value === "string" && Object.hasOwn(DUO_METHODS, value));
+}
 
 const START_MODES: Record<StartMode, true> = { off: true, window: true, tray: true };
 
@@ -337,6 +346,7 @@ function isProfileView(value: unknown): value is ProfileView {
         isProfileId(value.id) &&
         typeof value.name === "string" &&
         (value.username === null || typeof value.username === "string") &&
+        isDuoMethod(value.duo_method) &&
         isRouteSet(value.routes) &&
         typeof value.save_password === "boolean" &&
         typeof value.password_saved === "boolean"

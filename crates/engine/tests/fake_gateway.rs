@@ -175,3 +175,27 @@ fn fields_shows_a_hidden_field_one_for_a_second_login_and_a_group() {
     assert!(body.contains(r#"<input type="hidden" name="token""#));
     assert!(body.contains(r#"<select name="group_list""#));
 }
+
+// "sms" reads the method from the username, as UBC's gateway does: `@sms`
+// is refused with the form again, saying the codes were texted, and a
+// texted code after the `@` is taken.
+#[test]
+fn sms_refuses_the_text_request_and_takes_a_texted_code() {
+    let Some(gateway) = Gateway::start("sms") else {
+        return;
+    };
+    let reply =
+        |body| -> Value { serde_json::from_str(&post(gateway.port, "/auth", body)).unwrap() };
+    let texted = reply("username=someone%40sms&password=not-a-real-password");
+    assert!(is_login_form(&texted), "{texted}");
+    assert!(text(&texted, "body").contains("<error>New SMS passcodes sent.</error>"));
+    assert!(texted["cookie"].is_null(), "{texted}");
+    let taken = reply("username=someone%400000000&password=not-a-real-password");
+    assert!(gives_cookie(&taken), "{taken}");
+    let wrong = reply("username=someone%40app&password=not-a-real-password");
+    assert!(
+        text(&wrong, "body").contains("<error>Login failed.</error>"),
+        "{wrong}"
+    );
+    println!("RAN: gateway sms");
+}

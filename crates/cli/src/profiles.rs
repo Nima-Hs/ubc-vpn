@@ -30,8 +30,9 @@ use std::io::{BufRead, Write};
 
 use ubc_vpn_core::policy::{FullTunnel, Policy};
 use ubc_vpn_core::profiles::{
-    Keyring, MaybeProfile, NewProfile, Password, ProfileFailure, ProfileFailureCode, ProfileRef,
-    ProfileRoutes, ProfileView, Profiles, ProfilesView, RenameProfile, Startup, UpdateProfile,
+    Keyring, Login, MaybeProfile, NewProfile, Password, ProfileFailure, ProfileFailureCode,
+    ProfileRef, ProfileRoutes, ProfileView, Profiles, ProfilesView, RenameProfile, Startup,
+    UpdateProfile,
 };
 use ubc_vpn_core::protocol::{decode, encode};
 use ubc_vpn_core::routes::RouteSet;
@@ -42,7 +43,9 @@ use ubc_vpn_core::settings_cli::{
 use ubc_vpn_core::state::TunnelMode;
 use ubc_vpn_platform::Platform;
 
-use crate::settings::{Found, line, new_id, policy, read_profiles, write_profiles};
+use crate::settings::{
+    Found, drop_stored_codes, line, new_id, policy, read_profiles, write_profiles,
+};
 use crate::settings_lock::change;
 use crate::{keys, live};
 
@@ -140,6 +143,9 @@ fn answer(
     if command == Command::List {
         let found = read_profiles(dir)?;
         tell_cleaned(&found, err);
+        if found.codes_dropped {
+            drop_stored_codes(dir);
+        }
         return view(&found.profiles, policy.as_ref()).map(Answer::Profiles);
     }
     // What the change asks for is read before anything is locked.
@@ -286,10 +292,14 @@ fn apply(
             // made again.
             let mut tries = 0;
             loop {
-                let made = profiles.create(
+                let login = Login {
+                    username: Some(new.username.as_deref()),
+                    duo_method: new.duo_method,
+                };
+                let made = profiles.create_with(
                     new_id(),
                     &new.name,
-                    new.username.as_deref(),
+                    login,
                     routes.clone(),
                     new.save_password,
                 );
@@ -303,9 +313,12 @@ fn apply(
             .rename(&rename.id, &rename.name)
             .map(|()| Made::Profiles),
         Asked::Update(update) => {
-            let username = update.username.as_ref().map(|name| name.as_deref());
+            let login = Login {
+                username: update.username.as_ref().map(|name| name.as_deref()),
+                duo_method: update.duo_method,
+            };
             let was_saving = profiles.profile(&update.id).map(|p| p.save_password);
-            let password = profiles.update(&update.id, username, update.save_password)?;
+            let password = profiles.update_with(&update.id, login, update.save_password)?;
             forgets(password, &update.id, forget);
             // Turned on: whatever the keyring still holds for the profile
             // goes first. A password refused while the keyring would not

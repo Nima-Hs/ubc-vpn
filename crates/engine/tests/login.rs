@@ -265,6 +265,38 @@ fn a_form_shown_again_is_a_wrong_password_and_nothing_is_sent_twice() {
     assert_eq!(errors(&attempt), ["The gateway said: Login failed."]);
 }
 
+// With Duo's texted passcodes, the gateway refuses the login sent with
+// `@sms` and texts the codes: the library sees the form shown again, which
+// is a refused login, and nothing is sent twice. A login made afresh with a
+// texted code after the `@` is taken. This is what `ubc-vpn connect` does
+// with the `sms` method. The names and codes are made up.
+#[test]
+fn texted_codes_are_a_refusal_then_a_second_login() {
+    let (engine, library, _guard) = engine();
+    let Some(stand_in) = StandIn::start("sms") else {
+        return;
+    };
+    let pin = pin_of(library, &stand_in);
+    let gateway = gateway(&stand_in, &pin);
+    let login = |username: &'static str| {
+        let mut ask = move |prompt: &Prompt| {
+            Some(Secret::new(match prompt.kind {
+                PromptKind::Username => username,
+                _ => PASSWORD,
+            }))
+        };
+        let logs = LogSink::none();
+        engine.login(&gateway, &mut Prompts::new(&mut ask), &Cancel::new(), &logs)
+    };
+    assert_eq!(login("someone@sms").err(), Some(LoginError::WrongPassword));
+    // However the library writes the `@`, each was sent once.
+    let either = |name: &str| sent(&stand_in, name) + sent(&stand_in, &name.replace("%40", "@"));
+    assert_eq!(either("someone%40sms"), 1);
+    let session = login("someone@0000000").expect("a texted code is taken");
+    assert!(!session.cookie.expose().is_empty());
+    assert_eq!(either("someone%400000000"), 1);
+}
+
 // A gateway that answers the username and password with an empty reply
 // judged no password: seen at UBC's gateway with a username not in the form
 // it expects. That is its own error, which points at the username, and the

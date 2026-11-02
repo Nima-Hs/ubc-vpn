@@ -19,14 +19,21 @@
 //! user can change it in the app. Nothing is saved after a login that
 //! failed or was given up.
 //!
-//! The password, the one-time code and the cookie are [`Secret`]s. They are
-//! never printed or put in a message, they are registered with the engine's
-//! log sink, and the cookie leaves this program only inside the one request
-//! to the service.
+//! The gateway is sent the profile's username with its Duo method put back
+//! on (`ubc_vpn_core::duo`): `@app`, `@call` or `@sms`, or `@` and a
+//! passcode, which is asked for at each login, just before the username is
+//! sent, and never kept. A username typed with its own `@`, or a profile
+//! with no method, is sent as typed.
+//!
+//! The password, the one-time code, the username sent with a passcode in it
+//! and the cookie are [`Secret`]s. They are never printed or put in a
+//! message, they are registered with the engine's log sink, and the cookie
+//! leaves this program only inside the one request to the service.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+use ubc_vpn_core::duo::{self, DuoMethod};
 use ubc_vpn_core::login::{LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::profiles::{Profile, ProfileId};
@@ -60,9 +67,42 @@ pub const LOGIN_REFUSED: u8 = 8;
 /// points at the username. UBC's gateway reads the way to confirm the login
 /// from the username, so a username in another form is the usual cause. The
 /// example is made up.
-pub const CHECK_USERNAME: &str = "The gateway did not take the login. Check your username: \
-UBC's gateway expects your CWL username, your department and the way to confirm, \
-as CWL.dept@method, for example jdoe.dept@app.";
+pub const CHECK_USERNAME: &str = "The gateway did not take the login. Check your username \
+and Duo method: the username is your CWL username and your department, as CWL.dept, \
+for example jdoe.dept, and the Duo method is chosen in the profile.";
+
+/// What a user is told when a Duo code they were asked for was not one,
+/// time after time. Nothing was sent with it.
+pub const BAD_CODE: &str = "That was not a Duo code, so the login was stopped and the code \
+was not sent. Connect again, and enter only the digits.";
+
+/// How many times a Duo code is asked for before the login stops.
+const CODE_TRIES: usize = 3;
+
+/// The words of a question for a Duo code, which this program asks itself.
+pub struct CodeWords {
+    /// The field's label.
+    pub label: &'static str,
+    /// What is said with it the first time.
+    pub message: &'static str,
+    /// What is said with it after an answer that was not a code.
+    pub again: &'static str,
+}
+
+/// The question for a passcode, with [`DuoMethod::Passcode`].
+pub const PASSCODE: CodeWords = CodeWords {
+    label: "Duo passcode",
+    message: "Enter the 6-digit passcode from Duo Mobile or your token.",
+    again: "A Duo passcode is 6 digits. Enter it again.",
+};
+
+/// The question for a code from a text message, with [`DuoMethod::Sms`],
+/// after the gateway refused the login that asked for the text.
+pub const TEXTED: CodeWords = CodeWords {
+    label: "Code from the text message",
+    message: "Enter the code from the text message Duo sent you.",
+    again: "The code in the text message is 6 to 8 digits. Enter it again.",
+};
 /// The user gave up.
 pub const CANCELLED: u8 = 9;
 
@@ -192,14 +232,24 @@ fn busy() -> Stop {
     }
 }
 
-/// Runs `connect` with `profile`, or the active profile when that is
-/// `None`, and says how it ended. `progress` is told when the connect
+/// Which profile a connect uses, and the Duo method it uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Which<'a> {
+    /// The profile `--profile` names, or `None` for the active one.
+    pub profile: Option<&'a ProfileId>,
+    /// The method `--duo` names, for this connect only and never saved, or
+    /// `None` for the one saved in the profile.
+    pub duo: Option<DuoMethod>,
+}
+
+/// Runs `connect` with the profile `which` names, or the active profile,
+/// and says how it ended. `progress` is told when the connect
 /// request goes to the service, and is asked whether a request to stop has
 /// come.
 #[allow(clippy::too_many_arguments)]
 pub fn connect(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
-    profile: Option<&ProfileId>,
+    which: Which,
     engines: Engines,
     ask: &mut dyn Ask,
     progress: &Progress,
@@ -209,7 +259,7 @@ pub fn connect(
 ) -> Ended {
     let started = start(
         platform,
-        profile,
+        which,
         engines,
         ask,
         &Cancel::new(),
@@ -306,7 +356,7 @@ fn owner(platform: &Platform, limits: Limits) -> Result<Client, Stop> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start(
     platform: &dyn Fn() -> ubc_vpn_platform::Result<Platform>,
-    profile: Option<&ProfileId>,
+    which: Which,
     engines: Engines,
     ask: &mut dyn Ask,
     cancel: &Cancel,
@@ -327,7 +377,7 @@ pub(crate) fn start(
 
     let engine = engines(&policy).map_err(|why| internal(&why))?;
     let dir = platform.paths.settings_dir.as_path();
-    let (profile, tunnel) = chosen(dir, profile)?;
+    let (profile, tunnel) = chosen(dir, which.profile)?;
     let id = &profile.id;
     // The routes come from the user's settings and from nowhere else.
     if let Err(why) = profile.routes.check(policy.allowed_routes.as_deref()) {
@@ -360,6 +410,8 @@ pub(crate) fn start(
     let mut answers = Answers::default();
     let asked = Asked {
         username: name,
+        // For this connect only, or the profile's saved one.
+        method: which.duo.map_or(profile.duo_method, Some),
         password: saved_password.as_ref(),
         typed: &mut typed,
         answers: &mut answers,
@@ -493,7 +545,11 @@ fn chosen(dir: &std::path::Path, which: Option<&ProfileId>) -> Result<(Profile, 
         let why = unsafe_folder.unwrap_or_else(|| "The settings file cannot be read.".to_string());
         failed(LoginErrorCode::Internal, &why)
     };
-    let profiles = settings::read_profiles(dir).map_err(unreadable)?.profiles;
+    let found = settings::read_profiles(dir).map_err(unreadable)?;
+    if found.codes_dropped {
+        settings::drop_stored_codes(dir);
+    }
+    let profiles = found.profiles;
     let Some(id) = which else {
         return Ok((profiles.active().clone(), profiles.global.tunnel));
     };
@@ -558,6 +614,8 @@ fn word(code: &LoginErrorCode) -> String {
 struct Asked<'a> {
     /// The saved username, which answers that question for the user.
     username: Option<&'a str>,
+    /// The profile's Duo method, put on the username for the gateway.
+    method: Option<DuoMethod>,
     /// The saved password that may be sent, which answers that question.
     password: Option<&'a Secret>,
     /// A username the user was asked for.
@@ -595,11 +653,13 @@ fn login(
 ) -> Result<Session, Stop> {
     let Asked {
         username,
+        method,
         password,
         typed,
         answers,
         said,
     } = asked;
+    let mut bad_code = false;
     let lines = Arc::new(Mutex::new(Vec::new()));
     let kept = lines.clone();
     let keep = move |level, line: &str| kept.lock().unwrap().push((level, line.to_string()));
@@ -607,35 +667,98 @@ fn login(
     // printed: the engine reports the library's own complaints as progress,
     // since many do not end a login, and says itself what failed.
     let logs = LogSink::new(LogLevel::Info, keep);
-    let mut answer = |prompt: &Prompt| {
-        let given = match (prompt.kind, username) {
-            (PromptKind::Username, Some(name)) => Some(Secret::new(name)),
-            (PromptKind::Username, None) => {
-                *typed = ask.ask(prompt);
-                typed.clone()
-            }
-            (PromptKind::Password, _) => match password {
-                Some(saved) => {
-                    answers.sent_saved = true;
-                    Some(saved.clone())
+    // With texted codes, the code the user typed after the first login was
+    // refused, for the second.
+    let mut texted: Option<Secret> = None;
+    let result = loop {
+        // Whether this login sent the username with `@sms`.
+        let mut asked_for_text = false;
+        let mut answer = |prompt: &Prompt| {
+            let given = match (prompt.kind, username) {
+                (PromptKind::Username, saved) => 'name: {
+                    let account = match (saved, typed.clone()) {
+                        (Some(name), _) => Secret::new(name),
+                        // The second login with texted codes: as typed for
+                        // the first.
+                        (None, Some(account)) if texted.is_some() => account,
+                        (None, _) => {
+                            *typed = ask.ask(prompt);
+                            let Some(account) = typed.clone() else {
+                                break 'name None;
+                            };
+                            account
+                        }
+                    };
+                    // A username typed with its own `@` names its own
+                    // method, and is sent as typed.
+                    let method = method.filter(|_| !account.expose().contains('@'));
+                    // A passcode is asked for now, each time, and never kept.
+                    let code = match method {
+                        Some(DuoMethod::Passcode) => {
+                            let code = match ask_code(ask, &PASSCODE, duo::is_passcode) {
+                                Ok(code) => code,
+                                Err(not_a_code) => {
+                                    bad_code = not_a_code;
+                                    break 'name None;
+                                }
+                            };
+                            answers.code_entered = true;
+                            logs.hide(&code);
+                            Some(code)
+                        }
+                        Some(DuoMethod::Sms) => texted.clone(),
+                        _ => None,
+                    };
+                    asked_for_text = method == Some(DuoMethod::Sms) && code.is_none();
+                    duo::gateway_username(account.expose(), method, code.as_ref()).ok()
                 }
-                None => {
-                    answers.typed_password = ask.ask(prompt);
-                    answers.typed_password.clone()
+                (PromptKind::Password, _) => match (password, &answers.typed_password) {
+                    (Some(saved), _) => {
+                        answers.sent_saved = true;
+                        Some(saved.clone())
+                    }
+                    // The second login with texted codes sends the password
+                    // typed for the first: the refusal was the gateway
+                    // texting the codes.
+                    (None, Some(typed)) if texted.is_some() => Some(typed.clone()),
+                    (None, _) => {
+                        answers.typed_password = ask.ask(prompt);
+                        answers.typed_password.clone()
+                    }
+                },
+                (PromptKind::Code, _) => {
+                    let code = ask.ask(prompt);
+                    answers.code_entered |= code.is_some();
+                    code
                 }
-            },
-            (PromptKind::Code, _) => {
-                let code = ask.ask(prompt);
-                answers.code_entered |= code.is_some();
-                code
-            }
-            _ => ask.ask(prompt),
+                _ => ask.ask(prompt),
+            };
+            // Whatever was typed is kept out of every log line from here on.
+            given.inspect(|secret| logs.hide(secret))
         };
-        // Whatever was typed is kept out of every log line from here on.
-        given.inspect(|secret| logs.hide(secret))
+        let mut prompts = Prompts::new(&mut answer);
+        let result = engine.login(gateway, &mut prompts, cancel, &logs);
+        // UBC's gateway refuses a login sent with `@sms` and texts passcodes
+        // instead. Once, and only after such a login was refused, the user
+        // is asked for one of them, and the login is made again with it.
+        // A gateway that takes `@sms` at once, or asks for the code itself,
+        // never gets here.
+        if !(asked_for_text && result == Err(LoginError::WrongPassword)) {
+            break result;
+        }
+        match ask_code(ask, &TEXTED, duo::is_texted_code) {
+            Ok(code) => {
+                // A refusal from here on may be the code's.
+                answers.code_entered = true;
+                logs.hide(&code);
+                texted = Some(code);
+            }
+            Err(not_a_code) => {
+                bad_code = not_a_code;
+                break Err(LoginError::Cancelled);
+            }
+        }
     };
-    let mut prompts = Prompts::new(&mut answer);
-    let result = engine.login(gateway, &mut prompts, cancel, &logs);
     // The engine held the cookie before this code did, so a line it wrote on
     // the way may show it. The lines are printed only now, with it removed.
     // They can also carry text the gateway sent, some of it from before its
@@ -664,6 +787,9 @@ fn login(
         if let Some(why) = &stopped {
             return failed(LoginErrorCode::Internal, why);
         }
+        if bad_code {
+            return failed(LoginErrorCode::Internal, BAD_CODE);
+        }
         let (exit, code) = match error {
             LoginError::WrongPassword => (LOGIN_REFUSED, LoginErrorCode::WrongPassword),
             LoginError::CheckUsername => (LOGIN_REFUSED, LoginErrorCode::CheckUsername),
@@ -684,6 +810,28 @@ fn login(
             ..failed(code, &message)
         }
     })
+}
+
+/// Asks for a Duo code with `words` until the answer is one that `valid`
+/// takes, at most [`CODE_TRIES`] times. Spaces in an answer are left out,
+/// as Duo Mobile shows a code in two halves. `Err(true)` when no answer was
+/// a code; `Err(false)` when the user gave up, or could not be asked.
+fn ask_code(ask: &mut dyn Ask, words: &CodeWords, valid: fn(&str) -> bool) -> Result<Secret, bool> {
+    let mut message = words.message;
+    for _ in 0..CODE_TRIES {
+        let prompt = Prompt {
+            kind: PromptKind::Code,
+            label: words.label.to_string(),
+            message: Some(message.to_string()),
+        };
+        let answer = ask.ask(&prompt).ok_or(false)?;
+        let code = Secret::new(answer.expose().replace(' ', ""));
+        if valid(code.expose()) {
+            return Ok(code);
+        }
+        message = words.again;
+    }
+    Err(true)
 }
 
 /// Waits for the state the service ends in, after it has reported `during`,
@@ -709,3 +857,7 @@ fn follow(client: &mut Client, during: &ConnState) -> Result<ConnState, Stop> {
 #[cfg(test)]
 #[path = "connect_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "duo_tests.rs"]
+mod duo_tests;

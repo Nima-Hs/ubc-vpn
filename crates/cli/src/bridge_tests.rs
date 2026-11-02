@@ -762,13 +762,13 @@ fn messages_are_not_read_faster_than_the_app_takes_them() {
 // lines and none of the three.
 #[test]
 fn no_secret_reaches_the_app_through_the_log() {
-    use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, pin};
+    use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, gateway_script};
     use ubc_vpn_core::login::PromptKind;
     use ubc_vpn_core::redact::Secret;
-    use ubc_vpn_engine::fake::{FakeEngine, Script};
+    use ubc_vpn_engine::fake::FakeEngine;
 
     let mut scene = Scene::new(Some(&format!("{{{ROUTES}}}")), "");
-    let mut script = Script::new(pin());
+    let mut script = gateway_script();
     let mut code = script.form[1].clone();
     (code.0.kind, code.1) = (PromptKind::Code, Secret::new(CODE));
     script.form.push(code);

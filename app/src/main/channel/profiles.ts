@@ -109,6 +109,7 @@ function shownView(view: ProfilesView): ProfilesView {
             id: profile.id,
             name: shown(profile.name),
             username: profile.username === null ? null : shown(profile.username),
+            duo_method: profile.duo_method,
             routes: shownRoutes(profile.routes),
             save_password: profile.save_password,
             password_saved: profile.password_saved,
