@@ -269,8 +269,10 @@ fn dev() -> Result<Parts, String> {
 /// `install` and `uninstall`, run as an administrator by the Windows setup
 /// program, and as root by the macOS and Linux packages' scripts. The same
 /// steps on every OS; `ubc_vpn_platform::install` does each of them. On
-/// macOS and Linux it cannot do any yet, and neither can the folder check,
-/// so there both stop before anything is changed.
+/// macOS it cannot do any yet, so there it stops before anything is
+/// changed. On Linux the policy and the state are in two folders, and the
+/// calls given the data folder, which is the policy's, do the same to the
+/// state's.
 mod setup {
     use std::path::{Path, PathBuf};
 

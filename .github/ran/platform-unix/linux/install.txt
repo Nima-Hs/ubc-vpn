@@ -1,0 +1,6 @@
+install policy
+install fresh
+install update
+install verify
+install unit
+install remove

@@ -5,6 +5,8 @@ name: Platform (Unix)
 # second user to play the stranger, which a developer machine does not offer
 # by default. GitHub's Linux and macOS runners have passwordless sudo, so
 # those tests run here, and this workflow fails if any of them was skipped.
+# The systemd unit the service is installed as is tried there too, under
+# systemd on a Linux runner.
 
 on:
   pull_request:
@@ -20,6 +22,10 @@ on:
       - .github/workflows/platform-unix.yml
       - .github/ran/check.sh
       - .github/ran/platform-unix/**
+      # The systemd unit and its test.
+      - packaging/linux/**
+      - native/linux/test-packages.sh
+      - .github/ran/systemd/**
       # Last, so it wins: a change to Markdown files alone starts nothing.
       # None is built, tested or shipped. Any other file still counts.
       - "!**/*.md"
@@ -37,6 +43,10 @@ on:
       - .github/workflows/platform-unix.yml
       - .github/ran/check.sh
       - .github/ran/platform-unix/**
+      # The systemd unit and its test.
+      - packaging/linux/**
+      - native/linux/test-packages.sh
+      - .github/ran/systemd/**
       - "!**/*.md"
   workflow_dispatch:
 
@@ -172,3 +182,142 @@ jobs:
             fi
             echo "$program: $(wc -l < needed.txt) functions from outside, syscall not among them."
           done
+
+  # The systemd unit, installed by `ubc-vpn-service install` from a release
+  # build placed where the Linux packages will put it, and tried for real by
+  # packaging/linux/tests/systemd.sh: running, owned, reinstalled, connected
+  # through ocserv in a network namespace under the hardened unit, stopped
+  # and removed. On GitHub's Ubuntu 22.04 runners only, where systemd is PID
+  # 1, sudo needs no password and the pinned ocserv exists; they are thrown
+  # away after the job. The job uses no secrets.
+  systemd:
+    name: systemd unit (linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    # `actions: read` is for downloading our libopenconnect from the native
+    # library workflow's newest good run on main.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      BIN: /opt/UBC VPN/resources/bin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # As in engine.yml: only a run started by a push to main counts, and
+      # the commit the library was built from must be on main.
+      - name: Fetch the native library built on main
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: native-linux.yml
+          ARTIFACT: libopenconnect-linux-x64
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$WORKFLOW" --branch main \
+            --event push --status success --limit 1 --json databaseId,headSha \
+            --jq '.[0] | "\(.databaseId) \(.headSha)"')
+          read -r id sha <<<"$run"
+          [[ $id =~ ^[0-9]+$ ]]
+          echo "Run $id of $WORKFLOW, at commit $sha"
+          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir download
+          mkdir native
+          tar -xzf "download/$ARTIFACT.tar.gz" -C native
+          commit=$(jq -r '.build.repository_commit // empty' native/manifest.json)
+          [[ $commit =~ ^[0-9a-f]{40}$ ]]
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
+          echo "The library was built from $commit; main is $status of it."
+          [ "$status" = ahead ] || [ "$status" = identical ]
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        timeout-minutes: 4
+        run: rustup toolchain install
+      # Restores the build of our dependencies, keyed by the toolchain, the
+      # OS, the job and the lockfile.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: platform-unix-systemd
+          # Pull requests restore main's caches but save none of their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The client's keyring links the system's libdbus-1, and the test needs
+      # ocserv: all at the versions pinned in test-packages.sh, from its
+      # dated Ubuntu snapshot. The cache engine.yml keeps is only read here;
+      # the script checks every package again regardless.
+      - name: Restore the pinned packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev-ocserv
+      # ocserv's packaged service is kept from starting; systemd.sh starts
+      # its own.
+      - name: Install the pinned packages
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
+        run: |
+          mkdir "$RUNNER_TEMP/packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev ocserv
+          sudo systemctl disable ocserv.service
+          if systemctl is-active --quiet ocserv.service; then exit 1; fi
+
+      # One program at a time, with the real engine only, as a release
+      # builds them. No rpath, as in the Linux test bundle.
+      - name: Build the service and the client
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          RUSTFLAGS: ""
+        run: |
+          for package in ubc-vpn-service ubc-vpn-cli; do
+            cargo build --locked --release -p "$package" --features real-engine
+          done
+
+      # Root's, as the packages will install them: the service refuses to
+      # run from a folder anyone else could change. The library is the file
+      # itself, never a link. GitHub's image leaves /opt open to everyone
+      # (0777, with an access list), which the service rightly refuses, so
+      # on this throwaway runner it is closed as a system's own /opt is.
+      - name: Place the release build where the unit starts it
+        run: |
+          ls -ldn / /opt
+          sudo setfacl -b /opt
+          sudo chmod 0755 /opt
+          ls -ldn /opt
+          sudo install -d -o root -g root -m 0755 "/opt/UBC VPN" "/opt/UBC VPN/resources" "$BIN"
+          sudo install -o root -g root -m 0755 target/release/ubc-vpn-service target/release/ubc-vpn "$BIN/"
+          sudo install -o root -g root -m 0644 "$(readlink -f "$RUNNER_TEMP/native/lib/libopenconnect.so.5")" \
+            "$BIN/libopenconnect.so.5"
+          ls -ln "$BIN"
+
+      - name: Install, use and remove the unit
+        env:
+          UBC_VPN_TEST_THROWAWAY_MACHINE: "1"
+        run: bash packaging/linux/tests/systemd.sh "$RUNNER_TEMP/systemd" 2>&1 | tee systemd.log
+
+      # A check that is skipped passes, so prove from the log that each ran.
+      - name: Every check ran
+        run: |
+          bash .github/ran/check.sh .github/ran/systemd/linux "RAN: " systemd.log
+
+      # What the service logs holds no secret. ocserv's log is filtered as
+      # in engine.yml, though its account is made up.
+      - name: What the service and ocserv logged
+        if: failure()
+        run: |
+          journalctl -u ubc-vpn.service -o cat --no-pager | tail -n 200 || true
+          { sudo cat "$RUNNER_TEMP/systemd/ocserv.log" 2> /dev/null || true; } \
+            | grep -viE 'password' | grep -vE 'TLS\[' \
+            | sed -E 's/[A-Za-z0-9+\/=_-]{16,}/[hidden]/g' | tail -n 100
+
+      - name: No ubcvpn link is left
+        if: always()
+        run: |
+          if ip -o link show | grep ubcvpn; then exit 1; fi
+          echo "No ubcvpn link is left."

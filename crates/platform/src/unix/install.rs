@@ -1,15 +1,15 @@
-//! Installing and removing the service on Linux and macOS: its registration
-//! with launchd or systemd, and the folder that holds the policy and the
-//! state.
+//! Installing and removing the service on macOS: its registration with
+//! launchd, and the folder that holds the policy and the state. Linux has
+//! its own, in `linux/install.rs`.
 //!
-//! The packages' scripts run `ubc-vpn-service install` and `uninstall` as
+//! The package's scripts run `ubc-vpn-service install` and `uninstall` as
 //! root, as the Windows setup program does, and the service crate decides
 //! the order there too. The calls are the ones Windows has, so that the
 //! service crate's steps are the same on every OS.
 //!
 //! Not built yet: each call changes nothing and fails with
-//! [`Error::Unsupported`]. The launchd daemon and the systemd unit come
-//! with the macOS and Linux installers.
+//! [`Error::Unsupported`]. The launchd daemon comes with the macOS
+//! installer.
 
 use std::path::Path;
 
