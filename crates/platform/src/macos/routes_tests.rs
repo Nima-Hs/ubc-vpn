@@ -13,7 +13,7 @@
 //! remove every route to those however they end.
 
 use std::io::Write as _;
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,6 +28,7 @@ use super::routes::{
     BEFORE_ADD, MacRoutes, OURS, Present, boot, counts, is_utun_name, present, through, tunnel,
     winners,
 };
+use crate::fake::Fake;
 use crate::journal::{Boot, Journal, Prefix, Row, Store};
 use crate::suite::{self, Foreign};
 use crate::{Error, Mode, Platform, Routes, Verified, lock};
@@ -809,6 +810,57 @@ impl Foreign for Outsider {
         let found = find(interface).expect("the interface");
         found.v4.iter().map(|a| a.addr).collect()
     }
+
+    // The rest, for full mode's and events' checks, go through the
+    // system's own tools. Nothing here uses them until those parts exist.
+
+    fn add_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        let net = format!("{dest}/{prefix_len}");
+        system(
+            "/sbin/route",
+            &["-q", "-n", "add", "-inet6", &net, "-interface", interface],
+        );
+    }
+
+    fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        let net = format!("{dest}/{prefix_len}");
+        let args = [
+            "-q",
+            "-n",
+            "delete",
+            "-inet6",
+            &net,
+            "-interface",
+            interface,
+        ];
+        system("/sbin/route", &args);
+    }
+
+    fn add_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let address = address.to_string();
+        let args = [interface, "inet6", &address, "prefixlen", "64", "alias"];
+        system("/sbin/ifconfig", &args);
+    }
+
+    fn remove_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let address = address.to_string();
+        system("/sbin/ifconfig", &[interface, "inet6", &address, "-alias"]);
+    }
+
+    fn set_link(&self, interface: &str, up: bool) {
+        route_socket::set_up(interface, up).expect("set the link");
+    }
+
+    fn bind_ipv6(&self, interface: &str, on: bool) {
+        let setting = if on { "-ifdisabled" } else { "ifdisabled" };
+        system("/sbin/ifconfig", &[interface, "inet6", setting]);
+    }
+}
+
+/// Runs one of the system's tools, which must succeed.
+fn system(program: &str, args: &[&str]) {
+    let status = Command::new(program).args(args).status().expect(program);
+    assert!(status.success(), "{program} {args:?}: {status}");
 }
 
 #[test]
@@ -828,6 +880,29 @@ fn passes_the_shared_route_suite_on_a_utun() {
             say("STEP: check_route_ownership");
             let restarted = || Box::new(MacRoutes::unchecked(&dir)) as Box<dyn Routes>;
             suite::check_route_ownership(&routes, &restarted, &Outsider, &device.name);
+        },
+    );
+}
+
+// A change of routes on a live connection (#194). Split DNS on macOS is its
+// own part, not written yet, so the DNS half of the check runs against the
+// fake's resolver; the routes are real.
+#[test]
+fn passes_the_shared_live_route_change_check_on_a_utun() {
+    alone_as_root(
+        "passes_the_shared_live_route_change_check_on_a_utun",
+        "routes live change",
+        || {
+            let device = utun();
+            let dir = state_dir("live");
+            let _cleanup = Cleanup(vec![dir.clone()]);
+            let routes = MacRoutes::unchecked(&dir);
+            routes
+                .configure_tunnel(&device.name, ip("198.18.0.9"), 1300)
+                .expect("configure");
+            let dns = Fake::new();
+            let resolvers_for = |name: &str| dns.resolvers_for(name);
+            suite::check_live_route_change(&routes, &dns, &device.name, &resolvers_for);
         },
     );
 }
