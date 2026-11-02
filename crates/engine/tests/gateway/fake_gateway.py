@@ -84,6 +84,7 @@ import ssl
 import sys
 import threading
 import time
+import urllib.parse
 
 # Ends in base64 padding, as ocserv's cookie does: an "=" inside the value.
 COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef=="
@@ -205,11 +206,13 @@ SUCCESS = (
 
 
 def sms_reply(body):
-    """What the "sms" scenario answers a login with: see the scenarios."""
-    fields = dict(
-        part.split("=", 1) for part in body.decode("utf-8", "replace").split("&") if "=" in part
+    """What the "sms" scenario answers a login with: see the scenarios. The
+    answers come as a form or, as libopenconnect sends them, as XML."""
+    text = body.decode("utf-8", "replace")
+    found = re.search(r"<username>([^<]*)</username>", text) or re.search(
+        r"(?:^|&)username=([^&]*)", text
     )
-    username = fields.get("username", "").replace("%40", "@")
+    username = urllib.parse.unquote(found.group(1)) if found else ""
     if username.endswith("@sms"):
         return form("/auth", LOGIN, error="New SMS passcodes sent.")
     if re.search(r"@[0-9]{6,8}$", username):

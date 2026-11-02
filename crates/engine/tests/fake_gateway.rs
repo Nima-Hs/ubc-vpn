@@ -185,7 +185,7 @@ fn sms_refuses_the_text_request_and_takes_a_texted_code() {
         return;
     };
     let reply =
-        |body| -> Value { serde_json::from_str(&post(gateway.port, "/auth", body)).unwrap() };
+        |body: &str| -> Value { serde_json::from_str(&post(gateway.port, "/auth", body)).unwrap() };
     let texted = reply("username=someone%40sms&password=not-a-real-password");
     assert!(is_login_form(&texted), "{texted}");
     assert!(text(&texted, "body").contains("<error>New SMS passcodes sent.</error>"));
@@ -197,5 +197,17 @@ fn sms_refuses_the_text_request_and_takes_a_texted_code() {
         text(&wrong, "body").contains("<error>Login failed.</error>"),
         "{wrong}"
     );
+    // As libopenconnect answers: in XML.
+    let xml = |name: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><config-auth client="vpn" type="auth-reply"><auth><username>{name}</username><password>not-a-real-password</password></auth></config-auth>"#
+        )
+    };
+    let texted = reply(&xml("someone@sms"));
+    assert!(
+        text(&texted, "body").contains("New SMS passcodes sent."),
+        "{texted}"
+    );
+    assert!(gives_cookie(&reply(&xml("someone@12345678"))));
     println!("RAN: gateway sms");
 }

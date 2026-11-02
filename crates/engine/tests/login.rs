@@ -278,6 +278,11 @@ fn texted_codes_are_a_refusal_then_a_second_login() {
     };
     let pin = pin_of(library, &stand_in);
     let gateway = gateway(&stand_in, &pin);
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&said);
+    let logs = LogSink::new(LogLevel::Info, move |_, line: &str| {
+        kept.lock().unwrap().push(line.to_string());
+    });
     let login = |username: &'static str| {
         let mut ask = move |prompt: &Prompt| {
             Some(Secret::new(match prompt.kind {
@@ -285,10 +290,12 @@ fn texted_codes_are_a_refusal_then_a_second_login() {
                 _ => PASSWORD,
             }))
         };
-        let logs = LogSink::none();
         engine.login(&gateway, &mut Prompts::new(&mut ask), &Cancel::new(), &logs)
     };
     assert_eq!(login("someone@sms").err(), Some(LoginError::WrongPassword));
+    // Refused as a gateway that texts the codes refuses it.
+    let lines = said.lock().unwrap().join("\n");
+    assert!(lines.contains("New SMS passcodes sent."), "{lines}");
     // However the library writes the `@`, each was sent once.
     let either = |name: &str| sent(&stand_in, name) + sent(&stand_in, &name.replace("%40", "@"));
     assert_eq!(either("someone%40sms"), 1);
