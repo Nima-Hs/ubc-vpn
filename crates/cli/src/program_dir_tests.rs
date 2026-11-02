@@ -61,9 +61,10 @@ fn program_dir_is_the_real_programs_folder_when_started_through_a_link() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
 
+    // The test harness prints the test's name on the same line, before it.
     let found: Vec<&str> = stdout
         .lines()
-        .filter_map(|line| line.strip_prefix("PROGRAM_DIR="))
+        .filter_map(|line| line.split_once("PROGRAM_DIR=").map(|(_, dir)| dir))
         .collect();
     let expected = real.parent().unwrap();
     assert_eq!(found, [expected.to_str().unwrap()], "{stdout}");
