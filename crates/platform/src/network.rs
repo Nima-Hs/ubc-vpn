@@ -440,6 +440,12 @@ pub trait Dns: Send + Sync {
     /// catch-all this product set before. The resolvers are reached by
     /// ordinary routing, so the caller routes them through the tunnel.
     ///
+    /// On every OS the resolvers must be the split DNS's
+    /// ([`SplitDns::resolvers`]), as the service always passes: the VPN's
+    /// own. Linux keeps one list of DNS servers per link, so there other
+    /// resolvers are refused with [`Error::InvalidInput`], changing
+    /// nothing; Windows and macOS hold resolvers per rule and accept them.
+    ///
     /// Each OS keeps it as a rule of the product's own, beside the split
     /// DNS:
     ///
@@ -449,8 +455,9 @@ pub trait Dns: Send + Sync {
     ///   resolver at once. A single-label name is sent with the local
     ///   network's suffix added.
     /// - **Linux**: on the tunnel's link in systemd-resolved, the routing
-    ///   domain `~.` added to the split domains, the resolvers as the link's
-    ///   DNS servers, and the link's default-route flag switched on, so
+    ///   domain `~.` added to the split domains, the link's DNS servers left
+    ///   as the split DNS set them (which are these resolvers), and the
+    ///   link's default-route flag switched on, so
     ///   that every name not routed more specifically goes to the tunnel's
     ///   link.
     /// - **macOS**: a second supplemental resolver entry, set and held like

@@ -213,11 +213,7 @@ impl Foreign for Outsider {
     fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
         let row = foreign_v6(interface, dest, prefix_len);
         // SAFETY: the row is valid and initialised.
-        let removed = checked(unsafe { DeleteIpForwardEntry2(&row) });
-        assert!(
-            matches!(removed, Ok(()) | Err(Error::NotFound)),
-            "{removed:?}"
-        );
+        checked(unsafe { DeleteIpForwardEntry2(&row) }).expect("remove an IPv6 route");
     }
 
     fn add_address_v6(&self, interface: &str, address: Ipv6Addr) {

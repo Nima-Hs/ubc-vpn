@@ -8,7 +8,7 @@
 //! adapter nobody reads, so each test keeps them for as short a time as it
 //! can.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     DeleteIpNetEntry2, GetIpNetEntry2, MIB_IPNET_ROW2,
@@ -17,8 +17,8 @@ use windows_sys::Win32::Networking::WinSock::{NlnsIncomplete, NlnsUnreachable};
 
 use super::routes::{WinRoutes, best_route, checked, luid, v4, value};
 use super::routes_tests::{Cleanup, Outsider, ran, state_dir, step, turn, wintun};
-use crate::suite;
-use crate::{Ipv6Block, Routes, Verified};
+use crate::suite::{self, Foreign};
+use crate::{Error, Ipv6Block, Routes, Verified};
 
 /// The gateway the tests reach by the physical network.
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
@@ -46,7 +46,28 @@ fn passes_the_shared_full_tunnel_check() {
     let restarted = || Box::new(WinRoutes::unchecked(&dir)) as Box<dyn Routes>;
     suite::check_full_tunnel(&routes, &restarted, &Outsider, tunnel, other);
 
+    // A refusal journals nothing: no half is written down to be removed
+    // later, when none was added.
+    step("refused, with nothing journalled");
+    let journal = || std::fs::read_to_string(dir.join("routes.journal")).unwrap_or_default();
+    assert!(!journal().contains("0.0.0.0/1"), "{}", journal());
+    let leak = Ipv6Addr::new(0x2001, 0xdb8, 0x1, 0, 0, 0, 0, 0);
+    Outsider.bind_ipv6(tunnel, false);
+    Outsider.add_route_v6(other, leak, 48);
+    let refused = routes.add_full_tunnel(tunnel);
+    let written = journal();
+    Outsider.remove_route_v6(other, leak, 48);
+    Outsider.bind_ipv6(tunnel, true);
+    assert_eq!(refused, Err(Error::Unsupported));
+    assert!(!written.contains("0.0.0.0/1"), "{written}");
+
     step("the journal");
+    let started = std::time::Instant::now();
+    while routes.full_tunnel_ipv6(tunnel) != Ok(Ipv6Block::Blocked)
+        && started.elapsed() < std::time::Duration::from_secs(20)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     assert_eq!(routes.add_full_tunnel(tunnel), Ok(Ipv6Block::Blocked));
     let journal = std::fs::read_to_string(dir.join("routes.journal")).unwrap();
     routes.remove_full_tunnel(tunnel).unwrap();

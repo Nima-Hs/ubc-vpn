@@ -177,7 +177,7 @@ pub trait Foreign {
     /// Adds an IPv6 route to `dest`/`prefix_len` through the interface named
     /// `interface`, with no next hop.
     fn add_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8);
-    /// Removes it again. Succeeds when it is not there.
+    /// Removes it again; it must be there.
     fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8);
     /// Gives the interface a global IPv6 address, usable at once.
     fn add_address_v6(&self, interface: &str, address: Ipv6Addr);
@@ -408,90 +408,106 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Ve
     assert_eq!(dns.split_dns_matches(&second), no);
     assert_eq!(others.map(resolvers_for), usual);
 }
-
 /// Checks full mode's catch-all DNS beside split DNS. The harness is as for
-/// [`check_dns`], and `resolvers_for` must also tell 192.0.2.54 apart, which
-/// the catch-all uses. `theirs` adds (`true`) or removes (`false`) a
+/// [`check_dns`]. The catch-all uses the split DNS's resolver, as the
+/// service always does (see [`Dns::set_catch_all_dns`]), so it shows by the
+/// other names: they move from the usual resolvers to the VPN's when it is
+/// set and back when it is cleared, while names under the split domain stay
+/// on the VPN's throughout. `theirs` adds (`true`) or removes (`false`) a
 /// catch-all that is not the product's, as another VPN's would be: on
-/// Windows a local name-resolution rule for `.`, on Linux `~.` with the
-/// default-route flag on another link, on macOS a supplemental resolver
-/// entry matching every name. Leaves nothing set when it passes.
+/// Windows a local name-resolution rule for `.`, on Linux `~.` on another
+/// link, on macOS a supplemental resolver entry matching every name. Leaves
+/// nothing set when it passes.
 pub fn check_catch_all_dns(
     dns: &dyn Dns,
     tunnel: &str,
     resolvers_for: &dyn Fn(&str) -> Vec<Ipv4Addr>,
     theirs: &dyn Fn(bool),
 ) {
-    let (split_resolver, catch_all) = (Ipv4Addr::new(192, 0, 2, 53), Ipv4Addr::new(192, 0, 2, 54));
+    let vpn = vec![Ipv4Addr::new(192, 0, 2, 53)];
+    let elsewhere = [Ipv4Addr::new(192, 0, 2, 54)];
     let chosen = SplitDns {
-        resolvers: vec![split_resolver],
+        resolvers: vpn.clone(),
         domains: vec!["suite.example".to_string()],
     };
     let (split_name, other_name) = ("host.suite.example", "anything.example");
     let no = Verified::No;
 
     dns.clear_split_dns().expect("clear when nothing is set");
-    assert_eq!(
-        dns.foreign_catch_all(),
-        Ok(false),
-        "a catch-all to begin with"
-    );
+    let foreign = dns.foreign_catch_all();
+    assert_eq!(foreign, Ok(false), "a catch-all to begin with");
     let usual = resolvers_for(other_name);
-    assert!(!usual.contains(&catch_all), "{usual:?}");
+    assert_ne!(usual, vpn, "other names already go to the VPN");
 
-    // Names under the split domain still go to the split resolver, every
-    // other name to the catch-all's.
+    // With split DNS alone, other names keep the usual resolvers.
     dns.set_split_dns(tunnel, &chosen).expect("set split DNS");
-    dns.set_catch_all_dns(&[catch_all])
-        .expect("set the catch-all");
-    dns.set_catch_all_dns(&[catch_all])
+    let split = settled(&vpn, || resolvers_for(split_name));
+    assert_eq!(split, vpn, "split DNS is not in effect");
+    assert_eq!(
+        resolvers_for(other_name),
+        usual,
+        "split DNS took every name"
+    );
+
+    // The catch-all takes every other name; split names stay.
+    dns.set_catch_all_dns(&vpn).expect("set the catch-all");
+    dns.set_catch_all_dns(&vpn)
         .expect("set the catch-all again");
-    let split = settled(&vec![split_resolver], || resolvers_for(split_name));
-    let other = settled(&vec![catch_all], || resolvers_for(other_name));
-    assert_eq!(split, [split_resolver], "the catch-all took a split name");
-    assert_eq!(other, [catch_all], "the catch-all took no other name");
-    assert_in_effect(dns.catch_all_dns_matches(&[catch_all]), "the catch-all");
-    let wrong = dns.catch_all_dns_matches(&[split_resolver]);
+    let other = settled(&vpn, || resolvers_for(other_name));
+    assert_eq!(other, vpn, "the catch-all took no other name");
+    assert_eq!(resolvers_for(split_name), vpn, "a split name moved");
+    assert_in_effect(dns.catch_all_dns_matches(&vpn), "the catch-all");
+    let wrong = dns.catch_all_dns_matches(&elsewhere);
     assert_eq!(wrong, no, "other resolvers matched");
     assert_in_effect(dns.split_dns_matches(&chosen), "split DNS beside it");
     assert_eq!(dns.foreign_catch_all(), Ok(false), "ours counted as theirs");
 
     // Somebody else's catch-all is reported and not fought: ours is not in
-    // effect while it is there, and cannot be set again over it. It does not
-    // take the split names.
+    // effect while it is there, clearing ours leaves theirs alone, and ours
+    // cannot be set again over it. It does not take the split names.
     theirs(true);
     let foreign = dns.foreign_catch_all();
-    let matches = dns.catch_all_dns_matches(&[catch_all]);
+    let matches = dns.catch_all_dns_matches(&vpn);
     let split = dns.split_dns_matches(&chosen);
     let cleared = dns.clear_catch_all_dns();
-    let set = dns.set_catch_all_dns(&[catch_all]);
+    let kept = dns.foreign_catch_all();
+    let set = dns.set_catch_all_dns(&vpn);
+    let still = dns.foreign_catch_all();
     theirs(false);
     assert_eq!(foreign, Ok(true), "their catch-all was not seen");
     assert_eq!(matches, no, "ours counted as in effect beside theirs");
     assert_in_effect(split, "split DNS beside their catch-all");
     assert_eq!(cleared, Ok(()));
+    assert_eq!(kept, Ok(true), "clearing ours removed theirs");
     assert_eq!(set, Err(Error::AlreadyExists), "set over theirs");
+    assert_eq!(still, Ok(true), "setting ours removed theirs");
     assert_eq!(dns.foreign_catch_all(), Ok(false));
-    let left = dns.catch_all_dns_matches(&[catch_all]);
+    let left = dns.catch_all_dns_matches(&vpn);
     assert_eq!(left, no, "a refused catch-all was set");
+    let other = settled(&usual, || resolvers_for(other_name));
+    assert_eq!(other, usual, "a refused catch-all took other names");
 
     // Clearing the catch-all keeps the split DNS.
-    dns.set_catch_all_dns(&[catch_all])
+    dns.set_catch_all_dns(&vpn)
         .expect("set the catch-all once theirs is gone");
+    let other = settled(&vpn, || resolvers_for(other_name));
+    assert_eq!(other, vpn, "the catch-all took no other name");
     dns.clear_catch_all_dns().expect("clear the catch-all");
     dns.clear_catch_all_dns()
         .expect("clear the catch-all again");
-    assert_eq!(dns.catch_all_dns_matches(&[catch_all]), no);
+    assert_eq!(dns.catch_all_dns_matches(&vpn), no);
     assert_in_effect(dns.split_dns_matches(&chosen), "split DNS after it");
     let other = settled(&usual, || resolvers_for(other_name));
     assert_eq!(other, usual, "other names did not go back");
-    assert_eq!(resolvers_for(split_name), [split_resolver]);
+    assert_eq!(resolvers_for(split_name), vpn, "split names went back");
 
     // Clearing the split DNS removes both.
-    dns.set_catch_all_dns(&[catch_all])
+    dns.set_catch_all_dns(&vpn)
         .expect("set the catch-all again");
+    let other = settled(&vpn, || resolvers_for(other_name));
+    assert_eq!(other, vpn, "the catch-all took no other name");
     dns.clear_split_dns().expect("clear split DNS");
-    assert_eq!(dns.catch_all_dns_matches(&[catch_all]), no, "it stayed");
+    assert_eq!(dns.catch_all_dns_matches(&vpn), no, "it stayed");
     assert_eq!(dns.split_dns_matches(&chosen), no);
     let other = settled(&usual, || resolvers_for(other_name));
     assert_eq!(other, usual, "other names did not go back");
@@ -515,8 +531,8 @@ fn through(routes: &dyn Routes, dest: IpAddr, interface: &str) -> Verified {
 /// take IPv6 routes, and carry no routes. `other` names another interface,
 /// which also takes IPv6 routes, where the harness puts somebody else's
 /// routes. Apart from `other`'s, the machine must have no IPv6 leak path of
-/// its own (see [`Routes::full_tunnel_ipv6`]), and its router, if it has
-/// one, must be on its local network. `restarted` makes a fresh instance,
+/// its own (see [`Routes::full_tunnel_ipv6`]), and it must reach the
+/// gateway by a router on its local network. `restarted` makes a fresh instance,
 /// as for [`check_route_ownership`]. Leaves no route behind when it passes.
 ///
 /// While the halves are in place every connection of the machine goes to the
@@ -540,14 +556,12 @@ pub fn check_full_tunnel(
     assert!(physical.router_is_on_link(), "{physical:?}");
     // The router, and a neighbour on its network: the last address but one,
     // neither the router nor the broadcast.
-    let mut local = vec![IpAddr::V4(gateway)];
-    if let Some(router) = physical.next_hop() {
-        let network = physical.on_link().iter().find(|n| n.contains_addr(router));
-        let network = network.expect("the router's network");
-        let size = 1u32 << (32 - u32::from(network.prefix_len()));
-        let neighbour = Ipv4Addr::from(u32::from(network.addr()) + size - 2);
-        local.extend([IpAddr::V4(router), IpAddr::V4(neighbour)]);
-    }
+    let router = physical.next_hop().expect("the machine has a router");
+    let network = physical.on_link().iter().find(|n| n.contains_addr(router));
+    let network = network.expect("the router's network");
+    let size = 1u32 << (32 - u32::from(network.prefix_len()));
+    let neighbour = Ipv4Addr::from(u32::from(network.addr()) + size - 2);
+    let local = [gateway, router, neighbour].map(IpAddr::V4);
     routes
         .add_gateway_route(gateway, &physical)
         .expect("add gateway route");
@@ -560,7 +574,7 @@ pub fn check_full_tunnel(
     // but they are to any other interface.
     let added = routes.add_full_tunnel(tunnel);
     let taken = anywhere.map(|dest| through(routes, dest, tunnel));
-    let kept: Vec<_> = local.iter().map(|d| through(routes, *d, &wire)).collect();
+    let kept = local.map(|dest| through(routes, dest, &wire));
     let again = routes.add_full_tunnel(tunnel);
     let ours = routes.foreign_full_tunnel(tunnel);
     let elsewhere = routes.foreign_full_tunnel(other);
@@ -568,7 +582,7 @@ pub fn check_full_tunnel(
     assert_eq!(added, Ok(Ipv6Block::Blocked), "add");
     assert_eq!(removed, Ok(()), "remove");
     assert_eq!(taken, [yes; 4], "a half did not take {anywhere:?}");
-    assert_eq!(kept, vec![yes; local.len()], "{local:?} left the wire");
+    assert_eq!(kept, [yes; 3], "{local:?} left the wire");
     assert_eq!(again, Ok(Ipv6Block::Blocked), "add again");
     assert_eq!(ours, Ok(false), "our own halves counted as foreign");
     assert_eq!(elsewhere, Ok(true), "our halves, seen from another tunnel");
@@ -789,9 +803,18 @@ pub fn check_events(
     let event = subscription.events().recv_timeout(QUIET).ok();
     assert_eq!(event, None, "an event for our own routes or the tunnel");
 
-    // A new address on the watched network is a change.
+    // A new address, or the link going down and up, on another interface is
+    // no change to the watched network.
+    foreign.add_address(other, Ipv4Addr::new(203, 0, 113, 21));
+    foreign.set_link(other, false);
+    foreign.set_link(other, true);
+    let event = next_of(&subscription, physical, QUIET);
+    assert_eq!(event, None, "a change to another interface was reported");
+    drain(&subscription);
+
+    // A new address on the watched network is a change, and the first event.
     foreign.add_address(wire, Ipv4Addr::new(203, 0, 113, 11));
-    let event = next_of(&subscription, physical, SETTLE);
+    let event = subscription.events().recv_timeout(SETTLE).ok();
     assert_eq!(event, Some(physical), "a new address was not reported");
     drain(&subscription);
 

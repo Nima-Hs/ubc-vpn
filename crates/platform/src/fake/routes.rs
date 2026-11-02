@@ -438,10 +438,9 @@ impl crate::suite::Foreign for Fake {
     fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
         let route = (interface.to_string(), dest, prefix_len);
         let mut state = self.state();
-        if state.foreign_v6.contains(&route) {
-            state.foreign_v6.retain(|foreign| *foreign != route);
-            state.ipv6_changed(interface);
-        }
+        assert!(state.foreign_v6.contains(&route), "no route {route:?}");
+        state.foreign_v6.retain(|foreign| *foreign != route);
+        state.ipv6_changed(interface);
     }
 
     fn add_address_v6(&self, interface: &str, address: Ipv6Addr) {
