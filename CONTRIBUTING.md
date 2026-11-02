@@ -56,7 +56,9 @@ UBC_VPN_TEST_PYTHON=<python> UBC_VPN_TEST_GATEWAY_DIR=<folder> cargo test -p ubc
 
 Some engine tests drive a real gateway, ocserv, which only the engine workflow starts: on a Linux runner, `crates/engine/tests/ocserv/start.sh` installs it with `native/linux/test-packages.sh`, which holds the exact version and the dated Ubuntu snapshot it comes from, and starts it as root with a made-up account. The script replaces the machine's package sources and runs a root service, so never run it on a machine you keep. Without `UBC_VPN_TEST_OCSERV_DIR` those tests are skipped and say so. ocserv is only used for testing and is never shipped.
 
-The tunnel tests that create a real tunnel device run only with `UBC_VPN_TEST_DEVICE` set, which only the engine workflow sets: on a Windows runner, as administrator, with the Wintun pinned in `native/windows/wintun.pin` beside the test programs. Do not set it on your own machine; without it those tests are skipped and say so.
+The tunnel tests that create a real tunnel device run only with `UBC_VPN_TEST_DEVICE` set, which only the engine workflow sets: on a Windows runner, as administrator, with the Wintun pinned in `native/windows/wintun.pin` beside the test programs, and on macOS and Linux runners in a step of their own, as root. Do not set it on your own machine; without it those tests are skipped and say so.
+
+A skipped test passes, so each test that needs root, an elevated process, a gateway or a device prints `RAN: <name>` (`RAN AS ROOT: <name>` in `platform-unix.yml`) once it has run, and the workflow fails unless every name listed for its OS is a whole line of the log. The names are in `.github/ran/<workflow>/<os>/*.txt`, one per line (`engine-device` is the engine workflow's root step). When you add such a test, add its name to a file there, or a file of your own; the workflow needs no change. `.github/ran/check.sh` does the check, and `.github/ran/test.sh`, which CI runs, tests it.
 
 ## Development mode
 
@@ -214,11 +216,11 @@ gh run watch <run-id>
 
 The pull request's code runs as root and as an administrator there, and it could write to the Actions cache of the branch the run starts from. Run from `main`, that would be the cache every other workflow restores. A scratch branch's cache is read only by that branch.
 
-- It runs [cargo-mutants](https://mutants.rs/) with `--in-diff` over the Rust lines the pull request changed since its merge-base with `main`, split into four shards on Linux and four on Windows. Every mutant is tried on both, and counts as caught if a test fails on either.
-- A mutant is first tested with its own crate's tests and the features CI tests that crate with, and only if those miss it, with the whole workspace, then both again in release builds, and on Linux the platform crate's tests as root. On Windows the tests that need an elevated process and a second user run too, as in `platform-windows.yml`.
+- It runs [cargo-mutants](https://mutants.rs/) with `--in-diff` over the Rust lines the pull request changed since its merge-base with `main`, split into four shards each on Linux, Windows and macOS. Every mutant is tried on each OS that builds it, and counts as caught if a test fails on any of them. Code built only for macOS (`crates/platform/src/macos/`) is mutated on macOS alone, and code built only for Windows (`crates/platform/src/windows/`) is not tried on macOS.
+- A mutant is first tested with its own crate's tests and the features CI tests that crate with, and only if those miss it, with the whole workspace, then both again in release builds, and on Linux and macOS the platform crate's tests as root. On Windows the tests that need an elevated process and a second user run too, as in `platform-windows.yml`.
 - The run fails if any mutant was missed, or only timed out: a timeout is not a catch, since a slow suite runs out of time too, so a timed-out mutant is still tried in the later builds, and a miss anywhere counts over a timeout elsewhere. The runs that test the whole workspace get a longer time limit than cargo-mutants would set (10 minutes, 15 on Windows). The run's summary page has the number caught, missed, timed out and unviable, and names each missed and timed-out one. Each shard's reports, its `mutants.out` folders with every mutant's diff and log, are kept as an artifact named `mutants-<os>-<shard>`.
 - It has a read-only token and no secrets, and commits and pushes nothing. Its rules are checked by `.github/mutants/test.sh`, which CI runs.
-- Not covered: code built only for macOS is not mutated, and the engine tests that need the stand-in gateway, ocserv or a real tunnel device are skipped there. A mutant only those would catch shows as missed; check it by hand.
+- Not covered: the engine tests that need the stand-in gateway, ocserv or a real tunnel device are skipped there. A mutant only those would catch shows as missed; check it by hand.
 
 cargo-mutants cannot remove an attribute or a `cfg`, such as `#[serde(deny_unknown_fields)]` or `#[cfg(debug_assertions)]`. Write those mutations by hand in a file, commit it on the scratch branch `test/mut-N`, and name the file as well:
 
@@ -236,8 +238,8 @@ diff --git a/crates/core/src/policy.rs b/crates/core/src/policy.rs
 ...
 ```
 
-- `os` is `all`, `linux` or `windows`. `test` is the arguments for `cargo test --locked`, words separated by single spaces, with no quoting.
-- Each mutation runs by itself: its tests must pass without it and its patch must apply to the pull request's head, or the run fails. If it then does not build it is unviable, and that fails the run, since the patch is wrong; otherwise a failing test means it was caught. Its patch is then taken out again. A missed or timed-out one fails the run like a missed mutant. On Windows a test that runs out of time can leave its process running until the job ends.
+- `os` is `all`, `linux`, `windows` or `macos`. `test` is the arguments for `cargo test --locked`, words separated by single spaces, with no quoting.
+- Each mutation runs by itself: its tests must pass without it and its patch must apply to the pull request's head, or the run fails. If it then does not build it is unviable, and that fails the run, since the patch is wrong; otherwise a failing test means it was caught. Its patch is then taken out again. A missed or timed-out one fails the run like a missed mutant. On Windows a test that runs out of time can leave its process running until the job ends; on macOS, which has no `timeout`, the whole process group of a test run is stopped.
 - Delete the branch when the review is done. The scripts and the file come from that branch, never from the pull request.
 
 cargo-mutants is a test tool under the MIT licence and is never shipped. Its version is pinned in `.github/mutants/cargo-mutants.pin`; the workflow installs it with `cargo install --locked cargo-mutants@<version>`, the same command to use on your own machine. Dependabot does not update it: to move to a newer release at least two weeks old, change the pin.

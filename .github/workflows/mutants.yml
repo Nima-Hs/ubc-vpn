@@ -127,12 +127,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux for the shared and Unix code, Windows for the Windows code.
-        # Every mutant is tried on both, and is caught if either catches it.
-        os: [ubuntu-latest, windows-latest]
+        # Linux for the shared and Unix code, Windows for the Windows code,
+        # macOS for the macOS code. Every mutant is tried on each OS that
+        # builds it, and is caught if any of them catches it.
+        os: [ubuntu-latest, windows-latest, macos-latest]
         shard: [0, 1, 2, 3]
     env:
-      MUTANTS_OS: ${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }}
+      MUTANTS_OS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'macos-latest' && 'macos' || 'linux' }}
       SHARD: ${{ matrix.shard }}
       PATCHES: ${{ inputs.patches }}
       HEAD: ${{ needs.prepare.outputs.head }}
@@ -171,8 +172,10 @@ jobs:
       - name: Install the pinned cargo-mutants
         working-directory: pr
         timeout-minutes: 20
+        # Read without mapfile, which macOS's bash 3.2 does not have.
         run: |
-          mapfile -t pin < ../tools/.github/mutants/cargo-mutants.pin
+          pin=()
+          while IFS= read -r line || [ -n "$line" ]; do pin+=("$line"); done < ../tools/.github/mutants/cargo-mutants.pin
           if [ "${#pin[@]}" -ne 1 ] || ! [[ ${pin[0]} =~ ^CARGO_MUTANTS_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             echo ".github/mutants/cargo-mutants.pin is not as expected."
             exit 1
@@ -233,14 +236,16 @@ jobs:
           echo "$digest *wintun.zip" | sha256sum -c -
           unzip -q wintun.zip
           echo "UBC_VPN_TEST_WINTUN=$(cygpath -w "$RUNNER_TEMP/wintun/bin/amd64/wintun.dll")" >> "$GITHUB_ENV"
+      # Linux and macOS. The platform crate's root-only tests run with sudo,
+      # as in platform-unix.yml.
       - name: Mutation tests
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         working-directory: pr
         run: |
           patches=()
           if [ -n "$PATCHES" ]; then patches=("$GITHUB_WORKSPACE/tools/$PATCHES"); fi
           bash ../tools/.github/mutants/run.sh "$RUNNER_TEMP/diff/pr.diff" "$SHARD" "$SHARDS" \
-            "$RUNNER_TEMP/out" "${patches[@]}"
+            "$RUNNER_TEMP/out" ${patches[@]+"${patches[@]}"}
       # As in platform-windows.yml: the second user exists for this one
       # step, and its random password stays in this step's memory, handed to
       # the tests through their environment and never written to a file, a
@@ -307,7 +312,7 @@ jobs:
         with:
           pattern: mutants-*
           path: reports
-      # Two OSes, so twice as many reports as shards.
+      # Three OSes, so three times as many reports as shards.
       - name: Caught, missed, timeout and unviable
         env:
           PREPARE: ${{ needs.prepare.result }}
@@ -315,7 +320,7 @@ jobs:
         run: |
           mkdir -p reports
           status=0
-          bash tools/.github/mutants/summary.sh reports $((SHARDS * 2)) || status=$?
+          bash tools/.github/mutants/summary.sh reports $((SHARDS * 3)) || status=$?
           if [ "$PREPARE" != success ] || [ "$MUTANTS" != success ]; then
             echo "A job before this one did not succeed: prepare $PREPARE, mutants $MUTANTS."
             exit 1

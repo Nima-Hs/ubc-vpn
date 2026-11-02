@@ -6,12 +6,13 @@
 #
 # Usage: shard.sh <diff> <shard> <shards> <out>
 #
-# MUTANTS_OS names the OS, linux or windows. Each mutant goes to the same
-# shard on every OS. It is tested first with its own crate's tests and the
-# features CI tests that crate with, and only if those miss it, with the
-# whole workspace, then both again in release builds, and on Linux the
-# platform crate's tests as root. A rule that exists in only one of those
-# builds is still checked, and a mutant the first run catches costs no more.
+# MUTANTS_OS names the OS, linux, windows or macos. Each OS shares out the
+# mutants it can build among its shards. A mutant is tested first with its
+# own crate's tests and the features CI tests that crate with, and only if
+# those miss it, with the whole workspace, then both again in release
+# builds, and on Linux and macOS the platform crate's tests as root. A rule
+# that exists in only one of those builds is still checked, and a mutant the
+# first run catches costs no more.
 # A mutant that only timed out goes on to the later runs, as a missed one
 # does: a timeout is not a catch.
 #
@@ -29,17 +30,26 @@ os=${MUTANTS_OS:-}
 # Every cargo goes through cargo.sh, for Windows (see token.ps1).
 here=$(cd "$(dirname "$0")" && pwd)
 case $os in
-  linux | windows) ;;
-  *) echo "MUTANTS_OS must be linux or windows." >&2; exit 2 ;;
+  linux | windows | macos) ;;
+  *) echo "MUTANTS_OS must be linux, windows or macos." >&2; exit 2 ;;
 esac
 if ! [[ $shard =~ ^[0-9]+$ && $shards =~ ^[1-9][0-9]*$ ]] || [ "$shard" -ge "$shards" ]; then
   echo "The shard must be a number below the number of shards." >&2
   exit 2
 fi
 
-# Code built only for macOS. No job here runs on macOS, so its mutants would
-# all look missed.
-exclude=(--exclude 'crates/platform/src/macos/**')
+# The folders of code built only for another OS, whose mutants can never be
+# caught here: they would cost four runs each and always look missed. The
+# macOS jobs mutate the macOS folder; Linux and Windows still both try the
+# shared and Unix code, and Linux the Windows folder, as before.
+if [ "$os" = macos ]; then
+  exclude=(--exclude 'crates/platform/src/windows/**')
+else
+  exclude=(--exclude 'crates/platform/src/macos/**')
+fi
+
+# This also runs on macOS's bash 3.2, where an empty array is unset: each
+# array that may be empty is expanded as ${a[@]+"${a[@]}"}.
 
 # The features CI tests each crate with besides its defaults
 # (.github/workflows/ci.yml, platform-*.yml).
@@ -76,11 +86,11 @@ for manifest in crates/*/Cargo.toml; do
   fi
   bash "$here/cargo.sh" mutants --list --colors=never --line-col=true --in-diff "$diff" \
     --config "$none" -p "$package" "${exclude[@]}" > "$out/lists/$package.txt"
-  sed "s/^/$package\t/" "$out/lists/$package.txt" >> "$out/lists/all.tsv"
+  awk -v p="$package" '{ print p "\t" $0 }' "$out/lists/$package.txt" >> "$out/lists/all.tsv"
 done
 LC_ALL=C sort -t "$(printf '\t')" -k 2 "$out/lists/all.tsv" |
   awk -v k="$shard" -v n="$shards" '(NR - 1) % n == k' > "$out/lists/shard.tsv"
-echo "$(wc -l < "$out/lists/all.tsv") mutants in the diff, $(wc -l < "$out/lists/shard.tsv") of them in shard $shard of $shards."
+echo "$(wc -l < "$out/lists/all.tsv" | tr -d ' ') mutants in the diff, $(wc -l < "$out/lists/shard.tsv" | tr -d ' ') of them in shard $shard of $shards."
 
 # Runs cargo-mutants once over the mutants of $package that no earlier run
 # caught, then proves the same tests still pass without any mutation, so a
@@ -110,11 +120,11 @@ run() {
   mkdir -p "$dir"
   to_config "$remaining" > "$dir.toml"
   local count status=0
-  count=$(wc -l < "$remaining")
+  count=$(wc -l < "$remaining" | tr -d ' ')
   echo "::group::$package, $name: $count mutants"
-  "${prefix[@]}" bash "$here/cargo.sh" mutants --in-place --cap-lints=true --colors=never \
+  ${prefix[@]+"${prefix[@]}"} bash "$here/cargo.sh" mutants --in-place --cap-lints=true --colors=never \
     --in-diff "$diff" --config "$dir.toml" -p "$package" "${exclude[@]}" \
-    --output "$dir" "${margs[@]}" || status=$?
+    --output "$dir" ${margs[@]+"${margs[@]}"} || status=$?
   echo "::endgroup::"
   # 2 is a missed mutant and 3 a timeout, which the summary reports.
   case $status in
@@ -125,7 +135,7 @@ run() {
   for outcome in caught missed timeout unviable; do
     file=$dir/mutants.out/$outcome.txt
     if [ -f "$file" ]; then
-      sed "s/^/$outcome\t/" "$file" >> "$out/results.tsv"
+      awk -v o="$outcome" '{ print o "\t" $0 }' "$file" >> "$out/results.tsv"
       tested=$((tested + $(wc -l < "$file")))
     fi
   done
@@ -137,11 +147,12 @@ run() {
   fi
   # Only a catch takes a mutant out of the later runs. A timeout is not a
   # catch: a slow suite runs out of time too.
-  cat "$dir/mutants.out/caught.txt" 2> /dev/null |
-    grep -vxF -f - "$remaining" > "$remaining.next" || true
+  awk -v caught="$dir/mutants.out/caught.txt" \
+    'BEGIN { while ((getline line < caught) > 0) seen[line] = 1 } !($0 in seen)' \
+    "$remaining" > "$remaining.next"
   mv "$remaining.next" "$remaining"
   echo "::group::$package, $name: the tests pass without a mutation"
-  if ! "${prefix[@]}" bash "$here/cargo.sh" test --locked "${targs[@]}"; then
+  if ! ${prefix[@]+"${prefix[@]}"} bash "$here/cargo.sh" test --locked "${targs[@]}"; then
     echo "::endgroup::"
     echo "The tests fail without a mutation after $package, $name: its results cannot be trusted." >&2
     exit 1
@@ -168,12 +179,13 @@ while IFS= read -r package; do
   features=$(own_features "$package")
   own=()
   if [ -n "$features" ]; then own=(--features "$features"); fi
-  run own "${own[@]}" -- -p "$package" "${own[@]}"
+  run own ${own[@]+"${own[@]}"} -- -p "$package" ${own[@]+"${own[@]}"}
   run workspace --test-workspace=true "${slow[@]}" -- --workspace
-  run own-release "${own[@]}" --profile=release -- -p "$package" "${own[@]}" --release
+  run own-release ${own[@]+"${own[@]}"} --profile=release -- -p "$package" ${own[@]+"${own[@]}"} --release
   run workspace-release --test-workspace=true --profile=release "${slow[@]}" -- --workspace --release
-  # The channel's rules that only root can test (platform-unix.yml).
-  if [ "$os" = linux ] && [ "$package" = ubc-vpn-platform ]; then
+  # The channel's rules that only root can test (platform-unix.yml), on
+  # Linux and macOS.
+  if [ "$os" != windows ] && [ "$package" = ubc-vpn-platform ]; then
     prefix=(sudo env "PATH=$PATH" "HOME=$HOME" UBC_VPN_REQUIRE_ROOT=1)
     run root --features dev-mode -- -p "$package" --features dev-mode
     prefix=()

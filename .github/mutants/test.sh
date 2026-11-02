@@ -187,6 +187,7 @@ untouched() {
   mutation break-build all build.txt fine broken
   mutation hang all rule.txt strict hang
   mutation windows-only windows rule.txt strict lax
+  mutation macos-only macos rule.txt strict lax
 } > "$work/mutations"
 
 out=$work/out-all
@@ -206,17 +207,39 @@ if untouched; then
 else
   fail "the checkout was left changed"; git -C "$repo" status --short
 fi
-if grep -q "windows-only" "$out/results.tsv"; then
-  fail "a mutation for Windows ran on Linux"
+if grep -q "windows-only\|macos-only" "$out/results.tsv"; then
+  fail "a mutation for Windows or macOS ran on Linux"
 else
   pass "a mutation for another OS does not run"
 fi
 
 out=$work/out-windows
-if [ "$(patches "$work/mutations" 0 1 "$out" windows)" = 0 ] && grep -q $'^caught\tpatch windows-only$' "$out/results.tsv"; then
-  pass "a mutation for Windows runs on Windows"
+if [ "$(patches "$work/mutations" 0 1 "$out" windows)" = 0 ] && grep -q $'^caught\tpatch windows-only$' "$out/results.tsv" &&
+  ! grep -q "macos-only" "$out/results.tsv"; then
+  pass "a mutation for Windows runs on Windows, and one for macOS does not"
 else
-  fail "the Windows mutation did not run on Windows"; cat "$work/patches.out"
+  fail "the Windows mutation did not run on Windows alone"; cat "$work/patches.out" "$out/results.tsv"
+fi
+
+out=$work/out-macos
+if [ "$(patches "$work/mutations" 0 1 "$out" macos)" = 0 ] && grep -q $'^caught\tpatch macos-only$' "$out/results.tsv" &&
+  ! grep -q "windows-only" "$out/results.tsv"; then
+  pass "a mutation for macOS runs on macOS, and one for Windows does not"
+else
+  fail "the macOS mutation did not run on macOS alone"; cat "$work/patches.out" "$out/results.tsv"
+fi
+
+# macOS has no `timeout`: there a hung test is stopped by the fallback in
+# patches.sh, which must report a timeout too. MUTANTS_NO_TIMEOUT makes it
+# take that path on any OS.
+mutation hang-again all rule.txt strict hang > "$work/hang"
+status=0
+(cd "$repo" && MUTANTS_NO_TIMEOUT=1 CALLS=$work/calls MUTANTS_OS=macos MUTANTS_CARGO=$work/cargo MUTANTS_TIMEOUT=2 \
+  bash "$here/patches.sh" "$work/hang" 0 1 "$work/out-no-timeout") > "$work/patches.out" 2>&1 || status=$?
+if [ "$status" = 0 ] && grep -q $'^timeout\tpatch hang-again$' "$work/out-no-timeout/results.tsv" && untouched; then
+  pass "without timeout, a hung test is stopped and reported as a timeout"
+else
+  fail "the fallback for timeout did not report a timeout"; cat "$work/patches.out"
 fi
 
 out0=$work/out-shard0 out1=$work/out-shard1
@@ -275,7 +298,7 @@ refuse() {
 good=$(mutation x all notes.txt notes a)
 body=$(printf '%s\n' "$good" | tail -n +4)
 refuse "is not letters, digits" "$(mutation 'two words' all notes.txt notes a)"
-refuse "the os must be all, linux or windows" "$(mutation x mac notes.txt notes a)"
+refuse "the os must be all, linux, windows or macos" "$(mutation x mac notes.txt notes a)"
 refuse "plain words separated by single spaces" \
   "$(printf '=== mutation: x\n=== os: all\n=== test: -p x; rm -rf /\n%s' "$body")"
 refuse 'expected "=== os: "' "$(printf '=== mutation: x\n=== test: -p x\n%s' "$body")"
@@ -358,14 +381,27 @@ fi
 
 # A timeout is not a catch: only caught.txt takes a mutant out of the later
 # runs, and the runs over the whole workspace get a longer test time limit.
-if grep -B 1 'grep -vxF -f - "$remaining"' "$here/shard.sh" | grep -q 'caught.txt' &&
-  ! grep -B 1 'grep -vxF -f - "$remaining"' "$here/shard.sh" | grep -q 'timeout.txt' &&
+filter=$(grep -B 2 '"$remaining" > "$remaining.next"' "$here/shard.sh")
+if [ "$(grep -c 'remaining.next"$' "$here/shard.sh")" = 1 ] &&
+  grep -qF 'awk -v caught="$dir/mutants.out/caught.txt"' <<< "$filter" &&
+  ! grep -qE 'timeout|missed|unviable' <<< "$filter" &&
   [ "$(grep -F -- '--test-workspace=true' "$here/shard.sh" | grep -cF '"${slow[@]}"')" = 2 ] &&
   [ "$(grep -cF -- '--test-workspace=true' "$here/shard.sh")" = 2 ] &&
   grep -q '^slow=(--minimum-test-timeout=[0-9]*)$' "$here/shard.sh"; then
   pass "timed-out mutants go on to the later runs, and workspace runs have a longer limit"
 else
   fail "shard.sh must drop only caught mutants and give workspace runs a minimum test timeout"
+fi
+
+# The summary expects one report per shard on every OS in the matrix, and
+# each OS's jobs name it as the scripts know it.
+oses=$(sed -n 's/^        os: \[\(.*\)\]$/\1/p' "$workflow" | tr -d ' ' | tr ',' '\n')
+if [ "$oses" = "$(printf '%s\n' ubuntu-latest windows-latest macos-latest)" ] &&
+  grep -qF 'bash tools/.github/mutants/summary.sh reports $((SHARDS * 3))' "$workflow" &&
+  grep -qF "MUTANTS_OS: \${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'macos-latest' && 'macos' || 'linux' }}" "$workflow"; then
+  pass "Linux, Windows and macOS shards, each named for the scripts, and all counted by the summary"
+else
+  fail "mutants.yml must run Linux, Windows and macOS shards, name each OS, and count all three in the summary"
 fi
 
 # shard.sh checks the tracked files match the commit before it starts and
