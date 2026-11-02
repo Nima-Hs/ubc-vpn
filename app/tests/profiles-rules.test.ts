@@ -12,8 +12,8 @@ import { withProfile } from "../src/main/channel/connect";
 import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
 import { createDemoProfiles } from "../src/main/demo/demo-profiles";
-import { takeId, takeName, takeRename, takeUpdate } from "../src/main/profiles-checks";
-import { type TrayActions, type TrayMenuItem, trayMenu } from "../src/main/tray-menu";
+import { takeId, takeName, takeRename, takeUpdate } from "../src/main/profiles/checks";
+import { type TrayActions, type TrayMenuItem, trayMenu } from "../src/main/tray/menu";
 
 const view = async (result: Promise<{ ok: boolean; value?: ProfilesView }>) => {
     const answer = await result;

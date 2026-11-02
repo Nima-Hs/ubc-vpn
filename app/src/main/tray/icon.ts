@@ -15,9 +15,9 @@ import {
     type TrayKind,
     type TrayPalette,
     trayIcon,
-} from "./icon/designs";
-import { encodePng } from "./icon/formats";
-import { draw } from "./icon/raster";
+} from "../icon/designs";
+import { encodePng } from "../icon/formats";
+import { draw } from "../icon/raster";
 
 export {
     BUSY_FRAME_MS,
@@ -28,8 +28,8 @@ export {
     TRAY_KINDS,
     type TrayKind,
     type TrayPalette,
-} from "./icon/designs";
-export { encodePng } from "./icon/formats";
+} from "../icon/designs";
+export { encodePng } from "../icon/formats";
 
 /** The state icon for a state, in the shape of the tunnel mode it shows. */
 export function trayKind(state: LinkState, tunnel?: TunnelStatus): TrayKind {

@@ -3,9 +3,9 @@ import type { LinkState } from "@shared/api";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import { type TunnelStatus, UNREAD_TUNNEL } from "@shared/tunnel";
 import { app, type BrowserWindow, Menu, type NativeImage, nativeImage, Tray } from "electron";
-import { appIcon } from "./icon/designs";
-import { encodePng } from "./icon/formats";
-import { draw } from "./icon/raster";
+import { appIcon } from "../icon/designs";
+import { encodePng } from "../icon/formats";
+import { draw } from "../icon/raster";
 import {
     COLOUR_PALETTE,
     type StateIconPainter,
@@ -15,10 +15,10 @@ import {
     type TrayKind,
     trayIconPng,
     trayKind,
-} from "./tray-icon";
-import { type TrayActions, trayMenu, trayStatus } from "./tray-menu";
+} from "./icon";
+import { type TrayActions, trayMenu, trayStatus } from "./menu";
 
-export type { TrayActions } from "./tray-menu";
+export type { TrayActions } from "./menu";
 
 const mac = process.platform === "darwin";
 

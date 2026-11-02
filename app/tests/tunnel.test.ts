@@ -31,8 +31,8 @@ import { Controller } from "../src/main/controller";
 import { createDemoLink } from "../src/main/demo/demo-link";
 import { takeTunnelMode } from "../src/main/ipc";
 import { LinkStore } from "../src/main/link";
-import { trayKind } from "../src/main/tray-icon";
-import { type TrayActions, type TrayMenuItem, trayMenu, trayStatus } from "../src/main/tray-menu";
+import { trayKind } from "../src/main/tray/icon";
+import { type TrayActions, type TrayMenuItem, trayMenu, trayStatus } from "../src/main/tray/menu";
 import { SETTLE_MS, TunnelSwitch } from "../src/main/tunnel-switch";
 
 const ID = "0123456789abcdef0123456789abcdef";

@@ -2,7 +2,7 @@ import type { ActionError, LinkState } from "@shared/api";
 import { describe as copyFor, count, describeActionError, type StateCopy } from "@shared/copy";
 import type { ErrorCode } from "@shared/protocol/ErrorCode";
 import { describe, expect, it } from "vitest";
-import { trayKind } from "../src/main/tray-icon";
+import { trayKind } from "../src/main/tray/icon";
 
 const TUNNEL = {
     interface: "utun4",

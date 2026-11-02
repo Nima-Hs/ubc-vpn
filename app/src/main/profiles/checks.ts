@@ -4,7 +4,7 @@
 import { START_MODES, startupSupported } from "@shared/profiles";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { StartMode } from "@shared/protocol/StartMode";
-import { isProfileId } from "./channel/validate";
+import { isProfileId } from "../channel/validate";
 
 /** The arguments of a startup change, or a refusal. */
 export function takeStartup(
