@@ -72,6 +72,29 @@ done > "$sources"
 cache=${TEST_PACKAGES_CACHE:-$dir/cache}
 lists="$cache/lists"
 debs="$cache/debs"
+
+# The folder must hold only real folders and regular files with one name
+# each. A symbolic link could show the checks one file and apt another, or
+# hide files from the checks altogether, and a hard link could make the
+# change of owner below reach a file outside the folder. Anything else in
+# it stops the script; it is not deleted and fetched again, so that a
+# tampered cache is seen.
+check_cache() {
+    local folder odd
+    for folder in "$cache" "$lists" "$debs"; do
+        [ ! -L "$folder" ] || fail "$folder in the cache is a symbolic link, not a folder"
+        [ ! -e "$folder" ] || [ -d "$folder" ] || fail "$folder in the cache is not a folder"
+    done
+    [ -d "$cache" ] || return 0
+    odd=$(sudo find -P "$cache" -mindepth 1 ! -type f ! -type d -print -quit)
+    [ -z "$odd" ] || fail "$odd in the cache is neither a regular file nor a folder"
+    odd=$(sudo find -P "$cache" -type f -links +1 -print -quit)
+    [ -z "$odd" ] || fail "$odd in the cache has more than one name (a hard link)"
+}
+check_cache
+# apt's folders for unfinished downloads are emptied, so that nothing apt
+# could read goes unchecked.
+sudo rm -rf "$lists/partial" "$debs/partial"
 mkdir -p "$lists/partial" "$debs/partial"
 work=$(mktemp -d "$dir/work.XXXXXX")
 mkdir -p "$work/empty/partial"
@@ -148,7 +171,7 @@ verify_lists() {
             break
         done
         [ -n "$matched" ] || { echo "$name in the lists is not one the snapshot signed" >&2; return 1; }
-    done < <(find "$lists" -type f ! -path "$lists/partial/*" -print0)
+    done < <(find -P "$lists" -type f -print0)
 }
 
 # The size and SHA-256 that the checked lists give for the package at a
@@ -182,6 +205,8 @@ fetch_lists() {
     mkdir -p "$lists/partial"
     sudo apt-get "${apt_opts[@]}" update || return 1
     own_cache
+    rm -rf "$lists/partial"
+    mkdir "$lists/partial"
     verify_lists
 }
 if [ -f "$cache/lists.ok" ]; then
@@ -247,6 +272,7 @@ fi
 # every start keeps any of them from ever running; it is removed once the
 # packages are in. Only the packages checked above are installed: apt may
 # download nothing here.
+check_cache
 [ ! -e /usr/sbin/policy-rc.d ] || fail "/usr/sbin/policy-rc.d is already there"
 printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
 sudo chmod 755 /usr/sbin/policy-rc.d

@@ -149,7 +149,7 @@ jobs:
       # run need not ask the snapshot, which is down now and then. The
       # script checks them all against the archive's signature again before
       # it installs anything, and stops if one does not match.
-      # Saved once ocserv is in too.
+      # Saved as soon as everything is in, before any build script runs.
       - name: Restore the pinned packages
         id: packages-cache
         if: runner.os == 'Linux'
@@ -167,6 +167,24 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/dbus-packages"
           bash native/linux/test-packages.sh "$RUNNER_TEMP/dbus-packages" pkg-config libdbus-1-dev
+      # ocserv for the tests below (tests/ocserv.rs), installed here so that
+      # the cache is saved before any build script or test runs. Its
+      # packaged service is kept from starting; start.sh below finds it in
+      # place and starts its own.
+      - name: Install the pinned ocserv packages
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
+        run: |
+          mkdir "$RUNNER_TEMP/ocserv-packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/ocserv-packages" ocserv
+          sudo systemctl disable ocserv.service
+      - name: Save the pinned packages
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted' && steps.packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: ${{ steps.packages-cache.outputs.cache-primary-key }}
 
       # The binding as it ships, then as the tests see it: `fake` makes the
       # binding reachable from the tests and never ships.
@@ -238,12 +256,6 @@ jobs:
           bash "$GITHUB_WORKSPACE/crates/engine/tests/ocserv/start.sh" ocserv
           echo "UBC_VPN_TEST_OCSERV_DIR=$PWD/ocserv" >> "$GITHUB_ENV"
           echo "UBC_VPN_TEST_REQUIRE_OCSERV=1" >> "$GITHUB_ENV"
-      - name: Save the pinned packages
-        if: runner.os == 'Linux' && runner.environment == 'github-hosted' && steps.packages-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /var/tmp/ubc-vpn-test-packages
-          key: ${{ steps.packages-cache.outputs.cache-primary-key }}
 
       # The tunnel tests make a Wintun device, which needs administrator
       # rights, as GitHub's Windows runners have, and wintun.dll beside the
