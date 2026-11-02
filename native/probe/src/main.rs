@@ -80,6 +80,12 @@ extern "C" {
         ifname: *const c_char,
     ) -> c_int;
     fn openconnect_get_ifname(v: *mut OcInfo) -> *const c_char;
+    // `intptr_t` on Windows, `int` elsewhere. The engine hands its own
+    // device over with it on macOS and Linux.
+    #[cfg(windows)]
+    fn openconnect_setup_tun_fd(v: *mut OcInfo, fd: isize) -> c_int;
+    #[cfg(not(windows))]
+    fn openconnect_setup_tun_fd(v: *mut OcInfo, fd: c_int) -> c_int;
     fn openconnect_get_ip_info(
         v: *mut OcInfo,
         info: *mut *const IpInfo,
@@ -206,6 +212,12 @@ fn main() {
     unsafe {
         println!("init_ssl = {}", openconnect_init_ssl());
         println!("version  = {}", s(openconnect_get_version()));
+        // Taking its address makes the loader bind it as the probe starts,
+        // so the probe would not start at all without it.
+        println!(
+            "setup_tun_fd = {:p}",
+            openconnect_setup_tun_fd as *const c_void
+        );
         let ua = CString::new("AnyConnect-compatible OpenConnect VPN Agent (oc-probe)").unwrap();
         let v = openconnect_vpninfo_new(
             ua.as_ptr(),

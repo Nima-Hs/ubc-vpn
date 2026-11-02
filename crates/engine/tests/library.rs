@@ -246,6 +246,7 @@ fn the_declared_functions_are_the_reviewed_ones() {
         "get_ip_info",
         "setup_tun_device",
         "get_ifname",
+        "setup_tun_fd",
     ];
     let names: Vec<String> = reviewed
         .iter()

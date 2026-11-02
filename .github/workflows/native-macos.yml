@@ -142,6 +142,7 @@ jobs:
           # our libraries from the unpacked folder, and load nothing from Homebrew.
           check() {
             grep -qx 'version  = v9.21-unknown' "$1"
+            grep -qE '^setup_tun_fd = 0x[0-9a-f]+$' "$1"
             grep -qx 'RESULT: PASS' "$1"
             for lib in "$APP"/lib/*.*.dylib; do
               grep -qF " $lib" "$1"

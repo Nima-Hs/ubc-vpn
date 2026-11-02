@@ -180,6 +180,14 @@ pub(crate) type CmdPipe = usize;
 #[cfg(not(windows))]
 pub(crate) type CmdPipe = c_int;
 
+/// The tunnel device as `openconnect_setup_tun_fd` takes it: an `intptr_t`
+/// handle on Windows, where the engine never hands one over, and a file
+/// descriptor elsewhere.
+#[cfg(windows)]
+pub(crate) type TunFd = isize;
+#[cfg(not(windows))]
+pub(crate) type TunFd = c_int;
+
 /// Why the library was not loaded. Nothing of it may be called then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
@@ -298,6 +306,7 @@ library! {
     ) -> c_int;
     fn setup_tun_device(*mut VpnInfo, *const c_char, *const c_char) -> c_int;
     fn get_ifname(*mut VpnInfo) -> *const c_char;
+    fn setup_tun_fd(*mut VpnInfo, TunFd) -> c_int;
 }
 
 impl Library {
