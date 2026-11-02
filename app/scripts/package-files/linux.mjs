@@ -206,6 +206,10 @@ function checkDeb(deb) {
         if (file.owner !== "root/root" && file.owner !== "0/0") {
             problems.push(`${path} in the .deb belongs to ${file.owner}, not root`);
         }
+        // Only root may change what it installs (scripts/after-pack.cjs).
+        if (!file.mode.startsWith("l") && (file.mode[5] === "w" || file.mode[8] === "w")) {
+            problems.push(`${path} in the .deb can be changed by others (${file.mode})`);
+        }
     }
     const link = files.get(CLIENT_LINK);
     if (!link?.mode.startsWith("l") || link.target !== CLIENT) {
