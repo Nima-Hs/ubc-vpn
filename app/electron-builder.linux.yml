@@ -98,7 +98,9 @@ rpm:
     # Options go before this path: fpm reads everything after it as paths.
     - stage/links/ubc-vpn=/usr/bin/ubc-vpn
   # As for the .deb: electron-builder's own list for Electron first, then
-  # systemd-resolved (a package of its own on Fedora), dbus-libs (libdbus-1,
+  # mesa-libgbm and alsa-lib (libgbm and libasound, which the Electron
+  # program links), systemd-resolved (a package of its own on Fedora),
+  # dbus-libs (libdbus-1,
   # for the client's keyring), and what libopenconnect.so.5 links. Fedora's
   # zlib is provided by zlib-ng-compat.
   depends:
@@ -110,6 +112,8 @@ rpm:
     - xdg-utils
     - at-spi2-core
     - (libuuid or libuuid1)
+    - mesa-libgbm
+    - alsa-lib
     - systemd-resolved
     - dbus-libs
     - gnutls >= 3.7.3

@@ -105,6 +105,8 @@ const RPM_REQUIRES = [
     "xdg-utils",
     "at-spi2-core",
     "(libuuid or libuuid1)",
+    "mesa-libgbm",
+    "alsa-lib",
     "systemd-resolved",
     "dbus-libs",
     "gnutls >= 3.7.3",
