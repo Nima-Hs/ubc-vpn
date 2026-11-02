@@ -422,7 +422,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      IMAGE: fedora@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+      # Docker Hub's, as GitHub pulls for the containers job; podman would
+      # look a short name up elsewhere.
+      IMAGE: docker.io/library/fedora@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
       CHECK: packaging/linux/tests/installer.sh
       # Runs a command as root in the container, in the checkout.
       IN_FEDORA: sudo podman exec --env UBC_VPN_TEST_THROWAWAY_MACHINE=1 --workdir /src fedora
