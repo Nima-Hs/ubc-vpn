@@ -54,7 +54,7 @@ const TEST_RANGE_V6: &str = "2001:db8::/32";
 
 /// Writes one whole line in one call, so nothing another thread prints can
 /// land inside it: CI looks for these lines.
-fn say(line: &str) {
+pub(super) fn say(line: &str) {
     let line = format!("\n{line}\n");
     std::io::stderr().write_all(line.as_bytes()).expect("say");
 }
@@ -107,7 +107,11 @@ fn watchdog() {
 
 /// The path libtest knows the test function `test` in this file by.
 fn test_path(test: &str) -> String {
-    let module = module_path!();
+    test_path_in(module_path!(), test)
+}
+
+/// The path libtest knows the test function `test` in `module` by.
+fn test_path_in(module: &str, test: &str) -> String {
     let local = module.split_once("::").map_or(module, |(_, rest)| rest);
     format!("{local}::{test}")
 }
@@ -115,6 +119,13 @@ fn test_path(test: &str) -> String {
 /// Runs `body` as root, in a process of its own that runs the test function
 /// `test` alone, and says `RAN AS ROOT: {name}` when it passed.
 fn as_root(name: &str, test: &str, body: impl FnOnce()) {
+    as_root_in(module_path!(), name, test, body);
+}
+
+/// [`as_root`] for a test function in `module`, another file's tests that
+/// share the routing table and the test addresses: one at a time with these.
+/// Test function names must differ across the files.
+pub(super) fn as_root_in(module: &str, name: &str, test: &str, body: impl FnOnce()) {
     if std::env::var(CHILD).as_deref() == Ok(test) {
         watchdog();
         let live = marked();
@@ -134,10 +145,14 @@ fn as_root(name: &str, test: &str, body: impl FnOnce()) {
         return;
     }
     let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
+    // Recorded only once it is this test's turn, so it is the true original,
+    // and put back before the next test's turn, should the test's own
+    // process have been stopped before it could.
+    let _resolv_conf = super::dns_tests::AsItWas::now();
     let status = Command::new(std::env::current_exe().expect("this program"))
         .args([
             "--exact",
-            &test_path(test),
+            &test_path_in(module, test),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -159,7 +174,7 @@ fn ip(args: &[&str]) -> Output {
     Command::new("ip").args(args).output().expect("run ip")
 }
 
-fn ip_ok(args: &[&str]) {
+pub(super) fn ip_ok(args: &[&str]) {
     let done = ip(args);
     let stderr = String::from_utf8_lossy(&done.stderr);
     assert!(done.status.success(), "ip {args:?}: {stderr}");
@@ -304,13 +319,13 @@ const IFF_NO_PI: u16 = 0x1000;
 
 /// A tunnel device the test opened, as the engine would. It goes when this
 /// is dropped, and its routes and addresses with it.
-struct Tun {
-    fd: OwnedFd,
-    name: String,
+pub(super) struct Tun {
+    pub(super) fd: OwnedFd,
+    pub(super) name: String,
 }
 
 impl Tun {
-    fn open(name: &str) -> Self {
+    pub(super) fn open(name: &str) -> Self {
         let flags = rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC;
         let fd = rustix::fs::open("/dev/net/tun", flags, rustix::fs::Mode::empty())
             .expect("open /dev/net/tun");
@@ -335,7 +350,7 @@ impl Tun {
     }
 
     /// Says whether the device's link works, as a cable plugged in or out.
-    fn set_carrier(&self, on: bool) {
+    pub(super) fn set_carrier(&self, on: bool) {
         let mut value = libc::c_int::from(on);
         // SAFETY: `value` is a live `int`, which is what the call reads, and
         // the descriptor is open.
@@ -395,20 +410,23 @@ fn passes_the_shared_route_suite_on_a_tun_device() {
     );
 }
 
-// A change of routes on a live connection (#194), on the real routing
-// table. Linux split DNS is not written yet (X2), so the fake's DNS stands
-// in for that half until it is.
+// A change of routes and split DNS on a live connection (#194), on the real
+// routing table and in the real systemd-resolved. Lookups are seen where
+// they arrive: on the tunnel device, which this test holds.
 #[test]
 fn passes_the_shared_live_route_change_check() {
     let test = "passes_the_shared_live_route_change_check";
     as_root("live route change", test, || {
+        let _stub = super::dns_tests::stub_mode();
         let tun = Tun::open("uvt-live0");
         let routes = LinuxRoutes;
         routes
             .configure_tunnel(&tun.name, Ipv4Addr::new(198, 18, 0, 4), 1300)
             .expect("configure");
-        let dns = crate::fake::Fake::new();
-        suite::check_live_route_change(&routes, &dns, &tun.name, &|name| dns.resolvers_for(name));
+        let lookups = super::dns_tests::Lookups::new(&tun);
+        let dns = super::dns::Resolved::new(super::dns_tests::PREFIX);
+        let resolvers_for = |name: &str| lookups.resolvers_for(name);
+        suite::check_live_route_change(&routes, &dns, &tun.name, &resolvers_for);
     });
 }
 
