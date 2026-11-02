@@ -16,10 +16,8 @@ use ubc_vpn_platform::{Listener, RawConnection, Transport};
 
 use super::*;
 use crate::client::Limits;
-use crate::tests::Rig;
+use crate::test_support::{COOKIE, Rig};
 use ubc_vpn_engine::fake::{FakeEngine, Script};
-
-const COOKIE: &str = "Zq7-made-up-0123456789";
 
 /// Standard input the test writes to. Dropping the sender closes it.
 struct Feed(Receiver<Vec<u8>>, VecDeque<u8>);
@@ -764,7 +762,7 @@ fn messages_are_not_read_faster_than_the_app_takes_them() {
 // lines and none of the three.
 #[test]
 fn no_secret_reaches_the_app_through_the_log() {
-    use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist, pin};
+    use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, pin};
     use ubc_vpn_core::login::PromptKind;
     use ubc_vpn_core::redact::Secret;
     use ubc_vpn_engine::fake::{FakeEngine, Script};

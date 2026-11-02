@@ -18,12 +18,12 @@ use ubc_vpn_core::state::{ConnState, TunnelInfo, TunnelMode};
 
 use crate::client::{Client, Limits};
 use crate::connect::Ended;
-use crate::connect_tests::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, settings_text};
 use crate::interrupt::Progress;
 use crate::profiles::{Command, run};
 use crate::settings::DURING_A_SAVE;
 use crate::settings_lock::change_within;
-use crate::tests::{Rig, greet, scripted, tell};
+use crate::test_support::{CODE, PASSWORD, ROUTES, Scene, Typist, brief, settings_text};
+use crate::test_support::{Rig, greet, scripted, tell};
 
 const FULL: &str = r#"{"mode":"full"}"#;
 const SPLIT: &str = r#"{"mode":"split"}"#;

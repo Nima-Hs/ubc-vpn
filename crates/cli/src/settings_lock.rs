@@ -175,3 +175,7 @@ fn open(path: &Path) -> io::Result<File> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path)
 }
+
+#[cfg(test)]
+#[path = "settings_lock_tests.rs"]
+mod tests;

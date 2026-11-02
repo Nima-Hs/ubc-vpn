@@ -11,8 +11,8 @@ use ubc_vpn_platform::fake::paths;
 
 use super::*;
 use crate::client::Limits;
-use crate::connect_tests::{CODE, PASSWORD, Scene, Typist};
-use crate::tests::{Rig, greet, scripted, tell};
+use crate::test_support::{CODE, PASSWORD, Scene, Typist};
+use crate::test_support::{Rig, greet, scripted, tell};
 use crate::{NOT_OWNER, NOT_RUNNING, USAGE};
 use ubc_vpn_core::VERSION;
 

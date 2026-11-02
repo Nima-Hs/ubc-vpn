@@ -249,3 +249,7 @@ fn keep_locked(
         .save(id.as_str(), &saved)
         .map_err(|_| SettingsFailureCode::Unwritable)
 }
+
+#[cfg(test)]
+#[path = "passwords_tests.rs"]
+mod tests;

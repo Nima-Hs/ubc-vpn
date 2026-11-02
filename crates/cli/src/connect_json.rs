@@ -223,3 +223,7 @@ fn read_app(mut input: impl BufRead, to: &SyncSender<Arrival>, cancel: &Cancel) 
         }
     }
 }
+
+#[cfg(test)]
+#[path = "connect_json_tests.rs"]
+mod tests;

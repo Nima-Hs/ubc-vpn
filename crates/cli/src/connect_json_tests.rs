@@ -16,7 +16,7 @@ use ubc_vpn_engine::{Cancel, Gateway, LogSink, LoginEngine, LoginError, Prompts,
 use crate::client::ClientError;
 use crate::connect::{BUSY, CANCELLED, LOGIN_REFUSED, start, stop};
 use crate::connect_json::connect;
-use crate::connect_tests::{CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, pin, saved};
+use crate::test_support::{CODE, COOKIE, PASSWORD, ROUTES, Scene, Typist, brief, pin, saved};
 use crate::{FAILED, NOT_OWNER, NOT_RUNNING};
 
 /// What the command writes, line by line, as the app reads it.

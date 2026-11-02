@@ -1,167 +1,21 @@
 //! `connect` and `disconnect`, against the real service on the fakes, with a
 //! pretend gateway to log in to and a stand-in for the person at the terminal.
 
-use std::collections::VecDeque;
-
 use ubc_vpn_core::login::PromptKind;
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::state::ConnState;
 use ubc_vpn_engine::fake::{FakeEngine, Script};
-use ubc_vpn_engine::{LoginEngine, Prompt};
 use ubc_vpn_platform::Error;
 use ubc_vpn_platform::fake::Op;
-use ubc_vpn_service::Service;
 
 use crate::client::Limits;
-use crate::connect::{
-    Ask, BUSY, CANCELLED, CHECK_USERNAME, Ended, LOGIN_REFUSED, connect, disconnect,
-};
+use crate::connect::{BUSY, CANCELLED, CHECK_USERNAME, Ended, LOGIN_REFUSED, connect, disconnect};
 use crate::interrupt::Progress;
-use crate::tests::Rig;
+use crate::test_support::{
+    CODE, COOKIE, PASSWORD, ROUTES, Rig, Scene, Typist, brief, pin, returning, saved, settings_text,
+};
 use crate::{FAILED, NOT_RUNNING};
-
-pub(crate) const PASSWORD: &str = "correct-horse-battery";
-pub(crate) const CODE: &str = "246810";
-pub(crate) const COOKIE: &str = "Zq7-made-up-0123456789";
-pub(crate) const ROUTES: &str =
-    r#""routes":{"subnets":["10.255.0.0/24"],"dns_domains":["dept.example.test"]}"#;
-
-/// The person at the terminal: answers in order, and keeps what was asked.
-#[derive(Default)]
-pub(crate) struct Typist {
-    answers: VecDeque<Option<&'static str>>,
-    pub(crate) asked: Vec<PromptKind>,
-    unusable: Option<String>,
-    /// Whether a `None` answer is Ctrl-C rather than giving up.
-    interrupted: bool,
-}
-
-impl Typist {
-    pub(crate) fn typing(answers: &[Option<&'static str>]) -> Self {
-        Self {
-            answers: answers.iter().copied().collect(),
-            ..Self::default()
-        }
-    }
-}
-
-impl Ask for Typist {
-    fn unusable(&self) -> Option<String> {
-        self.unusable.clone()
-    }
-
-    fn ask(&mut self, prompt: &Prompt) -> Option<Secret> {
-        self.asked.push(prompt.kind);
-        self.answers.pop_front().flatten().map(Secret::new)
-    }
-
-    fn interrupted(&self) -> bool {
-        self.interrupted
-    }
-}
-
-/// A machine with a policy, saved settings, a running service, and a pretend
-/// gateway that asks for a username, a password and a one-time code.
-pub(crate) struct Scene {
-    pub(crate) rig: Rig,
-    pub(crate) gateway: FakeEngine,
-    pub(crate) service: Option<Service>,
-}
-
-/// A short wait for the outcome, so that a connect whose outcome never
-/// comes fails its test soon and does not hang it.
-pub(crate) fn brief() -> Limits {
-    Limits {
-        outcome: std::time::Duration::from_secs(5),
-        ..Limits::default()
-    }
-}
-
-pub(crate) fn pin() -> ubc_vpn_core::policy::Pin {
-    format!("pin-sha256:{}=", "A".repeat(43))
-        .try_into()
-        .unwrap()
-}
-
-impl Scene {
-    /// With `settings` as the text of the settings file, and `policy_extra`
-    /// appended to the fields of a valid policy.
-    pub(crate) fn new(settings: Option<&str>, policy_extra: &str) -> Self {
-        let rig = Rig::new();
-        let policy = format!(
-            r#"{{"gateway":"vpn.example.test","pins":["{}"]{policy_extra}}}"#,
-            pin().as_str()
-        );
-        std::fs::create_dir_all(rig.root.join("policy")).unwrap();
-        std::fs::write(rig.root.join("policy/policy.json"), policy).unwrap();
-        if let Some(text) = settings {
-            crate::tests::settings_folder(&rig.root.join("settings"));
-            std::fs::write(rig.root.join("settings/settings.json"), text).unwrap();
-        }
-        let mut script = Script::new(pin());
-        let mut code = script.form[1].clone();
-        (code.0.kind, code.1) = (PromptKind::Code, Secret::new(CODE));
-        script.form.push(code);
-        let service = Some(rig.service());
-        Self {
-            rig,
-            gateway: FakeEngine::new(script),
-            service,
-        }
-    }
-
-    /// The usual one: a saved username and routes the policy allows.
-    pub(crate) fn usual() -> Self {
-        Self::new(Some(&format!(r#"{{"username":"alice",{ROUTES}}}"#)), "")
-    }
-
-    /// Runs `connect` with `typist` at the terminal.
-    pub(crate) fn connect(&self, typist: &mut dyn Ask) -> (u8, String, String) {
-        let (ended, out, err) = self.connect_watched(typist, &Progress::default());
-        match ended {
-            Ended::Status(code) => (code, out, err),
-            other => panic!("the connect was stopped: {other:?}"),
-        }
-    }
-
-    /// The same, for a connect that may be stopped part-way.
-    pub(crate) fn connect_watched(
-        &self,
-        typist: &mut dyn Ask,
-        progress: &Progress,
-    ) -> (Ended, String, String) {
-        self.connect_as(None, typist, progress)
-    }
-
-    /// `connect --profile <profile>`, or with the active profile for `None`.
-    pub(crate) fn connect_as(
-        &self,
-        profile: Option<&ubc_vpn_core::profiles::ProfileId>,
-        typist: &mut dyn Ask,
-        progress: &Progress,
-    ) -> (Ended, String, String) {
-        let platform = || Ok(self.rig.fake.platform(&self.rig.root));
-        let engines = |_: &Policy| Ok(Box::new(self.gateway.clone()) as Box<dyn LoginEngine>);
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let limits = brief();
-        let ended = connect(
-            &platform, profile, &engines, typist, progress, limits, &mut out, &mut err,
-        );
-        let text = |bytes| String::from_utf8(bytes).unwrap();
-        (ended, text(out), text(err))
-    }
-
-    pub(crate) fn state(&self) -> String {
-        self.rig.run(&["status", "--json"]).1
-    }
-
-    /// Whether the gateway was sent anything, which is what costs the user
-    /// an MFA request.
-    pub(crate) fn gateway_was_asked(&self) -> bool {
-        !self.gateway.answers().is_empty()
-    }
-}
 
 #[test]
 fn connect_logs_in_asks_only_what_it_must_and_connects() {
@@ -537,12 +391,12 @@ fn the_wait_for_the_outcome_has_an_end() {
     use ubc_vpn_core::protocol::{Outcome, Request, Response, ResponseBody, ServerMessage, decode};
 
     let rig = Rig::new();
-    let service = crate::tests::scripted(&rig, |conn| {
-        crate::tests::greet(conn);
+    let service = crate::test_support::scripted(&rig, |conn| {
+        crate::test_support::greet(conn);
         let asked: Request = decode(&conn.read_line().unwrap().unwrap()).unwrap();
         let outcome = Outcome::Ok(ResponseBody::Accepted);
         let id = asked.id;
-        crate::tests::tell(conn, &ServerMessage::Response(Response { id, outcome }));
+        crate::test_support::tell(conn, &ServerMessage::Response(Response { id, outcome }));
         // Accepted, and then nothing, until the client goes or patience ends.
         drop(conn.read_line());
     });
@@ -579,8 +433,8 @@ fn the_logins_lines_follow_the_connect_request() {
     scene.service = None;
     let asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
-    let service = crate::tests::scripted(&scene.rig, move |conn| {
-        crate::tests::greet(conn);
+    let service = crate::test_support::scripted(&scene.rig, move |conn| {
+        crate::test_support::greet(conn);
         while let Ok(Some(line)) = conn.read_line() {
             let Request { id, body } = decode(&line).unwrap();
             let (name, answer, then) = match body {
@@ -598,9 +452,9 @@ fn the_logins_lines_follow_the_connect_request() {
             };
             seen.lock().unwrap().push(name);
             let outcome = Outcome::Ok(answer);
-            crate::tests::tell(conn, &ServerMessage::Response(Response { id, outcome }));
+            crate::test_support::tell(conn, &ServerMessage::Response(Response { id, outcome }));
             for state in then.into_iter().flatten() {
-                crate::tests::tell(conn, &ServerMessage::Event(Event::StateChanged(state)));
+                crate::test_support::tell(conn, &ServerMessage::Event(Event::StateChanged(state)));
             }
         }
     });
@@ -614,28 +468,6 @@ fn the_logins_lines_follow_the_connect_request() {
         "status", "connect", "add_log", "add_log", "add_log", "add_log", "add_log", "add_log",
     ];
     assert_eq!(*asked.lock().unwrap(), order);
-}
-
-/// A scene whose service takes a new login after a log-off, with these
-/// settings saved.
-pub(crate) fn returning(settings: &str) -> Scene {
-    let mut scene = Scene::new(Some(settings), "");
-    scene.service = None;
-    scene.service = Some(
-        scene
-            .rig
-            .service_on(FakeEngine::for_dev_mode(Script::new(pin()))),
-    );
-    scene
-}
-
-/// The settings file, byte for byte.
-pub(crate) fn settings_text(scene: &Scene) -> String {
-    std::fs::read_to_string(scene.rig.root.join("settings/settings.json")).unwrap()
-}
-
-pub(crate) fn saved(scene: &Scene) -> serde_json::Value {
-    crate::tests::as_v1(&settings_text(scene))
 }
 
 // A username the user typed is kept once a connect made with it has been

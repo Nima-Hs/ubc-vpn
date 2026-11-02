@@ -422,3 +422,11 @@ fn tell_cleaned(found: &Found, err: &mut dyn Write) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "profiles_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "tunnel_tests.rs"]
+mod tunnel_tests;

@@ -140,3 +140,7 @@ pub fn read_shown(question: &str, input: &mut dyn BufRead, echo: &mut dyn Write)
     let text = String::from_utf8(line).map_err(|_| Error::Failed(NOT_TEXT.to_string()))?;
     Ok(Secret::new(text))
 }
+
+#[cfg(test)]
+#[path = "terminal_tests.rs"]
+mod tests;
