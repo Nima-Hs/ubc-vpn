@@ -43,14 +43,11 @@ pub(super) const fn ioc(direction: c_ulong, group: u8, number: u8, size: usize) 
     direction + (((size as c_ulong) & 0x1fff) << 16) + ((group as c_ulong) << 8) + number as c_ulong
 }
 pub(super) const IOC_IN: c_ulong = 0x8000_0000;
-#[cfg(test)]
 pub(super) const IOC_INOUT: c_ulong = 0xc000_0000;
 const IFREQ: usize = size_of::<libc::ifreq>();
 const IN6_IFREQ: usize = size_of::<libc::in6_ifreq>();
 // The numbers are those of <sys/sockio.h> and <netinet6/in6_var.h>.
-#[cfg(test)]
 pub(super) const SIOCSIFFLAGS: c_ulong = ioc(IOC_IN, b'i', 16, IFREQ);
-#[cfg(test)]
 pub(super) const SIOCGIFFLAGS: c_ulong = ioc(IOC_INOUT, b'i', 17, IFREQ);
 pub(super) const SIOCDIFADDR: c_ulong = ioc(IOC_IN, b'i', 25, IFREQ);
 pub(super) const SIOCAIFADDR: c_ulong = ioc(IOC_IN, b'i', 26, size_of::<libc::ifaliasreq>());
@@ -562,8 +559,7 @@ fn ioctl<T>(family: AddressFamily, call: &str, number: c_ulong, request: &mut T)
     }
 }
 
-/// Brings the interface up, or takes it down, as an administrator would.
-#[cfg(test)]
+/// Brings the interface up, or takes it down.
 pub(super) fn set_up(name: &str, up: bool) -> Result<()> {
     let mut flags: libc::ifreq = request(name)?;
     ioctl(

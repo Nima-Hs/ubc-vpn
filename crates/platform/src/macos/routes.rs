@@ -428,9 +428,8 @@ impl Routes for MacRoutes {
         // device for it. Set again when it is there, which changes an
         // address left with another mask or other end.
         route_socket::add_address(tunnel, address, 32, Some(address))?;
-        // Setting an address brings a `utun` up: the kernel does so for
-        // every address set, one set again included.
-        route_socket::set_mtu(tunnel, mtu)
+        route_socket::set_mtu(tunnel, mtu)?;
+        route_socket::set_up(tunnel, true)
     }
 
     fn add_gateway_route(&self, gateway: Ipv4Addr, via: &PhysicalNetwork) -> Result<()> {
