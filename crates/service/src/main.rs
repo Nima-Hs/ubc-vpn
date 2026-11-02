@@ -10,7 +10,20 @@ use ubc_vpn_platform::{Platform, StateDir};
 use ubc_vpn_service::Service;
 use ubc_vpn_service::args::{self, Command, Run};
 
-type Parts = (Platform, StateDir, Arc<dyn TunnelEngine>);
+/// What the service is built from. In dev mode, also the fake that stands
+/// in for routing and DNS, so that what is left on it can be told at the
+/// end.
+struct Parts {
+    platform: Platform,
+    state: StateDir,
+    engine: Arc<dyn TunnelEngine>,
+    #[cfg(all(unix, feature = "dev-mode"))]
+    fake: Option<ubc_vpn_platform::fake::Fake>,
+}
+
+/// What a build without the real engine says when asked to run installed.
+#[cfg(not(feature = "real-engine"))]
+const NO_ENGINE: &str = "this build has no VPN engine, so it cannot run";
 
 fn main() -> ExitCode {
     match run() {
@@ -30,8 +43,9 @@ fn run() -> Result<(), String> {
         Command::Install { .. } | Command::Uninstall { .. } if cfg!(feature = "dev-mode") => {
             return Err("a build with dev mode cannot install or remove the service".to_string());
         }
-        // Run by the setup program, as an administrator, with the same
-        // checks of the environment as the service.
+        // Run by the Windows setup program or the packages' scripts, as an
+        // administrator or root, with the same checks of the environment as
+        // the service.
         Command::Install { policy, fresh } => {
             args::check_environment(Run::Installed)?;
             return setup::install(&policy, fresh);
@@ -48,10 +62,16 @@ fn run() -> Result<(), String> {
     if mode == Run::Installed && cfg!(feature = "dev-mode") {
         return Err("a build with dev mode cannot run as the installed service".to_string());
     }
-    // The installed service runs only from a folder that no one but SYSTEM,
-    // the Administrators and TrustedInstaller could change, held so that
-    // it cannot be swapped while the service runs.
-    #[cfg(windows)]
+    // On Linux and macOS a build without the engine loads nothing from its
+    // folder and cannot run at all, so it says that first. On Windows the
+    // folder and the service manager come first, as they always have.
+    #[cfg(all(unix, not(feature = "real-engine")))]
+    if mode == Run::Installed {
+        return Err(NO_ENGINE.to_string());
+    }
+    // The installed service runs only from a folder that no one but the
+    // system's own accounts could change (see `ubc_vpn_platform::program`),
+    // held so that it cannot be swapped while the service runs.
     let _folder = match mode {
         Run::Installed => Some(program_folder()?),
         #[cfg(feature = "dev-mode")]
@@ -62,7 +82,7 @@ fn run() -> Result<(), String> {
     #[cfg(windows)]
     if mode == Run::Installed {
         return ubc_vpn_platform::service::run(move |control, stop| {
-            let service = start(mode)?;
+            let service = start(mode, parts(mode)?)?;
             control.running().map_err(|e| {
                 format!("The service manager could not be told the service is running: {e}.")
             })?;
@@ -70,25 +90,92 @@ fn run() -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     }
-    let service = start(mode)?;
+    serve(mode)
+}
+
+/// On Linux and macOS: serves until asked to stop, by launchd or systemd
+/// with `SIGTERM`, or with Ctrl-C in dev mode, and removes everything it
+/// applied before it exits.
+#[cfg(unix)]
+fn serve(mode: Run) -> Result<(), String> {
+    let parts = parts(mode)?;
+    // Watched from before the service starts, so that no request to stop
+    // can find routes applied and nobody listening, which would end the
+    // program where it stands. After the engine is loaded, which must
+    // happen before any thread starts.
+    let stops = ubc_vpn_platform::interrupt::watch()
+        .map_err(|e| format!("Requests to stop cannot be watched for: {e}."))?;
+    #[cfg(feature = "dev-mode")]
+    let fake = parts.fake.clone();
+    let service = start(mode, parts)?;
+    #[cfg(feature = "dev-mode")]
+    let log = service.log_book();
+    eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
+    let served = service.serve_until_stopped(stops);
+    #[cfg(feature = "dev-mode")]
+    if let Some(fake) = fake {
+        the_end_in_dev_mode(&fake, &log)?;
+    }
+    served?;
+    eprintln!("ubc-vpn-service {} has stopped", ubc_vpn_core::VERSION);
+    Ok(())
+}
+
+/// On Windows, outside the service manager: dev mode, which serves until
+/// the program is ended.
+#[cfg(not(unix))]
+fn serve(mode: Run) -> Result<(), String> {
+    let service = start(mode, parts(mode)?)?;
     eprintln!("ubc-vpn-service {} is running", ubc_vpn_core::VERSION);
     Err(service.wait())
 }
 
+/// Dev mode, once the service has stopped, for whoever ran it: what the
+/// service logged from the request to stop on, which no client can read
+/// any more, and whether anything is left on the fake routing and DNS,
+/// which for the installed service would be the system's own. Anything
+/// left is a failure. The log holds no secret, as everywhere.
+#[cfg(all(unix, feature = "dev-mode"))]
+fn the_end_in_dev_mode(
+    fake: &ubc_vpn_platform::fake::Fake,
+    log: &ubc_vpn_service::Logs,
+) -> Result<(), String> {
+    let lines = log.lines();
+    let asked = lines
+        .iter()
+        .position(|line| line.starts_with("asked to stop"));
+    for line in &lines[asked.unwrap_or(lines.len())..] {
+        eprintln!("ubc-vpn-service: dev mode: logged at the end: {line}");
+    }
+    let applied = fake.applied();
+    if applied != Default::default() {
+        return Err(format!(
+            "dev mode: routes or DNS were left applied: {applied:?}"
+        ));
+    }
+    eprintln!("ubc-vpn-service: dev mode: no routes or DNS are left applied");
+    Ok(())
+}
+
 /// Checks the folder this program runs from; see `ubc_vpn_platform::program`.
-/// The path is used as Windows gives it, not canonicalised, which would make
-/// it a verbatim path that the engine refuses.
-#[cfg(windows)]
+/// The path is used as the OS gives it, not canonicalised, which on Windows
+/// would make it a verbatim path that the engine refuses.
 fn program_folder() -> Result<ubc_vpn_platform::program::ProgramFolder, String> {
     let program = std::env::current_exe()
         .map_err(|e| format!("The service cannot tell where it runs from: {e}."))?;
     ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())
 }
 
-fn start(mode: Run) -> Result<Service, String> {
-    let (platform, state, engine) = parts(mode)?;
+fn start(mode: Run, parts: Parts) -> Result<Service, String> {
     let dev_mode = mode != Run::Installed;
-    Service::start_in(platform, state, engine, args::timeouts(mode), dev_mode)
+    let timeouts = args::timeouts(mode);
+    Service::start_in(
+        parts.platform,
+        parts.state,
+        parts.engine,
+        timeouts,
+        dev_mode,
+    )
 }
 
 fn parts(mode: Run) -> Result<Parts, String> {
@@ -101,7 +188,7 @@ fn parts(mode: Run) -> Result<Parts, String> {
 
 #[cfg(not(feature = "real-engine"))]
 fn installed() -> Result<Parts, String> {
-    Err("this build has no VPN engine, so it cannot run".to_string())
+    Err(NO_ENGINE.to_string())
 }
 
 /// The installed service: the real platform, the state folder checked for
@@ -132,7 +219,13 @@ fn installed() -> Result<Parts, String> {
         std::env::current_exe().map_err(|e| format!("This program's folder is unknown: {e}."))?;
     let dir = exe.parent().ok_or("This program's folder is unknown.")?;
     let engine = OpenConnect::load(dir, &prepared).map_err(|e| e.to_string())?;
-    Ok((platform, state, Arc::new(engine)))
+    Ok(Parts {
+        platform,
+        state,
+        engine: Arc::new(engine),
+        #[cfg(all(unix, feature = "dev-mode"))]
+        fake: None,
+    })
 }
 
 /// Dev mode: the real channel and files for `Mode::Dev`, with fake routing,
@@ -152,7 +245,7 @@ fn dev() -> Result<Parts, String> {
     let platform = Platform {
         routes: Arc::new(fake.clone()),
         dns: Arc::new(fake.clone()),
-        events: Arc::new(fake),
+        events: Arc::new(fake.clone()),
         ..native
     };
     // The pretend gateway presents the dev policy's first pin, so that
@@ -164,11 +257,20 @@ fn dev() -> Result<Parts, String> {
         .map_err(|e| format!("The state folder cannot be used: {e}."))?;
     // Logging in happens in another process, so this fake keeps accepting
     // the dev cookie after a log-off. Otherwise dev mode would connect once.
-    Ok((platform, state, Arc::new(FakeEngine::for_dev_mode(script))))
+    Ok(Parts {
+        platform,
+        state,
+        engine: Arc::new(FakeEngine::for_dev_mode(script)),
+        #[cfg(unix)]
+        fake: Some(fake),
+    })
 }
 
-/// `install` and `uninstall`, run by the Windows setup program.
-#[cfg(windows)]
+/// `install` and `uninstall`, run as an administrator by the Windows setup
+/// program, and as root by the macOS and Linux packages' scripts. The same
+/// steps on every OS; `ubc_vpn_platform::install` does each of them. On
+/// macOS and Linux it cannot do any yet, and neither can the folder check,
+/// so there both stop before anything is changed.
 mod setup {
     use std::path::{Path, PathBuf};
 
@@ -204,7 +306,7 @@ mod setup {
         let command_line = os::quoted(&program)
             .map_err(|_| format!("The service's path cannot be used: {}.", program.display()))?;
         let paths = paths()?;
-        let mut steps = Windows {
+        let mut steps = System {
             data: paths.policy_dir.clone(),
             paths,
             command_line,
@@ -213,13 +315,13 @@ mod setup {
     }
 
     /// The steps of an install on this computer (see `install::install`).
-    struct Windows {
+    struct System {
         data: PathBuf,
         paths: Paths,
         command_line: String,
     }
 
-    impl install::Steps for Windows {
+    impl install::Steps for System {
         fn holds_an_owner(&mut self) -> bool {
             // `StateDir::open` makes the folder when it is missing; only one
             // that is already there can hold an owner.
@@ -271,19 +373,5 @@ mod setup {
         }
         os::remove_data_folder(&data_folder()?)
             .map_err(|e| format!("The data folder could not be removed: {e}."))
-    }
-}
-
-/// On macOS and Linux the packages' own scripts do this.
-#[cfg(not(windows))]
-mod setup {
-    const ONLY: &str = "install and uninstall are for the Windows setup program only";
-
-    pub fn install(_policy: &std::path::Path, _fresh: bool) -> Result<(), String> {
-        Err(ONLY.to_string())
-    }
-
-    pub fn uninstall(_keep_data: bool) -> Result<(), String> {
-        Err(ONLY.to_string())
     }
 }

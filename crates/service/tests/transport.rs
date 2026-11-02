@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use harness::*;
 use ubc_vpn_core::protocol::{Request, encode};
+use ubc_vpn_platform::interrupt::Stop;
 use ubc_vpn_platform::{Listener, Platform, RawConnection, Result, Transport};
 use ubc_vpn_service::{Service, Timeouts};
 
@@ -567,6 +568,99 @@ fn a_stop_request_ends_serving_and_cleans_up() {
     let ended = ended.recv_timeout(WAIT).expect("serving never ended");
     assert_eq!(ended, Ok(()));
     assert!(rig.is_clean());
+}
+
+/// Serves `service` until a request on the returned sender, in a thread of
+/// its own, and gives back the service's log and how serving ended.
+fn serving_until_stopped(
+    service: Service,
+) -> (
+    std::sync::mpsc::Sender<Stop>,
+    std::sync::mpsc::Receiver<std::result::Result<(), String>>,
+    ubc_vpn_service::Logs,
+) {
+    let logs = service.log_book();
+    let (stop, requests) = std::sync::mpsc::channel();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(service.serve_until_stopped(requests)));
+    (stop, ended, logs)
+}
+
+/// Where `text` is in `lines`, which must have it.
+fn place(lines: &[String], text: &str) -> usize {
+    let found = lines.iter().position(|line| line == text);
+    found.unwrap_or_else(|| panic!("no line {text:?} in {lines:#?}"))
+}
+
+// Security rule: on Linux and macOS, launchd and systemd stop the service
+// with SIGTERM, which `interrupt::watch` turns into a request. It removes
+// everything a connection applied before serving ends, and a second request
+// while that happens never cuts it short: the requests are still taken
+// afterwards, so none reaches nobody, which would end the program at once.
+#[test]
+fn a_request_to_stop_tears_the_connection_down_and_a_second_does_not_cut_it_short() {
+    let mut rig = harness::rig();
+    let mut alice = rig.owner();
+    let state = alice.connect_ends(good());
+    assert!(matches!(state, ConnState::Connected { .. }), "{state:?}");
+    assert!(!rig.is_clean());
+    let (stop, ended, logs) = serving_until_stopped(rig.service.take().unwrap());
+    stop.send(Stop::Terminate).unwrap();
+    stop.send(Stop::Interrupt).unwrap();
+    let ended = ended.recv_timeout(WAIT).expect("serving never ended");
+    assert_eq!(ended, Ok(()));
+    assert!(rig.is_clean(), "{:?}", rig.fake.applied());
+    let lines = logs.lines();
+    let asked = place(
+        &lines,
+        "asked to stop (terminate); removing everything applied",
+    );
+    let removed = place(&lines, "everything applied for the connection was removed");
+    assert!(asked < removed, "{lines:#?}");
+    // Still taken once the service is gone: the program ends by returning,
+    // never because a request found nobody.
+    assert!(
+        stop.send(Stop::Terminate).is_ok(),
+        "the requests were let go"
+    );
+}
+
+// The same while connecting: the open is cancelled, and whatever was applied
+// on the way there is removed.
+#[test]
+fn a_request_to_stop_while_connecting_cancels_and_tears_down() {
+    let mut rig = harness::rig();
+    let mut alice = rig.owner();
+    rig.engine.hold();
+    assert_eq!(alice.ask(good()), Ok(ResponseBody::Accepted));
+    rig.engine.wait_until_blocked();
+    let (stop, ended, logs) = serving_until_stopped(rig.service.take().unwrap());
+    stop.send(Stop::Terminate).unwrap();
+    let ended = ended.recv_timeout(WAIT).expect("serving never ended");
+    assert_eq!(ended, Ok(()));
+    assert!(rig.is_clean(), "{:?}", rig.fake.applied());
+    assert!(rig.fake.calls().ends_with(&[Op::RemoveAllRoutes]));
+    let lines = logs.lines();
+    place(
+        &lines,
+        "asked to stop (terminate); removing everything applied",
+    );
+    assert!(!lines.iter().any(|line| line == "connected"), "{lines:#?}");
+    rig.engine.release();
+}
+
+// Until a request comes, nothing stops: a sender that goes away asks for
+// nothing, and serving goes on.
+#[test]
+fn no_request_to_stop_means_serving_goes_on() {
+    let mut rig = harness::rig();
+    let (stop, ended, _) = serving_until_stopped(rig.service.take().unwrap());
+    drop(stop);
+    let waited = ended.recv_timeout(Duration::from_millis(500));
+    assert!(waited.is_err(), "serving ended: {waited:?}");
+    let mut alice = rig.owner();
+    let serves = Ok(ResponseBody::Status(ConnState::Disconnected));
+    assert_eq!(alice.ask(RequestBody::Status), serves);
 }
 
 // Accepting that ends by itself is still an error while serving until a stop
