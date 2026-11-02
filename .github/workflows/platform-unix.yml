@@ -281,10 +281,15 @@ jobs:
 
       # Root's, as the packages will install them: the service refuses to
       # run from a folder anyone else could change. The library is the file
-      # itself, never a link.
+      # itself, never a link. GitHub's image leaves /opt open to everyone
+      # (0777, with an access list), which the service rightly refuses, so
+      # on this throwaway runner it is closed as a system's own /opt is.
       - name: Place the release build where the unit starts it
         run: |
           ls -ldn / /opt
+          sudo setfacl -b /opt
+          sudo chmod 0755 /opt
+          ls -ldn /opt
           sudo install -d -o root -g root -m 0755 "/opt/UBC VPN" "/opt/UBC VPN/resources" "$BIN"
           sudo install -o root -g root -m 0755 target/release/ubc-vpn-service target/release/ubc-vpn "$BIN/"
           sudo install -o root -g root -m 0644 "$(readlink -f "$RUNNER_TEMP/native/lib/libopenconnect.so.5")" \
