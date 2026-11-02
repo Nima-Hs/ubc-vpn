@@ -21,9 +21,16 @@ target=$1
 [ ! -e "$target" ] || die "$target already exists"
 
 here=$(cd "$(dirname "$0")" && pwd)
-read -r sha archive extra <"$here/base.lock"
+lock=$here/base.lock
+lock_format="base.lock must be exactly one line, ending in a newline: a SHA-256 and a dated msys2-base archive name"
+[ -s "$lock" ] || die "base.lock is missing or empty. $lock_format"
+# $(...) drops a trailing newline, so the last byte is a newline only if this
+# is empty.
+[ -z "$(tail -c1 "$lock")" ] || die "base.lock does not end in a newline. $lock_format"
+[ "$(wc -l <"$lock")" -eq 1 ] || die "base.lock has more than one line. $lock_format"
+read -r sha archive extra <"$lock"
 [[ $sha =~ ^[0-9a-f]{64}$ ]] && [[ $archive =~ ^msys2-base-x86_64-[0-9]{8}\.tar\.xz$ ]] && [ -z "${extra:-}" ] ||
-    die "base.lock must be one line: a SHA-256 and a dated msys2-base archive name"
+    die "$lock_format"
 mkdir -p "$here/cache"
 download=$here/cache/$archive
 if [ ! -f "$download" ]; then
@@ -40,8 +47,11 @@ fi
 echo "$archive: SHA-256 matches base.lock"
 
 # The archive holds a single folder, msys64.
+# A run interrupted after unpacking leaves this folder behind. It is removed
+# first, so that none of its files can end up in the new install.
 parent=$(dirname "$target")
-mkdir -p "$parent/.base-unpack"
+rm -rf "$parent/.base-unpack"
+mkdir "$parent/.base-unpack"
 tar -xJf "$download" -C "$parent/.base-unpack"
 mv "$parent/.base-unpack/msys64" "$target"
 rmdir "$parent/.base-unpack"

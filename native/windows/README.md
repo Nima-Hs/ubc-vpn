@@ -49,9 +49,9 @@ The `Native library (Windows)` workflow runs the same two scripts on GitHub's Wi
 - **The MSYS2 source packages.** `sources.lock` lists each one with its SHA-256.
 - **The licences.** `licences.txt` names the licence we use each component under. `build.sh` stops if something that would ship is not listed.
 
-Not pinned: what runs before MSYS2 does. On the runner that is GitHub's Windows image: Git Bash, which runs `base.sh`, and its `curl`, `sha256sum` and `tar`, which fetch, check and unpack the archive. `base.sh` unpacks nothing unless the SHA-256 matches. `out/build-packages.txt` records the MSYS2 packages used.
+Not pinned: what runs before MSYS2 does. On the runner that is GitHub's Windows image: Git Bash, which runs `base.sh`, and the tools from it that `base.sh` uses to fetch, check and unpack the archive, such as `curl`, `sha256sum`, `tar` and `xz`. `base.sh` unpacks nothing unless the SHA-256 matches. `out/build-packages.txt` records the MSYS2 packages used.
 
-The archive's signature is not checked: the keys to check it with would come from the archive itself. The SHA-256 in `base.lock` is what pins it.
+The archive's signature is not checked. The SHA-256 in `base.lock`, taken from the official msys2-installer release, already fixes the exact archive, which is stronger than a signature check. One could be added later with a committed key checked by its fingerprint, as `keys/` does for GnuTLS.
 
 To move to a newer base, change `base.lock`, regenerate `base-packages.txt` from the archive's `var/lib/pacman/local/` folder, and expect to update `tools.lock` if a tool needs newer libraries.
 
