@@ -26,6 +26,22 @@ test("settings: nothing starts at sign-in and nothing connects by itself, until 
     await tab("Connection").click();
 });
 
+test("settings: automatic updates are on, and a test run says it cannot update itself", async () => {
+    await scenario("settings");
+    await tab("Settings").click();
+    const automatic = page.getByRole("switch", { name: "Automatic updates" });
+    await expect(automatic).toHaveAttribute("aria-checked", "true");
+    await expect(automatic).toHaveAccessibleDescription(/only tells you a new version is out/);
+    // Not an installed app: nothing is checked or downloaded, and it says so.
+    await expect(page.getByText("This copy of UBC VPN can't update itself.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Check for updates now" })).toBeDisabled();
+    await automatic.click();
+    await expect(automatic).toHaveAttribute("aria-checked", "false");
+    await automatic.click();
+    await expect(automatic).toHaveAttribute("aria-checked", "true");
+    await tab("Connection").click();
+});
+
 test("settings: starting in the tray registers the app with --hidden", async () => {
     test.skip(process.platform === "linux", "Linux has no start at sign-in yet");
     await scenario("settings");

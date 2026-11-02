@@ -6,6 +6,7 @@
 
 import type { ProfilesError } from "./profiles";
 import type { StartMode } from "./protocol/StartMode";
+import type { UpdateStatus } from "./updates";
 
 export const SETTINGS = {
     title: "Settings",
@@ -48,6 +49,48 @@ export const SETTINGS = {
         forgotten: "Your saved password is forgotten.",
     },
 } as const;
+
+export const UPDATES = {
+    heading: "Updates",
+    automatic: {
+        label: "Automatic updates",
+        hint: "On unless you turn it off. New versions download in the background and install when you restart UBC VPN to update. When off, UBC VPN only tells you a new version is out.",
+    },
+    checkNow: "Check for updates now",
+    lastChecked: (when: string) => `Last checked ${when}.`,
+    neverChecked: "Not checked yet.",
+} as const;
+
+/** Where updates stand, in a sentence; `null` when there is nothing to say yet. */
+export function describeUpdate(status: UpdateStatus): string | null {
+    switch (status.phase) {
+        case "unavailable":
+            return "This copy of UBC VPN can't update itself. Install new versions from the releases page on GitHub.";
+        case "idle":
+            return null;
+        case "checking":
+            return "Checking for updates…";
+        case "up_to_date":
+            return "UBC VPN is up to date.";
+        case "available":
+            return `Version ${status.version} is available. Turn on Automatic updates to download it.`;
+        case "downloading":
+            return `Downloading version ${status.version}…`;
+        case "ready":
+            return `Version ${status.version} is downloaded and ready to install.`;
+        case "failed":
+            switch (status.reason) {
+                case "offline":
+                    return "UBC VPN couldn't reach GitHub to check for updates. Check your internet connection, then try again.";
+                case "github":
+                    return "GitHub's answer couldn't be read, so nothing was downloaded. Try again later.";
+                case "refused":
+                    return "An update failed UBC VPN's safety checks, so it wasn't used and nothing was installed. Try again later.";
+                case "disk":
+                    return "The update couldn't be saved. Check that your disk isn't full, then try again.";
+            }
+    }
+}
 
 export const PROFILES = {
     heading: "Profiles",

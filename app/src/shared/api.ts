@@ -14,6 +14,7 @@ import type { SettingsFailureCode } from "./protocol/SettingsFailureCode";
 import type { SettingsView } from "./protocol/SettingsView";
 import type { TunnelMode } from "./protocol/TunnelMode";
 import type { TunnelStatus } from "./tunnel";
+import type { UpdatesApi } from "./updates";
 
 /** Why the service cannot be used right now. */
 export type UnavailableReason =
@@ -161,6 +162,8 @@ export interface VpnApi {
     minimizeWindow(): Promise<void>;
     /** Closes the window: to the tray where there is one, otherwise quitting. */
     closeWindow(): Promise<void>;
+    /** Where updates stand, and checking for one now. */
+    readonly updates: UpdatesApi;
     /** Present only in builds that have the log screen. */
     readonly logs?: LogsApi;
     /** Present only in builds that have the Settings screen. */

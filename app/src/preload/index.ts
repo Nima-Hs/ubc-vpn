@@ -8,6 +8,7 @@ import { DEMO_PROFILES_IPC, PROFILES_IPC } from "@shared/profiles";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { StartMode } from "@shared/protocol/StartMode";
+import { UPDATES_IPC, type UpdateView } from "@shared/updates";
 import { contextBridge, ipcRenderer } from "electron";
 
 declare const __DEMO__: boolean;
@@ -50,6 +51,17 @@ const api: VpnApi = {
     retry: () => invoke(IPC.retry),
     minimizeWindow: () => invoke(IPC.minimizeWindow),
     closeWindow: () => invoke(IPC.closeWindow),
+    updates: {
+        get: () => invoke(UPDATES_IPC.get),
+        checkNow: () => invoke(UPDATES_IPC.checkNow),
+        onChange: (listener: (view: UpdateView) => void) => {
+            const handler = (_event: unknown, view: UpdateView) => listener(view);
+            ipcRenderer.on(UPDATES_IPC.changed, handler);
+            return () => {
+                ipcRenderer.off(UPDATES_IPC.changed, handler);
+            };
+        },
+    },
     ...(__LOGS__ && {
         logs: {
             open: () => invoke(LOGS_IPC.open),
