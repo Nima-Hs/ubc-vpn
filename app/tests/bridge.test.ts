@@ -29,7 +29,7 @@ import {
     MAX_LINE_BYTES,
 } from "../src/main/channel/framing";
 import { isServerMessage } from "../src/main/channel/validate";
-import { profileFolder } from "../src/main/profile";
+import { profileFolder } from "../src/main/user-data";
 import {
     alive,
     type MockBridge,

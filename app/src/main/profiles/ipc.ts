@@ -1,21 +1,14 @@
 // What the Settings screen can ask the main process for. Each request is
-// checked (`profiles-checks.ts`) before anything else happens. Only in builds
+// checked (`checks.ts`) before anything else happens. Only in builds
 // that have the Settings screen: see `__SETTINGS__`.
 
 import { PROFILES_IPC, type ProfilesResult } from "@shared/profiles";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { BrowserWindow } from "electron";
-import type { ProfilesService } from "./channel/profiles";
-import { handleFromInterface } from "./ipc";
-import {
-    takeId,
-    takeName,
-    takeProfile,
-    takeRename,
-    takeStartup,
-    takeUpdate,
-} from "./profiles-checks";
-import { type LoginItem, loginItemFor } from "./startup";
+import type { ProfilesService } from "../channel/profiles";
+import { handleFromInterface } from "../ipc";
+import { type LoginItem, loginItemFor } from "../startup";
+import { takeId, takeName, takeProfile, takeRename, takeStartup, takeUpdate } from "./checks";
 
 /** Where the choice of starting at sign-in goes: the OS, or a record of it. */
 export interface LoginItems {

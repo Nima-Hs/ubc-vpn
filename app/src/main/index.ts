@@ -1,19 +1,17 @@
 import { join } from "node:path";
-import { DEMO_IPC, type LinkState } from "@shared/api";
-import { DEMO_PROFILES_IPC, PROFILES_IPC } from "@shared/profiles";
+import type { LinkState } from "@shared/api";
+import { PROFILES_IPC } from "@shared/profiles";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
-import type { TunnelMode } from "@shared/protocol/TunnelMode";
 import { app, type BrowserWindow, clipboard, Menu, protocol, session } from "electron";
 import { bridgeCommand, connectCommand, settingsCommand } from "./channel/cli";
 import { ProfilesRunner, type ProfilesService } from "./channel/profiles";
 import { SettingsRunner, type SettingsService } from "./channel/settings";
 import { Controller, type LoginFactory } from "./controller";
-import { handleFromInterface, registerIpc } from "./ipc";
+import { registerIpc } from "./ipc";
 import { createServiceLink, type ServiceLink } from "./link";
 import { clientLogin } from "./login";
 import type { LogFeed } from "./logs/book";
-import { profileFolder } from "./profile";
-import type { LoginItems } from "./profiles-ipc";
+import type { LoginItems } from "./profiles/ipc";
 import { holdQuitForCancel, stopForQuit } from "./quit";
 import {
     allowsRemoteDebugging,
@@ -31,9 +29,10 @@ import {
     startsInTray,
     startupSupported,
 } from "./startup";
-import { appImage, createTray, followStateOnTaskbar } from "./tray";
-import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray-icon";
+import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray/icon";
+import { appImage, createTray, followStateOnTaskbar } from "./tray/tray";
 import { TunnelSwitch } from "./tunnel-switch";
+import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
 
 // First of all, before the profile is read or anything is written to it.
@@ -100,68 +99,19 @@ async function start(): Promise<void> {
               },
           };
     if (__DEMO__) {
-        const { createDemoLink, DEMO_SCENARIOS } = await import("./demo/demo-link");
-        const { createDemoLogin, DEMO_LOGIN_SCENARIOS } = await import("./demo/demo-login");
-        const { createDemoSettings, DEMO_SETTINGS_SCENARIOS } = await import(
-            "./demo/demo-settings"
-        );
-        const { createDemoLogs, DEMO_LOG_SCENARIOS } = await import("./demo/demo-logs");
-        const { createDemoProfiles, DEMO_PROFILES_SCENARIOS } = await import(
-            "./demo/demo-profiles"
-        );
-        const fakeSettings = createDemoSettings();
-        demoSettings = fakeSettings;
-        const stepMs = Number(process.env.UBC_VPN_DEMO_STEP_MS);
-        const step = Number.isFinite(stepMs) && stepMs > 0 ? stepMs : undefined;
-        // The pretend service connects with the mode the pretend settings
-        // hold, and switches a live connection when they change.
-        let savedMode: TunnelMode = "split";
-        const demo = createDemoLink(step, () => savedMode);
-        const fakeProfiles = createDemoProfiles((mode) => {
-            savedMode = mode;
-            return demo.switchTunnel(mode);
+        const { createDemo } = await import("./demo");
+        const demo = createDemo({
+            devServerUrl,
+            profiles: () => profiles,
+            tunnelSwitch: () => tunnelSwitch,
+            loginItem: () => loginItemAsked,
         });
-        demoProfiles = fakeProfiles;
-        const fakeLogs = createDemoLogs(step);
-        logFeed = fakeLogs;
-        link = demo;
-        let demoLogin: ReturnType<typeof createDemoLogin> | undefined;
-        login = (onState) => {
-            demoLogin = createDemoLogin(onState, () => void demo.connect(), step);
-            return demoLogin;
-        };
-        registerDemo = (window) => {
-            handleFromInterface(window, devServerUrl, DEMO_IPC.listScenarios, () => [
-                ...DEMO_SCENARIOS,
-                ...DEMO_LOGIN_SCENARIOS,
-                ...DEMO_SETTINGS_SCENARIOS,
-                ...DEMO_LOG_SCENARIOS,
-                ...DEMO_PROFILES_SCENARIOS,
-            ]);
-            handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
-                if (typeof name === "string") {
-                    // A login state, or a connection state with no login under way.
-                    demoLogin?.setScenario(name);
-                    demo.setScenario(name);
-                    fakeSettings.setScenario(name);
-                    fakeLogs.setScenario(name);
-                    fakeProfiles.setScenario(name);
-                    // Everyone hears of the scenario's profiles, the saved mode among them.
-                    void profiles?.list().then((result) => {
-                        if (result.ok) {
-                            savedMode = result.value.global.tunnel;
-                        } else {
-                            tunnelSwitch?.readFailed();
-                        }
-                    });
-                }
-            });
-            handleFromInterface(window, devServerUrl, DEMO_PROFILES_IPC.loginItem, () =>
-                loginItemAsked === null
-                    ? null
-                    : { openAtLogin: loginItemAsked.openAtLogin, args: loginItemAsked.args },
-            );
-        };
+        link = demo.link;
+        login = demo.login;
+        demoSettings = demo.settings;
+        demoProfiles = demo.profiles;
+        logFeed = demo.logs;
+        registerDemo = demo.register;
     } else {
         // A login given up after the service accepted it is undone through
         // the link, which is made just below and is there before any login.
@@ -244,7 +194,7 @@ async function start(): Promise<void> {
     let latestProfiles: ProfilesView | null = null;
     controller.setProfileForLogin(() => latestProfiles?.global.active_profile ?? null);
     if (__SETTINGS__) {
-        const { registerProfiles, watchProfiles } = await import("./profiles-ipc");
+        const { registerProfiles, watchProfiles } = await import("./profiles/ipc");
         profiles = watchProfiles(
             demoProfiles ?? new ProfilesRunner(settingsCommand(app, process)),
             (view) => {

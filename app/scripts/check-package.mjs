@@ -59,7 +59,7 @@ const REQUIRED_FILES = [
     "resources/licenses/microsoft/microsoft-visual-studio-2026-community-license.txt",
     "resources/licenses/microsoft/microsoft-visual-studio-2026-distributable-code.txt",
     "resources/policy.json",
-    // The taskbar button's state icons, the tray's own pictures (src/main/tray.ts).
+    // The taskbar button's state icons, the tray's own pictures (src/main/tray/tray.ts).
     ...[
         "off",
         "busy-0",

@@ -24,7 +24,7 @@ import {
     stateIconFile,
     type TrayKind,
     WINDOW_ICON_SIZES,
-} from "../src/main/tray-icon";
+} from "../src/main/tray/icon";
 
 const build = join(__dirname, "../build");
 const update = process.env.UPDATE_ICONS === "1";

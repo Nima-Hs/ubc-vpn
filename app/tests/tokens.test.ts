@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { WINDOW_BACKGROUND } from "@shared/api";
 import { describe, expect, it } from "vitest";
 import { COLOURS } from "../src/main/icon/designs";
-import { COLOUR_PALETTE } from "../src/main/tray-icon";
+import { COLOUR_PALETTE } from "../src/main/tray/icon";
 import { duration, easeOut, tooltipDelay, tooltipSpace } from "../src/renderer/src/lib/motion";
 
 const css = readFileSync(join(__dirname, "../src/renderer/src/styles/tokens.css"), "utf8");

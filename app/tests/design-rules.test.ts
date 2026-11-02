@@ -23,7 +23,7 @@ import {
     type TrayKind,
     trayIconPng,
     WINDOW_ICON_SIZES,
-} from "../src/main/tray-icon";
+} from "../src/main/tray/icon";
 
 const renderer = join(__dirname, "../src/renderer/src");
 
