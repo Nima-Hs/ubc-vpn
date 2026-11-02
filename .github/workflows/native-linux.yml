@@ -67,13 +67,32 @@ jobs:
       - name: Unpack
         run: mkdir stage && tar -xzf libopenconnect-linux-x64.tar.gz -C stage
 
+      # The snapshot's signed package lists and the packages, as
+      # test-packages.sh last fetched them on this branch or main, so that a
+      # run need not ask the snapshot, which is down now and then. The
+      # script checks them all against the archive's signature again before
+      # it installs anything, and stops if one does not match.
+      - name: Restore the pinned packages
+        id: packages-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-ocserv-pkg-config
       # At the versions pinned in test-packages.sh, from its dated Ubuntu
       # snapshot, with ocserv's packaged service kept from ever starting.
       - name: Install the test server
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
         run: |
           mkdir "$RUNNER_TEMP/packages"
           bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" ocserv pkg-config
           sudo systemctl disable ocserv.service
+      - name: Save the pinned packages
+        if: steps.packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: ${{ steps.packages-cache.outputs.cache-primary-key }}
       - name: Check that no distribution libopenconnect is installed
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
