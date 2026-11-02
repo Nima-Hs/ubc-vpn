@@ -54,6 +54,8 @@ export function registerUpdates(
     window: BrowserWindow,
     devServerUrl: string | undefined,
     updater: Updater,
+    /** "Restart to update". */
+    install: () => Promise<void>,
 ): void {
     handleFromInterface(window, devServerUrl, UPDATES_IPC.get, (...args) => {
         takeNothing(args);
@@ -62,6 +64,10 @@ export function registerUpdates(
     handleFromInterface(window, devServerUrl, UPDATES_IPC.checkNow, (...args) => {
         takeNothing(args);
         void updater.check();
+    });
+    handleFromInterface(window, devServerUrl, UPDATES_IPC.install, (...args) => {
+        takeNothing(args);
+        void install();
     });
     updater.subscribe((view) => {
         if (!window.isDestroyed()) {

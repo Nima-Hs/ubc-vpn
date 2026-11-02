@@ -2,7 +2,7 @@
 // Electron import: the fetch, the clock, the timers and the folder are
 // passed in, so the whole flow is tested against fakes.
 
-import type { UpdateFailure, UpdateStatus, UpdateView } from "@shared/updates";
+import type { InstallNotice, UpdateFailure, UpdateStatus, UpdateView } from "@shared/updates";
 import { prepareFolder, saveInstaller } from "./download";
 import {
     type Fetch,
@@ -83,6 +83,7 @@ class Failed extends Error {
 export class Updater {
     private status: UpdateStatus;
     private lastChecked: number | null = null;
+    private notice: InstallNotice | null = null;
     /**
      * Whether downloads are automatic, as the settings say; `null` until
      * they have said, and nothing is downloaded until they say yes.
@@ -128,12 +129,56 @@ export class Updater {
     }
 
     view(): UpdateView {
-        return { status: this.status, lastChecked: this.lastChecked };
+        return { status: this.status, lastChecked: this.lastChecked, notice: this.notice };
+    }
+
+    /** Where installers are kept, or `null` in a copy that cannot update. */
+    folder(): string | null {
+        return this.canUpdate() ? this.options.folder : null;
     }
 
     /** The installer to run, once one is downloaded and checked. */
     readyInstaller(): ReadyInstaller | null {
         return this.ready;
+    }
+
+    /**
+     * Takes the ready installer to install it, and says so; `null` when none
+     * is ready or a check, a download or an install is under way. Nothing
+     * else starts until `endInstall`.
+     */
+    beginInstall(): ReadyInstaller | null {
+        const ready = this.ready;
+        if (ready === null || this.busy) {
+            return null;
+        }
+        this.busy = true;
+        this.notice = null;
+        this.publish({ phase: "installing", version: ready.version });
+        return ready;
+    }
+
+    /**
+     * After `beginInstall`: `null` once the setup program has started, as
+     * the app is about to quit; otherwise why it did not install. An
+     * installer that no longer matched is dropped and downloaded again at
+     * the next check.
+     */
+    endInstall(notice: InstallNotice | null): void {
+        this.busy = false;
+        if (notice === null) {
+            return;
+        }
+        this.notice = notice;
+        if (notice === "changed") {
+            this.ready = null;
+            this.publish({ phase: "failed", reason: "refused" });
+            return;
+        }
+        const ready = this.ready;
+        this.publish(
+            ready === null ? { phase: "idle" } : { phase: "ready", version: ready.version },
+        );
     }
 
     subscribe(listener: (view: UpdateView) => void): () => void {
@@ -187,6 +232,7 @@ export class Updater {
         const { checkMs, idleMs } = this.timeouts();
         const signal = AbortSignal.timeout(checkMs);
         const keep = this.ready;
+        this.notice = null;
         this.publish({ phase: "checking" });
         const answer = await getFromGitHub(
             fetch,
