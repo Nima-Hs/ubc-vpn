@@ -15,12 +15,12 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, IpDadStatePreferred};
 
 use super::full_tunnel_tests::foreign_v6;
-use super::journal::Prefix;
 use super::routes::{
     WinRoutes, addr_of, address_table, best_route, checked, luid, prefix_of, routes_of,
     up_interfaces, v4, value,
 };
 use super::wintun::Wintun;
+use crate::journal::Prefix;
 use crate::suite::{self, Foreign};
 use crate::{Error, Routes, Verified};
 
@@ -269,13 +269,13 @@ fn a_row_whose_route_was_never_added_is_dropped_at_the_next_start() {
     let physical = routes
         .capture_physical(Ipv4Addr::new(192, 0, 2, 1))
         .unwrap();
-    let row = super::journal::Row {
+    let row = crate::journal::Row {
         dest: "192.0.2.1/32".parse().unwrap(),
         luid: luid(physical.interface()).unwrap(),
         next_hop: physical.next_hop().unwrap_or(Ipv4Addr::UNSPECIFIED).into(),
         interface: physical.interface().to_string(),
     };
-    let mut journal = super::journal::Journal::new(super::journal::Store::Unchecked(dir.clone()));
+    let mut journal = crate::journal::Journal::new(crate::journal::Store::Unchecked(dir.clone()));
     journal.write(super::routes::boot(), &[row]).unwrap();
     WinRoutes::unchecked(&dir)
         .remove_all()

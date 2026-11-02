@@ -45,6 +45,8 @@ mod channel;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod interrupt;
+#[cfg(any(windows, target_os = "macos"))]
+mod journal;
 mod network;
 mod on_link;
 #[cfg(feature = "secrets")]

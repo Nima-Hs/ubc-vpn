@@ -39,7 +39,6 @@ mod events_tests;
 mod full_tunnel_tests;
 pub mod install;
 pub(crate) mod interrupt;
-mod journal;
 mod pipe;
 pub mod program;
 mod routes;

@@ -47,8 +47,8 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
-use super::journal::{Boot, Journal, Prefix, Row, Store};
 use super::security::{os_error, wide};
+use crate::journal::{Boot, Journal, Prefix, Row, Store};
 use crate::on_link::{AddressRow, DadState, usable_networks};
 use crate::{
     Error, FULL_TUNNEL_V4, FULL_TUNNEL_V6, Ipv6Block, Mode, Paths, PhysicalNetwork, Result, Routes,

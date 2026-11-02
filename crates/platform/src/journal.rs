@@ -1,6 +1,8 @@
 //! The record of routes this product added, kept in the state folder, which
 //! only an administrator can write. Windows has nothing to mark a route with,
 //! so this file is the only way a later process can tell ours from others.
+//! macOS keeps the same record beside its route flag (see "Which routes are
+//! ours" in `network.rs`). Each OS supplies the [`Boot`] it runs in.
 //!
 //! The file is text: a first line naming the boot it belongs to, then one
 //! line per route.
@@ -19,6 +21,9 @@
 //! journal that has one, and fails at start-up rather than guess; nothing
 //! was released before then, so no installed version is that old.
 
+// macOS routes do not use it yet; only its tests do there.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr};
 #[cfg(test)]
@@ -31,20 +36,20 @@ use crate::{Error, Mode, Paths, Result, StateDir};
 /// A route's destination: an IPv4 network, or an IPv6 one (only the halves
 /// of full mode, which block IPv6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Prefix {
+pub(crate) enum Prefix {
     V4(Ipv4Net),
     V6(Ipv6Addr, u8),
 }
 
 impl Prefix {
     /// An IPv6 prefix, refused unless its address has no bits set past `len`.
-    pub(super) fn v6(addr: Ipv6Addr, len: u8) -> Option<Self> {
+    pub(crate) fn v6(addr: Ipv6Addr, len: u8) -> Option<Self> {
         let host = u128::MAX.checked_shr(u32::from(len)).unwrap_or(0);
         (len <= 128 && u128::from(addr) & host == 0).then_some(Self::V6(addr, len))
     }
 
     /// Whether `ip` lies inside this prefix.
-    pub(super) fn contains(&self, ip: IpAddr) -> bool {
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
         match (self, ip) {
             (Self::V4(net), IpAddr::V4(ip)) => net.contains_addr(ip),
             (Self::V6(addr, len), IpAddr::V6(ip)) => {
@@ -56,7 +61,7 @@ impl Prefix {
     }
 
     /// The prefix length.
-    pub(super) fn len(&self) -> u8 {
+    pub(crate) fn len(&self) -> u8 {
         match self {
             Self::V4(net) => net.prefix_len(),
             Self::V6(_, len) => *len,
@@ -88,23 +93,24 @@ impl std::str::FromStr for Prefix {
 
 /// One route exactly as it was added.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Row {
-    pub(super) dest: Prefix,
-    pub(super) luid: u64,
+pub(crate) struct Row {
+    pub(crate) dest: Prefix,
+    pub(crate) luid: u64,
     /// Of the same family as `dest`.
-    pub(super) next_hop: IpAddr,
-    pub(super) interface: String,
+    pub(crate) next_hop: IpAddr,
+    pub(crate) interface: String,
 }
 
-/// Which start of the machine a journal belongs to. Windows gives no boot
-/// identifier, so it is worked out from the clock and the time since start.
+/// Which start of the machine a journal belongs to, as each OS's routes work
+/// it out. Windows gives no boot identifier, so there it comes from the clock
+/// and the time since start; macOS keeps the start time itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Boot {
+pub(crate) struct Boot {
     /// When the machine started, in seconds since 1970, as far as the clock
     /// can tell. It moves when the clock is set.
-    pub(super) started: u64,
+    pub(crate) started: u64,
     /// Seconds since the machine started, when this was taken.
-    pub(super) uptime: u64,
+    pub(crate) uptime: u64,
 }
 
 /// How far the start time worked out at two moments may differ for one
@@ -116,7 +122,7 @@ impl Boot {
     /// Whether `now` can be the same boot as `self`, which was taken earlier.
     /// Time since start only grows within a boot, so a smaller value means a
     /// restart, whatever the clock says.
-    pub(super) fn same_as(&self, now: &Boot) -> bool {
+    pub(crate) fn same_as(&self, now: &Boot) -> bool {
         now.uptime >= self.uptime && self.started.abs_diff(now.started) <= SAME_BOOT_SLACK
     }
 }
@@ -124,13 +130,13 @@ impl Boot {
 /// Where the journal is kept: the service's checked state folder, opened
 /// when the journal is first used, so that a process that never touches a
 /// route (such as the command-line client) never opens it.
-pub(super) enum Store {
+pub(crate) enum Store {
     Checked(Mode, Paths),
     #[cfg(test)]
     Unchecked(PathBuf),
 }
 
-pub(super) struct Journal {
+pub(crate) struct Journal {
     store: Store,
     opened: Option<StateDir>,
 }
@@ -142,7 +148,7 @@ fn corrupt() -> Error {
 }
 
 impl Journal {
-    pub(super) fn new(store: Store) -> Self {
+    pub(crate) fn new(store: Store) -> Self {
         Self {
             store,
             opened: None,
@@ -164,7 +170,7 @@ impl Journal {
     /// The rows written in boot `now`. Rows from another boot are dropped,
     /// with nothing removed: the routes they stood for went with the
     /// restart, and an identical one there now is somebody else's.
-    pub(super) fn rows(&mut self, now: Boot) -> Result<Vec<Row>> {
+    pub(crate) fn rows(&mut self, now: Boot) -> Result<Vec<Row>> {
         let Some(bytes) = self.state()?.read(FILE)? else {
             return Ok(Vec::new());
         };
@@ -175,7 +181,7 @@ impl Journal {
 
     /// Replaces the journal with `rows`, for boot `now`. A crash leaves the
     /// old journal or the new one.
-    pub(super) fn write(&mut self, now: Boot, rows: &[Row]) -> Result<()> {
+    pub(crate) fn write(&mut self, now: Boot, rows: &[Row]) -> Result<()> {
         let text = render(now, rows);
         self.state()?.write(FILE, text.as_bytes())
     }
