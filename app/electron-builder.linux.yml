@@ -50,6 +50,9 @@ deb:
   # Setting these replaces electron-builder's own list, so the first line
   # is that list for Electron, as electron-builder 26.18.0 has it. The rest
   # is ours:
+  # - libgbm1 and libasound2, which the Electron program links and neither
+  #   that list nor libgtk-3-0 brings. Ubuntu 24.04 renamed libasound2 to
+  #   libasound2t64.
   # - systemd-resolved, for split DNS. Debian 12 and Ubuntu 24.04 have it as
   #   a package of its own; on Ubuntu 22.04 it is part of systemd 249, and
   #   systemd moved it out in 251.3-2.
@@ -66,6 +69,8 @@ deb:
     - libatspi2.0-0
     - libuuid1
     - libsecret-1-0
+    - libgbm1
+    - libasound2 | libasound2t64
     - systemd-resolved | systemd (<< 251.3-2~)
     - libdbus-1-3
     - libgnutls30 (>= 3.7.3) | libgnutls30t64

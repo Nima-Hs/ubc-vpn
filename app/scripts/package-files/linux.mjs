@@ -86,6 +86,8 @@ const DEB_DEPENDS = [
     "libatspi2.0-0",
     "libuuid1",
     "libsecret-1-0",
+    "libgbm1",
+    "libasound2 | libasound2t64",
     "systemd-resolved | systemd (<< 251.3-2~)",
     "libdbus-1-3",
     "libgnutls30 (>= 3.7.3) | libgnutls30t64",
