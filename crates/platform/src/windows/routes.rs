@@ -211,44 +211,48 @@ fn up_interfaces() -> Result<HashSet<u64>> {
     Ok(up.map(|row| value(&row.InterfaceLuid)).collect())
 }
 
-/// The interfaces an IPv4 route can be used on now, each with its IPv4
-/// interface metric: those that are up and have IPv4 bound. A route on any
-/// other interface carries nothing.
-fn usable_interfaces() -> Result<HashMap<u64, u32>> {
+/// The interfaces a route of `family` can be used on now, each with its
+/// interface metric for that family: those that are up and have the family
+/// bound. A route on any other interface carries nothing.
+fn usable_interfaces(family: u16) -> Result<HashMap<u64, u32>> {
     let up = up_interfaces()?;
     let mut table: *mut MIB_IPINTERFACE_TABLE = null_mut();
     // SAFETY: the out pointer is valid; the table is freed by `Table`.
-    checked(unsafe { GetIpInterfaceTable(AF_INET, &mut table) })?;
+    checked(unsafe { GetIpInterfaceTable(family, &mut table) })?;
     let table = Table(table);
     // SAFETY: on success the table holds `NumEntries` initialised rows.
     let rows = unsafe {
         std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
     };
-    let ipv4 = rows
-        .iter()
-        .map(|row| (value(&row.InterfaceLuid), row.Metric));
-    Ok(usable(ipv4, &up))
+    Ok(usable(rows.iter().map(ip_interface), &up))
 }
 
-/// Of the interfaces with IPv4 bound, as (LUID, interface metric), those
-/// that are up.
-fn usable(ipv4: impl Iterator<Item = (u64, u32)>, up: &HashSet<u64>) -> HashMap<u64, u32> {
-    ipv4.filter(|(luid, _)| up.contains(luid)).collect()
+/// An interface of one family as (LUID, interface metric). `Metric` is the
+/// metric in effect, also when Windows chooses it (`UseAutomaticMetric`).
+fn ip_interface(row: &MIB_IPINTERFACE_ROW) -> (u64, u32) {
+    (value(&row.InterfaceLuid), row.Metric)
 }
 
-/// An IPv4 route as route selection sees it.
+/// Of the interfaces with a family bound, as (LUID, interface metric),
+/// those that are up.
+fn usable(bound: impl Iterator<Item = (u64, u32)>, up: &HashSet<u64>) -> HashMap<u64, u32> {
+    bound.filter(|(luid, _)| up.contains(luid)).collect()
+}
+
+/// A route as route selection sees it, of either family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct V4Route {
-    dest: Ipv4Net,
+struct TableRoute {
+    dest: Prefix,
     luid: u64,
     /// The route's own metric, which Windows adds to its interface's.
     metric: u32,
 }
 
-/// A system route as a [`V4Route`]; `None` for one of another family.
-fn v4_route(row: &MIB_IPFORWARD_ROW2) -> Option<V4Route> {
-    Some(V4Route {
-        dest: row_dest(row)?,
+/// A system route as a [`TableRoute`]; `None` for one this code cannot
+/// read.
+fn table_route(row: &MIB_IPFORWARD_ROW2) -> Option<TableRoute> {
+    Some(TableRoute {
+        dest: prefix_of(row)?,
         luid: value(&row.InterfaceLuid),
         metric: row.Metric,
     })
@@ -256,10 +260,10 @@ fn v4_route(row: &MIB_IPFORWARD_ROW2) -> Option<V4Route> {
 
 /// Whether the route Windows' table chooses for `dest` goes through
 /// `wanted`, judged from the routes alone, as Windows chooses with every
-/// neighbour reachable:
+/// neighbour reachable. The same rule holds for both families:
 ///
-/// - only routes on an interface in `interfaces` count: those up with IPv4
-///   bound, each mapped to its interface metric;
+/// - only routes on an interface in `interfaces` count: those up with the
+///   family bound, each mapped to its interface metric;
 /// - the longest prefix that holds `dest` wins, whatever its metric;
 /// - among those, the lowest sum of route and interface metric wins, which
 ///   is the metric Windows documents for `MIB_IPFORWARD_ROW2`.
@@ -269,31 +273,41 @@ fn v4_route(row: &MIB_IPFORWARD_ROW2) -> Option<V4Route> {
 /// disagree, so a tie never passes a check either way. No route at all is
 /// `No`.
 ///
+/// An interface's `DisableDefaultRoutes` is not read, so a default route
+/// (`0.0.0.0/0` or `::/0`) on such an interface still counts. That is
+/// harmless today because the product adds no default route. A check that
+/// needs `Yes` asks about an address one of its longer routes covers, which
+/// beats any default route. A check that needs `No` could only be misled by
+/// a default route somebody else put on the tunnel, beaten on metric by a
+/// default route on an interface that disables default routes.
+///
 /// This is not `GetBestRoute2`. That lookup skips an on-link route when the
 /// neighbour cache marks the destination unreachable, as after something
 /// scanned the local network, and falls back to a less specific route such
 /// as a half of full mode. Its answer then depends on which neighbours
-/// answered lately, not on the routes the product set and checks.
+/// answered lately, not on the routes the product set and checks. For IPv6
+/// it fails outright for an address the IPv6 halves cover, since the tunnel
+/// has no IPv6 source address.
 fn table_through(
-    routes: &[V4Route],
+    routes: &[TableRoute],
     interfaces: &HashMap<u64, u32>,
-    dest: Ipv4Addr,
+    dest: IpAddr,
     wanted: u64,
 ) -> Verified {
-    let candidates: Vec<(V4Route, u64)> = routes
+    let candidates: Vec<(TableRoute, u64)> = routes
         .iter()
-        .filter(|route| route.dest.contains_addr(dest))
+        .filter(|route| route.dest.contains(dest))
         .filter_map(|route| {
             let interface = interfaces.get(&route.luid)?;
             Some((*route, u64::from(route.metric) + u64::from(*interface)))
         })
         .collect();
-    let Some(longest) = candidates.iter().map(|(r, _)| r.dest.prefix_len()).max() else {
+    let Some(longest) = candidates.iter().map(|(r, _)| r.dest.len()).max() else {
         return Verified::No;
     };
     let longest: Vec<_> = candidates
         .into_iter()
-        .filter(|(route, _)| route.dest.prefix_len() == longest)
+        .filter(|(route, _)| route.dest.len() == longest)
         .collect();
     let Some(lowest) = longest.iter().map(|(_, metric)| *metric).min() else {
         return Verified::No;
@@ -311,6 +325,22 @@ fn table_through(
         (false, true) => Verified::No,
         _ => Verified::Unknown,
     }
+}
+
+/// [`table_through`] over the system's table of `family`, for the
+/// interface named `interface`. `Unknown` when a table cannot be read.
+fn system_through(family: u16, dest: IpAddr, interface: &str) -> Verified {
+    let (Ok(table), Ok(interfaces)) = (routes_of(family), usable_interfaces(family)) else {
+        return Verified::Unknown;
+    };
+    let wanted = match luid(interface) {
+        Ok(luid) => luid,
+        // An interface that does not exist is not the one used.
+        Err(Error::NotFound) => return Verified::No,
+        Err(_) => return Verified::Unknown,
+    };
+    let routes: Vec<TableRoute> = table.iter().filter_map(table_route).collect();
+    table_through(&routes, &interfaces, dest, wanted)
 }
 
 /// An IPv4 address of the system's table, with what decides whether it is
@@ -693,17 +723,7 @@ impl Routes for WinRoutes {
     /// The forwarding table's choice, by [`table_through`], not
     /// `GetBestRoute2`'s, whose answer changes with neighbour reachability.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified {
-        let (Ok(table), Ok(interfaces)) = (route_table(), usable_interfaces()) else {
-            return Verified::Unknown;
-        };
-        let wanted = match luid(interface) {
-            Ok(luid) => luid,
-            // An interface that does not exist is not the one used.
-            Err(Error::NotFound) => return Verified::No,
-            Err(_) => return Verified::Unknown,
-        };
-        let routes: Vec<V4Route> = table.iter().filter_map(v4_route).collect();
-        table_through(&routes, &interfaces, dest, wanted)
+        system_through(AF_INET, IpAddr::V4(dest), interface)
     }
 
     fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block> {
@@ -773,42 +793,9 @@ impl Routes for WinRoutes {
         Ok(foreign_halves(&table, tunnel))
     }
 
+    /// The forwarding table's choice, by [`table_through`], as for IPv4.
     fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified {
-        let Ok(table) = routes_of(AF_INET6) else {
-            return Verified::Unknown;
-        };
-        let wanted = match luid(interface) {
-            Ok(luid) => luid,
-            // An interface that does not exist is not the one used.
-            Err(Error::NotFound) => return Verified::No,
-            Err(_) => return Verified::Unknown,
-        };
-        let table: Vec<_> = table
-            .iter()
-            .filter_map(|route| Some((prefix_of(route)?, value(&route.InterfaceLuid))))
-            .collect();
-        longest_match_through(&table, IpAddr::V6(dest), wanted)
-    }
-}
-
-/// Whether the longest prefix in `table` (destination, interface) that
-/// holds `dest` goes through `wanted`. Several routes of the longest length
-/// could each be used, so only when all of them go through `wanted` is it
-/// surely the one. No route at all is `No`.
-fn longest_match_through(table: &[(Prefix, u64)], dest: IpAddr, wanted: u64) -> Verified {
-    let matching: Vec<_> = table
-        .iter()
-        .filter(|(prefix, _)| prefix.contains(dest))
-        .collect();
-    let Some(longest) = matching.iter().map(|(prefix, _)| prefix.len()).max() else {
-        return Verified::No;
-    };
-    let mut longest = matching
-        .iter()
-        .filter(|(prefix, _)| prefix.len() == longest);
-    match longest.all(|(_, luid)| *luid == wanted) {
-        true => Verified::Yes,
-        false => Verified::No,
+        system_through(AF_INET6, IpAddr::V6(dest), interface)
     }
 }
 
@@ -1075,37 +1062,12 @@ mod tests {
         assert!(!leaks(&own, tunnel));
     }
 
-    // Security rule: an IPv6 destination counts as going through an
-    // interface only when every route of the longest matching length does.
-    #[test]
-    fn the_longest_ipv6_match_counts_only_when_all_of_it_agrees() {
-        let (tunnel, physical) = (7, 9);
-        let dest: IpAddr = "2001:db8::1".parse().unwrap();
-        let halves = [(prefix("::/1"), tunnel), (prefix("8000::/1"), tunnel)];
-        assert_eq!(longest_match_through(&halves, dest, tunnel), Verified::Yes);
-        assert_eq!(longest_match_through(&halves, dest, physical), Verified::No);
-        // A default route is less specific than a half.
-        let with_default = [halves[0], halves[1], (prefix("::/0"), physical)];
-        assert_eq!(
-            longest_match_through(&with_default, dest, tunnel),
-            Verified::Yes
-        );
-        // A half beside ours on another interface: either could be used.
-        let shared = [halves[0], (prefix("::/1"), physical)];
-        assert_eq!(longest_match_through(&shared, dest, tunnel), Verified::No);
-        // A more specific route elsewhere wins.
-        let narrower = [halves[0], (prefix("2001:db8::/32"), physical)];
-        assert_eq!(longest_match_through(&narrower, dest, tunnel), Verified::No);
-        // Nothing matches.
-        assert_eq!(longest_match_through(&[], dest, tunnel), Verified::No);
-    }
-
     const WIFI: u64 = 9;
     const WIRED: u64 = 11;
     const TUNNEL_LUID: u64 = 7;
 
-    fn route(dest: &str, luid: u64, metric: u32) -> V4Route {
-        V4Route {
+    fn route(dest: &str, luid: u64, metric: u32) -> TableRoute {
+        TableRoute {
             dest: dest.parse().unwrap(),
             luid,
             metric,
@@ -1116,7 +1078,7 @@ mod tests {
     /// 10.200.0.0/24 on Wi-Fi with the router at .1 and the machine at .10,
     /// the gateway's host route, and the halves on the tunnel with metric 0
     /// on an interface of low metric, as the product adds them.
-    fn full_mode_table() -> (Vec<V4Route>, HashMap<u64, u32>) {
+    fn full_mode_table() -> (Vec<TableRoute>, HashMap<u64, u32>) {
         let routes = vec![
             route("0.0.0.0/0", WIFI, 0),
             route("10.200.0.0/24", WIFI, 256),
@@ -1131,7 +1093,7 @@ mod tests {
         (routes, interfaces)
     }
 
-    fn addr(text: &str) -> Ipv4Addr {
+    fn addr(text: &str) -> IpAddr {
         text.parse().unwrap()
     }
 
@@ -1150,7 +1112,7 @@ mod tests {
             assert_eq!(through(dest, TUNNEL_LUID), Verified::No, "{dest}");
         }
         assert_eq!(through("192.0.2.1", WIFI), Verified::Yes, "the gateway");
-        for dest in ["1.1.1.1", "200.1.1.1", "10.200.1.2"] {
+        for dest in ["100.64.0.9", "203.0.113.9", "10.200.1.2"] {
             assert_eq!(through(dest, TUNNEL_LUID), Verified::Yes, "{dest}");
             assert_eq!(through(dest, WIFI), Verified::No, "{dest}");
         }
@@ -1201,6 +1163,53 @@ mod tests {
         assert_eq!(table_through(&huge, &interfaces, dest, WIFI), Verified::Yes);
     }
 
+    // Security rule, issue #265: an IPv6 destination follows the same rule
+    // as an IPv4 one. Another program's `::/1` beside ours with an equal
+    // total metric could take the traffic or not, so it is `Unknown` for
+    // the tunnel, never `No`: the check that full mode's IPv6 is gone cannot
+    // pass while our half is still there. Otherwise the lower total wins.
+    #[test]
+    fn an_ipv6_destination_follows_the_same_rule_and_a_tie_is_unknown() {
+        let interfaces = HashMap::from([(WIFI, 35), (TUNNEL_LUID, 5)]);
+        let dest = addr("2001:db8::1");
+        let through = |routes: &[TableRoute], luid| table_through(routes, &interfaces, dest, luid);
+        let ours = route("::/1", TUNNEL_LUID, 0);
+        let halves = [ours, route("8000::/1", TUNNEL_LUID, 0)];
+        assert_eq!(through(&halves, TUNNEL_LUID), Verified::Yes);
+        assert_eq!(through(&halves, WIFI), Verified::No);
+        // A default route is less specific than a half, whatever its metric.
+        let with_default = [halves[0], halves[1], route("::/0", WIFI, 0)];
+        assert_eq!(through(&with_default, TUNNEL_LUID), Verified::Yes);
+        // Theirs beside ours, both totalling 35: either could be used.
+        let tied = [route("::/1", TUNNEL_LUID, 30), route("::/1", WIFI, 0)];
+        assert_eq!(through(&tied, TUNNEL_LUID), Verified::Unknown);
+        assert_eq!(through(&tied, WIFI), Verified::Unknown);
+        // Ours totals 5 against their 35, then 105 against 35.
+        let ours_lower = [ours, route("::/1", WIFI, 0)];
+        assert_eq!(through(&ours_lower, TUNNEL_LUID), Verified::Yes);
+        assert_eq!(through(&ours_lower, WIFI), Verified::No);
+        let ours_higher = [route("::/1", TUNNEL_LUID, 100), route("::/1", WIFI, 0)];
+        assert_eq!(through(&ours_higher, TUNNEL_LUID), Verified::No);
+        assert_eq!(through(&ours_higher, WIFI), Verified::Yes);
+        // A more specific route elsewhere wins.
+        let narrower = [ours, route("2001:db8::/32", WIFI, 256)];
+        assert_eq!(through(&narrower, TUNNEL_LUID), Verified::No);
+        // A half on a tunnel that is down carries nothing.
+        let down = HashMap::from([(WIFI, 35)]);
+        assert_eq!(
+            table_through(&halves, &down, dest, TUNNEL_LUID),
+            Verified::No
+        );
+        // An IPv4 route never holds an IPv6 address, nor the reverse.
+        let v4 = [route("0.0.0.0/0", TUNNEL_LUID, 0)];
+        assert_eq!(through(&v4, TUNNEL_LUID), Verified::No);
+        let v4_dest = addr("203.0.113.9");
+        let halves_for_v4 = table_through(&halves, &interfaces, v4_dest, TUNNEL_LUID);
+        assert_eq!(halves_for_v4, Verified::No);
+        // Nothing matches.
+        assert_eq!(through(&[], TUNNEL_LUID), Verified::No);
+    }
+
     // An interface counts only when it is up and has IPv4 bound, with the
     // interface metric Windows gives it.
     #[test]
@@ -1221,8 +1230,11 @@ mod tests {
             table_through(&routes, interfaces, addr(dest), luid)
         };
         interfaces.remove(&TUNNEL_LUID);
-        assert_eq!(through(&interfaces, "1.1.1.1", TUNNEL_LUID), Verified::No);
-        assert_eq!(through(&interfaces, "1.1.1.1", WIFI), Verified::Yes);
+        assert_eq!(
+            through(&interfaces, "100.64.0.9", TUNNEL_LUID),
+            Verified::No
+        );
+        assert_eq!(through(&interfaces, "100.64.0.9", WIFI), Verified::Yes);
         let mut lan_down = full_mode_table().1;
         lan_down.remove(&WIFI);
         assert_eq!(through(&lan_down, "10.200.0.2", WIFI), Verified::No);
@@ -1233,24 +1245,37 @@ mod tests {
             "no usable route"
         );
         assert_eq!(
-            table_through(&[], &interfaces, addr("1.1.1.1"), WIFI),
+            table_through(&[], &interfaces, addr("100.64.0.9"), WIFI),
             Verified::No
         );
     }
 
-    // A system route is read with its destination, interface and own
-    // metric; an IPv6 one is not an IPv4 route.
+    // A system route of either family is read with its destination,
+    // interface and own metric.
     #[test]
     fn a_system_route_is_read_with_its_metric() {
         // SAFETY: plain data for which all zeroes is valid.
         let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
-        row.DestinationPrefix.Prefix = v4(addr("10.200.0.0"));
+        row.DestinationPrefix.Prefix = v4(Ipv4Addr::new(10, 200, 0, 0));
         row.DestinationPrefix.PrefixLength = 24;
         row.InterfaceLuid = net_luid(WIFI);
         row.Metric = 256;
-        assert_eq!(v4_route(&row), Some(route("10.200.0.0/24", WIFI, 256)));
-        row.DestinationPrefix.Prefix = v6(Ipv6Addr::UNSPECIFIED);
-        assert_eq!(v4_route(&row), None);
+        assert_eq!(table_route(&row), Some(route("10.200.0.0/24", WIFI, 256)));
+        row.DestinationPrefix.Prefix = v6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0));
+        row.DestinationPrefix.PrefixLength = 1;
+        row.Metric = 7;
+        assert_eq!(table_route(&row), Some(route("8000::/1", WIFI, 7)));
+    }
+
+    // An interface is read with the interface metric Windows has in
+    // effect for it, which decides between routes of equal length.
+    #[test]
+    fn an_interface_is_read_with_its_metric() {
+        // SAFETY: plain data for which all zeroes is valid.
+        let mut row: MIB_IPINTERFACE_ROW = unsafe { std::mem::zeroed() };
+        row.InterfaceLuid = net_luid(WIRED);
+        row.Metric = 25;
+        assert_eq!(ip_interface(&row), (WIRED, 25));
     }
 
     #[test]
