@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use ubc_vpn_core::routes::Ipv4Net;
 
-use super::routes::netlink::{
+use super::netlink::{
     self, AF_INET, AF_INET6, AF_UNSPEC, Address, IFF_RUNNING, IFF_UP, Link, RT_SCOPE_LINK,
     RT_TABLE_MAIN, RTN_UNICAST, Route,
 };
@@ -192,7 +192,7 @@ fn router(interface: &str) -> Option<String> {
 
 /// Changes routes and addresses as somebody other than the product: with
 /// the system's own tool, without the product's mark.
-struct Outsider;
+pub(super) struct Outsider;
 
 impl Outsider {
     fn route(verb: &str, interface: &str, net: Ipv4Net, metric: Option<u32>) -> Output {
@@ -954,7 +954,7 @@ fn address(index: u32, addr: [u8; 4], prefix_len: u8) -> Address {
 // interface that is down or has no link, does not.
 #[test]
 fn only_a_usable_address_on_a_running_link_puts_the_machine_on_a_network() {
-    use super::routes::netlink::{IFA_F_DADFAILED, IFA_F_DEPRECATED, IFA_F_TENTATIVE};
+    use super::netlink::{IFA_F_DADFAILED, IFA_F_DEPRECATED, IFA_F_TENTATIVE};
     let running = IFF_UP | IFF_RUNNING;
     let links = [
         link(2, running),

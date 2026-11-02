@@ -18,18 +18,15 @@
 //! network the machine is on would draw a neighbour's traffic to this
 //! machine, so it is refused.
 
-#[path = "netlink.rs"]
-pub(super) mod netlink;
-
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ubc_vpn_core::routes::Ipv4Net;
 
-use self::netlink::{
-    AF_INET, AF_INET6, AF_UNSPEC, Address, IFA_F_DADFAILED, IFA_F_DEPRECATED, IFA_F_TENTATIVE,
-    Link, RT_SCOPE_LINK, RT_SCOPE_UNIVERSE, RT_TABLE_MAIN, RTN_UNICAST, RTNH_F_DEAD,
-    RTNH_F_LINKDOWN, Route,
+use super::netlink::{
+    self, AF_INET, AF_INET6, AF_UNSPEC, Address, IFA_F_DADFAILED, IFA_F_DEPRECATED,
+    IFA_F_TENTATIVE, Link, RT_SCOPE_LINK, RT_SCOPE_UNIVERSE, RT_TABLE_MAIN, RTN_UNICAST,
+    RTNH_F_DEAD, RTNH_F_LINKDOWN, Route,
 };
 use crate::on_link::{AddressRow, DadState, usable_networks};
 use crate::unsupported::Native;
@@ -44,7 +41,7 @@ const TUN: &str = "tun";
 pub(super) struct LinuxRoutes;
 
 /// An OS error as this crate's.
-fn os(error: io::Error) -> Error {
+pub(super) fn os(error: io::Error) -> Error {
     match error.raw_os_error() {
         Some(libc::EEXIST) => Error::AlreadyExists,
         Some(libc::ENODEV) => Error::NotFound,

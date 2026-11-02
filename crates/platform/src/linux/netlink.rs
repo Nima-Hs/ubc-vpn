@@ -6,7 +6,8 @@
 //! socket of its own, waits a few seconds at most for each reply, and reads
 //! until the kernel says it is done: an acknowledgement, or the end of a
 //! dump. A reply that cannot be read whole is an error, never a shorter
-//! answer.
+//! answer. A socket from [`listen`] asks nothing: it receives the kernel's
+//! notices of changes instead.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -14,6 +15,7 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use rustix::net::netlink::SocketAddrNetlink;
 use rustix::net::sockopt::{self, Timeout};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
@@ -80,6 +82,21 @@ pub(crate) const IFA_F_DEPRECATED: u32 = 0x20;
 pub(crate) const RTNH_F_DEAD: u32 = 0x1;
 /// The route's next hop has no carrier.
 pub(crate) const RTNH_F_LINKDOWN: u32 = 0x10;
+
+/// The route is a copy the kernel made for one destination, such as one
+/// that learned a smaller packet size, not one anybody added.
+pub(crate) const RTM_F_CLONED: u32 = 0x200;
+
+/// The kernel's notices about links (`RTMGRP_LINK`), as a group bit.
+pub(crate) const GROUP_LINK: u32 = 0x1;
+/// About IPv4 addresses (`RTMGRP_IPV4_IFADDR`).
+pub(crate) const GROUP_IPV4_ADDRESS: u32 = 0x10;
+/// About IPv4 routes (`RTMGRP_IPV4_ROUTE`).
+pub(crate) const GROUP_IPV4_ROUTE: u32 = 0x40;
+/// About IPv6 addresses (`RTMGRP_IPV6_IFADDR`).
+pub(crate) const GROUP_IPV6_ADDRESS: u32 = 0x100;
+/// About IPv6 routes (`RTMGRP_IPV6_ROUTE`).
+pub(crate) const GROUP_IPV6_ROUTE: u32 = 0x400;
 
 /// The main routing table, where routes go unless a rule says otherwise.
 pub(crate) const RT_TABLE_MAIN: u32 = 254;
@@ -506,6 +523,20 @@ impl Socket {
             }
         }
     }
+}
+
+/// A socket the kernel sends its notices for `groups` to, as they happen.
+/// It never blocks, and is closed in any program this one starts. With
+/// `buffer`, it holds about that many bytes of notices not yet read, the
+/// kernel's least where that is smaller; otherwise the kernel's usual.
+pub(crate) fn listen(groups: u32, buffer: Option<usize>) -> io::Result<OwnedFd> {
+    let flags = SocketFlags::CLOEXEC | SocketFlags::NONBLOCK;
+    let fd = rustix::net::socket_with(AddressFamily::NETLINK, SocketType::RAW, flags, None)?;
+    if let Some(size) = buffer {
+        sockopt::set_socket_recv_buffer_size(&fd, size)?;
+    }
+    rustix::net::bind(&fd, &SocketAddrNetlink::new(0, groups))?;
+    Ok(fd)
 }
 
 /// Sends `request` on a socket of its own.

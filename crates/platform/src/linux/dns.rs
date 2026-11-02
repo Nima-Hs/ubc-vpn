@@ -15,7 +15,7 @@ pub(super) mod resolved;
 
 use std::net::Ipv4Addr;
 
-use super::routes::netlink::{self, Link};
+use super::netlink::{self, Link};
 use crate::unsupported::Native;
 use crate::{Dns, Error, Result, SplitDns, Verified};
 

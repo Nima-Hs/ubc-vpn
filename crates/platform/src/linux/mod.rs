@@ -1,7 +1,7 @@
 //! Linux: the channel is a Unix socket (see `unix`), and the folders follow
 //! the usual system places and the XDG rules. Routes, DNS and network events
-//! are not implemented yet and report that they are unsupported, each from a
-//! file of its own.
+//! each come from a file of their own; routes and events ask the kernel
+//! through route netlink (`netlink`). Full mode is not written yet.
 
 mod dns;
 #[cfg(test)]
@@ -11,6 +11,8 @@ mod events;
 mod events_tests;
 #[cfg(test)]
 mod full_tunnel_tests;
+/// Route netlink, which the routes, DNS and network events share.
+mod netlink;
 mod routes;
 #[cfg(test)]
 mod routes_tests;
