@@ -1,0 +1,214 @@
+name: Linux test bundle
+
+# Builds a bundle for trying the Linux service and command-line client by
+# hand, before the Linux packages exist: a release ubc-vpn-service and
+# ubc-vpn for x86-64 with the real engine, our pinned libopenconnect.so.5
+# beside them, the policy the Windows installer ships, the licence texts and
+# the exact source of the LGPL library. Started by hand only.
+#
+# It is not a release and nothing is signed. The bundle is kept as an
+# artifact for a few days, with its SHA-256 in the run's summary.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-test-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The same build as the Native library (Linux) workflow's: native/linux/
+  # build.sh in the same pinned image. The two digests below must stay the
+  # ones in native-linux.yml.
+  native:
+    name: Build libopenconnect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
+      - name: Build libopenconnect
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_IMAGE: ubuntu@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+        run: bash native/linux/build.sh out
+      # A tarball, to keep the library's symbolic links.
+      - name: Pack
+        run: tar -C out -czf libopenconnect-linux-x64.tar.gz .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libopenconnect-linux-x64
+          path: libopenconnect-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  bundle:
+    name: Build the bundle
+    needs: native
+    # The oldest supported system, so the programs need no newer glibc than
+    # it has.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      BUNDLE: ubc-vpn-linux-x64-test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libopenconnect-linux-x64
+          path: ${{ runner.temp }}/download
+      - name: Unpack the library
+        run: |
+          mkdir "$RUNNER_TEMP/native"
+          tar -xzf "$RUNNER_TEMP/download/libopenconnect-linux-x64.tar.gz" -C "$RUNNER_TEMP/native"
+
+      # The client's keyring links the system's libdbus-1: its headers and
+      # pkg-config, at the versions pinned in test-packages.sh, from its
+      # dated Ubuntu snapshot. The cache ci.yml and native-linux.yml keep is
+      # only read here; the script checks every package again regardless.
+      - name: Restore the pinned packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-ubuntu-22.04-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev
+      - name: Install the pinned D-Bus headers
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
+        run: |
+          mkdir "$RUNNER_TEMP/packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/packages" pkg-config libdbus-1-dev
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        timeout-minutes: 4
+        run: rustup toolchain install
+
+      # Each program built by itself, with -p and the real engine only, as
+      # packaging/windows/stage.sh builds them: built together, the service
+      # would get the keyring feature only the client enables. No rpath: the
+      # engine loads the library by its full path beside the program, and an
+      # rpath would make the loader search a folder before the service has
+      # checked it.
+      - name: Build the service and the client
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          RUSTFLAGS: ""
+        run: |
+          for package in ubc-vpn-service ubc-vpn-cli; do
+            cargo build --locked --release -p "$package" --features real-engine
+          done
+
+      - name: Lay out the bundle
+        env:
+          NATIVE: ${{ runner.temp }}/native
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          out="$RUNNER_TEMP/$BUNDLE"
+          mkdir -p "$out/licenses/native" "$out/source"
+          cp target/release/ubc-vpn-service target/release/ubc-vpn "$out/"
+          # The file itself, never a link: the service refuses a link in its
+          # folder.
+          cp -L "$NATIVE/lib/libopenconnect.so.5" "$out/"
+          cp packaging/windows/policy.json "$out/"
+          cp LICENSE-MIT LICENSE-APACHE "$out/licenses/"
+          cp -R "$NATIVE/licenses/." "$out/licenses/native/"
+          cp -R "$NATIVE/source/." "$out/source/"
+          cp "$NATIVE/manifest.json" "$out/source/"
+          cat > "$out/licenses/SOURCES.txt" <<EOF
+          UBC VPN is free software, licensed under the MIT licence or the
+          Apache License 2.0, at your option: LICENSE-MIT and LICENSE-APACHE.
+
+          libopenconnect.so.5 is openconnect 9.21 under the GNU Lesser General
+          Public License 2.1, with json-parser (BSD-2-Clause) and libxml2 (MIT)
+          built into it. Their licence texts are in native/ in this folder.
+
+          The exact source it was built from, with our patch and the build
+          script, is in the source/ folder of this bundle, and manifest.json
+          there lists each archive. It was built by this run of the Linux test
+          bundle workflow, from commit $GITHUB_SHA of
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY:
+
+            $RUN_URL
+          EOF
+          # Folders and programs 755, every other file 644.
+          find "$out" -type d -exec chmod 755 {} +
+          find "$out" -type f -exec chmod 644 {} +
+          chmod 755 "$out/ubc-vpn-service" "$out/ubc-vpn"
+
+      - name: Check the bundle
+        run: |
+          out="$RUNNER_TEMP/$BUNDLE"
+          # Every file directly in the folder is a real file: the service
+          # refuses to run beside a link.
+          if find "$out" -maxdepth 1 -mindepth 1 ! -type f ! -type d | grep .; then
+            echo "The bundle's folder holds something that is not a file or a folder."
+            exit 1
+          fi
+          for file in ubc-vpn-service ubc-vpn libopenconnect.so.5; do
+            dynamic=$(readelf -d "$out/$file")
+            echo "$file:"
+            grep -E 'NEEDED|RPATH|RUNPATH|SONAME' <<<"$dynamic" || true
+            # The list must be readable, or the next check would prove nothing.
+            grep -q '(NEEDED)' <<<"$dynamic"
+            if grep -E '\((RPATH|RUNPATH)\)' <<<"$dynamic"; then
+              echo "$file has an rpath: the loader would search a folder no one checked."
+              exit 1
+            fi
+            echo "  newest glibc symbol: $(objdump -T "$out/$file" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          done
+          # The library is loaded at run time, never linked.
+          for program in ubc-vpn-service ubc-vpn; do
+            if readelf -d "$out/$program" | grep -F libopenconnect; then
+              echo "$program links libopenconnect instead of loading it."
+              exit 1
+            fi
+          done
+          # A release build: no dev mode.
+          if "$out/ubc-vpn-service" --dev 2> refused.txt; then
+            echo "The service accepted --dev."
+            exit 1
+          fi
+          grep -F 'unknown argument: --dev' refused.txt
+          "$out/ubc-vpn" version
+          echo "Policy: $(cat "$out/policy.json")"
+
+      # Owned by root in the archive, so that extracting it with sudo gives
+      # the folder the owner the service requires.
+      - name: Pack
+        run: |
+          cd "$RUNNER_TEMP"
+          tar --owner=0 --group=0 --numeric-owner --sort=name -czf "$BUNDLE.tar.gz" "$BUNDLE"
+          sha256sum "$BUNDLE.tar.gz" | tee "$BUNDLE.tar.gz.sha256"
+          tar -tvzf "$BUNDLE.tar.gz"
+          {
+            echo "### $BUNDLE.tar.gz"
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 "$BUNDLE.tar.gz.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-linux-x64-test
+          path: |
+            ${{ runner.temp }}/ubc-vpn-linux-x64-test.tar.gz
+            ${{ runner.temp }}/ubc-vpn-linux-x64-test.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
