@@ -24,6 +24,7 @@ mod keys;
 mod live;
 mod logs;
 mod passwords;
+mod private_fs;
 mod profiles;
 mod settings;
 mod settings_lock;

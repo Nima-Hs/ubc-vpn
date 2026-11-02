@@ -489,7 +489,7 @@ fn remember(
 /// From the user's settings, or the defaults when none are saved.
 fn chosen(dir: &std::path::Path, which: Option<&ProfileId>) -> Result<(Profile, TunnelMode), Stop> {
     let unreadable = |_| {
-        let unsafe_folder = settings::folder_problem(dir);
+        let unsafe_folder = crate::private_fs::folder_problem(dir);
         let why = unsafe_folder.unwrap_or_else(|| "The settings file cannot be read.".to_string());
         failed(LoginErrorCode::Internal, &why)
     };

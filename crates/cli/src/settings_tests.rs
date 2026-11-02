@@ -1004,7 +1004,7 @@ fn the_fix_is_quoted_for_a_shell() {
     let dir = root.join("settings");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
-    let said = crate::settings::folder_problem(&dir);
+    let said = crate::private_fs::folder_problem(&dir);
     std::fs::remove_dir_all(&root).unwrap();
     let quoted = dir.display().to_string().replace('\'', r"'\''");
     let fix = format!("To stop them, run: chmod go-w '{quoted}'");

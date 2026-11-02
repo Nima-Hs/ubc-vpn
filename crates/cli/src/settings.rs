@@ -6,7 +6,7 @@
 //! The policy is read from the platform's policy folder and validated. No
 //! argument and no environment variable can point this at another file.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,7 @@ use ubc_vpn_core::settings_cli::{
 };
 use ubc_vpn_platform::{Paths, Platform};
 
+use crate::private_fs::{create_folder, create_private, folder_problem};
 use crate::settings_lock::change;
 use crate::{keys, live};
 
@@ -453,44 +454,6 @@ pub(crate) fn line(input: &mut dyn BufRead) -> Result<String, SettingsFailureCod
     String::from_utf8(line).map_err(|_| bad)
 }
 
-/// Why the settings folder is not used, when it is not. On Unix that is a
-/// folder its group, or anyone, may write to: whoever can write there can
-/// replace the settings, and with them the routes the next connect asks
-/// for. A link is judged by the folder it leads to, which is the one used. On Windows a folder takes its access list from the profile it is in,
-/// and nothing is checked.
-pub(crate) fn folder_problem(dir: &Path) -> Option<String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let open = |found: fs::Metadata| found.permissions().mode() & 0o022 != 0;
-        if fs::metadata(dir).is_ok_and(open) {
-            // Quoted for a shell as it stands, whatever the path holds.
-            let folder = crate::clean(&dir.to_string_lossy()).replace('\'', r"'\''");
-            return Some(format!(
-                "The settings folder can be changed by other users of this computer, so it \
-                 is not used. To stop them, run: chmod go-w '{folder}'"
-            ));
-        }
-    }
-    let _ = dir;
-    None
-}
-
-/// Makes the settings folder if it is not there. On Unix a folder made here
-/// is the user's alone, mode 0700, whatever the umask; one that is already
-/// there is left as it is, and must pass [`folder_problem`].
-pub(crate) fn create_folder(dir: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)?;
-    match folder_problem(dir) {
-        Some(_) => Err(io::ErrorKind::PermissionDenied.into()),
-        None => Ok(()),
-    }
-}
-
 /// The text of `settings.json`, or `None` when there is no such file. One
 /// that is there and cannot be read is an error, not "no settings".
 pub(crate) fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> {
@@ -509,24 +472,6 @@ pub(crate) fn stored(dir: &Path) -> Result<Option<String>, SettingsFailureCode> 
 /// Anything but settings that can be read is refused.
 pub(crate) fn understood(text: &str) -> Result<Settings, SettingsFailureCode> {
     Profiles::read(Some(text)).map(|read| read.profiles.v1_view())
-}
-
-/// Opens a new file for the settings. On Unix it is created with mode 0600,
-/// whatever the umask, so only the user can read it. On Windows a new file
-/// takes the access list of the folder it is in, whatever that is: under a
-/// user's profile that is usually the user, administrators and the system,
-/// and on a domain machine it can include other accounts. The file holds
-/// the username and the routes, and no secret.
-fn create_private(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    // The one piece of OS-specific code outside the platform crate, kept
-    // here on purpose: it is the standard library's own open option, with no
-    // unsafe code, and a platform operation for it would be more code than
-    // these lines.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
 }
 
 /// A name for one save's partial file, unlike that of any other save in
