@@ -92,4 +92,22 @@ describe("the environment end-to-end tests give the apps they launch", () => {
             expect(text, spec).toMatch(/from "\.\/(launch|fixture)"/);
         }
     });
+
+    it("checks the installed product's folder after every spec that uses the fixture", () => {
+        // `useApp()` launches the spec's app and checks its window and the
+        // folder after its last test; `guardInstalledFolder()` checks the
+        // folder alone. A spec that imports the fixture and calls neither, or
+        // calls one twice, would lose or muddle those checks unnoticed.
+        const folder = join(__dirname, "e2e");
+        const specs = readdirSync(folder).filter((file) => file.endsWith(".spec.ts"));
+        const users = specs.filter((spec) =>
+            readFileSync(join(folder, spec), "utf8").includes('from "./fixture"'),
+        );
+        expect(users.length).toBeGreaterThan(1);
+        for (const spec of users) {
+            const text = readFileSync(join(folder, spec), "utf8");
+            const calls = text.match(/^(useApp|guardInstalledFolder)\(\);$/gm) ?? [];
+            expect(calls, `${spec} calls useApp() or guardInstalledFolder() once`).toHaveLength(1);
+        }
+    });
 });
