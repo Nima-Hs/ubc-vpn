@@ -1,0 +1,262 @@
+name: macOS test bundle
+
+# Builds a bundle for trying the macOS service and command-line client by
+# hand, before the macOS package exists: a release ubc-vpn-service and
+# ubc-vpn for Apple silicon with the real engine, our pinned
+# libopenconnect.5.dylib and the libraries it loads beside them, the policy
+# the Windows installer ships, the licence texts and the exact source of the
+# LGPL libraries. Started by hand, and by a pull request that changes this
+# file, so that a change is tried before it merges.
+#
+# It is not a release. Nothing is signed beyond the ad-hoc signatures the
+# linker and bundle.sh give, which are kept as they are. The bundle is kept
+# as an artifact for a few days, with its SHA-256 in the run's summary.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/macos-test-bundle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-test-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+# Naming the shell turns on pipefail, so a failure before a pipe counts.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bundle:
+    name: Build the bundle
+    # The image native-macos.yml builds the library on.
+    runs-on: macos-15
+    # Room for a build of every library from source with nothing cached.
+    timeout-minutes: 60
+    env:
+      BUNDLE: ubc-vpn-macos-arm64-test
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
+
+      # The same build as the Native library (macOS) workflow's, from the
+      # sources pinned in native/macos/versions.env, with nothing restored
+      # from a cache.
+      - name: Build libopenconnect
+        run: bash native/macos/build.sh "$RUNNER_TEMP/native-build"
+      - name: Bundle and check libopenconnect
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: bash native/macos/bundle.sh "$RUNNER_TEMP/native-build" "$RUNNER_TEMP/native"
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        timeout-minutes: 4
+        run: rustup toolchain install
+
+      # Each program built by itself, with -p and the real engine only, as
+      # packaging/windows/stage.sh builds them: built together, the service
+      # would get the keyring feature only the client enables. No rpath: the
+      # engine loads the library by its full path beside the program.
+      - name: Build the service and the client
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          RUSTFLAGS: ""
+        run: |
+          for package in ubc-vpn-service ubc-vpn-cli; do
+            cargo build --locked --release --target "$TARGET" -p "$package" --features real-engine
+          done
+
+      - name: Lay out the bundle
+        env:
+          NATIVE: ${{ runner.temp }}/native
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          out="$RUNNER_TEMP/$BUNDLE"
+          mkdir -p "$out/licenses/native" "$out/source"
+          cp "target/$TARGET/release/ubc-vpn-service" "target/$TARGET/release/ubc-vpn" "$out/"
+          # The libraries themselves, never the link bundle.sh adds for the
+          # linker: the service refuses a link in its folder. Copied as they
+          # are, so their ad-hoc signatures stay.
+          find "$NATIVE/lib" -maxdepth 1 -type f -name '*.dylib' -exec cp {} "$out/" \;
+          cp packaging/windows/policy.json "$out/"
+          cp LICENSE-MIT LICENSE-APACHE "$out/licenses/"
+          cp -R "$NATIVE/licenses/." "$out/licenses/native/"
+          cp -R "$NATIVE/sources/." "$out/source/"
+          cp "$NATIVE/manifest.json" "$out/source/"
+          cat > "$out/licenses/SOURCES.txt" <<EOF
+          UBC VPN is free software, licensed under the MIT licence or the
+          Apache License 2.0, at your option: LICENSE-MIT and LICENSE-APACHE.
+
+          libopenconnect.5.dylib is openconnect 9.21 under the GNU Lesser General
+          Public License 2.1, with json-parser (BSD-2-Clause) built into it.
+          It loads GnuTLS (libgnutls.30.dylib, LGPL-2.1-or-later), Nettle
+          (libnettle.9.dylib and libhogweed.7.dylib) and GMP (libgmp.10.dylib),
+          each under the LGPL-3.0-or-later or the GPL-2.0-or-later, and libxml2
+          and zlib from macOS itself. Their licence texts are in native/ in this
+          folder.
+
+          The exact source each library was built from, with our patch and the
+          build scripts, is in the source/ folder of this bundle, and
+          manifest.json there lists each archive and its SHA-256. They were
+          built by this run of the macOS test bundle workflow, from commit
+          $GITHUB_SHA of $GITHUB_SERVER_URL/$GITHUB_REPOSITORY:
+
+            $RUN_URL
+          EOF
+          # Folders and programs 755, every other file 644.
+          find "$out" -type d -exec chmod 755 {} +
+          find "$out" -type f -exec chmod 644 {} +
+          chmod 755 "$out/ubc-vpn-service" "$out/ubc-vpn"
+          ls -l "$out"
+
+      - name: Check the bundle
+        run: |
+          out="$RUNNER_TEMP/$BUNDLE"
+          # Nothing in the bundle is a link: the service refuses to run
+          # beside one, and the rest has no need of any.
+          if find "$out" ! -type f ! -type d | grep .; then
+            echo "The bundle holds something that is not a file or a folder."
+            exit 1
+          fi
+          # The only parts of macOS anything here may load from outside the
+          # folder: the system's own libraries and frameworks.
+          outside() {
+            [[ $1 == /usr/lib/* || $1 == /System/Library/Frameworks/* ]]
+          }
+          dylibs=()
+          for lib in "$out"/*.dylib; do dylibs+=("${lib##*/}"); done
+          [ "${#dylibs[@]}" -eq 5 ]
+          for file in ubc-vpn-service ubc-vpn "${dylibs[@]}"; do
+            path="$out/$file"
+            echo "$file:"
+            [ "$(lipo -archs "$path")" = arm64 ]
+            # Every file keeps a valid ad-hoc signature: Apple silicon runs
+            # nothing unsigned, and nothing here is re-signed.
+            codesign --verify --strict "$path"
+            signature=$(codesign -dv "$path" 2>&1)
+            grep -qx 'Signature=adhoc' <<<"$signature"
+            commands=$(otool -l "$path")
+            if grep -q LC_RPATH <<<"$commands"; then
+              echo "$file has a search path: the loader would search a folder no one checked."
+              exit 1
+            fi
+            loads=$(otool -L "$path" | sed -n 's/^[[:space:]]*\(.*\) (compatibility version .*/\1/p')
+            # The list must be readable, or the next check would prove nothing.
+            grep -q '^/usr/lib/libSystem.B.dylib$' <<<"$loads"
+            while IFS= read -r dep; do
+              echo "    $dep"
+              case $dep in
+                "@rpath/$file") ;;
+                @loader_path/*)
+                  # Only the libraries load each other, and only from beside
+                  # themselves.
+                  [[ $file == *.dylib ]]
+                  [ -f "$out/${dep#@loader_path/}" ]
+                  [ "${dep#@loader_path/}" = "${dep##*/}" ]
+                  ;;
+                *)
+                  if ! outside "$dep"; then
+                    echo "$file loads $dep, which is neither in the bundle nor part of macOS."
+                    exit 1
+                  fi
+                  ;;
+              esac
+            done <<<"$loads"
+          done
+          # The library is loaded at run time, never linked.
+          for program in ubc-vpn-service ubc-vpn; do
+            if otool -L "$out/$program" | grep -E 'libopenconnect|@rpath|@loader_path|@executable_path'; then
+              echo "$program links a library from beside itself instead of loading it."
+              exit 1
+            fi
+          done
+          # A release build: no dev mode.
+          if "$out/ubc-vpn-service" --dev 2> refused.txt; then
+            echo "The service accepted --dev."
+            exit 1
+          fi
+          grep -F 'unknown argument: --dev' refused.txt
+          "$out/ubc-vpn" version
+          echo "Policy: $(cat "$out/policy.json")"
+
+      # Owned by root in the archive, so that extracting it with sudo gives
+      # the folder the owner the service requires. No AppleDouble files or
+      # extended attributes: only the files themselves.
+      - name: Pack
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          cd "$RUNNER_TEMP"
+          tar --uid 0 --gid 0 --numeric-owner --no-mac-metadata --no-xattrs -czf "$BUNDLE.tar.gz" "$BUNDLE"
+          shasum -a 256 "$BUNDLE.tar.gz" | tee "$BUNDLE.tar.gz.sha256"
+          listing=$(tar -tvzf "$BUNDLE.tar.gz")
+          echo "$listing"
+          if grep -E '(^|/)\._' <<<"$(tar -tzf "$BUNDLE.tar.gz")"; then
+            echo "The archive holds AppleDouble files."
+            exit 1
+          fi
+          {
+            echo "### $BUNDLE.tar.gz"
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 "$BUNDLE.tar.gz.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The bundle as someone trying it uses it, on this runner, which is
+      # thrown away after the job: unpacked as root into a folder under
+      # /Library/PrivilegedHelperTools, started by launchd without a
+      # LaunchDaemon, asked for its status by the client as an ordinary
+      # user, and stopped with SIGTERM. Nothing connects.
+      - name: Start and stop the bundled service
+        env:
+          FOLDER: /Library/PrivilegedHelperTools/ubc-vpn-test
+          DATA: /Library/Application Support/UBC VPN
+          LABEL: io.github.nima-hs.ubc-vpn-test
+        run: |
+          ls -lde / /Library /Library/PrivilegedHelperTools "/Library/Application Support" 2>&1 || true
+          sudo install -d -o root -g wheel -m 1755 /Library/PrivilegedHelperTools
+          sudo mkdir "$FOLDER"
+          sudo tar -xzf "$RUNNER_TEMP/$BUNDLE.tar.gz" -C "$FOLDER" --strip-components 1
+          sudo install -d -o root -g wheel -m 755 "$DATA"
+          sudo install -o root -g wheel -m 644 "$FOLDER/policy.json" "$DATA/policy.json"
+          ls -le "$FOLDER"
+          log="$RUNNER_TEMP/service.log"
+          sudo launchctl submit -l "$LABEL" -o "$log" -e "$log" -- "$FOLDER/ubc-vpn-service"
+          for _ in $(seq 20); do
+            if "$FOLDER/ubc-vpn" status > status.txt 2>&1; then break; fi
+            sleep 1
+          done
+          cat status.txt
+          "$FOLDER/ubc-vpn" status
+          sudo launchctl list "$LABEL"
+          sudo launchctl remove "$LABEL"
+          for _ in $(seq 20); do
+            if grep -q 'has stopped' "$log"; then break; fi
+            sleep 1
+          done
+          cat "$log"
+          grep -q 'is running' "$log"
+          grep -q 'has stopped' "$log"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-macos-arm64-test
+          path: |
+            ${{ runner.temp }}/ubc-vpn-macos-arm64-test.tar.gz
+            ${{ runner.temp }}/ubc-vpn-macos-arm64-test.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
