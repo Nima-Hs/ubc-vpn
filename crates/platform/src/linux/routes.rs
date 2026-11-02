@@ -118,7 +118,7 @@ pub(super) fn local_network_holding(
 
 /// An IPv4 address as [`usable_networks`] reads it. Its interface counts
 /// as up when it is up and its link works.
-fn address_row(row: &Address, links: &[Link]) -> Option<AddressRow> {
+pub(super) fn address_row(row: &Address, links: &[Link]) -> Option<AddressRow> {
     let state = if row.flags & IFA_F_DADFAILED != 0 {
         DadState::Duplicate
     } else if row.flags & IFA_F_TENTATIVE != 0 {
@@ -357,10 +357,20 @@ impl Routes for LinuxRoutes {
         if local_network_holding(address, device.index, &addresses).is_some() {
             return Err(Error::InvalidInput);
         }
-        netlink::set_mtu(device.index, mtu).map_err(os)?;
+        // The kernel gives a device that is up an IPv6 address of its own the
+        // moment IPv6 starts on it, as it does afresh when the device grows
+        // past 1280 bytes: before `addr_gen_mode` could be set. So a device
+        // that is up goes down while its size changes, which also takes the
+        // routes through it; the service configures before it routes.
+        if device.mtu != Some(u32::from(mtu)) {
+            if device.flags & netlink::IFF_UP != 0 {
+                netlink::set_down(device.index).map_err(os)?;
+            }
+            quiet_ipv6(device.index)?;
+            netlink::set_mtu(device.index, mtu).map_err(os)?;
+        }
         // Before the device comes up, which is when the kernel would give it
-        // an IPv6 address; and again after the size changes, since the
-        // kernel starts IPv6 afresh on a device that grows past 1280.
+        // an IPv6 address.
         quiet_ipv6(device.index)?;
         let mut ours = false;
         for row in addresses.iter().filter(|row| row.index == device.index) {

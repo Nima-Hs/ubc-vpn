@@ -13,7 +13,7 @@
 //! every such route when they end.
 
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -49,6 +49,8 @@ const TEST_RANGES: [&str; 4] = [
     "198.18.0.0/15",
     "203.0.113.0/24",
 ];
+/// The same for IPv6: the documentation range.
+const TEST_RANGE_V6: &str = "2001:db8::/32";
 
 /// Writes one whole line in one call, so nothing another thread prints can
 /// land inside it: CI looks for these lines.
@@ -77,6 +79,15 @@ impl Drop for Cleanup {
         for range in TEST_RANGES {
             let _ = ip(&["-4", "route", "flush", "root", range, "table", "main"]);
         }
+        let _ = ip(&[
+            "-6",
+            "route",
+            "flush",
+            "root",
+            TEST_RANGE_V6,
+            "table",
+            "main",
+        ]);
     }
 }
 
@@ -234,6 +245,54 @@ impl Foreign for Outsider {
         }
         found
     }
+
+    fn add_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        ip_ok(&[
+            "-6",
+            "route",
+            "add",
+            &format!("{dest}/{prefix_len}"),
+            "dev",
+            interface,
+        ]);
+    }
+
+    fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        ip_ok(&[
+            "-6",
+            "route",
+            "del",
+            &format!("{dest}/{prefix_len}"),
+            "dev",
+            interface,
+        ]);
+    }
+
+    fn add_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let address = format!("{address}/64");
+        ip_ok(&["-6", "addr", "add", &address, "dev", interface, "nodad"]);
+    }
+
+    fn remove_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        ip_ok(&[
+            "-6",
+            "addr",
+            "del",
+            &format!("{address}/64"),
+            "dev",
+            interface,
+        ]);
+    }
+
+    fn set_link(&self, interface: &str, up: bool) {
+        let state = if up { "up" } else { "down" };
+        ip_ok(&["link", "set", "dev", interface, state]);
+    }
+
+    fn bind_ipv6(&self, interface: &str, on: bool) {
+        let path = format!("/proc/sys/net/ipv6/conf/{interface}/disable_ipv6");
+        std::fs::write(path, if on { "0" } else { "1" }).expect("turn IPv6 on or off");
+    }
 }
 
 /// `TUNSETIFF`, `_IOW('T', 202, int)`.
@@ -336,6 +395,71 @@ fn passes_the_shared_route_suite_on_a_tun_device() {
     );
 }
 
+// A change of routes on a live connection (#194), on the real routing
+// table. Linux split DNS is not written yet (X2), so the fake's DNS stands
+// in for that half until it is.
+#[test]
+fn passes_the_shared_live_route_change_check() {
+    let test = "passes_the_shared_live_route_change_check";
+    as_root("live route change", test, || {
+        let tun = Tun::open("uvt-live0");
+        let routes = LinuxRoutes;
+        routes
+            .configure_tunnel(&tun.name, Ipv4Addr::new(198, 18, 0, 4), 1300)
+            .expect("configure");
+        let dns = crate::fake::Fake::new();
+        suite::check_live_route_change(&routes, &dns, &tun.name, &|name| dns.resolvers_for(name));
+    });
+}
+
+// The mark is the whole rule, for IPv6 as for IPv4: start-up removes an
+// IPv6 route that carries it, as full mode's blocking halves will, and
+// leaves somebody else's.
+#[test]
+fn remove_all_removes_a_marked_ipv6_route() {
+    as_root(
+        "marked ipv6",
+        "remove_all_removes_a_marked_ipv6_route",
+        || {
+            let tun = Tun::open("uvt-mark6-0");
+            let routes = LinuxRoutes;
+            routes
+                .configure_tunnel(&tun.name, Ipv4Addr::new(198, 18, 0, 6), 1300)
+                .expect("configure");
+            let (ours, theirs) = ("2001:db8:5::/48", "2001:db8:6::/48");
+            let protocol = LINUX_ROUTE_PROTOCOL.to_string();
+            ip_ok(&[
+                "-6", "route", "add", ours, "dev", &tun.name, "proto", &protocol,
+            ]);
+            Outsider.add_route_v6(
+                &tun.name,
+                Ipv6Addr::new(0x2001, 0xdb8, 6, 0, 0, 0, 0, 0),
+                48,
+            );
+            let present = |dest: &str| {
+                let net: Ipv6Addr = dest.split('/').next().unwrap().parse().unwrap();
+                let table = netlink::routes(AF_INET6).expect("the IPv6 table");
+                table
+                    .iter()
+                    .any(|r| r.dst == IpAddr::V6(net) && r.dst_len == 48)
+            };
+            assert!(
+                present(ours) && present(theirs),
+                "the routes were not added"
+            );
+            let marked_v6 = marked().iter().filter(|r| r.family == AF_INET6).count();
+            assert_eq!(marked_v6, 1, "the IPv6 route does not carry the mark");
+
+            routes.remove_all().expect("remove all");
+            assert!(!present(ours), "remove_all left a marked IPv6 route");
+            assert!(
+                present(theirs),
+                "remove_all took somebody else's IPv6 route"
+            );
+        },
+    );
+}
+
 // Linux keeps routes to one destination with different metrics side by
 // side. Ours would join somebody else's at another metric, and win or lose
 // by it; the add must refuse instead and change nothing.
@@ -433,6 +557,23 @@ fn the_tunnel_has_no_ipv6_address_after_each_configure() {
                 let index = tun.index();
                 all.into_iter().filter(|a| a.index == index).count()
             };
+            // Every IPv6 address the kernel adds or removes, as it happens, so
+            // one that comes and goes within a configure is seen too.
+            let mut monitor = Command::new("stdbuf")
+                .args(["-oL", "ip", "-6", "-o", "monitor", "address"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("start ip monitor");
+            let output = monitor.stdout.take().expect("the monitor's output");
+            let lines = thread::spawn(move || {
+                let reader = std::io::BufReader::new(output);
+                std::io::BufRead::lines(reader)
+                    .map_while(Result::ok)
+                    .collect::<Vec<_>>()
+            });
+            thread::sleep(Duration::from_secs(1));
+            // Up at 1300, then down to 1000, which stops IPv6 on it, then up
+            // to 1400 while the device is up, which starts IPv6 afresh.
             for (n, mtu) in [(2, 1300), (3, 1000), (3, 1400), (3, 1400)] {
                 routes
                     .configure_tunnel(&tun.name, Ipv4Addr::new(198, 18, 0, n), mtu)
@@ -441,6 +582,26 @@ fn the_tunnel_has_no_ipv6_address_after_each_configure() {
                 thread::sleep(Duration::from_secs(1));
                 assert_eq!(ipv6(), 0, "an IPv6 address after configuring .{n} at {mtu}");
             }
+            // The monitor sees an address that is added: this one.
+            let control = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1);
+            Outsider.add_address_v6(&tun.name, control);
+            thread::sleep(Duration::from_secs(1));
+            let _ = monitor.kill();
+            let _ = monitor.wait();
+            let lines = lines.join().expect("the monitor's lines");
+            let on_tunnel: Vec<_> = lines.iter().filter(|l| l.contains(&tun.name)).collect();
+            say(&format!("IPV6 seen on the tunnel: {on_tunnel:?}"));
+            let seen_control = on_tunnel.iter().any(|l| l.contains("2001:db8:1::1"));
+            assert!(seen_control, "the monitor saw nothing: {lines:?}");
+            let others: Vec<_> = on_tunnel
+                .iter()
+                .filter(|l| !l.contains("2001:db8:1::1"))
+                .collect();
+            assert_eq!(
+                others,
+                Vec::<&&String>::new(),
+                "an IPv6 address came and went"
+            );
             let mode = format!("/proc/sys/net/ipv6/conf/{}/addr_gen_mode", tun.name);
             if let Ok(mode) = std::fs::read_to_string(mode) {
                 assert_eq!(mode.trim(), "1", "the kernel would give it an address");
@@ -694,6 +855,7 @@ fn link(index: u32, flags: u32) -> Link {
         name: format!("if{index}"),
         flags,
         kind: None,
+        mtu: None,
     }
 }
 
@@ -766,6 +928,46 @@ fn address(index: u32, addr: [u8; 4], prefix_len: u8) -> Address {
         local: IpAddr::V4(Ipv4Addr::from(addr)),
         address: None,
     }
+}
+
+// How Linux's address flags and interface state map onto the networks the
+// machine is on: a preferred or deprecated address on an interface that is
+// up and running counts; a tentative or duplicate one, or any on an
+// interface that is down or has no link, does not.
+#[test]
+fn only_a_usable_address_on_a_running_link_puts_the_machine_on_a_network() {
+    use super::routes::netlink::{IFA_F_DADFAILED, IFA_F_DEPRECATED, IFA_F_TENTATIVE};
+    let running = IFF_UP | IFF_RUNNING;
+    let links = [
+        link(2, running),
+        link(3, IFF_UP),
+        link(4, 0),
+        link(5, running),
+    ];
+    let flagged = |index, addr, flags| Address {
+        flags,
+        ..address(index, addr, 24)
+    };
+    let rows = [
+        flagged(2, [10, 200, 0, 10], 0),
+        flagged(2, [10, 201, 0, 10], IFA_F_DEPRECATED),
+        flagged(2, [10, 202, 0, 10], IFA_F_TENTATIVE),
+        flagged(2, [10, 203, 0, 10], IFA_F_DADFAILED),
+        flagged(3, [10, 204, 0, 10], 0),
+        flagged(4, [10, 205, 0, 10], 0),
+        // An interface the list of links does not have.
+        flagged(9, [10, 206, 0, 10], 0),
+        Address {
+            family: AF_INET6,
+            local: "2001:db8::1".parse().unwrap(),
+            ..address(5, [0; 4], 64)
+        },
+    ];
+    let usable = rows
+        .iter()
+        .filter_map(|row| super::routes::address_row(row, &links));
+    let networks = crate::on_link::usable_networks(usable);
+    assert_eq!(networks, [net("10.200.0.0/24"), net("10.201.0.0/24")]);
 }
 
 // Issue #146, the rule alone: the networks of every other interface's

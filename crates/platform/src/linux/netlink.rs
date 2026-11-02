@@ -55,6 +55,9 @@ const IFLA_MTU: u16 = 4;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_INFO_KIND: u16 = 1;
 const IFLA_AF_SPEC: u16 = 26;
+const IFLA_EXT_MASK: u16 = 29;
+/// Leave the statistics out of a list of links.
+const RTEXT_FILTER_SKIP_STATS: u32 = 1 << 3;
 const IFLA_INET6_ADDR_GEN_MODE: u16 = 8;
 
 const IFA_ADDRESS: u16 = 1;
@@ -352,6 +355,8 @@ pub(crate) struct Link {
     pub(crate) flags: u32,
     /// What made it, such as `tun`, when it says.
     pub(crate) kind: Option<String>,
+    /// The largest packet it sends, when it says.
+    pub(crate) mtu: Option<u32>,
 }
 
 impl Link {
@@ -359,9 +364,11 @@ impl Link {
         let fixed = body.get(..16).ok_or_else(|| invalid("a link cut short"))?;
         let mut name = None;
         let mut kind = None;
+        let mut mtu = None;
         for (attr, data) in attributes(&body[16..])? {
             match attr {
                 IFLA_IFNAME => name = Some(text(data)?),
+                IFLA_MTU => mtu = Some(u32_of(data)?),
                 IFLA_LINKINFO => {
                     for (inner, data) in attributes(data)? {
                         if inner == IFLA_INFO_KIND {
@@ -377,6 +384,7 @@ impl Link {
             name: name.ok_or_else(|| invalid("a link with no name"))?,
             flags: u32_at(fixed, 8)?,
             kind,
+            mtu,
         })
     }
 
@@ -506,20 +514,24 @@ fn exchange(request: Request) -> io::Result<Vec<Message>> {
 }
 
 /// A dump, tried again when the table changed while it was read.
-fn dump(kind: u16, fixed: &[u8]) -> io::Result<Vec<Message>> {
+fn dump(request: impl Fn() -> Request) -> io::Result<Vec<Message>> {
     let mut tries = 0;
     loop {
-        match exchange(Request::new(kind, NLM_F_DUMP, fixed)) {
+        match exchange(request()) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted && tries < 3 => tries += 1,
             other => return other,
         }
     }
 }
 
-/// Every network interface.
+/// Every network interface. Their statistics are left out, as is the
+/// virtual-function list (only sent when asked for), which on a network card
+/// with many could fill a read.
 pub(crate) fn links() -> io::Result<Vec<Link>> {
     let fixed = [0; 16];
-    let replies = dump(RTM_GETLINK, &fixed)?;
+    let skip_stats = RTEXT_FILTER_SKIP_STATS.to_ne_bytes();
+    let replies =
+        dump(|| Request::new(RTM_GETLINK, NLM_F_DUMP, &fixed).attr(IFLA_EXT_MASK, &skip_stats))?;
     replies
         .iter()
         .filter(|m| m.kind == RTM_NEWLINK)
@@ -530,7 +542,7 @@ pub(crate) fn links() -> io::Result<Vec<Link>> {
 /// Every address of `family`.
 pub(crate) fn addresses(family: u8) -> io::Result<Vec<Address>> {
     let fixed = [family, 0, 0, 0, 0, 0, 0, 0];
-    let replies = dump(RTM_GETADDR, &fixed)?;
+    let replies = dump(|| Request::new(RTM_GETADDR, NLM_F_DUMP, &fixed))?;
     let all: io::Result<Vec<Address>> = replies
         .iter()
         .filter(|m| m.kind == RTM_NEWADDR)
@@ -545,7 +557,7 @@ pub(crate) fn addresses(family: u8) -> io::Result<Vec<Address>> {
 pub(crate) fn routes(family: u8) -> io::Result<Vec<Route>> {
     let mut fixed = vec![family, 0, 0, 0, 0, 0, 0, 0];
     fixed.extend_from_slice(&0u32.to_ne_bytes());
-    let replies = dump(RTM_GETROUTE, &fixed)?;
+    let replies = dump(|| Request::new(RTM_GETROUTE, NLM_F_DUMP, &fixed))?;
     let wanted = |f: u8| match family {
         AF_UNSPEC => f == AF_INET || f == AF_INET6,
         _ => f == family,
@@ -624,6 +636,11 @@ pub(crate) fn set_mtu(index: u32, mtu: u16) -> io::Result<()> {
 /// Brings the interface numbered `index` up.
 pub(crate) fn set_up(index: u32) -> io::Result<()> {
     exchange(link_request(index, IFF_UP, IFF_UP)).map(drop)
+}
+
+/// Takes the interface numbered `index` down.
+pub(crate) fn set_down(index: u32) -> io::Result<()> {
+    exchange(link_request(index, 0, IFF_UP)).map(drop)
 }
 
 /// Sets how the kernel makes IPv6 addresses of its own on the interface
@@ -742,10 +759,12 @@ mod tests {
         body.extend_from_slice(&attribute(IFLA_IFNAME, b"uvt0\0"));
         let info = attribute(IFLA_INFO_KIND, b"tun\0");
         body.extend_from_slice(&attribute(IFLA_LINKINFO | 0x8000, &info));
+        body.extend_from_slice(&attribute(IFLA_MTU, &1400u32.to_ne_bytes()));
         let link = Link::parse(&body).unwrap();
         assert_eq!(link.index, 9);
         assert_eq!(link.name, "uvt0");
         assert_eq!(link.kind.as_deref(), Some("tun"));
+        assert_eq!(link.mtu, Some(1400));
         assert!(link.running());
         let down = Link {
             flags: IFF_UP,
