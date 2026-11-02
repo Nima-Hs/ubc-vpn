@@ -218,14 +218,19 @@ jobs:
 
       # The bundle as someone trying it uses it, on this runner, which is
       # thrown away after the job: unpacked as root into a folder under
-      # /Library/PrivilegedHelperTools, started by launchd without a
-      # LaunchDaemon, asked for its status by the client as an ordinary
-      # user, and stopped with SIGTERM. Nothing connects.
+      # /Library/PrivilegedHelperTools, started as root by launchd from a
+      # job description kept outside /Library/LaunchDaemons (so nothing is
+      # installed or started again at boot), asked for its status by the
+      # client as an ordinary user, and stopped with SIGTERM. Nothing
+      # connects. `launchctl submit` is not used: run with sudo, it puts the
+      # job in the user's domain and runs it as that user.
       - name: Start and stop the bundled service
         env:
           FOLDER: /Library/PrivilegedHelperTools/ubc-vpn-test
+          JOB: /Library/PrivilegedHelperTools/ubc-vpn-test.plist
           DATA: /Library/Application Support/UBC VPN
           LABEL: io.github.nima-hs.ubc-vpn-test
+          LOG: /Library/Logs/ubc-vpn-test.log
         run: |
           ls -lde / /Library /Library/PrivilegedHelperTools "/Library/Application Support" 2>&1 || true
           sudo install -d -o root -g wheel -m 1755 /Library/PrivilegedHelperTools
@@ -234,28 +239,53 @@ jobs:
           sudo install -d -o root -g wheel -m 755 "$DATA"
           sudo install -o root -g wheel -m 644 "$FOLDER/policy.json" "$DATA/policy.json"
           ls -le "$FOLDER"
-          log="$RUNNER_TEMP/service.log"
-          sudo launchctl submit -l "$LABEL" -o "$log" -e "$log" -- "$FOLDER/ubc-vpn-service"
+          # The job description, root's and closed to others as launchd
+          # requires for the system domain.
+          sudo tee "$JOB" > /dev/null <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>$LABEL</string>
+            <key>ProgramArguments</key><array><string>$FOLDER/ubc-vpn-service</string></array>
+            <key>RunAtLoad</key><true/>
+            <key>KeepAlive</key><false/>
+            <key>ExitTimeOut</key><integer>30</integer>
+            <key>StandardOutPath</key><string>$LOG</string>
+            <key>StandardErrorPath</key><string>$LOG</string>
+          </dict>
+          </plist>
+          PLIST
+          sudo chown root:wheel "$JOB"
+          sudo chmod 644 "$JOB"
+          plutil -lint "$JOB"
+          sudo launchctl bootstrap system "$JOB"
           for _ in $(seq 20); do
             if "$FOLDER/ubc-vpn" status > status.txt 2>&1; then break; fi
             sleep 1
           done
           cat status.txt
           if ! "$FOLDER/ubc-vpn" status; then
-            sudo launchctl list "$LABEL" || true
-            sudo cat "$log" || true
-            sudo launchctl remove "$LABEL" || true
+            sudo launchctl print "system/$LABEL" || true
+            sudo cat "$LOG" || true
+            sudo launchctl bootout "system/$LABEL" || true
             exit 1
           fi
-          sudo launchctl list "$LABEL"
-          sudo launchctl remove "$LABEL"
-          for _ in $(seq 20); do
-            if grep -q 'has stopped' "$log"; then break; fi
+          # Root's, as the installed service will be.
+          pid=$(sudo launchctl print "system/$LABEL" | awk '$1 == "pid" { print $3; exit }')
+          [ "$(ps -o user= -p "$pid" | tr -d ' ')" = root ]
+          sudo launchctl bootout "system/$LABEL"
+          for _ in $(seq 30); do
+            if grep -q 'has stopped' "$LOG"; then break; fi
             sleep 1
           done
-          cat "$log"
-          grep -q 'is running' "$log"
-          grep -q 'has stopped' "$log"
+          cat "$LOG"
+          grep -q 'is running' "$LOG"
+          grep -q 'has stopped' "$LOG"
+          if pgrep -f "$FOLDER/ubc-vpn-service"; then
+            echo "The service is still running."
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
