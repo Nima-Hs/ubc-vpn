@@ -504,27 +504,30 @@ mod device {
         unsafe { if_nametoindex(name.as_ptr()) != 0 }
     }
 
-    /// The `utun` devices the system has now. The system makes some of its
-    /// own, so the engine's are told apart by [`BEFORE`].
+    /// The names the engine's next device may get: the lowest `utun` units
+    /// the system has free now, as the kernel gives the lowest free unit.
+    /// The system makes `utun` devices of its own, so the engine's are told
+    /// apart this way.
     #[cfg(target_os = "macos")]
-    fn utuns() -> Vec<String> {
+    fn free_utuns() -> Vec<String> {
         (0..256)
             .map(|unit| format!("utun{unit}"))
-            .filter(|name| exists(name))
+            .filter(|name| !exists(name))
+            .take(2)
             .collect()
     }
 
-    /// The `utun` devices there were before the test that asks [`made`] made
-    /// any, which it notes once it holds the engine's guard.
+    /// [`free_utuns`] as they were before the test that asks [`made`] made
+    /// a device, which it notes once it holds the engine's guard.
     #[cfg(target_os = "macos")]
-    static BEFORE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static NEXT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    /// Whether any device of the engine's exists now: any `utun` device
-    /// that was not in [`BEFORE`].
+    /// Whether any device of the engine's exists now: any of [`NEXT`]. Only
+    /// a few names are asked about, so a watcher sees a device soon after it
+    /// is made.
     #[cfg(target_os = "macos")]
     fn made() -> bool {
-        let before = BEFORE.lock().unwrap().clone();
-        utuns().iter().any(|name| !before.contains(name))
+        NEXT.lock().unwrap().iter().any(|name| exists(name))
     }
 
     /// Whether a name is one the engine gives a device: `utun` and a number.
@@ -845,7 +848,7 @@ mod device {
         let (engine, library, _guard) = engine();
         #[cfg(target_os = "macos")]
         {
-            *BEFORE.lock().unwrap() = utuns();
+            *NEXT.lock().unwrap() = free_utuns();
         }
         let Some(stand_in) = StandIn::start("accept") else {
             return;
