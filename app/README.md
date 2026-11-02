@@ -117,7 +117,7 @@ The app icon (the program, the Start menu, the setup program) is the mark on the
 
 Not yet checked on a real desktop, and to be checked before the first release: the tray on macOS and on Linux (GNOME with and without the extension, KDE), the rimmed icon on a light Windows taskbar, and the click on Windows.
 
-Every word the app shows about the connection is in [`src/shared/copy.ts`](src/shared/copy.ts). The window and the tray both read from it.
+Every word the app shows about the connection is in [`src/shared/copy`](src/shared/copy), one file for each screen, and [`src/shared/copy.ts`](src/shared/copy.ts) gathers them. The window and the tray both read from it. The Settings screen's words are in [`src/shared/settings-copy.ts`](src/shared/settings-copy.ts), apart, because only builds with that screen carry them.
 
 ## The design system
 
