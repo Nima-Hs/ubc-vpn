@@ -306,7 +306,7 @@ Newline-delimited JSON, one message per line. The service drops a connection tha
 
 ### The log the owner can read
 
-The service keeps its recent log lines in memory and the owner can read them, for the app's log view and for a report to paste into a bug report. The shapes are in `crates/core/src/protocol.rs` (protocol version 5).
+The service keeps its recent log lines in memory and the owner can read them, for the app's log view and for a report to paste into a bug report. The shapes are in `crates/core/src/protocol/`: the requests in `mod.rs`, and the lines and pages in `log.rs` (protocol version 6).
 
 - **What is kept:** 500 lines from the service and the engine, and 100 lines that the client hands over from a login, in a space of their own so a client cannot push the service's lines out. Nothing is written to disk.
 - **Before a line is kept:** the service removes any character that could mislead when shown, then every secret it holds at that moment, then everything from a word such as `cookie`, `pass` or `session` to the end of the line, which it replaces with `[redacted]`. A line that is empty or too long after the first step is replaced whole by a marker, not shortened to fit. Debug-level lines are never kept. Only the exact form of a secret is found; one that is split or encoded is not.
