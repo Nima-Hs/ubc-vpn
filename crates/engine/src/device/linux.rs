@@ -57,7 +57,8 @@ struct IfReq {
 }
 
 unsafe extern "C" {
-    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    #[link_name = "open"]
+    fn open_file(path: *const c_char, flags: c_int, ...) -> c_int;
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn if_nametoindex(name: *const c_char) -> c_uint;
@@ -70,7 +71,7 @@ unsafe extern "C" {
 pub(super) fn open() -> Result<(OwnedFd, String), TunnelError> {
     // SAFETY: the path is a NUL-terminated string that outlives the call,
     // and these flags take no third argument.
-    let fd = unsafe { open(c"/dev/net/tun".as_ptr(), O_RDWR | O_CLOEXEC) };
+    let fd = unsafe { open_file(c"/dev/net/tun".as_ptr(), O_RDWR | O_CLOEXEC) };
     if fd < 0 {
         return Err(TunnelError::Failed);
     }
