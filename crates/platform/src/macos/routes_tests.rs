@@ -918,10 +918,8 @@ fn the_tunnel_is_a_single_host_with_no_ipv6() {
         || {
             let device = utun();
             let routes = MacRoutes::unchecked(&state_dir("tunnel"));
-            // Down, so bringing it up is seen; and with IPv6 addresses, as a
-            // reused device could have, so taking them off is seen.
-            route_socket::set_up(&device.name, false).expect("take the device down");
-            assert!(!find(&device.name).expect("the device").is_up(), "still up");
+            // With IPv6 addresses, as a reused device could have, so taking
+            // them off is seen.
             let v6 = "2001:db8::5";
             let added = Command::new("/sbin/ifconfig")
                 .args([device.name.as_str(), "inet6", v6, "prefixlen", "128"])
@@ -936,6 +934,9 @@ fn the_tunnel_is_a_single_host_with_no_ipv6() {
             );
             for (n, mtu) in [(2, 1300), (3, 1400), (3, 1400)] {
                 let address = Ipv4Addr::new(198, 18, 0, n);
+                // Down, so bringing it up is seen, also with the same address.
+                route_socket::set_up(&device.name, false).expect("take the device down");
+                assert!(!find(&device.name).expect("the device").is_up(), "still up");
                 routes
                     .configure_tunnel(&device.name, address, mtu)
                     .expect("configure");

@@ -43,11 +43,14 @@ pub(super) const fn ioc(direction: c_ulong, group: u8, number: u8, size: usize) 
     direction + (((size as c_ulong) & 0x1fff) << 16) + ((group as c_ulong) << 8) + number as c_ulong
 }
 pub(super) const IOC_IN: c_ulong = 0x8000_0000;
+#[cfg(test)]
 pub(super) const IOC_INOUT: c_ulong = 0xc000_0000;
 const IFREQ: usize = size_of::<libc::ifreq>();
 const IN6_IFREQ: usize = size_of::<libc::in6_ifreq>();
 // The numbers are those of <sys/sockio.h> and <netinet6/in6_var.h>.
+#[cfg(test)]
 pub(super) const SIOCSIFFLAGS: c_ulong = ioc(IOC_IN, b'i', 16, IFREQ);
+#[cfg(test)]
 pub(super) const SIOCGIFFLAGS: c_ulong = ioc(IOC_INOUT, b'i', 17, IFREQ);
 pub(super) const SIOCDIFADDR: c_ulong = ioc(IOC_IN, b'i', 25, IFREQ);
 pub(super) const SIOCAIFADDR: c_ulong = ioc(IOC_IN, b'i', 26, size_of::<libc::ifaliasreq>());
@@ -94,9 +97,9 @@ impl Interface {
         }
     }
 
-    /// Whether it is up and running: only then does anything go out of it.
+    /// Whether it is up: only then does anything go out of it.
     pub(super) fn is_up(&self) -> bool {
-        self.flags & libc::IFF_UP != 0 && self.flags & libc::IFF_RUNNING != 0
+        self.flags & libc::IFF_UP != 0
     }
 
     #[cfg(test)]
@@ -439,16 +442,6 @@ fn new_socket(family: AddressFamily, kind: SocketType) -> Result<OwnedFd> {
     Ok(socket)
 }
 
-/// Frees what `getifaddrs` returned when dropped.
-struct Addresses(*mut libc::ifaddrs);
-
-impl Drop for Addresses {
-    fn drop(&mut self) {
-        // SAFETY: the list came from `getifaddrs` and is freed once.
-        unsafe { libc::freeifaddrs(self.0) }
-    }
-}
-
 /// The bytes of a socket address the kernel gave, as many as its length
 /// byte says.
 ///
@@ -470,11 +463,23 @@ pub(super) fn interfaces() -> Result<Vec<Interface>> {
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
         return Err(os_error("getifaddrs", io::Error::last_os_error()));
     }
-    let list = Addresses(list);
+    // SAFETY: the list is the one just returned, freed only below.
+    let read = unsafe { read_interfaces(list) };
+    // SAFETY: the list came from `getifaddrs` and is freed once.
+    unsafe { libc::freeifaddrs(list) };
+    read
+}
+
+/// The interfaces in a list `getifaddrs` returned.
+///
+/// # Safety
+///
+/// `list` is a list from `getifaddrs` that has not been freed.
+unsafe fn read_interfaces(list: *mut libc::ifaddrs) -> Result<Vec<Interface>> {
     let mut found: BTreeMap<String, Interface> = BTreeMap::new();
-    let mut next = list.0;
+    let mut next = list;
     // SAFETY: each entry is valid until the list is freed, which is after
-    // the loop, and each address in it is valid for its length byte.
+    // this returns, and each address in it is valid for its length byte.
     while let Some(entry) = unsafe { next.as_ref() } {
         next = entry.ifa_next;
         // SAFETY: the name is a NUL-terminated string in the entry.
@@ -557,7 +562,8 @@ fn ioctl<T>(family: AddressFamily, call: &str, number: c_ulong, request: &mut T)
     }
 }
 
-/// Brings the interface up, or takes it down.
+/// Brings the interface up, or takes it down, as an administrator would.
+#[cfg(test)]
 pub(super) fn set_up(name: &str, up: bool) -> Result<()> {
     let mut flags: libc::ifreq = request(name)?;
     ioctl(
