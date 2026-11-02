@@ -85,7 +85,9 @@ fn inet(addr: &str) -> Vec<u8> {
 fn short_mask(mask: &str, length: usize) -> Vec<u8> {
     let mut bytes = inet(mask);
     bytes.truncate(length);
-    bytes[0] = length as u8;
+    if let Some(first) = bytes.first_mut() {
+        *first = length as u8;
+    }
     bytes
 }
 
