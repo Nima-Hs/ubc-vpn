@@ -202,11 +202,8 @@ fn a_file_others_could_change_is_refused() {
     let pipe = std::ffi::CString::new(folder_of(&service).join("p").as_os_str().as_encoded_bytes())
         .expect("a path");
     // SAFETY: the path is a valid C string for the length of the call.
-    assert_eq!(
-        unsafe { libc::mkfifo(pipe.as_ptr(), 0o644) },
-        0,
-        "make a pipe"
-    );
+    let made = unsafe { libc::mkfifo(pipe.as_ptr(), 0o644) };
+    assert_eq!(made, 0, "make a pipe");
     let refused = within("the check", move || checked(&service));
     assert_eq!(refused, failed(NOT_A_FILE), "a pipe");
 }
