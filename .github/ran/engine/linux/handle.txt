@@ -1,0 +1,5 @@
+handle logs in
+handle rejects
+handle opens a tunnel connection
+handle judges a trusted certificate
+handle closes a handed-over device

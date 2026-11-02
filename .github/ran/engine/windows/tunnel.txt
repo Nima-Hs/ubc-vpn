@@ -1,0 +1,5 @@
+tunnel refuses a wrong pin
+tunnel asks for no dtls
+tunnel makes and removes a device
+tunnel logs off only when asked
+tunnel reports a lost gateway

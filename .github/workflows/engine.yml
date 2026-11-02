@@ -18,6 +18,9 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/engine.yml
+      - .github/ran/check.sh
+      - .github/ran/engine/**
+      - .github/ran/engine-device/**
       # Last, so it wins: a change to Markdown files alone starts nothing.
       # None is built, tested or shipped. Any other file still counts.
       - "!**/*.md"
@@ -34,6 +37,9 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/engine.yml
+      - .github/ran/check.sh
+      - .github/ran/engine/**
+      - .github/ran/engine-device/**
       - "!**/*.md"
   workflow_dispatch:
 
@@ -297,38 +303,11 @@ jobs:
           UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: |
           cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests -- --nocapture | tee test.log
-          # Each of the gateway's nine scenarios ran.
-          [ "$(grep -c '^RAN: gateway ' test.log)" = 9 ]
-          # The real library logged in to it, and was refused by it.
-          grep -q '^RAN: handle logs in' test.log
-          grep -q '^RAN: handle rejects' test.log
-          grep -q '^RAN: handle opens a tunnel connection' test.log
-          # So did the engine.
-          grep -q '^RAN: engine logs in' test.log
-          grep -q '^RAN: engine refuses a wrong pin' test.log
-          grep -q '^RAN: engine refuses single sign-on' test.log
-          grep -q '^RAN: engine offers no single sign-on' test.log
-          grep -q '^RAN: engine fetches a host-scan stub and runs nothing' test.log
-          # And the tunnel engine.
-          grep -q '^RAN: tunnel refuses a wrong pin' test.log
-          grep -q '^RAN: tunnel asks for no dtls' test.log
-          if [ "$RUNNER_OS" = Linux ]; then
-            grep -q '^RAN: handle judges a trusted certificate' test.log
-            grep -q '^RAN: engine refuses a trusted certificate' test.log
-            grep -q '^RAN: tunnel refuses a trusted certificate' test.log
-            grep -q '^RAN: ocserv takes a login and a tunnel connection' test.log
-          fi
-          if [ "$RUNNER_OS" = Windows ]; then
-            grep -q '^RAN: engine writes no key log' test.log
-            grep -q '^RAN: tunnel makes and removes a device' test.log
-            grep -q '^RAN: tunnel logs off only when asked' test.log
-            grep -q '^RAN: tunnel reports a lost gateway' test.log
-          else
-            grep -q '^RAN: tunnel refuses at the device step' test.log
-            # openconnect_setup_tun_fd resolved in the pinned library and
-            # took a descriptor, which the handle closed when it was freed.
-            grep -q '^RAN: handle closes a handed-over device' test.log
-          fi
+          # Each of the gateway's scenarios ran, the real library and the
+          # engines logged in to it and were refused by it, and on each OS
+          # what only it can test: every name in .github/ran/engine/<os>.
+          os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
+          bash .github/ran/check.sh ".github/ran/engine/$os" "RAN: " test.log
           # The examples that show the binding is private only mean something
           # in this configuration: the feature on and the fake off. The tests
           # that need no binding run in it too.
@@ -355,6 +334,40 @@ jobs:
           UBC_VPN_TEST_GATEWAY_DIR: ${{ runner.temp }}/gateway
           UBC_VPN_TEST_REQUIRE_GATEWAY: "1"
         run: cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --tests --release
+
+      # The tunnel tests that make a device, as root, which the engine needs
+      # to open a tunnel device on macOS and Linux. GitHub's runners have
+      # passwordless sudo and are thrown away after the job; the step uses no
+      # secrets and runs on GitHub's own runners only. sudo resets PATH and
+      # the toolchain's environment, so the test program is built here and
+      # run as root with only the variables the tests read. Last of the
+      # tests, so nothing after it meets a file root made; the build folder
+      # and the gateway's logs are handed back all the same.
+      - name: The device tests, as root
+        if: runner.os != 'Windows' && runner.environment == 'github-hosted'
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          UBC_VPN_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+          UBC_VPN_TEST_GATEWAY_DIR: ${{ runner.temp }}/gateway
+        run: |
+          cargo test --locked -p ubc-vpn-engine --features libopenconnect,fake --test tunnel \
+            --no-run --message-format=json > device-build.json
+          tests=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' device-build.json)
+          test -x "$tests"
+          status=0
+          sudo env UBC_VPN_TEST_PYTHON="$UBC_VPN_TEST_PYTHON" UBC_VPN_TEST_GATEWAY_DIR="$UBC_VPN_TEST_GATEWAY_DIR" \
+            UBC_VPN_TEST_REQUIRE_GATEWAY=1 UBC_VPN_TEST_DEVICE=1 \
+            "$tests" device --nocapture 2>&1 | tee device.log || status=$?
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/target" "$UBC_VPN_TEST_GATEWAY_DIR"
+          [ "$status" = 0 ]
+          # A test that is skipped passes, so each one that must run is
+          # named in .github/ran/engine-device/<os>.
+          os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
+          bash .github/ran/check.sh ".github/ran/engine-device/$os" "RAN: " device.log
+          if grep "SKIPPED" device.log; then
+            echo "A test was skipped."
+            exit 1
+          fi
 
       # The command-line client and the service built with the real engine,
       # as a release builds them: one program at a time. The client's test

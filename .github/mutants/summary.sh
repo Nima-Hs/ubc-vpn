@@ -77,7 +77,12 @@ has() {
     listed=$(awk -F '\t' -v o="$outcome" '$1 == o && (o != "unviable" || $2 ~ /^patch /) { print "- `" $2 "`" }' "$merged")
     if [ -n "$listed" ]; then
       echo
-      echo "### ${outcome^}"
+      # Capitalised by hand: macOS's bash 3.2 has no ${outcome^}.
+      case $outcome in
+        missed) echo "### Missed" ;;
+        timeout) echo "### Timeout" ;;
+        unviable) echo "### Unviable" ;;
+      esac
       echo
       echo "$listed"
     fi

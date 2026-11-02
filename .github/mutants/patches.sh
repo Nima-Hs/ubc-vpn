@@ -11,7 +11,7 @@
 # writes it, relative to the repository's root:
 #
 #   === mutation: <id>
-#   === os: all | linux | windows
+#   === os: all | linux | windows | macos
 #   === test: <arguments for cargo test>
 #   diff --git a/crates/core/src/x.rs b/crates/core/src/x.rs
 #   ...
@@ -30,7 +30,9 @@
 #
 # <out>/results.tsv gets one line for each mutation: the outcome, a tab, and
 # `patch <id>`. MUTANTS_CARGO names the cargo to run (for this script's own
-# tests) and MUTANTS_TIMEOUT the seconds a test run may take.
+# tests) and MUTANTS_TIMEOUT the seconds a test run may take. It also runs
+# on macOS's bash 3.2, which has no associative arrays and leaves an empty
+# array unset.
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
@@ -42,8 +44,8 @@ os=${MUTANTS_OS:-}
 here=$(cd "$(dirname "$0")" && pwd)
 limit=${MUTANTS_TIMEOUT:-1800}
 case $os in
-  linux | windows) ;;
-  *) echo "MUTANTS_OS must be linux or windows." >&2; exit 2 ;;
+  linux | windows | macos) ;;
+  *) echo "MUTANTS_OS must be linux, windows or macos." >&2; exit 2 ;;
 esac
 if ! [[ $shard =~ ^[0-9]+$ && $shards =~ ^[1-9][0-9]*$ ]] || [ "$shard" -ge "$shards" ]; then
   echo "The shard must be a number below the number of shards." >&2
@@ -97,7 +99,7 @@ for n in $(seq 1 "$count"); do
     echo "Mutation $n: the id '$id' is not letters, digits, '.', '_' and '-'." >&2
     exit 1
   fi
-  for seen in "${ids[@]}"; do
+  for seen in ${ids[@]+"${ids[@]}"}; do
     if [ "$seen" = "$id" ]; then
       echo "Mutation $n: the id '$id' is used twice." >&2
       exit 1
@@ -105,8 +107,8 @@ for n in $(seq 1 "$count"); do
   done
   ids+=("$id")
   case $where in
-    all | linux | windows) ;;
-    *) echo "Mutation $id: the os must be all, linux or windows." >&2; exit 1 ;;
+    all | linux | windows | macos) ;;
+    *) echo "Mutation $id: the os must be all, linux, windows or macos." >&2; exit 1 ;;
   esac
   if ! [[ $test =~ ^[A-Za-z0-9_:./=,+-]+( [A-Za-z0-9_:./=,+-]+)*$ ]]; then
     echo "Mutation $id: the test arguments must be plain words separated by single spaces." >&2
@@ -128,27 +130,56 @@ if ! clean; then
   exit 1
 fi
 
-# Runs the tests named by a mutation, with a time limit. Status 124 is a
-# timeout. On Windows, `timeout` stops only its own child, so a test process
-# started through token.ps1 can outlive it; the job's time limit bounds that.
+# Runs a command with the time limit. Status 124 is a timeout. On Windows,
+# `timeout` stops only its own child, so a test process started through
+# token.ps1 can outlive it; the job's time limit bounds that. macOS has no
+# `timeout`, so there perl starts the command in a process group of its own
+# and, when the time runs out, stops the whole group. MUTANTS_NO_TIMEOUT
+# makes it do that anywhere, for this script's own tests.
+limited() {
+  if [ -z "${MUTANTS_NO_TIMEOUT:-}" ] && command -v timeout > /dev/null; then
+    timeout "$limit" "$@"
+    return
+  fi
+  perl -e '
+    my $limit = shift;
+    my $pid = fork;
+    die "fork: $!\n" unless defined $pid;
+    if ($pid == 0) {
+      setpgrp(0, 0);
+      exec { $ARGV[0] } @ARGV;
+      die "exec $ARGV[0]: $!\n";
+    }
+    setpgrp($pid, $pid);
+    $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid($pid, 0); exit 124 };
+    alarm $limit;
+    waitpid($pid, 0);
+    exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+  ' "$limit" "$@"
+}
+
+# Runs the tests named by a mutation, with the time limit.
 tests() {
   local args
   read -ra args <<< "$1"
-  timeout "$limit" bash "$here/cargo.sh" test --locked "${args[@]}"
+  limited bash "$here/cargo.sh" test --locked "${args[@]}"
 }
 
-declare -A passed=()
-for n in "${mine[@]}"; do
+# The test arguments that passed without a mutation, one set per line. A
+# file, not an associative array, which macOS's bash 3.2 does not have.
+passed=$work/passed
+: > "$passed"
+for n in ${mine[@]+"${mine[@]}"}; do
   { IFS= read -r id; IFS= read -r where; IFS= read -r test; } < "$work/$n.meta"
   patch=$work/$n.patch
   echo "::group::Mutation $id: the tests pass without it"
-  if [ -z "${passed[$test]:-}" ]; then
+  if ! grep -qxF -- "$test" "$passed"; then
     if ! tests "$test"; then
       echo "::endgroup::"
       echo "Mutation $id: the tests fail without it, so it proves nothing." >&2
       exit 1
     fi
-    passed[$test]=1
+    printf '%s\n' "$test" >> "$passed"
   fi
   echo "::endgroup::"
   # Each mutation starts from the commit, not from what the tests rewrote.
@@ -191,13 +222,13 @@ for n in "${mine[@]}"; do
 done
 
 # A mutation that left the machine broken must not pass for caught.
-for test in "${!passed[@]}"; do
+while IFS= read -r test; do
   echo "::group::The tests pass after the mutations: $test"
-  if ! tests "$test"; then
+  if ! tests "$test" < /dev/null; then
     echo "::endgroup::"
     echo "The tests '$test' fail after the mutations: their results cannot be trusted." >&2
     exit 1
   fi
   echo "::endgroup::"
-done
+done < "$passed"
 git checkout HEAD -- .
