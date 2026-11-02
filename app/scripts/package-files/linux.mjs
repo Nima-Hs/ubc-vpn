@@ -202,7 +202,8 @@ function checkDeb(deb) {
 
     const files = debFiles(deb);
     for (const [path, file] of files) {
-        if (file.owner !== "root/root") {
+        // fpm writes owners by number, which dpkg-deb lists as 0/0.
+        if (file.owner !== "root/root" && file.owner !== "0/0") {
             problems.push(`${path} in the .deb belongs to ${file.owner}, not root`);
         }
     }
