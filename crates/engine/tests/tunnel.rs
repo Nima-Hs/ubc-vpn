@@ -7,8 +7,8 @@
 //! The tests that create a tunnel device run only where
 //! `UBC_VPN_TEST_DEVICE` is set: in the engine workflow, on a Windows runner
 //! as administrator with `wintun.dll` beside the test program, and on a Linux
-//! runner as root. Each removes its device on every path and checks that it
-//! is gone.
+//! or macOS runner as root. Each removes its device on every path and checks
+//! that it is gone.
 
 #![cfg(all(feature = "libopenconnect", feature = "fake"))]
 
@@ -404,13 +404,22 @@ fn a_tunnel_asks_for_no_dtls_and_tries_none() {
     println!("RAN: tunnel asks for no dtls");
 }
 
-// Until the engine opens the device itself on macOS, a tunnel that got that
-// far is refused there, and no device is made. Everything before it ran:
-// the cookie went to the gateway.
+// On macOS only the superuser may make a `utun` device, and the ordinary
+// test run is not one: a tunnel that got that far is refused, and no device
+// is made. Everything before it ran: the cookie went to the gateway. (Named
+// so the root run's "device" filter leaves it out.)
 #[cfg(target_os = "macos")]
 #[test]
-fn elsewhere_than_windows_the_device_step_refuses() {
+fn on_macos_without_root_the_tunnel_is_refused_at_the_last_step() {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
     let (engine, library, _guard) = engine();
+    // SAFETY: no arguments, and it cannot fail.
+    if unsafe { geteuid() } == 0 {
+        println!("SKIPPED: this runs as root, which may make a device");
+        return;
+    }
     let Some(stand_in) = StandIn::start("accept") else {
         return;
     };
@@ -453,11 +462,17 @@ fn refused_at_the_device_step(engine: &OpenConnect, library: Library, stand_in: 
 }
 
 /// Tests that make a device, which run only where the workflow allows it:
-/// as administrator on Windows, as root on Linux.
-#[cfg(any(windows, target_os = "linux"))]
+/// as administrator on Windows, as root on Linux and macOS.
 mod device {
     use super::*;
     use ubc_vpn_engine::CloseMode;
+
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn if_nametoindex(name: *const std::ffi::c_char) -> u32;
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        fn getsockopt(fd: i32, level: i32, name: i32, value: *mut u8, len: *mut u32) -> i32;
+    }
 
     #[cfg(windows)]
     #[link(name = "iphlpapi")]
@@ -479,6 +494,70 @@ mod device {
     #[cfg(target_os = "linux")]
     fn exists(name: &str) -> bool {
         Path::new("/sys/class/net").join(name).exists()
+    }
+
+    /// Whether the system has an interface of this name.
+    #[cfg(target_os = "macos")]
+    fn exists(name: &str) -> bool {
+        let name = std::ffi::CString::new(name).expect("no NUL");
+        // SAFETY: `name` is a NUL-terminated string that outlives the call.
+        unsafe { if_nametoindex(name.as_ptr()) != 0 }
+    }
+
+    /// The `utun` devices the system has now. The system makes some of its
+    /// own, so the engine's are told apart by [`BEFORE`].
+    #[cfg(target_os = "macos")]
+    fn utuns() -> Vec<String> {
+        (0..256)
+            .map(|unit| format!("utun{unit}"))
+            .filter(|name| exists(name))
+            .collect()
+    }
+
+    /// The `utun` devices there were before the test that asks [`made`] made
+    /// any, which it notes once it holds the engine's guard.
+    #[cfg(target_os = "macos")]
+    static BEFORE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// Whether any device of the engine's exists now: any `utun` device
+    /// that was not in [`BEFORE`].
+    #[cfg(target_os = "macos")]
+    fn made() -> bool {
+        let before = BEFORE.lock().unwrap().clone();
+        utuns().iter().any(|name| !before.contains(name))
+    }
+
+    /// Whether a name is one the engine gives a device: `utun` and a number.
+    #[cfg(target_os = "macos")]
+    fn ours(name: &str) -> bool {
+        name.strip_prefix("utun")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// The descriptor of this process that is the control socket of the
+    /// `utun` device `name`: the one the kernel names `name` when asked.
+    #[cfg(target_os = "macos")]
+    fn utun_descriptor(name: &str) -> Option<i32> {
+        const SYSPROTO_CONTROL: i32 = 2;
+        const UTUN_OPT_IFNAME: i32 = 2;
+        (0..4096).find(|fd| {
+            let mut field = [0u8; 16];
+            let mut len = field.len() as u32;
+            // SAFETY: `field` has room for `len` bytes, which is all the
+            // kernel writes, during the call only. A descriptor that is not
+            // open, or not a control socket, gives an error.
+            let asked = unsafe {
+                getsockopt(
+                    *fd,
+                    SYSPROTO_CONTROL,
+                    UTUN_OPT_IFNAME,
+                    field.as_mut_ptr(),
+                    &mut len,
+                )
+            };
+            let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+            asked == 0 && &field[..end] == name.as_bytes()
+        })
     }
 
     /// Whether the engine's device exists now. On Windows the adapter is
@@ -638,7 +717,7 @@ mod device {
         assert_eq!(assigned.mtu, 1300);
         assert_eq!(assigned.split_includes.len(), 2);
         assert!(!assigned.interface.is_empty());
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         assert!(ours(&assigned.interface), "{:?}", assigned.interface);
         assert_eq!(connects(&stand_in), (1, 1));
         // The tunnel runs by itself, and nothing ends it.
@@ -764,6 +843,10 @@ mod device {
             return;
         }
         let (engine, library, _guard) = engine();
+        #[cfg(target_os = "macos")]
+        {
+            *BEFORE.lock().unwrap() = utuns();
+        }
         let Some(stand_in) = StandIn::start("accept") else {
             return;
         };
@@ -867,5 +950,120 @@ mod device {
         }
         end(opened, Some(CloseMode::LogOff));
         println!("RAN: tunnel gives a child no device descriptor");
+    }
+
+    // Security rule: a program the process starts while a tunnel runs holds
+    // no descriptor of the `utun` device, which would keep the device after
+    // the tunnel ended. A socket made inheritable on purpose shows the
+    // child's listing works.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_child_process_holds_no_descriptor_of_the_device() {
+        use std::os::fd::AsRawFd;
+        const F_GETFD: i32 = 1;
+        const F_SETFD: i32 = 2;
+        const FD_CLOEXEC: i32 = 1;
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("accept") else {
+            return;
+        };
+        let opened = opened(engine, &local(library, &stand_in));
+        let name = opened
+            .result
+            .as_ref()
+            .expect("open")
+            .assigned()
+            .interface
+            .clone();
+        let device = utun_descriptor(&name).expect("this process holds the device");
+        let (control, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        // SAFETY: `control` is open, and these take an `int` or nothing.
+        unsafe {
+            let flags = fcntl(control.as_raw_fd(), F_GETFD);
+            assert!(flags >= 0);
+            assert!(fcntl(control.as_raw_fd(), F_SETFD, flags & !FD_CLOEXEC) >= 0);
+        }
+        // The shell lists the numbers of the sockets it was given. The
+        // descriptor that read the folder is a folder, not a socket.
+        let listed = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                r#"for fd in /dev/fd/*; do [ -S "$fd" ] && echo "${fd##*/}"; done; :"#,
+            ])
+            .output()
+            .expect("the shell runs");
+        assert!(listed.status.success(), "{listed:?}");
+        let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+        let sockets: Vec<i32> = listed
+            .lines()
+            .map(|n| n.parse().expect("a number"))
+            .collect();
+        assert!(sockets.contains(&control.as_raw_fd()), "{listed}");
+        assert!(!sockets.contains(&device), "{device}: {listed}");
+        end(opened, Some(CloseMode::LogOff));
+        println!("RAN: tunnel gives a child no device descriptor");
+    }
+
+    // Packets really pass through the `utun` device both ways, which shows
+    // its 4-byte address-family header is handled: the library strips it
+    // from what it reads and adds it to what it writes. The gateway reflects
+    // each UDP packet it gets back to its sender, and logs what it got: an
+    // IPv4 packet with no header before it. The device is given the
+    // tunnel's address here, as the service would; the engine sets none.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn traffic_passes_through_the_device_both_ways() {
+        use std::net::{SocketAddr, UdpSocket};
+        const PROBE: &[u8] = b"UBC-VPN-TEST-PROBE";
+        if !allowed() {
+            return;
+        }
+        let (engine, library, _guard) = engine();
+        let Some(stand_in) = StandIn::start("echo") else {
+            return;
+        };
+        let opened = opened(engine, &local(library, &stand_in));
+        let name = opened
+            .result
+            .as_ref()
+            .expect("open")
+            .assigned()
+            .interface
+            .clone();
+        // The tunnel's address, and the gateway's end of the link.
+        let configured = std::process::Command::new("/sbin/ifconfig")
+            .args([name.as_str(), "inet", "10.11.12.13", "10.11.12.1", "up"])
+            .status()
+            .expect("ifconfig runs");
+        assert!(configured.success(), "{configured:?}");
+        let socket = UdpSocket::bind("10.11.12.13:0").expect("the tunnel's address");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let far: SocketAddr = "10.11.12.1:9".parse().unwrap();
+        let mut answer = None;
+        for _ in 0..10 {
+            socket.send_to(PROBE, far).expect("sent into the device");
+            let mut buffer = [0; 256];
+            if let Ok((len, from)) = socket.recv_from(&mut buffer) {
+                answer = Some((buffer[..len].to_vec(), from));
+                break;
+            }
+        }
+        let lines = opened.lines.lock().unwrap().join("\n");
+        let requests = stand_in.requests();
+        let (data, from) = answer.unwrap_or_else(|| panic!("no answer: {requests:?}\n{lines}"));
+        assert_eq!((data.as_slice(), from), (PROBE, far));
+        let probe = String::from_utf8_lossy(PROBE);
+        let seen = format!(r#""body": "ipv4 udp {probe}""#);
+        assert!(
+            requests.iter().any(|line| line.contains(&seen)),
+            "{requests:?}"
+        );
+        end(opened, Some(CloseMode::LogOff));
+        println!("RAN: tunnel passes traffic through the device");
     }
 }

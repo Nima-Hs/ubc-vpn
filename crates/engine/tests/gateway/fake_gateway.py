@@ -58,6 +58,11 @@ the first tunnel a second after it opens:
   end       sends a disconnect packet, as a gateway that ends the session
   expire    closes the connection, and refuses every later CONNECT with 401
   drop      closes the connection, and every later connection at once
+In the scenario "echo" the tunnel passes traffic, as far as a test needs:
+each data packet the client sends is logged, as "ipv4 udp" and the UDP
+payload when it is a bare IPv4 UDP packet and by its first bytes otherwise,
+and a UDP packet is sent back to where it came from, its addresses and ports
+swapped. Every other scenario passes no traffic.
 
 It stops when its standard input closes, which is when the test that started
 it ends, however that test ends. Started by hand with no input, it stops at
@@ -79,10 +84,26 @@ COOKIE = "webvpn=FAKE-GATEWAY-COOKIE-0123456789abcdef=="
 SCENARIOS = (
     "accept", "reject", "code", "group", "hang", "redirect", "action", "csd", "fields",
     "codeagain", "otherhost", "otherport", "sso", "csdstub", "ended", "end", "expire", "drop",
-    "emptyreply", "usernameagain", "emptyprobe", "emptyprobefail",
+    "emptyreply", "usernameagain", "emptyprobe", "emptyprobefail", "echo",
 )
 # The CSTP packet types the gateway reads or sends.
+CSTP_DATA = 0
 CSTP_DISCONNECT = 5
+
+
+def reflect(packet):
+    """`packet` with its IPv4 addresses and UDP ports swapped, and its UDP
+    payload, if it is an IPv4 UDP packet with no header before it; None
+    otherwise. Swapping leaves both checksums as they were."""
+    if len(packet) < 28 or packet[0] >> 4 != 4 or packet[9] != 17:
+        return None
+    ihl = (packet[0] & 0x0F) * 4
+    if ihl < 20 or len(packet) < ihl + 8:
+        return None
+    out = bytearray(packet)
+    out[12:16], out[16:20] = packet[16:20], packet[12:16]
+    out[ihl:ihl + 2], out[ihl + 2:ihl + 4] = packet[ihl + 2:ihl + 4], packet[ihl:ihl + 2]
+    return bytes(out), packet[ihl + 8:]
 
 
 def cstp(kind, payload):
@@ -339,7 +360,8 @@ class Gateway(http.server.BaseHTTPRequestHandler):
 
     def serve_tunnel(self, ending):
         """Reads the client's CSTP packets until it closes the connection,
-        and ends the tunnel after a second if `ending`. Passes no traffic."""
+        and ends the tunnel after a second if `ending`. Passes traffic only
+        in the scenario "echo"."""
         started, pending = time.monotonic(), b""
         self.request.settimeout(0.2)
         while True:
@@ -372,8 +394,21 @@ class Gateway(http.server.BaseHTTPRequestHandler):
                 break
             if pending[6] == CSTP_DISCONNECT:
                 self.record(b"disconnect", method="CSTP")
+            elif pending[6] == CSTP_DATA and self.scenario == "echo":
+                self.echo(pending[8:end])
             pending = pending[end:]
         return pending
+
+    def echo(self, packet):
+        """Logs a data packet, and sends a UDP one back reflected."""
+        reflected = reflect(packet)
+        if reflected is None:
+            self.record(b"other " + packet[:4].hex().encode(), method="DATA")
+            return
+        reflected, payload = reflected
+        self.record(b"ipv4 udp " + payload, method="DATA")
+        self.wfile.write(cstp(CSTP_DATA, reflected))
+        self.wfile.flush()
 
 
 def listen_udp():
