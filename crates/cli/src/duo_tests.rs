@@ -3,14 +3,18 @@
 
 use ubc_vpn_core::duo::DuoMethod;
 use ubc_vpn_core::login::PromptKind;
-use ubc_vpn_core::redact::Secret;
+use ubc_vpn_core::policy::Policy;
+use ubc_vpn_core::redact::{Secret, redact_line};
 use ubc_vpn_engine::fake::{FakeEngine, Script};
+use ubc_vpn_engine::{
+    Cancel, Gateway, LogLevel, LogSink, LoginEngine, LoginError, Prompts, Session,
+};
 
 use crate::FAILED;
 use crate::connect::{BAD_CODE, Ended, LOGIN_REFUSED, PASSCODE, TEXTED};
 use crate::interrupt::Progress;
 use crate::test_support::{
-    CODE, PASSWORD, ROUTES, Scene, Typist, gateway_script, saved, settings_text,
+    CODE, PASSWORD, ROUTES, Scene, Typist, brief, gateway_script, saved, settings_text,
 };
 
 /// A passcode, and a code from a text message. Neither holds a word the
@@ -48,6 +52,69 @@ fn sent_usernames(scene: &Scene) -> Vec<String> {
         .iter()
         .filter(|(kind, _)| *kind == PromptKind::Username);
     names.map(|(_, name)| name.expose().to_string()).collect()
+}
+
+/// A careless library: once a login has worked, it writes the code it was
+/// sent in forms the redaction cannot recognise, bare and escaped twice.
+/// Only the hiding of the code itself keeps those out of what is shown.
+#[derive(Clone)]
+struct Echoing {
+    inner: FakeEngine,
+    code: &'static str,
+}
+
+impl Echoing {
+    /// The lines it writes for `code`.
+    fn lines(code: &str) -> String {
+        format!("sent {code} as user%2540{code}")
+    }
+}
+
+impl LoginEngine for Echoing {
+    fn login(
+        &self,
+        gateway: &Gateway,
+        prompts: &mut Prompts<'_>,
+        cancel: &Cancel,
+        logs: &LogSink,
+    ) -> Result<Session, LoginError> {
+        let session = self.inner.login(gateway, prompts, cancel, logs)?;
+        logs.log(LogLevel::Error, &Self::lines(self.code));
+        Ok(session)
+    }
+}
+
+/// `connect` through `engine`, which logs in at the scene's gateway.
+fn connect_through(scene: &Scene, engine: Echoing, typist: &mut Typist) -> (u8, String, String) {
+    let platform = || Ok(scene.rig.fake.platform(&scene.rig.root));
+    let engines = |_: &Policy| Ok(Box::new(engine.clone()) as Box<dyn LoginEngine>);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let ended = crate::connect::connect(
+        &platform,
+        crate::connect::Which::default(),
+        &engines,
+        typist,
+        &Progress::default(),
+        brief(),
+        &mut out,
+        &mut err,
+    );
+    let text = |bytes| String::from_utf8(bytes).unwrap();
+    match ended {
+        Ended::Status(code) => (code, text(out), text(err)),
+        other => panic!("the connect was stopped: {other:?}"),
+    }
+}
+
+// The echo is one the redaction lets through, so these tests fail unless
+// each code is hidden on its own.
+#[test]
+fn the_echo_is_not_one_the_redaction_catches() {
+    for code in [PASSCODE_TYPED, TEXTED_CODE] {
+        let lines = Echoing::lines(code);
+        assert_eq!(redact_line(&lines), lines);
+        assert!(lines.contains(code));
+    }
 }
 
 fn connect(scene: &Scene, duo: Option<DuoMethod>, typist: &mut Typist) -> (u8, String, String) {
@@ -125,9 +192,13 @@ fn a_passcode_is_asked_for_sent_and_never_kept_or_shown() {
     let mut script = gateway(&wanted);
     script.leaks = true;
     scene.gateway = FakeEngine::new(script);
+    let engine = Echoing {
+        inner: scene.gateway.clone(),
+        code: PASSCODE_TYPED,
+    };
     // Not a passcode, then one with the space Duo Mobile shows.
     let mut typist = Typist::typing(&[Some("12345"), Some("135 790"), Some(PASSWORD), Some(CODE)]);
-    let (code, out, err) = connect(&scene, None, &mut typist);
+    let (code, out, err) = connect_through(&scene, engine, &mut typist);
     assert_eq!(code, 0, "{err}");
     let asked = [
         PromptKind::Code,
@@ -146,8 +217,16 @@ fn a_passcode_is_asked_for_sent_and_never_kept_or_shown() {
             assert!(!shown.contains(secret), "{secret} in {shown}");
         }
     }
-    // The echoed answers did arrive, blanked.
+    // The echoed answers and codes did arrive, blanked.
     assert!(err.contains("ubc-vpn: > [redacted]"), "{err}");
+    assert!(
+        err.contains("sent [redacted] as user%2540[redacted]"),
+        "{err}"
+    );
+    assert!(
+        logs.contains("sent [redacted] as user%2540[redacted]"),
+        "{logs}"
+    );
 }
 
 #[test]
@@ -182,8 +261,12 @@ fn the_code_questions_say_what_to_enter() {
 fn texted_codes_are_asked_for_after_the_refusal_and_sent() {
     let wanted = format!("alice@{TEXTED_CODE}");
     let scene = scene("alice@sms", &wanted);
+    let engine = Echoing {
+        inner: scene.gateway.clone(),
+        code: TEXTED_CODE,
+    };
     let mut typist = Typist::typing(&[Some(PASSWORD), Some(CODE), Some(TEXTED_CODE), Some(CODE)]);
-    let (code, out, err) = connect(&scene, None, &mut typist);
+    let (code, out, err) = connect_through(&scene, engine, &mut typist);
     assert_eq!(code, 0, "{err}");
     assert_eq!(sent_usernames(&scene), ["alice@sms", wanted.as_str()]);
     // The password was typed once, and sent again with the code.
@@ -195,9 +278,15 @@ fn texted_codes_are_asked_for_after_the_refusal_and_sent() {
     ];
     assert_eq!(typist.asked, asked);
     let logs = scene.service.as_ref().unwrap().login_lines().join("\n");
-    for shown in [&out, &err, &logs, &settings_text(&scene)] {
+    let listed = scene.rig.run(&["logs", "--json"]).1;
+    for shown in [&out, &err, &logs, &listed, &settings_text(&scene)] {
         assert!(!shown.contains(TEXTED_CODE), "{shown}");
     }
+    // The echo did arrive, blanked.
+    assert!(
+        logs.contains("sent [redacted] as user%2540[redacted]"),
+        "{logs}"
+    );
 }
 
 // Only once: a second refusal is a refused login, as any other.

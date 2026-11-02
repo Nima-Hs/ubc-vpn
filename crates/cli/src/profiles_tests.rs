@@ -600,3 +600,29 @@ fn every_command_line_reaches_its_command() {
         assert_eq!(Command::parse(&more), None, "{args:?}");
     }
 }
+
+// Security rule: a Duo passcode stored in a username by an older version
+// leaves the file at the next `profiles list`, which the app runs at every
+// start, though listing changes nothing else. The code is made up.
+#[test]
+fn listing_removes_a_stored_passcode_from_the_file() {
+    let machine = Machine::new();
+    machine.write_settings(r#"{"username":"alice@246802","save_password":false}"#);
+    let view = machine.list();
+    let first = &view.profiles[0].profile;
+    assert_eq!(first.username.as_deref(), Some("alice"));
+    assert_eq!(
+        first.duo_method,
+        Some(ubc_vpn_core::duo::DuoMethod::Passcode)
+    );
+    let text = std::fs::read_to_string(machine.settings_file()).unwrap();
+    assert!(!text.contains("246802"), "{text}");
+    assert!(text.contains(r#""duo_method": "passcode""#), "{text}");
+    // A file with nothing to drop is not written by a listing.
+    let before = std::fs::read_to_string(machine.settings_file()).unwrap();
+    machine.list();
+    assert_eq!(
+        std::fs::read_to_string(machine.settings_file()).unwrap(),
+        before
+    );
+}

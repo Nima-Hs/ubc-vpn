@@ -109,34 +109,46 @@ pub const MASKED_DIGITS: usize = 6;
 /// secret as the password. This masks it on a line that carries no marker,
 /// such as a gateway's "Login failed for user@123456". It also masks some
 /// digits that are no passcode, which is cheap.
+///
+/// One pass, in time linear in the length of the line: the text comes from
+/// a gateway, so its length is not ours to choose. It works on bytes and
+/// cuts only next to ASCII ones, so a character is never split.
 pub fn mask_codes(line: &str) -> String {
+    let bytes = line.as_bytes();
     let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    loop {
-        let sign = rest.find('@').into_iter().chain(find_ascii_ci(rest, "%40"));
-        let Some(at) = sign.min() else { break };
-        let width = if rest[at..].starts_with('@') { 1 } else { 3 };
-        let after = &rest[at + width..];
-        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
-        out.push_str(&rest[..at + width]);
-        rest = match digits >= MASKED_DIGITS {
-            true => {
-                out.push_str(REDACTED);
-                &after[digits..]
+    // What is copied to `out` already, and where the scan is.
+    let (mut copied, mut at) = (0, 0);
+    while at < bytes.len() {
+        let width = match bytes[at] {
+            b'@' => 1,
+            b'%' if bytes
+                .get(at + 1..at + 3)
+                .is_some_and(|hex| hex.eq_ignore_ascii_case(b"40")) =>
+            {
+                3
             }
-            false => after,
+            _ => {
+                at += 1;
+                continue;
+            }
         };
+        let start = at + width;
+        let digits = bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits >= MASKED_DIGITS {
+            out.push_str(&line[copied..start]);
+            out.push_str(REDACTED);
+            copied = start + digits;
+            at = copied;
+        } else {
+            // A run too short is not looked at again from its sign.
+            at = start + digits;
+        }
     }
-    out.push_str(rest);
+    out.push_str(&line[copied..]);
     out
-}
-
-/// Where `needle`, which is ASCII, first starts in `text`, without regard
-/// to the case of ASCII letters.
-fn find_ascii_ci(text: &str, needle: &str) -> Option<usize> {
-    let (text, needle) = (text.as_bytes(), needle.as_bytes());
-    (0..=text.len().checked_sub(needle.len())?)
-        .find(|&at| text[at..at + needle.len()].eq_ignore_ascii_case(needle))
 }
 
 #[cfg(test)]
@@ -285,6 +297,28 @@ mod tests {
         }
         // Text that is not ASCII is passed over whole.
         assert_eq!(mask_codes("é@ü@123456"), format!("é@ü@{REDACTED}"));
+        // A sign at the very end, or half of `%40`, is left as it is.
+        for line in ["user@", "user%", "user%4", "%%40", "@@@"] {
+            assert_eq!(mask_codes(line), line, "{line:?}");
+        }
+        assert_eq!(mask_codes("%%40123456"), format!("%%40{REDACTED}"));
+        assert_eq!(mask_codes("@12345@123456"), format!("@12345@{REDACTED}"));
+    }
+
+    // A gateway chooses how long its lines are: masking a long line full of
+    // signs takes one pass, not one pass per sign. A scan per sign of these
+    // 256 KiB lines took minutes; one pass takes milliseconds.
+    #[test]
+    fn masking_takes_time_in_proportion_to_the_line() {
+        let started = std::time::Instant::now();
+        for unit in ["@", "%40", "@1", "%4"] {
+            let line = unit.repeat((1 << 18) / unit.len());
+            assert_eq!(mask_codes(&line), line);
+        }
+        let line = "@123456".repeat(1 << 15);
+        assert_eq!(mask_codes(&line).matches(REDACTED).count(), 1 << 15);
+        let spent = started.elapsed();
+        assert!(spent < std::time::Duration::from_secs(10), "{spent:?}");
     }
 
     #[test]
