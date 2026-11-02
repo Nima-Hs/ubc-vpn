@@ -57,6 +57,13 @@ fn status_says_why_it_cannot_reach_the_service_and_what_to_do() {
     assert!(err.contains("restart the computer"), "{err}");
     #[cfg(windows)]
     assert!(err.contains("sc start ubc-vpn"), "{err}");
+    #[cfg(target_os = "macos")]
+    assert!(
+        err.contains("`sudo launchctl kickstart -k system/io.github.nima-hs.ubc-vpn`"),
+        "{err}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(err.contains("`sudo systemctl start ubc-vpn`"), "{err}");
 
     // Running, but the channel is kept to another user.
     let rig = Rig::new();

@@ -40,6 +40,12 @@ const MISMATCH: u8 = 4;
 const NOT_OWNER: u8 = 5;
 const NOT_THE_SERVICE: u8 = 6;
 
+/// The help text. It is the same on every system
+/// (`.claude/rules/consistency.md`), and CI compares the three with
+/// `.github/help/compare.sh`. A line meant for one system only starts, after
+/// its indent, with that system's name and a colon: `Windows:`, `macOS:` or
+/// `Linux:`. The comparison leaves such lines out, and fails on one in
+/// another system's help text.
 const HELP: &str = "\
 Usage: ubc-vpn <command>
 
@@ -292,14 +298,21 @@ impl Real {
 /// The folder this program was installed in, where the VPN library and the
 /// libraries it needs are. It never comes from the environment, a setting or
 /// an argument.
-#[cfg(feature = "real-engine")]
+///
+/// On Unix it is the folder of the program's real file, with every link
+/// resolved. On macOS `current_exe` gives the path the program was started
+/// by, so a link to it, such as `/usr/local/bin/ubc-vpn`, would otherwise
+/// make the link's folder the one the library is loaded from.
+#[cfg(any(feature = "real-engine", all(test, unix)))]
 fn program_dir() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|_| LIBRARY_FAILED.to_string())?;
+    #[cfg(unix)]
+    let exe = std::fs::canonicalize(&exe).map_err(|_| LIBRARY_FAILED.to_string())?;
     let dir = exe.parent().ok_or(LIBRARY_FAILED)?;
     Ok(dir.to_path_buf())
 }
 
-#[cfg(feature = "real-engine")]
+#[cfg(any(feature = "real-engine", all(test, unix)))]
 const LIBRARY_FAILED: &str = "The VPN library could not be loaded.";
 
 #[cfg(feature = "real-engine")]
@@ -613,15 +626,21 @@ fn listed(joined: &str) -> String {
     }
 }
 
-/// What to do when the service is installed but stopped. The Windows
-/// service is registered as `ubc-vpn` ("UBC VPN Service") by the service's
-/// install command.
+/// What to do when the service is installed but stopped: the same sentence
+/// on every system, naming that system's own command to start it
+/// (`.claude/rules/consistency.md`). The service's install command
+/// registers it as the Windows service `ubc-vpn` ("UBC VPN Service"), the
+/// launchd daemon `io.github.nima-hs.ubc-vpn`, or the systemd unit
+/// `ubc-vpn.service`.
 #[cfg(windows)]
 const START_THE_SERVICE: &str = "Start it from an administrator's command prompt with \
      `sc start ubc-vpn`, or restart the computer.";
-#[cfg(not(windows))]
-const START_THE_SERVICE: &str = "Start the UBC VPN service as an administrator, or \
-     restart the computer.";
+#[cfg(target_os = "macos")]
+const START_THE_SERVICE: &str = "Start it from a terminal with \
+     `sudo launchctl kickstart -k system/io.github.nima-hs.ubc-vpn`, or restart the computer.";
+#[cfg(not(any(windows, target_os = "macos")))]
+const START_THE_SERVICE: &str = "Start it from a terminal with \
+     `sudo systemctl start ubc-vpn`, or restart the computer.";
 
 /// The exit code and the sentence for each way of failing.
 fn explain(error: &ClientError) -> (u8, String) {
@@ -664,6 +683,10 @@ fn explain(error: &ClientError) -> (u8, String) {
         ClientError::Lost(why) => (FAILED, format!("Lost contact with the service: {why}.")),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "program_dir_tests.rs"]
+mod program_dir_tests;
 
 #[cfg(test)]
 #[path = "status_tests.rs"]

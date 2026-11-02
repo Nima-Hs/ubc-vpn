@@ -3,11 +3,14 @@
 //! Unix.
 //!
 //! `docs/architecture.md` keeps OS-specific code in the platform crate,
-//! `native/` and `packaging/`. This file is the command-line client's
-//! exception, kept here on purpose and in this file only, so that it stays
+//! `native/` and `packaging/`. This file is one of the command-line client's
+//! exceptions, kept here on purpose and in this file only, so that it stays
 //! in one place: it is the standard library's own Unix permission bits and
 //! open options, with no unsafe code, and a platform operation for it would
-//! be more code than these lines.
+//! be more code than these lines. The client's other exceptions are in
+//! `main.rs`: each system's command to start the service
+//! (`START_THE_SERVICE`), and resolving links to the program on Unix
+//! (`program_dir`).
 
 use std::fs::{self, File, OpenOptions};
 use std::io;

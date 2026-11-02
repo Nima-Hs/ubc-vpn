@@ -1,0 +1,13 @@
+# How the app is packaged on macOS: everything in electron-builder.yml, which
+# this extends, and macOS's own settings below. The rules it follows are in
+# docs/architecture.md, "What the installers must do".
+#
+# Not built yet: the target is a placeholder until the .pkg installer is
+# added, and `pnpm package:mac` and `pnpm check:package:mac` say so and fail.
+
+extends: electron-builder.yml
+
+mac:
+  target:
+    - target: dir
+      arch: [arm64]

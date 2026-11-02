@@ -26,7 +26,11 @@
     "check:licenses": "node scripts/check-licenses.mjs",
     "icons": "node scripts/make-icons.mjs",
     "package:win": "node node_modules/electron/install.js && pnpm build && pnpm check:build && electron-builder --win --publish never",
-    "check:package": "node scripts/check-package.mjs dist/win-unpacked dist"
+    "package:mac": "node scripts/not-built-yet.mjs macOS",
+    "package:linux": "node scripts/not-built-yet.mjs Linux",
+    "check:package:win": "node scripts/check-package.mjs win dist/win-unpacked dist",
+    "check:package:mac": "node scripts/check-package.mjs mac dist/mac-arm64 dist",
+    "check:package:linux": "node scripts/check-package.mjs linux dist/linux-unpacked dist"
   },
   "dependencies": {
     "@fontsource-variable/geist-mono": "5.3.0",
