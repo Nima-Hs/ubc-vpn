@@ -187,7 +187,7 @@ listing=$(sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$work/empty/" i
 uris=$(cut -d "'" -f 2 <<<"$listing")
 [ -n "$uris" ] || all_in_place "$@" || fail "apt would download nothing, yet not every package is installed"
 echo "Packages to download:"
-echo "${uris:-(none)}"
+echo "${listing:-(none)}"
 stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
 [ -z "$stray" ] || fail "these packages are not from the snapshot: $stray"
 
@@ -208,7 +208,7 @@ if [ -n "$listing" ]; then
         case "$hash" in
             SHA512:*) sum=sha512sum ;;
             SHA256:*) sum=sha256sum ;;
-            *) fail "the lists give no SHA-256 or SHA-512 for $name" ;;
+            *) fail "the lists give no SHA-256 or SHA-512 for $name: $hash" ;;
         esac
         file="$debs/$name"
         [ -f "$file" ] || fail "$name was not downloaded"
