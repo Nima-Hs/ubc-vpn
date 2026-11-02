@@ -110,13 +110,25 @@ unsafe impl Send for Adapter<'_> {}
 // SAFETY: as above.
 unsafe impl Sync for Adapter<'_> {}
 
+impl Adapter<'_> {
+    /// Ends the session, so that Windows sees the adapter disconnected, and
+    /// keeps the adapter, with its routes, until it is dropped.
+    pub(super) fn end_session(&mut self) {
+        if self.session.is_null() {
+            return;
+        }
+        // SAFETY: the session is open and owned by this value; it is ended
+        // once, here, and never used again.
+        unsafe { (self.wintun.end_session)(self.session) };
+        self.session = std::ptr::null_mut();
+    }
+}
+
 impl Drop for Adapter<'_> {
     fn drop(&mut self) {
-        // SAFETY: the session and the adapter are open, owned by this value,
-        // and ended and closed once, the session first.
-        unsafe {
-            (self.wintun.end_session)(self.session);
-            (self.wintun.close)(self.handle);
-        }
+        self.end_session();
+        // SAFETY: the adapter is open, owned by this value, and closed once,
+        // after its session has ended.
+        unsafe { (self.wintun.close)(self.handle) };
     }
 }

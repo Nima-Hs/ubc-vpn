@@ -198,7 +198,7 @@ pub(super) fn addresses_of(family: u16) -> Result<Vec<MIB_UNICASTIPADDRESS_ROW>>
 }
 
 /// The LUIDs of the interfaces that are up now.
-fn up_interfaces() -> Result<HashSet<u64>> {
+pub(super) fn up_interfaces() -> Result<HashSet<u64>> {
     let mut table: *mut MIB_IF_TABLE2 = null_mut();
     // SAFETY: the out pointer is valid; the table is freed by `Table`.
     checked(unsafe { GetIfTable2(&mut table) })?;
@@ -339,8 +339,23 @@ fn system_through(family: u16, dest: IpAddr, interface: &str) -> Verified {
         Err(Error::NotFound) => return Verified::No,
         Err(_) => return Verified::Unknown,
     };
-    let routes: Vec<TableRoute> = table.iter().filter_map(table_route).collect();
-    table_through(&routes, &interfaces, dest, wanted)
+    rows_through(&table, &interfaces, dest, wanted)
+}
+
+/// [`table_through`] over rows of the system's table. `Unknown` when any
+/// row cannot be read: left out, a more specific route that is not
+/// `wanted`'s could turn a `No` into a wrong `Yes`.
+fn rows_through(
+    rows: &[MIB_IPFORWARD_ROW2],
+    interfaces: &HashMap<u64, u32>,
+    dest: IpAddr,
+    wanted: u64,
+) -> Verified {
+    let routes: Option<Vec<TableRoute>> = rows.iter().map(table_route).collect();
+    let Some(routes) = routes else {
+        return Verified::Unknown;
+    };
+    table_through(&routes, interfaces, dest, wanted)
 }
 
 /// An IPv4 address of the system's table, with what decides whether it is
@@ -395,7 +410,7 @@ pub(super) fn row_dest(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Net> {
 }
 
 /// The destination of a system route, of either family.
-fn prefix_of(row: &MIB_IPFORWARD_ROW2) -> Option<Prefix> {
+pub(super) fn prefix_of(row: &MIB_IPFORWARD_ROW2) -> Option<Prefix> {
     let len = row.DestinationPrefix.PrefixLength;
     match ip_of(&row.DestinationPrefix.Prefix)? {
         IpAddr::V4(addr) => Ipv4Net::new(addr, len).ok().map(Prefix::V4),
@@ -1265,6 +1280,44 @@ mod tests {
         row.DestinationPrefix.PrefixLength = 1;
         row.Metric = 7;
         assert_eq!(table_route(&row), Some(route("8000::/1", WIFI, 7)));
+    }
+
+    /// A system row for `addr/len` through `luid`, host bits and all.
+    fn system_row(addr: Ipv4Addr, len: u8, luid: u64) -> MIB_IPFORWARD_ROW2 {
+        // SAFETY: plain data for which all zeroes is valid.
+        let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+        row.DestinationPrefix.Prefix = v4(addr);
+        row.DestinationPrefix.PrefixLength = len;
+        row.InterfaceLuid = net_luid(luid);
+        row
+    }
+
+    // A row of the system's table that this code cannot read makes the
+    // answer `Unknown` for every interface. Left out, the unreadable route
+    // on the tunnel would leave Wi-Fi's default route as the only match: a
+    // wrong `Yes` for Wi-Fi.
+    #[test]
+    fn an_unreadable_route_row_makes_the_answer_unknown() {
+        let interfaces = HashMap::from([(WIFI, 35), (TUNNEL_LUID, 5)]);
+        let dest = addr("203.0.113.9");
+        let through =
+            |rows: &[MIB_IPFORWARD_ROW2], luid| rows_through(rows, &interfaces, dest, luid);
+        let default = system_row(Ipv4Addr::UNSPECIFIED, 0, WIFI);
+        let tunnel = system_row(Ipv4Addr::new(203, 0, 113, 0), 24, TUNNEL_LUID);
+        assert_eq!(through(&[default, tunnel], TUNNEL_LUID), Verified::Yes);
+        assert_eq!(through(&[default, tunnel], WIFI), Verified::No);
+        // Host bits set: not a prefix this code reads.
+        let host_bits = system_row(Ipv4Addr::new(203, 0, 113, 1), 24, TUNNEL_LUID);
+        assert_eq!(table_route(&host_bits), None);
+        assert_eq!(through(&[default, host_bits], WIFI), Verified::Unknown);
+        assert_eq!(
+            through(&[default, host_bits], TUNNEL_LUID),
+            Verified::Unknown
+        );
+        // A family this code does not know.
+        let mut no_family = tunnel;
+        no_family.DestinationPrefix.Prefix.si_family = 0;
+        assert_eq!(through(&[default, no_family], WIFI), Verified::Unknown);
     }
 
     // An interface is read with the interface metric Windows has in
