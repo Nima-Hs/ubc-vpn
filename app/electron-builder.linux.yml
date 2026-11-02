@@ -1,0 +1,14 @@
+# How the app is packaged on Linux: everything in electron-builder.yml, which
+# this extends, and Linux's own settings below. The rules it follows are in
+# docs/architecture.md, "What the installers must do".
+#
+# Not built yet: the target is a placeholder until the .deb and .rpm
+# packages are added, and `pnpm package:linux` and `pnpm check:package:linux`
+# say so and fail.
+
+extends: electron-builder.yml
+
+linux:
+  target:
+    - target: dir
+      arch: [x64]

@@ -1,6 +1,8 @@
 # How the app is packaged: `pnpm package:win` builds the Windows setup program
 # into dist/. The rules it follows are in docs/architecture.md, "What the
-# installers must do". macOS and Linux are added later.
+# installers must do". This file holds the settings every system shares, and
+# Windows' own. electron-builder.mac.yml and electron-builder.linux.yml extend
+# it with macOS's and Linux's own; each starts with everything here.
 
 appId: io.github.nima-hs.ubc-vpn
 productName: UBC VPN

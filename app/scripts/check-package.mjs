@@ -1,79 +1,26 @@
-// Checks a packaged Windows app: the folder electron-builder made
-// (dist/win-unpacked) or the folder it was installed to.
+// Checks a packaged app: the folder electron-builder made (dist/win-unpacked
+// on Windows) or the folder it was installed to.
 //
-//   node scripts/check-package.mjs <app folder> [<electron-builder output folder>]
+//   node scripts/check-package.mjs <win|mac|linux> <app folder> [<electron-builder output folder>]
 //
+// What each system's package must hold is in scripts/package-files/<system>.mjs.
 // It fails unless:
-// - every Electron fuse is in the state written below, and the program has no
-//   fuse this script does not know (a newer Electron may add one, and it must
-//   be reviewed before it ships);
+// - every Electron fuse is in the state written there, and the program has
+//   no fuse that file does not know (a newer Electron may add one, and it
+//   must be reviewed before it ships);
 // - the app's code is in the archive, and the licence texts are beside it;
 // - nothing an updater would read is in the app or in the output folder.
 //
-// The states are written out here, not read from electron-builder.yml, so a
-// change to that file cannot also change what this script accepts. The
-// reasons for them are in docs/architecture.md, "What the installers must do".
+// The states are written out in those files, not read from
+// electron-builder.yml, so a change to that file cannot also change what
+// this script accepts. The reasons for them are in docs/architecture.md,
+// "What the installers must do".
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FuseState, FuseV1Options, getCurrentFuseWire } from "@electron/fuses";
 
-const PROGRAM = "UBC VPN.exe";
-
-/** Each fuse, by name, and the state it must be in. */
-const EXPECTED_FUSES = {
-    RunAsNode: FuseState.DISABLE,
-    EnableCookieEncryption: FuseState.ENABLE,
-    EnableNodeOptionsEnvironmentVariable: FuseState.DISABLE,
-    EnableNodeCliInspectArguments: FuseState.DISABLE,
-    EnableEmbeddedAsarIntegrityValidation: FuseState.ENABLE,
-    OnlyLoadAppFromAsar: FuseState.ENABLE,
-    LoadBrowserProcessSpecificV8Snapshot: FuseState.DISABLE,
-    GrantFileProtocolExtraPrivileges: FuseState.DISABLE,
-    // Electron's default, left as it is: V8 uses guard pages, not explicit
-    // checks, to catch WebAssembly reading out of bounds. The app runs no
-    // WebAssembly. electron-builder 26.15.3 cannot set this fuse.
-    WasmTrapHandlers: FuseState.ENABLE,
-};
-
-/** Files that must be in the app folder, relative to it. */
-const REQUIRED_FILES = [
-    PROGRAM,
-    "LICENSE.electron.txt",
-    "LICENSES.chromium.html",
-    "resources/app.asar",
-    "resources/licenses/LICENSE-MIT",
-    "resources/licenses/LICENSE-APACHE",
-    "resources/licenses/fonts/geist-mono/LICENSE",
-    "resources/licenses/fonts/instrument-sans/LICENSE",
-    // packaging/windows/stage.sh: the programs, what they load, the
-    // licences that go with them, and the policy.
-    "resources/bin/ubc-vpn.exe",
-    "resources/bin/ubc-vpn-service.exe",
-    "resources/bin/libopenconnect-5.dll",
-    "resources/bin/wintun.dll",
-    "resources/bin/vcruntime140.dll",
-    "resources/licenses/SOURCES.txt",
-    "resources/licenses/wintun/LICENSE.txt",
-    "resources/licenses/microsoft/microsoft-vc-runtime-NOTICE.txt",
-    "resources/licenses/microsoft/microsoft-visual-studio-2026-community-license.txt",
-    "resources/licenses/microsoft/microsoft-visual-studio-2026-distributable-code.txt",
-    "resources/policy.json",
-    // The taskbar button's state icons, the tray's own pictures (src/main/tray/tray.ts).
-    ...[
-        "off",
-        "busy-0",
-        "busy-1",
-        "busy-2",
-        "on",
-        "busy-full-0",
-        "busy-full-1",
-        "busy-full-2",
-        "on-full",
-        "attention",
-        "problem",
-    ].map((name) => `resources/state-icons/${name}.ico`),
-];
+const SYSTEMS = ["win", "mac", "linux"];
 
 /** What an updater reads, anywhere in the app or the output folder. */
 const UPDATER_FILE = /^(latest.*\.yml|app-update\.yml|.*\.blockmap)$/;
@@ -86,23 +33,21 @@ function filesUnder(folder) {
         .map((entry) => join(entry.parentPath, entry.name));
 }
 
-async function check(appFolder, outputFolder) {
+async function check(expected, appFolder, outputFolder) {
     const problems = [];
 
-    for (const file of REQUIRED_FILES) {
+    for (const file of expected.REQUIRED_FILES) {
         if (!existsSync(join(appFolder, file))) {
             problems.push(`missing: ${file}`);
         }
     }
-    // Electron's own default app and version file, left by a copy of
-    // Electron's folder; scripts/after-pack.cjs removes them.
-    for (const leftover of ["resources/default_app.asar", "version"]) {
+    for (const leftover of expected.LEFTOVER_FILES) {
         if (existsSync(join(appFolder, leftover))) {
             problems.push(`left over from Electron: ${leftover}`);
         }
     }
-    if (existsSync(join(appFolder, "resources", "app"))) {
-        problems.push("the app's code is in resources/app, outside the archive");
+    if (existsSync(join(appFolder, expected.UNPACKED_APP))) {
+        problems.push(`the app's code is in ${expected.UNPACKED_APP}, outside the archive`);
     }
 
     for (const folder of [appFolder, outputFolder].filter(Boolean)) {
@@ -113,26 +58,26 @@ async function check(appFolder, outputFolder) {
         }
     }
 
-    const wire = await getCurrentFuseWire(join(appFolder, PROGRAM));
+    const wire = await getCurrentFuseWire(join(appFolder, expected.PROGRAM));
     const seen = new Set();
     for (const [key, state] of Object.entries(wire)) {
         if (key === "version" || key === "resetAdHocDarwinSignature") {
             continue;
         }
         const name = FuseV1Options[key];
-        const expected = EXPECTED_FUSES[name];
+        const want = expected.EXPECTED_FUSES[name];
         seen.add(name);
-        if (expected === undefined) {
+        if (want === undefined) {
             problems.push(
                 `fuse ${name ?? key} is not known to this script (it is ${stateName(state)})`,
             );
-        } else if (state !== expected) {
-            problems.push(`fuse ${name} is ${stateName(state)}, not ${stateName(expected)}`);
+        } else if (state !== want) {
+            problems.push(`fuse ${name} is ${stateName(state)}, not ${stateName(want)}`);
         } else {
             console.log(`fuse ${name}: ${stateName(state)}`);
         }
     }
-    for (const name of Object.keys(EXPECTED_FUSES)) {
+    for (const name of Object.keys(expected.EXPECTED_FUSES)) {
         if (!seen.has(name)) {
             problems.push(`fuse ${name} is not on the program's wire`);
         }
@@ -140,12 +85,19 @@ async function check(appFolder, outputFolder) {
     return problems;
 }
 
-const [appFolder, outputFolder] = process.argv.slice(2);
-if (appFolder === undefined) {
-    console.error("usage: node scripts/check-package.mjs <app folder> [<output folder>]");
+const [system, appFolder, outputFolder] = process.argv.slice(2);
+if (!SYSTEMS.includes(system) || appFolder === undefined) {
+    console.error(
+        "usage: node scripts/check-package.mjs <win|mac|linux> <app folder> [<output folder>]",
+    );
     process.exit(2);
 }
-const problems = await check(appFolder, outputFolder);
+const expected = await import(`./package-files/${system}.mjs`);
+if (expected.NOT_BUILT_YET !== undefined) {
+    console.error(`check-package: ${expected.NOT_BUILT_YET}`);
+    process.exit(1);
+}
+const problems = await check(expected, appFolder, outputFolder);
 for (const problem of problems) {
     console.error(`check-package: ${problem}`);
 }

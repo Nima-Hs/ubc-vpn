@@ -167,14 +167,14 @@ A program built with `dev-mode` must never be released or installed: it can be t
 
 ## The Windows installer
 
-The setup program is built with [electron-builder](https://www.electron.build/), pinned in `app/package.json` like the app's other packages. Its settings are in `app/electron-builder.yml`, and our additions to the setup script are in `packaging/windows/installer.nsh`. It installs the app, and in `resources\bin` the service, the command-line client, the native libraries, Wintun and the Visual C++ runtime, which it gathers from `app/stage/`. On Windows, with the app's packages installed as in Setup, Rust, and the native library unpacked as in Setup, from the repository root in Git Bash:
+The setup program is built with [electron-builder](https://www.electron.build/), pinned in `app/package.json` like the app's other packages. Its settings are in `app/electron-builder.yml`, which holds the settings every system shares (`app/electron-builder.mac.yml` and `app/electron-builder.linux.yml` extend it), and what each package must hold is in `app/scripts/package-files/`. Our additions to the setup script are in `packaging/windows/installer.nsh`. It installs the app, and in `resources\bin` the service, the command-line client, the native libraries, Wintun and the Visual C++ runtime, which it gathers from `app/stage/`. On Windows, with the app's packages installed as in Setup, Rust, and the native library unpacked as in Setup, from the repository root in Git Bash:
 
 ```sh
 packaging/windows/stage.sh <native-folder> <native-run> <recipe-folder> <sources-archive>   # checks the libraries against their manifest, builds the programs with the real engine, gathers the libraries and the policy
 packaging/windows/stage-redist.sh                                                           # adds Wintun, the Visual C++ runtime, their licences and the licence page
 cd app
-pnpm package:win     # builds the app, then dist/ubc-vpn-setup-<version>-x64.exe
-pnpm check:package   # fuses, licence files, the staged files, and no updater files
+pnpm package:win         # builds the app, then dist/ubc-vpn-setup-<version>-x64.exe
+pnpm check:package:win   # fuses, licence files, the staged files, and no updater files
 ```
 
 `<native-folder>` is the unpacked `libopenconnect-windows-x64` artifact of a Native library run on `main`, and `<native-run>` that run's ID, which is recorded in `SOURCES.txt` and the sources archive. `<recipe-folder>` is `native/windows` as it is at the commit the artifact's `manifest.json` names (`recipe.commit`), for example from `git archive <commit> native/windows`. `stage.sh` first checks every library in its `bin` and every source archive in its `source` against the SHA-256 its `manifest.json` records, and the recipe in `source/recipe` against `<recipe-folder>`, file by file (`packaging/windows/check-native.mjs`). It stops on a mismatch, a missing file, or a file or folder that neither accounts for: that manifest and recipe are what tie each shipped library to its published source. `packaging/windows/tests/check-native.sh` tests the check.
@@ -200,6 +200,8 @@ If it stops because your Visual Studio has another compiler or runtime version, 
 Branch from `main`, commit using Conventional Commits, and open a pull request whose title follows the same format. The full conventions are in [workflow](.claude/rules/workflow.md), [dependencies](.claude/rules/dependencies.md) and [security](.claude/rules/security.md).
 
 CI runs `cargo fmt`, `cargo clippy` and `cargo test`. For the app it runs the lint, type check, unit tests and end-to-end tests. See `.github/workflows/ci.yml` and `.github/workflows/app.yml` for the exact commands.
+
+The command-line client's help text must be the same on Windows, macOS and Linux ([consistency](.claude/rules/consistency.md)). CI writes `ubc-vpn --help` on each and compares them with `.github/help/compare.sh`. A line meant for one system only starts, after its indent, with that system's name and a colon (`Windows:`, `macOS:` or `Linux:`): the comparison leaves it out, and fails if it appears in another system's help.
 
 The TypeScript types in `app/src/shared/protocol/` are generated from `crates/core` by `cargo test`. Never edit them by hand; change the Rust type, run the tests, and commit the result.
 

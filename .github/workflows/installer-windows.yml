@@ -179,7 +179,7 @@ jobs:
       - name: Build the setup program
         run: pnpm package:win
       - name: The app is fused, licensed and has no updater
-        run: pnpm check:package
+        run: pnpm check:package:win
 
       - name: The setup program refuses another folder
         run: pwsh -NoProfile -File "$CHECK" refuse-folder dist/ubc-vpn-setup-*-x64.exe
@@ -202,7 +202,7 @@ jobs:
       - name: Only administrators can change the installed app
         run: pwsh -NoProfile -File "$CHECK" who-can-change
       - name: The installed app is fused, licensed and has no updater
-        run: node scripts/check-package.mjs "C:/Program Files/UBC VPN"
+        run: node scripts/check-package.mjs win "C:/Program Files/UBC VPN"
       - name: The service is installed, running and answers a standard user
         run: |
           pwsh -NoProfile -File "$CHECK" service
