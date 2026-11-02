@@ -107,19 +107,27 @@ fn finish(child: &mut Child) -> Result<std::process::ExitStatus> {
     }
 }
 
-/// Runs busctl with `args` after the fixed options, and gives what it wrote.
-/// [`Error::Unsupported`] when there is no busctl, as on a system without
-/// systemd.
-fn busctl(args: &[&str]) -> Result<String> {
-    let spawned = Command::new(BUSCTL)
+/// The busctl command for `args`: busctl by its absolute path, with nothing
+/// from this process's environment, and the fixed options, ending in `--`,
+/// before `args`.
+fn command(args: &[&str]) -> Command {
+    let mut command = Command::new(BUSCTL);
+    command
         .env_clear()
         .current_dir("/")
         .args(OPTIONS)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    command
+}
+
+/// Runs busctl with `args` after the fixed options, and gives what it wrote.
+/// [`Error::Unsupported`] when there is no busctl, as on a system without
+/// systemd.
+fn busctl(args: &[&str]) -> Result<String> {
+    let spawned = command(args).spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(Error::Unsupported),
@@ -569,6 +577,18 @@ mod tests {
         assert!(state.is_exactly(&resolver, &both), "order does not count");
         assert!(!state.is_exactly(&resolver, &both[..1]), "fewer domains");
         assert!(!state.is_exactly(&[Ipv4Addr::new(192, 0, 2, 54)], &both));
+        // Settings that resolved holds but does not use, as on a link that is
+        // down: no unicast DNS scope, so not in effect.
+        let unused = LinkState {
+            dns_scope: false,
+            ..state.clone()
+        };
+        assert!(!unused.is_exactly(&resolver, &both), "no DNS scope");
+        let unused = "t 6\na(iay) 1 2 4 192 0 2 53\na(sb) 1 \"suite.example\" true\n\
+                      b false\ns \"no\"\ns \"no\"\n";
+        let unused = parse_link_state(unused).expect("understood");
+        assert!(!unused.dns_scope, "only LLMNR scopes");
+        assert!(!unused.is_exactly(&resolver, &both[1..]), "no DNS scope");
 
         let empty = "t 6\na(iay) 0\na(sb) 0\nb true\ns \"yes\"\ns \"no\"\n";
         let state = parse_link_state(empty).expect("understood");
@@ -671,7 +691,9 @@ mod tests {
             let names = [domain.to_string()];
             assert_eq!(domain_args(7, &names), None, "{domain:?}");
             let resolvers = [Ipv4Addr::new(192, 0, 2, 53)];
-            assert_eq!(set_link(7, &resolvers, &names), Err(Error::InvalidInput));
+            // Link 0 is no link, which resolved refuses: were the check ever
+            // lost, no real link's DNS could change here.
+            assert_eq!(set_link(0, &resolvers, &names), Err(Error::InvalidInput));
         }
         for domain in ["suite.example", "a-b.c1.example", "x.y.z.example"] {
             assert!(is_valid_domain(domain), "{domain}");
@@ -697,7 +719,73 @@ mod tests {
         ] {
             assert_eq!(dns_args(7, &[bad]), None, "{bad}");
             let names = ["suite.example".to_string()];
-            assert_eq!(set_link(7, &[bad], &names), Err(Error::InvalidInput));
+            assert_eq!(set_link(0, &[bad], &names), Err(Error::InvalidInput));
         }
+    }
+
+    // Security rule: busctl by its absolute path, and `--` right before the
+    // caller's arguments, after the fixed options and nothing else, so no
+    // argument can be read as an option.
+    #[test]
+    fn busctl_is_named_by_its_path_and_options_end_before_the_arguments() {
+        let args = ["call", "--address=unix:path=/x", "-h"];
+        let command = command(&args);
+        assert_eq!(command.get_program(), BUSCTL);
+        assert!(std::path::Path::new(BUSCTL).is_absolute());
+        let given: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        let mut expected: Vec<&str> = OPTIONS.to_vec();
+        expected.extend(args);
+        assert_eq!(given, expected);
+        let end = given.iter().position(|arg| *arg == "--");
+        assert_eq!(end, Some(given.len() - args.len() - 1), "-- before them");
+        assert_eq!(OPTIONS.last(), Some(&"--"));
+        assert_eq!(command.get_current_dir(), Some(std::path::Path::new("/")));
+    }
+
+    /// Set in the process that [`nothing_from_the_environment_reaches_busctl`]
+    /// starts.
+    const ENV_CHILD: &str = "UBC_VPN_BUSCTL_ENV_CHILD";
+
+    // Security rule: nothing from the environment reaches busctl. A process
+    // of its own, with a system bus address and systemd settings that would
+    // send busctl nowhere, still asks the real bus. The control shows that a
+    // busctl that did inherit them would fail. Needs no root.
+    #[test]
+    fn nothing_from_the_environment_reaches_busctl() {
+        if std::env::var_os(ENV_CHILD).is_some() {
+            let asked = running();
+            assert!(asked.is_ok(), "busctl took the environment: {asked:?}");
+            if std::path::Path::new(BUSCTL).exists() {
+                let mut inherited = Command::new(BUSCTL);
+                inherited.args(OPTIONS).args([
+                    "call",
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "NameHasOwner",
+                    "s",
+                    RESOLVE1,
+                ]);
+                let status = inherited.output().expect("run busctl").status;
+                assert!(!status.success(), "the environment did not matter");
+            }
+            return;
+        }
+        let module = module_path!();
+        let local = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let test = format!("{local}::nothing_from_the_environment_reaches_busctl");
+        let status = Command::new(std::env::current_exe().expect("this program"))
+            .args(["--exact", &test, "--nocapture", "--test-threads=1"])
+            .env(ENV_CHILD, "1")
+            .env(
+                "DBUS_SYSTEM_BUS_ADDRESS",
+                "unix:path=/nonexistent/ubc-vpn-test",
+            )
+            .env("SYSTEMD_LOG_LEVEL", "debug")
+            .env("SYSTEMD_BUS_TIMEOUT", "1")
+            .env("SYSTEMD_PAGER", "/nonexistent/ubc-vpn-test")
+            .status()
+            .expect("start the test's own process");
+        assert!(status.success(), "the test's own process failed: {status}");
     }
 }

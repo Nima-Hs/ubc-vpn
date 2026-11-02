@@ -145,6 +145,10 @@ pub(super) fn as_root_in(module: &str, name: &str, test: &str, body: impl FnOnce
         return;
     }
     let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
+    // Recorded only once it is this test's turn, so it is the true original,
+    // and put back before the next test's turn, should the test's own
+    // process have been stopped before it could.
+    let _resolv_conf = super::dns_tests::AsItWas::now();
     let status = Command::new(std::env::current_exe().expect("this program"))
         .args([
             "--exact",
@@ -346,7 +350,7 @@ impl Tun {
     }
 
     /// Says whether the device's link works, as a cable plugged in or out.
-    fn set_carrier(&self, on: bool) {
+    pub(super) fn set_carrier(&self, on: bool) {
         let mut value = libc::c_int::from(on);
         // SAFETY: `value` is a live `int`, which is what the call reads, and
         // the descriptor is open.
@@ -412,7 +416,6 @@ fn passes_the_shared_route_suite_on_a_tun_device() {
 #[test]
 fn passes_the_shared_live_route_change_check() {
     let test = "passes_the_shared_live_route_change_check";
-    let _back = super::dns_tests::AsItWas::now();
     as_root("live route change", test, || {
         let _stub = super::dns_tests::stub_mode();
         let tun = Tun::open("uvt-live0");

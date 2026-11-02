@@ -315,9 +315,9 @@ impl ResolvConf {
     }
 }
 
-/// Puts `/etc/resolv.conf` back as it is now when dropped. Each root test
-/// that might change it holds one in the process that starts it, too, so it
-/// is put back should the test's own process be stopped.
+/// Puts `/etc/resolv.conf` back as it is now when dropped. The process that
+/// starts each root test holds one too, taken once it is that test's turn,
+/// so it is put back should the test's own process be stopped.
 pub(super) struct AsItWas(ResolvConf);
 
 impl AsItWas {
@@ -371,7 +371,6 @@ fn link_stub() {
 // back exactly.
 #[test]
 fn passes_the_shared_dns_suite_in_resolved() {
-    let _back = AsItWas::now();
     as_root("dns", "passes_the_shared_dns_suite_in_resolved", || {
         let _stub = stub_mode();
         let tun = tunnel("uvt-dns0", 10);
@@ -406,7 +405,6 @@ fn restore_resolved() {
 // stopped too.
 #[test]
 fn split_dns_is_unsupported_where_resolved_is_masked() {
-    let _back = AsItWas::now();
     let _restore = Finally(restore_resolved);
     let test = "split_dns_is_unsupported_where_resolved_is_masked";
     as_root("dns unsupported", test, || {
@@ -449,7 +447,6 @@ fn split_dns_is_unsupported_where_resolved_is_masked() {
 // itself, so the runner's own lookups keep working meanwhile.
 #[test]
 fn split_dns_is_unsupported_where_programs_do_not_ask_resolved() {
-    let _back = AsItWas::now();
     let test = "split_dns_is_unsupported_where_programs_do_not_ask_resolved";
     as_root("dns resolv.conf mode", test, || {
         let _stub = stub_mode();
@@ -480,7 +477,6 @@ fn split_dns_is_unsupported_where_programs_do_not_ask_resolved() {
 // DNS on it is refused.
 #[test]
 fn another_links_dns_is_untouched() {
-    let _back = AsItWas::now();
     as_root("dns foreign", "another_links_dns_is_untouched", || {
         let _stub = stub_mode();
         let tun = tunnel("uvt-dns3", 13);
@@ -520,7 +516,6 @@ fn another_links_dns_is_untouched() {
 // set stays as it was.
 #[test]
 fn a_domain_that_is_not_a_plain_name_never_reaches_resolved() {
-    let _back = AsItWas::now();
     let test = "a_domain_that_is_not_a_plain_name_never_reaches_resolved";
     as_root("dns refused domain", test, || {
         let _stub = stub_mode();
@@ -543,6 +538,41 @@ fn a_domain_that_is_not_a_plain_name_never_reaches_resolved() {
         }
         dns.clear_split_dns().expect("clear");
         assert_eq!(shown("domain", &tun.name), "");
+    });
+}
+
+// Settings resolved holds but does not use are not in effect: while the
+// tunnel's link has no carrier, resolved has no DNS scope on it, and the
+// check says `No` though the servers and domains read back unchanged.
+#[test]
+fn settings_resolved_does_not_use_are_not_in_effect() {
+    let test = "settings_resolved_does_not_use_are_not_in_effect";
+    as_root("dns no scope", test, || {
+        let _stub = stub_mode();
+        let tun = tunnel("uvt-dns5", 15);
+        let dns = Resolved::new(PREFIX);
+        let setting = split([192, 0, 2, 53], &["suite.example"]);
+        let settled = |wanted: Verified| {
+            let started = Instant::now();
+            loop {
+                let answer = dns.split_dns_matches(&setting);
+                if answer == wanted || started.elapsed() > Duration::from_secs(10) {
+                    return answer;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        dns.set_split_dns(&tun.name, &setting).expect("set");
+        assert_eq!(settled(Verified::Yes), Verified::Yes, "with a carrier");
+
+        tun.set_carrier(false);
+        assert_eq!(settled(Verified::No), Verified::No, "without a carrier");
+        assert_eq!(shown("domain", &tun.name), "~suite.example", "kept");
+        assert_eq!(shown("dns", &tun.name), "192.0.2.53", "kept");
+
+        tun.set_carrier(true);
+        assert_eq!(settled(Verified::Yes), Verified::Yes, "the carrier back");
+        dns.clear_split_dns().expect("clear");
     });
 }
 
