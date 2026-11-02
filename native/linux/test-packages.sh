@@ -151,6 +151,21 @@ verify_lists() {
     done < <(find "$lists" -type f ! -path "$lists/partial/*" -print0)
 }
 
+# The size and SHA-256 that the checked lists give for the package at a
+# path in the archive, one line for each different pair.
+signed_entry() {
+    awk -v path="$1" 'BEGIN { RS = "" }
+        index($0 "\n", "\nFilename: " path "\n") {
+            size = sha256 = ""
+            n = split($0, field, "\n")
+            for (i = 1; i <= n; i++) {
+                if (field[i] ~ /^Size: /) size = substr(field[i], 7)
+                if (field[i] ~ /^SHA256: /) sha256 = substr(field[i], 9)
+            }
+            print size, sha256
+        }' "$lists"/*_Packages | sort -u
+}
+
 # Whether every package asked for is already installed at its pinned
 # version, so that apt has nothing to download.
 all_in_place() {
@@ -204,17 +219,23 @@ if [ -n "$listing" ]; then
     else
         echo "Packages: already in $cache; the snapshot was not asked"
     fi
-    while read -r _ name size hash; do
-        case "$hash" in
-            SHA512:*) sum=sha512sum ;;
-            SHA256:*) sum=sha256sum ;;
-            *) fail "the lists give no SHA-256 or SHA-512 for $name: $hash" ;;
-        esac
+    # apt prints only an MD5 sum here, so each package's size and SHA-256
+    # are read from the checked lists, by the path apt would fetch it from.
+    # Every entry for that path must agree.
+    hex=' '
+    while read -r uri name size _; do
+        uri=${uri//\'/}
+        expected=$(signed_entry "${uri#"$snapshot_url/"}")
+        [ -n "$expected" ] && [ "$(wc -l <<<"$expected")" = 1 ] ||
+            fail "the signed lists give no single size and SHA-256 for $name"
+        read -r want_size want_sha256 <<<"$expected"
+        [ -n "$want_sha256" ] && [ "$want_size" = "$size" ] ||
+            fail "the signed lists give no single size and SHA-256 for $name"
         file="$debs/$name"
         [ -f "$file" ] || fail "$name was not downloaded"
-        [ "$(stat -c %s "$file")" = "$size" ] && [ "$($sum "$file" | cut -d ' ' -f 1)" = "${hash#*:}" ] ||
+        [ "$(stat -c %s "$file")" = "$want_size" ] && [ "$(sha256sum "$file" | cut -d ' ' -f 1)" = "$want_sha256" ] ||
             fail "$name is not the package the snapshot's signed lists give"
-        echo "$name: size and ${hash%%:*} match the signed lists"
+        echo "$name: size and SHA-256 match the signed lists ($want_sha256)"
     done <<<"$listing"
 fi
 
