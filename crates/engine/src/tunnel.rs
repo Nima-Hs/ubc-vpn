@@ -13,8 +13,8 @@
 //! script), so the device would outlive the tunnel. There the engine opens
 //! the device itself (the `device` module) and hands it over with
 //! `openconnect_setup_tun_fd`; the handle keeps the descriptor and closes it
-//! once the library has freed the handle. Until the device is opened, which
-//! is all placeholders for now, opening refuses at the device step.
+//! once the library has freed the handle. On macOS the device is not opened
+//! yet, so opening refuses there at the device step.
 //!
 //! Once the tunnel is open, the thread runs the library's main loop until
 //! the tunnel ends: closed through a command on the command pipe, refused by
@@ -460,6 +460,13 @@ fn device(
 /// names it in `assigned`. The handle keeps the descriptor from then on and
 /// closes it when it is dropped, which removes the device on every path: a
 /// failure here is followed by dropping the handle.
+///
+/// On Linux a device the library has taken may also be held by vhost-net,
+/// whose descriptors only the end of the main loop closes, never freeing
+/// the handle. The library sets vhost-net up only once it has taken the
+/// device, as the last step of a `setup_tun_fd` that succeeds. So after a
+/// success the main loop runs on every path: here on a failure, as the
+/// Windows device step does, and otherwise in the tunnel's thread.
 #[cfg(not(windows))]
 fn device(
     handle: &Handle<'_>,
@@ -473,8 +480,25 @@ fn device(
     if name.is_empty() || handle.setup_tun_fd(fd) != 0 {
         return Err(TunnelError::Failed);
     }
+    if sealed().is_err() {
+        handle.stopper().cancel();
+        handle.mainloop(RECONNECT_TIMEOUT, RECONNECT_INTERVAL);
+        return Err(TunnelError::Failed);
+    }
     assigned.interface = name;
     Ok(assigned)
+}
+
+/// Keeps what the library opened for the device out of programs the
+/// process starts (`device::seal_vhost`).
+#[cfg(target_os = "linux")]
+fn sealed() -> Result<(), TunnelError> {
+    crate::device::seal_vhost()
+}
+
+#[cfg(target_os = "macos")]
+fn sealed() -> Result<(), TunnelError> {
+    Ok(())
 }
 
 /// The longest a closed device is waited for to disappear.
