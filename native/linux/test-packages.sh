@@ -31,6 +31,17 @@ declare -A PINNED_noble=(
     [pkg-config]=1.8.1-2build1
     [libdbus-1-dev]=1.14.10-4ubuntu4.1
 )
+# The snapshot's release file for each suite, as fetched from it. A dated
+# snapshot never changes, so the lists must start from exactly these:
+# genuine, signed lists from another date are refused too.
+declare -A RELEASE_SHA256=(
+    [jammy]=c14060cd8c6d625874dfcb9523a35a395bf4865c28b6b6a82569ef326fe92dc6
+    [jammy-updates]=f7ec53a0cc04bcdd0f6cad7108e764f58511d026cd6723a9730bdc69c68a6223
+    [jammy-security]=70ca8de91b135a4e84d6c1d25e4d33659206400ef5c573720963b34e3483fbcd
+    [noble]=cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0
+    [noble-updates]=e90154c79048da9dce495b64850efa9a549500fe24caf5278f286b508f4d08fe
+    [noble-security]=e9f1574afc6e08e0f5cdce41515bcede1907fa1c92194d54f79e356905ce2d43
+)
 
 fail() { echo "error: $*" >&2; exit 1; }
 [ $# -ge 2 ] || fail "usage: test-packages.sh <folder> <package>..."
@@ -76,9 +87,11 @@ debs="$cache/debs"
 # The folder must hold only real folders and regular files with one name
 # each. A symbolic link could show the checks one file and apt another, or
 # hide files from the checks altogether, and a hard link could make the
-# change of owner below reach a file outside the folder. Anything else in
-# it stops the script; it is not deleted and fetched again, so that a
-# tampered cache is seen.
+# change of owner below reach a file outside the folder. Everything must
+# also be the runner's own and open to it: a folder it cannot read would
+# hide its files from the checks, which run as the runner, but not from
+# apt, which runs as root. Anything else stops the script; it is not
+# deleted and fetched again, so that a tampered cache is seen.
 check_cache() {
     local folder odd
     for folder in "$cache" "$lists" "$debs"; do
@@ -90,6 +103,8 @@ check_cache() {
     [ -z "$odd" ] || fail "$odd in the cache is neither a regular file nor a folder"
     odd=$(sudo find -P "$cache" -type f -links +1 -print -quit)
     [ -z "$odd" ] || fail "$odd in the cache has more than one name (a hard link)"
+    odd=$(sudo find -P "$cache" \( ! -user "$(id -u)" -o -type d ! -perm -u=rwx -o -type f ! -perm -u=r \) -print -quit)
+    [ -z "$odd" ] || fail "$odd in the cache is not the runner's own, or not open to it"
 }
 check_cache
 # apt's folders for unfinished downloads are emptied, so that nothing apt
@@ -138,9 +153,12 @@ own_cache() {
 list_prefix=$(sed 's|^https://||; s|/|_|g' <<<"$snapshot_url")
 verify_lists() {
     local suite release status file name path size hash matched
+    local -A checked=()
     for suite in "${suites[@]}"; do
         release="$lists/${list_prefix}_dists_${suite}_InRelease"
         [ -f "$release" ] || { echo "the lists have no InRelease for $suite" >&2; return 1; }
+        [ "$(sha256sum "$release" | cut -d ' ' -f 1)" = "${RELEASE_SHA256[$suite]}" ] ||
+            { echo "$release is not the snapshot's release file pinned in this script" >&2; return 1; }
         rm -f "$work/$suite.Release"
         status=$(gpgv --status-fd 1 --keyring "$keyring" --output "$work/$suite.Release" "$release" 2>/dev/null || true)
         if ! grep -q '^\[GNUPG:\] GOODSIG ' <<<"$status" || grep -q '^\[GNUPG:\] BADSIG ' <<<"$status"; then
@@ -149,6 +167,10 @@ verify_lists() {
         fi
         grep -qx "Suite: $suite" "$work/$suite.Release" || { echo "$release is not for $suite" >&2; return 1; }
     done
+    # Read into a file first, so that a folder find cannot read stops the
+    # check instead of leaving nothing to check.
+    find -P "$lists" -type f -print0 > "$work/list-files" ||
+        { echo "the lists folder $lists could not be read" >&2; return 1; }
     while IFS= read -r -d '' file; do
         name=${file#"$lists/"}
         matched=
@@ -166,12 +188,16 @@ verify_lists() {
                     section == "SHA256:" && $1 == h && $2 == s && $3 == p { ok = 1 }
                     END { exit !ok }' "$work/$suite.Release"; then
                     matched=1
+                    [[ $path != */Packages ]] || checked[$suite]=1
                 fi
             fi
             break
         done
         [ -n "$matched" ] || { echo "$name in the lists is not one the snapshot signed" >&2; return 1; }
-    done < <(find -P "$lists" -type f -print0)
+    done < "$work/list-files"
+    for suite in "${suites[@]}"; do
+        [ -n "${checked[$suite]:-}" ] || { echo "the lists hold no checked package list for $suite" >&2; return 1; }
+    done
 }
 
 # The size and SHA-256 that the checked lists give for the package at a
@@ -272,6 +298,7 @@ fi
 # every start keeps any of them from ever running; it is removed once the
 # packages are in. Only the packages checked above are installed: apt may
 # download nothing here.
+own_cache
 check_cache
 [ ! -e /usr/sbin/policy-rc.d ] || fail "/usr/sbin/policy-rc.d is already there"
 printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null

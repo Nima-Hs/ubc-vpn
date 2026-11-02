@@ -149,7 +149,9 @@ jobs:
       # run need not ask the snapshot, which is down now and then. The
       # script checks them all against the archive's signature again before
       # it installs anything, and stops if one does not match.
-      # Saved as soon as everything is in, before any build script runs.
+      # Saved as soon as everything is in, before the lint, build and test
+      # steps below. (The build check above runs before the restore; what it
+      # could leave in the folder is checked like everything else.)
       - name: Restore the pinned packages
         id: packages-cache
         if: runner.os == 'Linux'
