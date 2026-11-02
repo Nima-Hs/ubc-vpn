@@ -59,6 +59,12 @@ defaults:
   run:
     shell: bash
 
+# Python writes no bytecode cache, which records the folder it was made in,
+# beside the test scripts. The gateway is also started with -B, which holds
+# where sudo clears the environment.
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
 jobs:
   load:
     name: load (${{ matrix.name }})
@@ -342,9 +348,9 @@ jobs:
       # the toolchain's environment, so the test program is built here and
       # run as root with only the variables the tests read. Last of the
       # tests, so nothing after it meets a file root made; the build folder
-      # and the gateway's logs are handed back all the same. On Linux the
-      # device module's own root test and the ocserv test run as root too,
-      # so the ocserv tunnel has a real device.
+      # and the gateway's logs are handed back all the same. The device
+      # module's own root test runs as root too, and on Linux the ocserv
+      # test, so the ocserv tunnel has a real device.
       - name: The device tests, as root
         if: runner.os != 'Windows' && runner.environment == 'github-hosted'
         env:
@@ -368,11 +374,12 @@ jobs:
           sudo env UBC_VPN_TEST_PYTHON="$UBC_VPN_TEST_PYTHON" UBC_VPN_TEST_GATEWAY_DIR="$UBC_VPN_TEST_GATEWAY_DIR" \
             UBC_VPN_TEST_REQUIRE_GATEWAY=1 UBC_VPN_TEST_DEVICE=1 "${expect[@]}" \
             "$tests" device --nocapture 2>&1 | tee device.log || status=$?
+          os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
+          lib=$(program ubc_vpn_engine)
+          test -x "$lib"
+          sudo env UBC_VPN_TEST_DEVICE=1 "$lib" "device::$os::tests::as_root" --nocapture 2>&1 \
+            | tee -a device.log || status=$?
           if [ "$RUNNER_OS" = Linux ]; then
-            lib=$(program ubc_vpn_engine)
-            test -x "$lib"
-            sudo env UBC_VPN_TEST_DEVICE=1 "$lib" device::linux::tests::as_root --nocapture 2>&1 \
-              | tee -a device.log || status=$?
             ocserv=$(program ocserv)
             test -x "$ocserv"
             sudo env UBC_VPN_TEST_OCSERV_DIR="$UBC_VPN_TEST_OCSERV_DIR" UBC_VPN_TEST_REQUIRE_OCSERV=1 \
@@ -384,7 +391,6 @@ jobs:
           [ "$status" = 0 ]
           # A test that is skipped passes, so each one that must run is
           # named in .github/ran/engine-device/<os>.
-          os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
           bash .github/ran/check.sh ".github/ran/engine-device/$os" "RAN: " device.log
           if grep "SKIPPED" device.log; then
             echo "A test was skipped."

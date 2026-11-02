@@ -13,8 +13,7 @@
 //! script), so the device would outlive the tunnel. There the engine opens
 //! the device itself (the `device` module) and hands it over with
 //! `openconnect_setup_tun_fd`; the handle keeps the descriptor and closes it
-//! once the library has freed the handle. On macOS the device is not opened
-//! yet, so opening refuses there at the device step.
+//! once the library has freed the handle.
 //!
 //! Once the tunnel is open, the thread runs the library's main loop until
 //! the tunnel ends: closed through a command on the command pipe, refused by
@@ -496,6 +495,8 @@ fn sealed() -> Result<(), TunnelError> {
     crate::device::seal_vhost()
 }
 
+/// Nothing to keep out on macOS: the library opens nothing more for a
+/// `utun` device than the descriptor it was given.
 #[cfg(target_os = "macos")]
 fn sealed() -> Result<(), TunnelError> {
     Ok(())
