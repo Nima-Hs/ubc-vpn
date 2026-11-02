@@ -147,9 +147,10 @@ pub const FULL_TUNNEL_V6: [&str; 2] = ["::/1", "8000::/1"];
 ///   number never changes, so a later version finds an earlier one's routes.
 /// - **macOS** writes the exact route to a journal in the state folder, which
 ///   only an administrator can write, and also sets the route flag
-///   `RTF_PROTO3` on it. It removes a route only when it matches a journal
+///   `RTF_PROTO1` on it. It removes a route only when it matches a journal
 ///   row and carries that flag. The flag never changes, for the same reason
-///   as Linux's number.
+///   as Linux's number. Not `RTF_PROTO3`: macOS uses that one as its own
+///   expiry mark (`RTPRF_OURS`) and clears it when a route is used.
 /// - **Windows** has nothing to mark a route with. It writes the exact route
 ///   to the same kind of journal and removes only exact matches. Windows
 ///   keeps routes to one destination through two interfaces side by side and
