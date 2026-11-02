@@ -36,9 +36,11 @@ pub(crate) const LONGEST_PATH: usize = 103;
 pub(crate) fn clear_flags(path: &Path) -> io::Result<()> {
     let path = CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: `path` is a NUL-terminated string that outlives the call.
-    match unsafe { libc::lchflags(path.as_ptr(), 0) } {
-        0 => Ok(()),
-        _ => Err(io::Error::last_os_error()),
+    let status = unsafe { libc::lchflags(path.as_ptr(), 0) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
