@@ -1,17 +1,31 @@
 //! Linux: the channel is a Unix socket (see `unix`), and the folders follow
 //! the usual system places and the XDG rules. Routes, DNS and network events
-//! are not implemented yet and report that they are unsupported.
+//! are not implemented yet and report that they are unsupported, each from a
+//! file of its own.
+
+mod dns;
+#[cfg(test)]
+mod dns_tests;
+mod events;
+#[cfg(test)]
+mod events_tests;
+#[cfg(test)]
+mod full_tunnel_tests;
+mod routes;
+#[cfg(test)]
+mod routes_tests;
 
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rustix::net::{AddressFamily, SendFlags, SocketFlags, SocketType, socket_with, sockopt};
 
 #[cfg(feature = "dev-mode")]
 use crate::Error;
-use crate::unix::{self, Env};
+use crate::unix::{self, Env, Parts};
 use crate::{Mode, Paths, Platform, Result};
 
 const POLICY: &str = "/etc/ubc-vpn";
@@ -41,6 +55,15 @@ pub(crate) const ROOT_ONLY: &str = "/run";
 
 pub(crate) fn native(mode: Mode) -> Result<Platform> {
     Ok(unix::native(mode, paths(mode, &unix::real_env)?))
+}
+
+/// The routes, DNS and network events the platform uses.
+pub(crate) fn parts(_mode: Mode, _paths: &Paths) -> Parts {
+    Parts {
+        routes: Arc::new(routes::LinuxRoutes),
+        dns: Arc::new(dns::LinuxDns),
+        events: Arc::new(events::LinuxEvents),
+    }
 }
 
 /// Security rule: nothing the installed service uses comes from the

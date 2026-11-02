@@ -12,7 +12,6 @@ mod state;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::net::Ipv4Addr;
 use std::os::unix::fs::{MetadataExt, chown, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -25,10 +24,7 @@ use rustix::process::geteuid;
 use ubc_vpn_core::protocol::MAX_LINE_BYTES;
 
 use super::{NOT_A_FOLDER, SocketTransport, TOO_OPEN, WRONG_OWNER, set_mode};
-use crate::{
-    Connection, Error, Listener, Mode, PhysicalNetwork, Platform, SplitDns, Transport, UserId,
-    Verified, lock, os, suite,
-};
+use crate::{Connection, Error, Listener, Mode, Platform, Transport, UserId, lock, os, suite};
 
 /// Two users that are neither root nor whoever runs the tests. Root can
 /// become any user ID, so they need no account.
@@ -1017,35 +1013,14 @@ fn dev_paths_never_collide_with_the_installed_ones() {
 }
 
 // The counterpart of `the_unimplemented_os_reports_unsupported`: the channel
-// and the paths are real here. Everything else must still say it is
-// unsupported, and its checks must still fail closed.
+// and the paths are real here. Each OS's routes, DNS and events are tested in
+// their own files.
 #[test]
-fn native_has_a_real_channel_and_nothing_else_yet() {
-    let unsupported = Some(Error::Unsupported);
-    let gateway = Ipv4Addr::new(192, 0, 2, 1);
-    let physical = PhysicalNetwork {
-        interface: "eth0".to_string(),
-        next_hop: None,
-        own_addresses: Vec::new(),
-        on_link: Vec::new(),
-    };
-    let dns = SplitDns {
-        resolvers: vec![gateway],
-        domains: vec!["dept.example".to_string()],
-    };
+fn native_has_a_real_channel_and_real_paths() {
     let _turn = turn();
     let modes = [Some(Mode::Installed), DEV];
     for mode in modes.into_iter().flatten() {
         let native = Platform::native(mode).expect("a platform");
-        assert_eq!(native.routes.capture_physical(gateway).err(), unsupported);
-        let configured = native.routes.configure_tunnel("tun0", gateway, 1300);
-        assert_eq!(configured.err(), unsupported);
-        assert_eq!(native.routes.remove_all().err(), unsupported);
-        let routed = native.routes.uses_interface(gateway, "tun0");
-        assert_eq!(routed, Verified::Unknown);
-        assert_eq!(native.dns.clear_split_dns().err(), unsupported);
-        assert_eq!(native.dns.split_dns_matches(&dns), Verified::Unknown);
-        assert_eq!(native.events.subscribe(&physical).err(), unsupported);
         // Nothing listens there, and the transport can tell.
         let absent = native.transport.connect("/ubc-vpn-nobody/listens.sock");
         assert_eq!(absent.err(), Some(Error::NotFound));

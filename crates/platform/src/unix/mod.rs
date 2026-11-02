@@ -94,10 +94,9 @@ use rustix::net::sockopt::{self, Timeout};
 use rustix::net::{RecvFlags, SocketAddrUnix, connect, recv};
 use rustix::process::geteuid;
 
-use crate::unsupported::Native;
 use crate::{
-    Connection, Error, Listener, Mode, Paths, Platform, RawConnection, Result, Transport, UserId,
-    lock, os,
+    Connection, Dns, Error, Listener, Mode, NetworkEvents, Paths, Platform, RawConnection, Result,
+    Routes, Transport, UserId, lock, os,
 };
 
 /// What `listen` reports for a folder that breaks the rule. A client reports
@@ -139,11 +138,23 @@ pub(crate) fn dev_paths(dev: &Path, env: Env<'_>, variable: &str) -> Paths {
     }
 }
 
+/// The parts each OS supplies itself, each from a file of its own.
+pub(crate) struct Parts {
+    pub(crate) routes: Arc<dyn Routes>,
+    pub(crate) dns: Arc<dyn Dns>,
+    pub(crate) events: Arc<dyn NetworkEvents>,
+}
+
 pub(crate) fn native(mode: Mode, paths: Paths) -> Platform {
+    let Parts {
+        routes,
+        dns,
+        events,
+    } = os::parts(mode, &paths);
     Platform {
-        routes: Arc::new(Native),
-        dns: Arc::new(Native),
-        events: Arc::new(Native),
+        routes,
+        dns,
+        events,
         transport: Arc::new(SocketTransport { mode }),
         paths,
     }
