@@ -14,7 +14,7 @@ use ubc_vpn_core::settings_cli::SettingsFailureCode;
 use ubc_vpn_platform::fake::Fake;
 
 use crate::settings::{Command, DURING_A_SAVE, remember_username, run};
-use crate::settings_lock::{Tried, WAIT, change, change_with, change_within};
+use crate::settings_lock::{QUEUE, Tried, WAIT, change, change_with, change_within};
 use crate::test_support::settings_folder;
 
 const ROUTES: &str = r#"{"subnets":["10.19.0.0/16"],"dns_domains":["dept.example.test"]}"#;
@@ -233,6 +233,12 @@ fn changes_queued_behind_each_other_all_get_their_turn() {
 
 // A holder that keeps the lock and keeps saying it is a new one is not
 // waited for without end: past six times the wait, the change gives up.
+//
+// The wait here is half a second, not `SHORT`. A change gives up when the
+// time between two of its tries is longer than the wait, as it then sees no
+// hand-off in time. On a busy macOS runner a 10 ms sleep has taken longer
+// than 100 ms, and the change gave up after 250 ms.
+// The bounds are in terms of the wait, with room above the cap.
 #[test]
 fn a_lock_that_changes_hands_for_ever_is_given_up_on() {
     let folder = Folder::new();
@@ -244,18 +250,20 @@ fn a_lock_that_changes_hands_for_ever_is_given_up_on() {
         let n = next.fetch_add(1, Ordering::SeqCst) as u64;
         Ok(Tried::Busy(Some(base + Duration::from_secs(n))))
     };
-    let started = Instant::now();
+    let (wait, started) = (Duration::from_millis(500), Instant::now());
+    let longest = wait * QUEUE;
     // On a thread of its own, so that a wait with no end fails this test
     // and does not hang it.
     let (done, ended) = channel();
     std::thread::spawn(move || {
-        let _ = done.send(change_with(&dir, SHORT, for_ever).map(|c| c.unlocked()));
+        let _ = done.send(change_with(&dir, wait, for_ever).map(|c| c.unlocked()));
     });
-    let refused = ended.recv_timeout(Duration::from_secs(4));
+    let refused = ended.recv_timeout(longest * 5);
     let waited = started.elapsed();
-    assert_eq!(refused, Ok(HELD));
-    assert!(waited >= SHORT * 6, "{waited:?}");
-    assert!(waited < Duration::from_secs(4), "{waited:?}");
+    assert_eq!(refused, Ok(HELD), "it did not give up");
+    // It waited past one wait, as hand-offs restart it, and up to the cap.
+    assert!(waited >= longest, "{waited:?}");
+    assert_eq!(QUEUE, 6);
 }
 
 // Each change that takes the lock marks the lock file's time as it does,
