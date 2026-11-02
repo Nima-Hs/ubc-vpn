@@ -1,0 +1,107 @@
+Hand-made mutations for pull request #283: the settings files' Unix
+permission code, now in crates/cli/src/private_fs.rs. Each must make a
+Unix-only test in the client fail.
+=== mutation: folder-check-022-removed
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -22,7 +22,7 @@
+     #[cfg(unix)]
+     {
+         use std::os::unix::fs::PermissionsExt;
+-        let open = |found: fs::Metadata| found.permissions().mode() & 0o022 != 0;
++        let open = |found: fs::Metadata| found.permissions().mode() & 0o000 != 0;
+         if fs::metadata(dir).is_ok_and(open) {
+             // Quoted for a shell as it stands, whatever the path holds.
+             let folder = crate::clean(&dir.to_string_lossy()).replace('\'', r"'\''");
+=== mutation: folder-check-only-other-write
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -22,7 +22,7 @@
+     #[cfg(unix)]
+     {
+         use std::os::unix::fs::PermissionsExt;
+-        let open = |found: fs::Metadata| found.permissions().mode() & 0o022 != 0;
++        let open = |found: fs::Metadata| found.permissions().mode() & 0o002 != 0;
+         if fs::metadata(dir).is_ok_and(open) {
+             // Quoted for a shell as it stands, whatever the path holds.
+             let folder = crate::clean(&dir.to_string_lossy()).replace('\'', r"'\''");
+=== mutation: folder-check-only-group-write
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -22,7 +22,7 @@
+     #[cfg(unix)]
+     {
+         use std::os::unix::fs::PermissionsExt;
+-        let open = |found: fs::Metadata| found.permissions().mode() & 0o022 != 0;
++        let open = |found: fs::Metadata| found.permissions().mode() & 0o020 != 0;
+         if fs::metadata(dir).is_ok_and(open) {
+             // Quoted for a shell as it stands, whatever the path holds.
+             let folder = crate::clean(&dir.to_string_lossy()).replace('\'', r"'\''");
+=== mutation: folder-mode-700-removed
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -42,8 +42,6 @@
+ pub(crate) fn create_folder(dir: &Path) -> io::Result<()> {
+     let mut builder = fs::DirBuilder::new();
+     builder.recursive(true);
+-    #[cfg(unix)]
+-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+     builder.create(dir)?;
+     match folder_problem(dir) {
+         Some(_) => Err(io::ErrorKind::PermissionDenied.into()),
+=== mutation: file-mode-600-removed
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -60,8 +60,6 @@
+ pub(crate) fn create_private(path: &Path) -> io::Result<File> {
+     let mut options = OpenOptions::new();
+     options.write(true).create_new(true);
+-    #[cfg(unix)]
+-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+     options.open(path)
+ }
+
+=== mutation: file-mode-600-to-644
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -61,6 +61,6 @@
+     let mut options = OpenOptions::new();
+     options.write(true).create_new(true);
+     #[cfg(unix)]
+-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
++    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+     options.open(path)
+ }
+
+=== mutation: lock-mode-600-removed
+=== os: linux
+=== test: -p ubc-vpn-cli --bins
+diff --git a/crates/cli/src/private_fs.rs b/crates/cli/src/private_fs.rs
+--- a/crates/cli/src/private_fs.rs
++++ b/crates/cli/src/private_fs.rs
+@@ -71,7 +71,5 @@
+ pub(crate) fn open_private(path: &Path) -> io::Result<File> {
+     let mut options = OpenOptions::new();
+     options.write(true).create(true).truncate(false);
+-    #[cfg(unix)]
+-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+     options.open(path)
+ }
