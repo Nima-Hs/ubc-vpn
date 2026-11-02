@@ -28,7 +28,16 @@ export const TRUSTED_KEYS: readonly TrustedKey[] = [
     { label: "placeholder until the owner adds the release key", publicKey: PLACEHOLDER_KEY },
 ];
 
-const RAW_KEY = /^[A-Za-z0-9+/]{43}=$/;
+/**
+ * A key's 32 raw bytes, or `null` unless the text is exactly their base64:
+ * re-encoding the bytes must give the same text back. The verifier and the
+ * release check both use this, so a key the check passes is one the app
+ * trusts. The placeholder is never one.
+ */
+export function rawKey(text: string): Buffer | null {
+    const raw = Buffer.from(text, "base64");
+    return raw.length === 32 && raw.toString("base64") === text ? raw : null;
+}
 
 /**
  * What stops a release from shipping these keys: the placeholder, a key
@@ -44,7 +53,7 @@ export function releaseKeyProblems(keys: readonly TrustedKey[]): string[] {
     for (const key of keys) {
         if (key.publicKey === PLACEHOLDER_KEY) {
             problems.push("the update key is still the placeholder");
-        } else if (!RAW_KEY.test(key.publicKey)) {
+        } else if (rawKey(key.publicKey) === null) {
             problems.push(`"${key.label}" is not a 32-byte key in base64`);
         } else if (seen.has(key.publicKey)) {
             problems.push(`"${key.label}" is listed twice`);

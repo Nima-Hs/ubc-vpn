@@ -31,6 +31,14 @@ function refusal(run: () => unknown): string {
     throw new Error("was not refused");
 }
 
+/** The same 32 bytes in base64, with the unused bits of the last digit set: not canonical. */
+function nonCanonical(canonical: string): string {
+    const digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const last = canonical.length - 2;
+    const digit = digits.indexOf(canonical.charAt(last));
+    return `${canonical.slice(0, last)}${digits.charAt(digit | 1)}=`;
+}
+
 function withFile(change: Record<string, unknown>): Record<string, unknown> {
     const body = listBody("0.2.0", installer);
     const [file] = body.files as Record<string, unknown>[];
@@ -91,7 +99,9 @@ describe("trusting an update list", () => {
     it("reads a built-in key only as plain base64 of 32 bytes", () => {
         const signed = signList(listBody("0.2.0", installer), key);
         const raw = Buffer.from(key.trusted.publicKey, "base64");
-        for (const publicKey of [raw.toString("base64url"), `${key.trusted.publicKey}AA==`]) {
+        const odd = nonCanonical(key.trusted.publicKey);
+        expect(Buffer.from(odd, "base64")).toEqual(raw);
+        for (const publicKey of [raw.toString("base64url"), `${key.trusted.publicKey}AA==`, odd]) {
             const odd = { label: "odd", publicKey };
             expect(refusal(() => verifyUpdateList(signed, [odd]))).toMatch(/trusted key/);
         }
@@ -232,6 +242,19 @@ describe("checking a downloaded installer", () => {
         await expect(check(changed)).rejects.toThrow(/checksum/);
     });
 
+    it("reads at most one byte past the size, however long the file is", async () => {
+        let served = 0;
+        const endless = {
+            read: async (buffer: Buffer, offset: number, length: number) => {
+                buffer.fill(0, offset, offset + length);
+                served += length;
+                return { bytesRead: length };
+            },
+        };
+        await expect(checkInstaller(endless, entry)).rejects.toThrow(/size/);
+        expect(served).toBe(entry.size + 1);
+    });
+
     it("refuses a file that is longer or shorter", async () => {
         await expect(check(Buffer.concat([installer, Buffer.from("x")]))).rejects.toThrow(/size/);
         await expect(check(installer.subarray(1))).rejects.toThrow(/size/);
@@ -248,6 +271,9 @@ describe("the release key check", () => {
         ]);
         expect(releaseKeyProblems([real, placeholder])).not.toEqual([]);
         expect(releaseKeyProblems([{ label: "short", publicKey: "AAAA" }])).not.toEqual([]);
+        // One the verifier would never match must not pass either.
+        const odd = { label: "odd", publicKey: nonCanonical(real.publicKey) };
+        expect(releaseKeyProblems([odd])).not.toEqual([]);
         expect(releaseKeyProblems([real, real])).not.toEqual([]);
         expect(releaseKeyProblems([])).not.toEqual([]);
     });

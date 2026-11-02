@@ -186,7 +186,7 @@ The signed bytes are JSON too:
 - **The private key** is an Ed25519 key the owner generates on their own machine. It lives only as a secret of a GitHub Environment that the release workflow alone uses, limited to `main` and release tags, with the owner's approval required for every run, and in the owner's offline backup. It is never in the repository, a pull request, a fork, an issue, a log or a command line. The workflow passes it to `sign.mjs` on standard input, or an open file descriptor, and the script prints nothing secret.
 - **The public keys** are built into the app, in `app/src/main/update/keys.ts`. The list names the key that signed it, so several can be trusted at once.
 - **Rotating the key:** add the new public key and release; once that version is out, sign with the new key; later, remove the old one.
-- **The placeholder:** until the owner adds the real public key, `keys.ts` holds a placeholder that verifies nothing. `pnpm check:release` fails while it is there, and the release workflow runs that check before it builds. A test build with the placeholder can check for updates but trusts no list.
+- **The placeholder:** until the owner adds the real public key, `keys.ts` holds a placeholder that verifies nothing. `pnpm check:release` fails while it is there, and the release workflow runs that check before it builds. TODO: nothing runs it yet; the pull request that adds the release workflow must. A test build with the placeholder can check for updates but trusts no list.
 
 ### Threat model
 
@@ -204,7 +204,7 @@ The signed bytes are JSON too:
 What it does not stop:
 
 - **A program already running as the user.** It could change the file between the last check and the moment the setup program opens it, but it could as well start its own program behind its own admin prompt, which looks the same while nothing is signed. The fresh folder and the second check leave it the least time.
-- **Withholding updates.** Someone who could block GitHub could keep the app on its version. Settings shows when it last checked.
+- **Withholding updates (a freeze).** Lists do not expire, by design. Someone who can block GitHub can keep the app on its version; Settings shows when it last checked. Someone with a token that can change this repository's releases can do the same without the app noticing: replace `update-list.json` with an older, validly signed list, which the app refuses as not newer, or delete the release. The check succeeds and finds nothing new. They still cannot make the app install anything the owner did not sign.
 - **A setup program that is not signed.** Windows shows "Unknown publisher". Signing is reconsidered after v0.1.0 (see "Open points").
 
 ## Development and testing

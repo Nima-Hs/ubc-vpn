@@ -109,6 +109,22 @@ describe("signing an update list", () => {
         expect(run(args, "").status).toBe(1);
     });
 
+    it("keeps to the app's limits on the version and the number of installers", async () => {
+        const file = `windows-x64=${installerPath}`;
+        const long = `0.2.0-${"a".repeat(59)}`;
+        expect(long.length).toBe(65);
+        expect(run(["--version", long, "--file", file], pem).status).toBe(2);
+        const many: string[] = [];
+        for (let at = 0; at < 17; at++) {
+            many.push("--file", `p${at}=${installerPath}`);
+        }
+        expect(run(["--version", "0.2.0", ...many], pem).status).toBe(2);
+        expect(run(["--version", "0.2.0", ...many.slice(2)], pem).status).toBe(0);
+        const empty = join(folder, "upd-empty.exe");
+        await writeFile(empty, "");
+        expect(run(["--version", "0.2.0", "--file", `windows-x64=${empty}`], pem).status).toBe(1);
+    });
+
     it("refuses a version, a platform or a file the app would not accept", () => {
         const file = `windows-x64=${installerPath}`;
         expect(run(["--version", "v0.2.0", "--file", file], pem).status).toBe(2);

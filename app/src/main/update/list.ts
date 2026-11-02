@@ -4,7 +4,7 @@
 // be tested on their own.
 
 import { createHash, createPublicKey, type KeyObject, verify } from "node:crypto";
-import type { TrustedKey } from "./keys";
+import { rawKey, type TrustedKey } from "./keys";
 import { isNewer, parseVersion } from "./semver";
 
 /** The product a list is for: the app's `appId` in electron-builder.yml. */
@@ -76,9 +76,8 @@ function strictBase64(text: unknown): Buffer {
 
 function findKey(id: unknown, keys: readonly TrustedKey[]): KeyObject {
     for (const key of keys) {
-        // Only exact base64 of 32 bytes is a key; the placeholder is not.
-        const raw = Buffer.from(key.publicKey, "base64");
-        if (raw.length === 32 && raw.toString("base64") === key.publicKey && keyId(raw) === id) {
+        const raw = rawKey(key.publicKey);
+        if (raw !== null && keyId(raw) === id) {
             return createPublicKey({
                 key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
                 format: "jwk",
