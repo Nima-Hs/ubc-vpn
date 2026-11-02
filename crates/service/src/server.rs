@@ -4,18 +4,19 @@
 use std::collections::HashMap;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ubc_vpn_core::VERSION;
 use ubc_vpn_core::protocol::{
-    AddLogParams, ClientKind, ErrorCode, ErrorInfo, Hello, HelloReply, LogText,
+    AddLogParams, ClientKind, ErrorCode, ErrorInfo, Hello, HelloReply, LogLevel, LogText,
     MAX_ADDED_LOG_LINES, Outcome, PROTOCOL_VERSION, Request, RequestBody, Response, ResponseBody,
     ServerMessage, decode, encode, peek_protocol_version,
 };
 use ubc_vpn_engine::TunnelEngine;
+use ubc_vpn_platform::interrupt::Stop;
 use ubc_vpn_platform::{Connection, Error, Listener, Platform, StateDir, UserId};
 
 use crate::diagnostics::About;
@@ -245,6 +246,12 @@ impl Service {
         self.shared.logs.lines()
     }
 
+    /// The service's log itself, which can still be read once the service
+    /// has shut down: what a teardown at shutdown wrote is in it.
+    pub fn log_book(&self) -> Logs {
+        self.shared.logs.clone()
+    }
+
     /// The text of each line a client handed over, oldest first.
     pub fn login_lines(&self) -> Vec<String> {
         let added = |line: &ubc_vpn_core::protocol::LogLine| {
@@ -287,10 +294,58 @@ impl Service {
         }
     }
 
+    /// Serves until `stops` receives a request to stop, then shuts down as
+    /// [`Service::serve_until`] does: the tunnel is torn down and every
+    /// connection closed before this returns. For Linux and macOS, where
+    /// launchd and systemd stop a service with `SIGTERM`, and for dev mode
+    /// there, where Ctrl-C stops it; `stops` comes from
+    /// [`ubc_vpn_platform::interrupt::watch`].
+    ///
+    /// Security rule: a second request never cuts the teardown short. The
+    /// first starts it, and later ones are only logged. `stops` is held
+    /// until the process ends, even after this returns, because `watch`
+    /// ends the program at once when a request comes that nobody takes.
+    /// If the requests cannot be watched over, nothing is served and the
+    /// service shuts down at once, as dropping it does.
+    pub fn serve_until_stopped(self, stops: Receiver<Stop>) -> Result<(), String> {
+        let (stop, requests) = mpsc::channel();
+        let logs = self.shared.logs.clone();
+        let watching = thread::Builder::new().name("stop requests".to_string());
+        let watching = watching.spawn(move || {
+            let Ok(first) = stops.recv() else {
+                return;
+            };
+            logs.info(&format!(
+                "asked to stop ({}); removing everything applied",
+                stop_word(first)
+            ));
+            let _ = stop.send(());
+            for again in stops.iter() {
+                let line = format!(
+                    "asked to stop again ({}); already stopping",
+                    stop_word(again)
+                );
+                logs.at_about(LogLevel::Info, "asked to stop again", &line);
+            }
+        });
+        if let Err(error) = watching {
+            return Err(format!("Requests to stop cannot be watched for: {error}."));
+        }
+        self.serve_until(requests)
+    }
+
     fn join(&mut self) {
         if let Some(accepting) = self.accepting.take() {
             let _ = accepting.join();
         }
+    }
+}
+
+/// How the log names a request to stop.
+fn stop_word(stop: Stop) -> &'static str {
+    match stop {
+        Stop::Interrupt => "interrupt",
+        Stop::Terminate => "terminate",
     }
 }
 

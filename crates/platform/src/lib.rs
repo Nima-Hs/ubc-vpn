@@ -70,17 +70,24 @@ mod os;
 #[path = "windows/mod.rs"]
 mod os;
 
-/// Registering the service and making its data folder, on Windows.
+/// Registering the service and making its data folder. The same calls on
+/// every OS; on Linux and macOS each is unsupported until the installers
+/// are built.
 #[cfg(windows)]
 pub use os::install;
+#[cfg(unix)]
+pub use unix::install;
 
 /// Running as a Windows service, started by the service manager.
 #[cfg(windows)]
 pub use os::service;
 
-/// The installed service's check of the folder it runs from, on Windows.
+/// The installed service's check of the folder it runs from, on every OS.
+/// On Linux and macOS it refuses every folder until the check is built.
 #[cfg(windows)]
 pub use os::program;
+#[cfg(unix)]
+pub use unix::program;
 
 pub use channel::{Connection, Listener, RawConnection, Transport, UserId};
 pub use network::{

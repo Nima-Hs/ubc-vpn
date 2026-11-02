@@ -110,7 +110,7 @@ jobs:
       - name: Build the service and the client in dev mode
         run: |
           cargo build --locked -p ubc-vpn-service --features dev-mode $PROFILE
-          cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test system --test interrupts --no-run
+          cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test system --test interrupts --test service_stop --no-run
       - name: Run them together
         run: |
           # The workspace's path as this OS writes it, for the test to start.
@@ -142,6 +142,21 @@ jobs:
             exit 1
           fi
           grep -qx "RAN: interrupts" interrupts.log
+      # SIGTERM, as launchd and systemd send it, to a service that is
+      # connected and to one that is connecting. Windows stops a service
+      # through its service manager instead.
+      - name: Stop the service with SIGTERM
+        if: runner.os != 'Windows'
+        run: |
+          service="$GITHUB_WORKSPACE/target/${{ matrix.profile }}/ubc-vpn-service"
+          UBC_VPN_SYSTEM_SERVICE="$service" \
+            cargo test --locked -p ubc-vpn-cli --features dev-mode $PROFILE --test service_stop \
+            -- --nocapture 2>&1 | tee service-stop.log
+          if grep "SKIPPED:" service-stop.log; then
+            echo "The service stop test was skipped."
+            exit 1
+          fi
+          grep -qx "RAN: service stop" service-stop.log
       # Also when the test failed: it must clean up after itself then too.
       - name: Nothing of it is left behind
         if: always()

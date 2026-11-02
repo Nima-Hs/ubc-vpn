@@ -68,7 +68,9 @@
 //! [`Error::NotTheService`]. That fails closed, and packaging has to keep the
 //! clients outside such a sandbox.
 
+pub mod install;
 pub(crate) mod interrupt;
+pub mod program;
 pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
