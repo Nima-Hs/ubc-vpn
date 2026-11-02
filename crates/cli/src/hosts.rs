@@ -138,7 +138,7 @@ pub fn check(
 fn saved(platform: &Platform) -> Result<Settings, String> {
     let dir = &platform.paths.settings_dir;
     let unreadable = |_| {
-        settings::folder_problem(dir)
+        crate::private_fs::folder_problem(dir)
             .unwrap_or_else(|| "The settings file cannot be read.".to_string())
     };
     match settings::stored(dir).map_err(unreadable)? {
