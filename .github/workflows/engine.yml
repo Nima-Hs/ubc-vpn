@@ -144,14 +144,49 @@ jobs:
         run: |
           if ldconfig -p | grep libopenconnect; then exit 1; fi
 
+      # The snapshot's signed package lists and the packages, as
+      # test-packages.sh last fetched them on this branch or main, so that a
+      # run need not ask the snapshot, which is down now and then. The
+      # script checks them all against the archive's signature again before
+      # it installs anything, and stops if one does not match.
+      # Saved as soon as everything is in, before the lint, build and test
+      # steps below. (The build check above runs before the restore; what it
+      # could leave in the folder is checked like everything else.)
+      - name: Restore the pinned packages
+        id: packages-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-${{ matrix.os }}-${{ hashFiles('native/linux/test-packages.sh') }}-pkg-config-libdbus-1-dev-ocserv
       # The command-line client's keyring links the system's libdbus-1 on
       # Linux: its headers and pkg-config, at the versions pinned in
       # test-packages.sh, from its dated Ubuntu snapshot.
       - name: Install the pinned D-Bus headers
         if: runner.os == 'Linux'
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
         run: |
           mkdir "$RUNNER_TEMP/dbus-packages"
           bash native/linux/test-packages.sh "$RUNNER_TEMP/dbus-packages" pkg-config libdbus-1-dev
+      # ocserv for the tests below (tests/ocserv.rs), installed here so that
+      # the cache is saved before any build script or test runs. Its
+      # packaged service is kept from starting; start.sh below finds it in
+      # place and starts its own.
+      - name: Install the pinned ocserv packages
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
+        run: |
+          mkdir "$RUNNER_TEMP/ocserv-packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/ocserv-packages" ocserv
+          sudo systemctl disable ocserv.service
+      - name: Save the pinned packages
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted' && steps.packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: ${{ steps.packages-cache.outputs.cache-primary-key }}
 
       # The binding as it ships, then as the tests see it: `fake` makes the
       # binding reachable from the tests and never ships.
@@ -215,6 +250,8 @@ jobs:
       - name: Start ocserv, a real gateway, on this runner
         if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         working-directory: ${{ runner.temp }}
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
         run: |
           mkdir ocserv
           cp gateway/cert.pem gateway/key.pem ocserv/
