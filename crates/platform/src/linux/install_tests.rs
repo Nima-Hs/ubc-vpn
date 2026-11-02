@@ -276,6 +276,8 @@ fn the_unit_is_hardened_as_the_service_needs() {
     for (key, wanted) in expected {
         assert_eq!(value(key), [wanted], "{key}");
     }
+    // Where `enable` puts the link that `uninstall` may have to remove.
+    assert_eq!(WANTED_BY, format!("{}.wants", value("WantedBy")[0]));
     // The state folder `install` makes is the one systemd expects.
     assert_eq!(
         value("StateDirectoryMode"),
@@ -399,19 +401,25 @@ fn start_waits_until_the_service_listens() {
     );
     assert_eq!(calls.len(), 2 + 3, "{calls:?}");
 
-    let failed = Recorder::new(|args| match args {
-        ["is-active", _] => Said {
-            code: Some(3),
-            out: "failed\n".to_string(),
-            ..ok()
-        },
-        _ => ok(),
-    });
-    let refused = start_with(&failed, &scratch.0.join("none.sock"));
-    assert!(
-        matches!(&refused, Err(Error::Failed(why)) if why.contains("journalctl -u ubc-vpn")),
-        "{refused:?}"
-    );
+    // Ended with an error, or by itself: said at once, not after the wait.
+    for ended in ["failed", "inactive"] {
+        let stopped = Recorder::new(|args| match args {
+            ["is-active", _] => Said {
+                code: Some(3),
+                out: format!("{ended}\n"),
+                ..ok()
+            },
+            _ => ok(),
+        });
+        let at = std::time::Instant::now();
+        let refused = start_with(&stopped, &scratch.0.join("none.sock"));
+        assert!(
+            matches!(&refused, Err(Error::Failed(why)) if why.contains("journalctl -u ubc-vpn")),
+            "{ended}: {refused:?}"
+        );
+        assert!(at.elapsed() < Duration::from_secs(5), "{ended}: it waited");
+        assert_eq!(stopped.calls().len(), 3, "{ended}: asked once");
+    }
 
     let no_enable = Recorder::new(|args| match args {
         ["enable", ..] => Said {
@@ -449,7 +457,14 @@ fn uninstall_stops_the_service_before_it_removes_the_unit() {
     assert!(fs::symlink_metadata(&unit).is_err(), "the unit is gone");
 
     // No unit file: stopped all the same, and one systemd does not know is
-    // fine.
+    // fine. The link that would start it with the system, left behind when
+    // the unit was removed by hand, is removed; a file there is not ours.
+    let wants = scratch.0.join(WANTED_BY);
+    fs::create_dir(&wants).expect("the wants folder");
+    let wanted = wants.join(UNIT_NAME);
+    symlink(&unit, &wanted).expect("a dangling link");
+    let not_ours = wants.join("other.service");
+    fs::write(&not_ours, "").expect("another file");
     let not_loaded = Recorder::watching(&scratch.0, |args| match args {
         ["stop", _] | ["reset-failed", _] => Said {
             code: Some(NOT_LOADED),
@@ -466,6 +481,12 @@ fn uninstall_stops_the_service_before_it_removes_the_unit() {
             "reset-failed ubc-vpn.service",
         ]
     );
+    assert!(fs::symlink_metadata(&wanted).is_err(), "the link is gone");
+    assert!(not_ours.exists(), "another unit's file is kept");
+    // A file in the link's place is not removed.
+    fs::write(&wanted, "").expect("a file in its place");
+    unregister_with(&Recorder::new(|_| ok()), &scratch.0).expect("unregister");
+    assert!(wanted.exists(), "a file that is not a link is kept");
 
     fs::write(&unit, UNIT).expect("a unit again");
     let stuck = Recorder::watching(&scratch.0, |args| match args {

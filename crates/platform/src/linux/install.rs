@@ -59,6 +59,9 @@ pub const INSTALLED_SERVICE: &str = "/opt/UBC VPN/resources/bin/ubc-vpn-service"
 /// The folder for units the administrator installs.
 const UNIT_DIR: &str = "/etc/systemd/system";
 
+/// The folder of links `systemctl enable` makes for the unit's `WantedBy=`.
+const WANTED_BY: &str = "multi-user.target.wants";
+
 /// systemctl, by its absolute path, never looked for.
 pub(crate) const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
@@ -287,7 +290,10 @@ pub(crate) fn start_with(systemd: &dyn Systemd, channel: &Path) -> Result<()> {
             fs::symlink_metadata(channel).is_ok_and(|found| found.file_type().is_socket());
         match state.out.trim() {
             "active" if listening => return Ok(()),
-            "failed" => {
+            // `enable --now` waited for the start, so a service that is not
+            // running now has ended already: with an error ("failed"), or
+            // by itself ("inactive"), which it never does unasked.
+            "failed" | "inactive" => {
                 return Err(Error::Failed(
                     "the service stopped as it started; `journalctl -u ubc-vpn` says why"
                         .to_string(),
@@ -312,6 +318,14 @@ pub(crate) fn unregister_with(systemd: &dyn Systemd, units: &Path) -> Result<()>
         Err(error) => return Err(error.into()),
     }
     remove_file(&unit)?;
+    // `disable` removes the link that starts it with the system, but only
+    // while the unit file is there to say where it is. One whose unit was
+    // removed by hand keeps it, so it is removed here. Only a link: a file
+    // there is not ours.
+    let wanted = units.join(WANTED_BY).join(UNIT_NAME);
+    if fs::symlink_metadata(&wanted).is_ok_and(|found| found.file_type().is_symlink()) {
+        remove_file(&wanted)?;
+    }
     must(systemd, &["daemon-reload"], &[])?;
     // Nothing to say if it has no failure to forget.
     let _ = systemd.run(&["reset-failed", UNIT_NAME]);
