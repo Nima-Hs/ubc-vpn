@@ -21,7 +21,7 @@ It is an open-source app with a GUI, installed from a release file, for Windows,
 | CLI | A small one: `login`, `connect`, `disconnect`, `status` |
 | VPN engine | `libopenconnect`, linked as a library, built by us from a pinned source tag |
 | Install | System-wide on all three OSes, one admin prompt |
-| Updates | Through the installer, one admin prompt each; nothing privileged updates itself |
+| Updates | The app downloads the next installer from GitHub Releases, trusts it only through an update list signed with our own key, and runs it with one admin prompt; nothing privileged updates itself |
 | Signing | None for now; checksums and build attestations instead |
 | Licence | `MIT OR Apache-2.0`; LGPL libraries bundled as separate, replaceable files |
 | Releases | One version, one tag, one generated changelog; prepared as a pull request, published by hand |
@@ -130,10 +130,82 @@ The look is a clean dark theme, and dark is the default. Every colour, size, rad
 
 - **Installers:** built with `electron-builder`. A setup `.exe` on Windows, a `.pkg` on macOS, a `.deb` and `.rpm` on Linux. Each installs the app and the service together.
 - **User data:** settings and the saved password stay in the user's profile and keyring.
-- **Updates:** a new installer, with one admin prompt.
+- **Updates:** a new installer, with one admin prompt. The app finds, checks and runs it; see [Updates](#updates).
 - **Releases:** the version and changelog are computed from commit messages with `git-cliff`. A workflow prepares the release as a branch, the maintainer opens it as a pull request, and after merging starts the publish workflow by hand. That workflow builds on three OSes with no write access, then a separate final step creates the tag, checksums, build attestations and the GitHub release. No bot credential is stored.
 
 The release workflows are added before the first release, not now.
+
+## Updates
+
+Status: being built, Windows first. The update list and its checks exist (`app/src/main/update/`); checking, downloading and installing follow. macOS and Linux get the same flow and the same setting, with their own admin prompt and installer.
+
+The app updates itself through the installer, as a person would, with no code signing and at no cost. Nothing privileged updates itself, and the service plays no part beyond disconnecting.
+
+### The flow
+
+1. **Checking.** At start and every four hours, the app asks GitHub for the latest release of this repository (`Nima-Hs/ubc-vpn`), over HTTPS. It talks to GitHub's own hosts only (`api.github.com`, `github.com`, and the hosts GitHub sends release downloads to), and checks every redirect against the same rules before following it.
+2. **Trusting the list.** The release carries `update-list.json`. The app downloads it, refuses one over 64 KiB, and checks its signature against the public keys built into it. Only then does it read what the list says: it must be for this app, name a version newer than the app's own, and name the same version as the release's tag.
+3. **Downloading.** The app takes the installer the list names for its system, and downloads that release asset into a folder of its own that only the user can write (on Windows, `%LOCALAPPDATA%\UBC VPN\updates`). It stops at the size the list gives, and keeps the file only if its size and SHA-256 match the list.
+4. **Offering.** With "Automatic updates" on, the default, all of this happens in the background and the app then offers "Restart to update". With it off, the app checks but downloads nothing, and only says an update exists. "Check for updates now" in Settings checks at once, and Settings shows when the app last checked.
+5. **Installing.** "Restart to update" disconnects the VPN through the service, cleanly. The app then copies the installer into a fresh folder made for this run, checks its size and SHA-256 again there, and runs that copy silently, which takes one admin prompt (UAC on Windows, which says "Unknown publisher" because nothing is signed). The setup program replaces the app and the service, the app starts again, and it reconnects if it was connected. If the user cancels the prompt, nothing changes: the app reconnects if it was connected and says the update was not installed.
+
+### The update list
+
+The release workflow writes the list with `packaging/update/sign.mjs`, which works out each installer's size and SHA-256 from the file itself. The list is JSON:
+
+```json
+{
+  "format": 1,
+  "key": "<key id: the first 16 hex digits of the public key's SHA-256>",
+  "list": "<base64 of the signed bytes>",
+  "signature": "<base64 of the Ed25519 signature>"
+}
+```
+
+The signed bytes are JSON too:
+
+```json
+{
+  "format": 1,
+  "app": "io.github.nima-hs.ubc-vpn",
+  "version": "0.2.0",
+  "files": [
+    { "platform": "windows-x64", "name": "ubc-vpn-setup-0.2.0-x64.exe", "size": 104857600, "sha256": "<64 lowercase hex digits>" }
+  ]
+}
+```
+
+- **What is signed:** the text `ubc-vpn update list v1` and a newline, followed by the signed bytes exactly as they appear in the list. Nothing is re-encoded before checking, so no two programs can disagree on what was signed, and a signature the key makes for any other purpose cannot pass as one.
+- **What the app checks, in order:** the size; the format; that the key id names a key it trusts; the signature; and only then the contents. `app` must be this app's id, the `appId` the installer is built with, so a list for another product signed with the same key is refused. `version` must be a Semantic Versioning version. Each file needs a platform name, a plain file name (never a path), a size from 1 byte to 512 MiB, and a SHA-256; a platform appears at most once.
+- **Versions:** the app takes a list only if its version is newer than its own, in Semantic Versioning order, with pre-releases before their release (`0.2.0-rc.1` < `0.2.0`). The same version, an older one, or one that differs only in build metadata is not an update.
+- **Fields the app does not know are ignored,** so a later version of the format can add some. A change old apps must not misread gets a new `format`.
+- **Platform names:** `windows-x64` and `macos-arm64`; Linux names are chosen with its installer.
+
+### The keys
+
+- **The private key** is an Ed25519 key the owner generates on their own machine. It lives only as a secret of a GitHub Environment that the release workflow alone uses, limited to `main` and release tags, with the owner's approval required for every run, and in the owner's offline backup. It is never in the repository, a pull request, a fork, an issue, a log or a command line. The workflow passes it to `sign.mjs` on standard input, or an open file descriptor, and the script prints nothing secret.
+- **The public keys** are built into the app, in `app/src/main/update/keys.ts`. The list names the key that signed it, so several can be trusted at once.
+- **Rotating the key:** add the new public key and release; once that version is out, sign with the new key; later, remove the old one.
+- **The placeholder:** until the owner adds the real public key, `keys.ts` holds a placeholder that verifies nothing. `pnpm check:release` fails while it is there, and the release workflow runs that check before it builds. TODO: nothing runs it yet; the pull request that adds the release workflow must. A test build with the placeholder can check for updates but trusts no list.
+
+### Threat model
+
+| Threat | What stops it |
+| --- | --- |
+| A forged installer or list on the release page, from a stolen GitHub token or a mistaken upload | The signature: only the owner's key signs lists, and a workflow can use it only with the owner's approval |
+| Someone between the app and GitHub | HTTPS to GitHub's hosts only, redirects included; the signature even so |
+| An older release, or its list, served again | The app refuses a version that is not newer than its own |
+| A list signed with the same key for another product or purpose | The `app` field, and the text signed in front of the list |
+| An installer swapped for another, or cut short | Its size and SHA-256 against the list, after downloading and again right before running |
+| A download that never ends, or a huge list | The list's 64 KiB limit and the size the list gives |
+| A fork's releases | The app asks for this repository's releases only |
+| A leaked private key | The owner rotates it as above; until then, the threat it opens is the forged installer above |
+
+What it does not stop:
+
+- **A program already running as the user.** It could change the file between the last check and the moment the setup program opens it, but it could as well start its own program behind its own admin prompt, which looks the same while nothing is signed. The fresh folder and the second check leave it the least time.
+- **Withholding updates (a freeze).** Lists do not expire, by design. Someone who can block GitHub can keep the app on its version; Settings shows when it last checked. Someone with a token that can change this repository's releases can do the same without the app noticing: replace `update-list.json` with an older, validly signed list, which the app refuses as not newer, or delete the release. The check succeeds and finds nothing new. They still cannot make the app install anything the owner did not sign.
+- **A setup program that is not signed.** Windows shows "Unknown publisher". Signing is reconsidered after v0.1.0 (see "Open points").
 
 ## Development and testing
 
@@ -342,7 +414,7 @@ A trial packaged the app with pnpm and `electron-builder` on all three OSes, ins
 - Extra files (the command-line client, the native libraries, licence texts) ship as separate files beside the app, outside the app archive. They arrive on the user's disk byte for byte as built.
 - Electron's fuses are set so that a packaged app cannot be run as plain Node, ignores `NODE_OPTIONS` and `--inspect`, and loads its code only from the app archive. No fuse covers `--remote-debugging-port`, so the main process removes the remote debugging switches itself before anything else.
 - The archive's integrity is checked at start on Windows and macOS. Electron has no such check on Linux, where root-owned files are the only protection.
-- No updater is included, and the build produces no update feed for one to read.
+- electron-builder's updater is not included, and the build produces no update feed for it. The app's own updater reads a signed list instead; see [Updates](#updates).
 - The fonts' licence files are copied into the package explicitly; the build does not pick them up by itself.
 
 **Windows**

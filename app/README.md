@@ -40,6 +40,7 @@ pnpm test:system     # the real app against the real client and a dev-mode servi
 pnpm build           # production build, into out/
 pnpm check:build     # the production build contains no demo code
 pnpm check:licenses  # everything shipped has an allowed licence
+pnpm check:release   # the app trusts a real update key, not the placeholder; fails until the owner adds it
 pnpm icons           # draws the app icon files in build/ again, after the mark changes
 ```
 
