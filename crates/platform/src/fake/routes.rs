@@ -28,6 +28,32 @@ fn v4_halves() -> [Ipv4Net; 2] {
     FULL_TUNNEL_V4.map(|half| half.parse().expect("a network"))
 }
 
+/// The two IPv6 halves of full mode, as destination and prefix length.
+const V6_HALVES: [(Ipv6Addr, u8); 2] = [
+    (Ipv6Addr::UNSPECIFIED, 1),
+    (Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0), 1),
+];
+
+/// An IPv6 route: the interface, the destination and its prefix length.
+type RouteV6 = (String, Ipv6Addr, u8);
+
+/// Whether `addr` is in the network `dest`/`len`.
+fn contains_v6(dest: Ipv6Addr, len: u8, addr: Ipv6Addr) -> bool {
+    let mask = u128::MAX.checked_shl(128 - u32::from(len)).unwrap_or(0);
+    u128::from(dest) & mask == u128::from(addr) & mask
+}
+
+/// Whether IPv6 could leave by a route to `dest`/`len`, as the contract
+/// counts a leak path: any unicast route but link-local, loopback and
+/// multicast.
+fn leaks(dest: Ipv6Addr, len: u8) -> bool {
+    let first = dest.segments()[0];
+    let link_local = len >= 10 && first & 0xffc0 == 0xfe80;
+    let multicast = len >= 8 && first & 0xff00 == 0xff00;
+    let loopback = len == 128 && dest == Ipv6Addr::LOCALHOST;
+    !(link_local || multicast || loopback)
+}
+
 impl State {
     /// Every IPv4 route on the fake machine as the OS would list it, the
     /// product's and anybody else's, as interface and destination.
@@ -45,14 +71,63 @@ impl State {
             .collect()
     }
 
+    /// Whether `interface` takes IPv6 routes: nobody turned IPv6 off for it.
+    fn has_ipv6(&self, interface: &str) -> bool {
+        !self.ipv6_off.contains(interface)
+    }
+
+    /// Every IPv6 route on the fake machine: link-local through the
+    /// physical network, its default route when it has IPv6, the halves
+    /// when they block IPv6, and anybody else's. An interface with IPv6
+    /// turned off has none.
+    fn table_v6(&self) -> Vec<RouteV6> {
+        let physical = PHYSICAL_INTERFACE.to_string();
+        let link_local = (
+            physical.clone(),
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0),
+            10,
+        );
+        let default = (physical, Ipv6Addr::UNSPECIFIED, 0);
+        let default = self.physical_ipv6.then_some(default);
+        let full = self.applied.full_tunnel.iter();
+        let blocking = full.filter(|full| full.ipv6 == Ipv6Block::Blocked);
+        let halves =
+            blocking.flat_map(|full| V6_HALVES.map(|(dest, len)| (full.tunnel.clone(), dest, len)));
+        std::iter::once(link_local)
+            .chain(default)
+            .chain(halves)
+            .chain(self.foreign_v6.iter().cloned())
+            .filter(|(interface, _, _)| self.has_ipv6(interface))
+            .collect()
+    }
+
     /// What full mode can do about IPv6 here, as the contract says: block it
     /// when the tunnel takes IPv6, nothing to block when there is no leak
-    /// path either, and a refusal otherwise.
-    fn ipv6_decision(&self) -> Result<Ipv6Block> {
-        match (self.tunnel_ipv6, self.physical_ipv6) {
+    /// path either, and a refusal otherwise. A leak path is any unicast IPv6
+    /// route, other than link-local, on an interface other than the tunnel.
+    fn ipv6_decision(&self, tunnel: &str) -> Result<Ipv6Block> {
+        let table = self.table_v6();
+        let mut paths = table.iter().filter(|(interface, _, _)| interface != tunnel);
+        let leak = paths.any(|(_, dest, len)| leaks(*dest, *len));
+        match (self.tunnel_ipv6 && self.has_ipv6(tunnel), leak) {
             (true, _) => Ok(Ipv6Block::Blocked),
             (false, false) => Ok(Ipv6Block::NothingToBlock),
             (false, true) => Err(Error::Unsupported),
+        }
+    }
+
+    /// Whether a half of `family` goes through an interface other than
+    /// `tunnel`.
+    fn half_elsewhere(&self, tunnel: &str, v6: bool) -> bool {
+        match v6 {
+            false => self
+                .table()
+                .iter()
+                .any(|(i, dest)| i != tunnel && v4_halves().contains(dest)),
+            true => self
+                .table_v6()
+                .iter()
+                .any(|(i, dest, len)| i != tunnel && V6_HALVES.contains(&(*dest, *len))),
         }
     }
 
@@ -71,6 +146,15 @@ impl State {
     /// else's goes too, so an implementation that took one over shows it.
     fn forget(&mut self, interface: &str, net: Ipv4Net) {
         self.foreign.retain(|(i, d)| !(i == interface && *d == net));
+    }
+
+    /// The same for full mode's halves through `tunnel`, of both families.
+    fn forget_halves(&mut self, tunnel: &str) {
+        for half in v4_halves() {
+            self.forget(tunnel, half);
+        }
+        let half = |(i, d, l): &RouteV6| i == tunnel && V6_HALVES.contains(&(*d, *l));
+        self.foreign_v6.retain(|route| !half(route));
     }
 }
 
@@ -200,9 +284,7 @@ impl Routes for Fake {
             state.forget(&name, subnet);
         }
         if let Some(full) = state.applied.full_tunnel.take() {
-            for half in v4_halves() {
-                state.forget(&full.tunnel, half);
-            }
+            state.forget_halves(&full.tunnel);
         }
         Ok(())
     }
@@ -230,8 +312,10 @@ impl Routes for Fake {
         let on_link = state.on_link.iter();
         let local = on_link.map(|net| (adapter(net).to_string(), *net));
         let table: Vec<_> = state.table().into_iter().chain(local).collect();
+        // A route on a link that is down carries nothing.
         let narrowest = table
             .iter()
+            .filter(|(interface, _)| !state.links_down.contains(interface))
             .filter(|(_, subnet)| subnet.contains_addr(dest))
             .max_by_key(|(_, subnet)| subnet.prefix_len());
         let used = match (host, narrowest) {
@@ -245,10 +329,10 @@ impl Routes for Fake {
         }
     }
 
-    fn full_tunnel_ipv6(&self, _tunnel: &str) -> Result<Ipv6Block> {
+    fn full_tunnel_ipv6(&self, tunnel: &str) -> Result<Ipv6Block> {
         let (state, outcome) = self.start(Op::FullTunnelIpv6);
         outcome?;
-        state.ipv6_decision()
+        state.ipv6_decision(tunnel)
     }
 
     /// Decides about IPv6 first, as the contract says, and refuses having
@@ -262,12 +346,12 @@ impl Routes for Fake {
         if state.absent.contains(tunnel) {
             return outcome.and(Err(Error::NotFound));
         }
-        let ipv6 = match state.ipv6_decision() {
+        let ipv6 = match state.ipv6_decision(tunnel) {
             Ok(ipv6) => ipv6,
             Err(refused) => return outcome.and(Err(refused)),
         };
-        let elsewhere = |half| matches!(state.route_to(half, tunnel), Present::Elsewhere);
-        if v4_halves().into_iter().any(elsewhere) {
+        let v6_elsewhere = ipv6 == Ipv6Block::Blocked && state.half_elsewhere(tunnel, true);
+        if state.half_elsewhere(tunnel, false) || v6_elsewhere {
             return outcome.and(Err(Error::AlreadyExists));
         }
         let full = FullTunnel {
@@ -284,47 +368,40 @@ impl Routes for Fake {
         let ours = state.applied.full_tunnel.as_ref();
         if ours.is_some_and(|full| full.tunnel == tunnel) {
             state.applied.full_tunnel = None;
-            for half in v4_halves() {
-                state.forget(tunnel, half);
-            }
+            state.forget_halves(tunnel);
         }
         Ok(())
     }
 
+    /// Any half through another interface counts, this product's own
+    /// through another tunnel too.
     fn foreign_full_tunnel(&self, tunnel: &str) -> Result<bool> {
         let (state, outcome) = self.start(Op::ForeignFullTunnel);
         outcome?;
-        let halves = v4_halves();
-        let foreign = state.foreign.iter();
-        Ok(foreign
-            .filter(|(name, _)| name != tunnel)
-            .any(|(_, dest)| halves.contains(dest)))
+        Ok(state.half_elsewhere(tunnel, false) || state.half_elsewhere(tunnel, true))
     }
 
-    /// The fake's IPv6 table: link-local through the physical network, the
-    /// halves through the tunnel when they were added, and a default route
-    /// through the physical network when it has IPv6. The longest prefix
-    /// wins.
+    /// Picks from the fake's IPv6 table (see `table_v6`) by the longest
+    /// prefix, on links that are up. Equally long routes that disagree
+    /// about `interface` answer `Unknown`.
     fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified {
         let (state, outcome) = self.start(Op::VerifyRouteV6);
         if outcome.is_err() {
             return Verified::Unknown;
         }
-        let link_local = dest.segments()[0] & 0xffc0 == 0xfe80;
-        let blocked = state
-            .applied
-            .full_tunnel
-            .as_ref()
-            .filter(|full| full.ipv6 == Ipv6Block::Blocked);
-        let used = match (link_local, blocked) {
-            (true, _) => Some(PHYSICAL_INTERFACE),
-            (false, Some(full)) => Some(full.tunnel.as_str()),
-            (false, None) if state.physical_ipv6 => Some(PHYSICAL_INTERFACE),
-            (false, None) => None,
-        };
-        match used == Some(interface) {
-            true => state.confirmed(Op::VerifyRouteV6),
-            false => Verified::No,
+        let table = state.table_v6();
+        let matching: Vec<_> = table
+            .iter()
+            .filter(|(i, _, _)| !state.links_down.contains(i))
+            .filter(|(_, net, len)| contains_v6(*net, *len, dest))
+            .collect();
+        let longest = matching.iter().map(|(_, _, len)| *len).max();
+        let winners = matching.iter().filter(|(_, _, len)| Some(*len) == longest);
+        let through: Vec<bool> = winners.map(|(i, _, _)| i == interface).collect();
+        match (through.iter().all(|t| *t), through.iter().any(|t| *t)) {
+            (true, true) => state.confirmed(Op::VerifyRouteV6),
+            (_, false) => Verified::No,
+            (false, true) => Verified::Unknown,
         }
     }
 }
@@ -345,5 +422,66 @@ impl crate::suite::Foreign for Fake {
 
     fn addresses(&self, interface: &str) -> Vec<Ipv4Addr> {
         self.device_addresses(interface)
+    }
+
+    /// Every subscription is told IPv6 changed, unless `interface` is a
+    /// tunnel this product configured; the same for the three below.
+    fn add_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        let route = (interface.to_string(), dest, prefix_len);
+        let mut state = self.state();
+        if !state.foreign_v6.contains(&route) {
+            state.foreign_v6.push(route);
+            state.ipv6_changed(interface);
+        }
+    }
+
+    fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        let route = (interface.to_string(), dest, prefix_len);
+        let mut state = self.state();
+        if state.foreign_v6.contains(&route) {
+            state.foreign_v6.retain(|foreign| *foreign != route);
+            state.ipv6_changed(interface);
+        }
+    }
+
+    fn add_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let added = (interface.to_string(), address);
+        let mut state = self.state();
+        if !state.addresses_v6.contains(&added) {
+            state.addresses_v6.push(added);
+            state.ipv6_changed(interface);
+        }
+    }
+
+    fn remove_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let removed = (interface.to_string(), address);
+        let mut state = self.state();
+        if state.addresses_v6.contains(&removed) {
+            state.addresses_v6.retain(|address| *address != removed);
+            state.ipv6_changed(interface);
+        }
+    }
+
+    /// A subscription watching `interface` is told its network changed.
+    fn set_link(&self, interface: &str, up: bool) {
+        let mut state = self.state();
+        let changed = match up {
+            true => state.links_down.remove(interface),
+            false => state.links_down.insert(interface.to_string()),
+        };
+        if changed {
+            state.physical_changed(interface);
+        }
+    }
+
+    fn bind_ipv6(&self, interface: &str, on: bool) {
+        let mut state = self.state();
+        let changed = match on {
+            true => state.ipv6_off.remove(interface),
+            false => state.ipv6_off.insert(interface.to_string()),
+        };
+        if changed {
+            state.ipv6_changed(interface);
+        }
     }
 }

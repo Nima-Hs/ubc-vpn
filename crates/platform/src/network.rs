@@ -146,8 +146,10 @@ pub const FULL_TUNNEL_V6: [&str; 2] = ["::/1", "8000::/1"];
 ///   removes exactly the routes that carry it. No journal is needed. The
 ///   number never changes, so a later version finds an earlier one's routes.
 /// - **macOS** writes the exact route to a journal in the state folder, which
-///   only an administrator can write, and also sets a route flag. It removes
-///   a route only when it matches a journal row and carries the flag.
+///   only an administrator can write, and also sets the route flag
+///   `RTF_PROTO3` on it. It removes a route only when it matches a journal
+///   row and carries that flag. The flag never changes, for the same reason
+///   as Linux's number.
 /// - **Windows** has nothing to mark a route with. It writes the exact route
 ///   to the same kind of journal and removes only exact matches. Windows
 ///   keeps routes to one destination through two interfaces side by side and
@@ -200,7 +202,24 @@ pub trait Routes: Send + Sync {
     /// what the tunnel carries.
     ///
     /// Where the OS would give a device an IPv6 address of its own accord
-    /// when it comes up, the implementation turns that off first.
+    /// when it comes up, the implementation turns that off first. IPv6
+    /// itself stays on, so that full mode's IPv6 halves can be added on the
+    /// device (see [`Ipv6Block::Blocked`]):
+    ///
+    /// - **Linux** sets the device's `addr_gen_mode` to 1 (none) before it
+    ///   comes up, so the kernel makes no link-local or other address, and
+    ///   never sets `disable_ipv6`, which would leave no IPv6 to route.
+    /// - **Windows** turns off the adapter's router discovery and stateful
+    ///   address configuration, and removes any IPv6 address it has.
+    ///
+    /// On **Linux** an address inside one of the networks the machine is
+    /// directly on (see [`PhysicalNetwork::on_link`], read again at the
+    /// call) is refused with [`Error::InvalidInput`], changing nothing. Linux
+    /// answers ARP on the physical link for every address the machine holds,
+    /// the tunnel's included, so such an address equal to a neighbour's
+    /// would draw that neighbour's traffic. Windows and macOS answer only
+    /// for an interface's own addresses, so there it only makes that
+    /// neighbour unreachable, and is allowed.
     ///
     /// The device ends up with this one IPv4 address and no other: any other
     /// IPv4 address it has, such as one left on a reused adapter, is
@@ -421,12 +440,25 @@ pub trait Dns: Send + Sync {
     /// catch-all this product set before. The resolvers are reached by
     /// ordinary routing, so the caller routes them through the tunnel.
     ///
-    /// On Windows it is one more name-resolution rule, for the namespace
-    /// `.`, under a key with an identifier of the product's own, volatile
-    /// like the others. It takes precedence over Windows asking every
-    /// network's resolver at once. A single-label name is sent with the
-    /// local network's suffix added. mDNS, LLMNR and NetBIOS names are not
-    /// DNS and are not affected.
+    /// Each OS keeps it as a rule of the product's own, beside the split
+    /// DNS:
+    ///
+    /// - **Windows**: one more name-resolution rule, for the namespace `.`,
+    ///   under a key with an identifier of the product's own, volatile like
+    ///   the others. It takes precedence over Windows asking every network's
+    ///   resolver at once. A single-label name is sent with the local
+    ///   network's suffix added.
+    /// - **Linux**: on the tunnel's link in systemd-resolved, the routing
+    ///   domain `~.` added to the split domains, the resolvers as the link's
+    ///   DNS servers, and the link's default-route flag switched on, so
+    ///   that every name not routed more specifically goes to the tunnel's
+    ///   link.
+    /// - **macOS**: a second supplemental resolver entry, set and held like
+    ///   the split DNS one, whose match domains match every name. Exactly
+    ///   which entry does that is confirmed when full mode is written for
+    ///   macOS.
+    ///
+    /// mDNS, LLMNR and NetBIOS names are not DNS and are not affected.
     ///
     /// Fails with [`Error::Unsupported`], having changed nothing, where
     /// [`Dns::set_split_dns`] would, and on an OS that cannot do this. Fails
@@ -448,11 +480,20 @@ pub trait Dns: Send + Sync {
     /// gives `No`.
     fn catch_all_dns_matches(&self, resolvers: &[Ipv4Addr]) -> Verified;
 
-    /// Whether a rule that is not this product's already takes every name:
-    /// on Windows, a local name-resolution rule for the namespace `.`, such
-    /// as Tailscale's "override local DNS" or exit node sets. Read-only, for
-    /// the service to refuse full mode before it changes anything.
-    /// `Ok(false)` when there is none.
+    /// Whether a rule that is not this product's already takes every name.
+    /// Read-only, for the service to refuse full mode before it changes
+    /// anything. `Ok(false)` when there is none.
+    ///
+    /// - **Windows**: a local name-resolution rule for the namespace `.`,
+    ///   such as Tailscale's "override local DNS" or exit node sets.
+    /// - **Linux**: a link other than the tunnel's with the routing domain
+    ///   `~.` in systemd-resolved, such as another VPN's, which takes every
+    ///   name not routed more specifically. A link that merely has the
+    ///   default-route flag, as the physical network's usually does, takes
+    ///   names only when no link claims them, so it does not count.
+    /// - **macOS**: a supplemental resolver entry that is not the product's
+    ///   and matches every name, as the catch-all does (see
+    ///   [`Dns::set_catch_all_dns`]).
     fn foreign_catch_all(&self) -> Result<bool>;
 }
 
@@ -489,8 +530,16 @@ pub trait NetworkEvents: Send + Sync {
     /// [`NetworkEvent::Ipv6Changed`] is sent for an IPv6 route or address
     /// added, changed or removed on any interface but the tunnel, so that
     /// full mode's "nothing to block" is never older than the last such
-    /// change. Windows sends it from the same notifications it already
-    /// watches (routes and addresses) for IPv6 as well as IPv4.
+    /// change. Each OS sends it from the same notifications it already
+    /// watches for the physical network, for IPv6 as well as IPv4:
+    ///
+    /// - **Windows**: the IP Helper route and address notifications.
+    /// - **Linux**: the rtnetlink route and address groups for IPv6
+    ///   (`RTNLGRP_IPV6_ROUTE` and `RTNLGRP_IPV6_IFADDR`), beside the IPv4
+    ///   ones and the link group.
+    /// - **macOS**: the `PF_ROUTE` routing socket's route and address
+    ///   messages (`RTM_ADD`, `RTM_DELETE`, `RTM_CHANGE`, `RTM_NEWADDR` and
+    ///   `RTM_DELADDR`) for `AF_INET6`.
     fn subscribe(&self, watching: &PhysicalNetwork) -> Result<Subscription>;
 
     /// Whether a [`Subscription`] here sends [`NetworkEvent::Ipv6Changed`].

@@ -8,12 +8,14 @@
 
 use std::ffi::c_void;
 use std::ptr::null;
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW};
 use windows_sys::core::GUID;
 
 use super::security::wide;
+use crate::lock;
 
 type Create = unsafe extern "system" fn(*const u16, *const u16, *const GUID) -> *mut c_void;
 type Close = unsafe extern "system" fn(*mut c_void);
@@ -68,22 +70,71 @@ impl Wintun {
     /// Windows sees it connected. Dropping it removes it.
     pub(super) fn adapter(&self, name: &str) -> Adapter<'_> {
         super::routes_tests::step(&format!("creating the adapter {name}"));
-        let (name, kind) = (wide(name), wide("ubc-vpn-test"));
+        let (wide_name, kind) = (wide(name), wide("ubc-vpn-test"));
         // SAFETY: both strings are NUL-terminated and outlive the call; a
         // null GUID lets the system choose one.
-        let handle = unsafe { (self.create)(name.as_ptr(), kind.as_ptr(), null()) };
+        let handle = unsafe { (self.create)(wide_name.as_ptr(), kind.as_ptr(), null()) };
         assert!(!handle.is_null(), "creating a Wintun adapter failed");
-        super::routes_tests::step("starting a session");
-        // SAFETY: the adapter is open; the capacity is a power of two in the
-        // documented range.
-        let session = unsafe { (self.start_session)(handle, 0x40_0000) };
-        assert!(!session.is_null(), "starting a Wintun session failed");
-        super::routes_tests::step("the adapter is up");
-        Adapter {
+        lock(&LINKS).push(Link {
+            name: name.to_string(),
+            handle: handle as usize,
+            session: 0,
+            start: self.start_session,
+            end: self.end_session,
+        });
+        let adapter = Adapter {
             wintun: self,
+            name: name.to_string(),
             handle,
-            session,
+        };
+        super::routes_tests::step("starting a session");
+        set_link(name, true);
+        super::routes_tests::step("the adapter is up");
+        adapter
+    }
+}
+
+/// The session ring buffer's size: a power of two in the documented range.
+const CAPACITY: u32 = 0x40_0000;
+
+/// An open adapter's session, by the adapter's name, so that a test can take
+/// its link down and bring it up again as somebody else would.
+struct Link {
+    name: String,
+    /// The adapter, as an address: it is open while the entry exists.
+    handle: usize,
+    /// The running session, as an address, or zero for none.
+    session: usize,
+    start: StartSession,
+    end: EndSession,
+}
+
+/// Every open adapter's link. An adapter adds its entry when it is created
+/// and removes it before it is closed.
+static LINKS: Mutex<Vec<Link>> = Mutex::new(Vec::new());
+
+/// Starts the session of the test adapter named `name`, so that Windows sees
+/// it connected, or ends it, so that Windows sees it disconnected, as a
+/// pulled cable would. The adapter and its settings stay.
+pub(super) fn set_link(name: &str, up: bool) {
+    let mut links = lock(&LINKS);
+    let link = links.iter_mut().find(|link| link.name == name);
+    let link = link.unwrap_or_else(|| panic!("{name} is not an open test adapter"));
+    match (up, link.session) {
+        (true, 0) => {
+            // SAFETY: the adapter is open while its entry exists, and has no
+            // session running.
+            let session = unsafe { (link.start)(link.handle as *mut c_void, CAPACITY) };
+            assert!(!session.is_null(), "starting a Wintun session failed");
+            link.session = session as usize;
         }
+        (false, session) if session != 0 => {
+            // SAFETY: the session is running and owned by this entry; it is
+            // ended once, here, and never used again.
+            unsafe { (link.end)(session as *mut c_void) };
+            link.session = 0;
+        }
+        _ => {}
     }
 }
 
@@ -101,11 +152,11 @@ impl Drop for Wintun {
 
 pub(super) struct Adapter<'a> {
     wintun: &'a Wintun,
+    name: String,
     handle: *mut c_void,
-    session: *mut c_void,
 }
 
-// SAFETY: the handles are used through the library's thread-safe functions.
+// SAFETY: the handle is used through the library's thread-safe functions.
 unsafe impl Send for Adapter<'_> {}
 // SAFETY: as above.
 unsafe impl Sync for Adapter<'_> {}
@@ -114,19 +165,14 @@ impl Adapter<'_> {
     /// Ends the session, so that Windows sees the adapter disconnected, and
     /// keeps the adapter, with its routes, until it is dropped.
     pub(super) fn end_session(&mut self) {
-        if self.session.is_null() {
-            return;
-        }
-        // SAFETY: the session is open and owned by this value; it is ended
-        // once, here, and never used again.
-        unsafe { (self.wintun.end_session)(self.session) };
-        self.session = std::ptr::null_mut();
+        set_link(&self.name, false);
     }
 }
 
 impl Drop for Adapter<'_> {
     fn drop(&mut self) {
         self.end_session();
+        lock(&LINKS).retain(|link| link.name != self.name);
         // SAFETY: the adapter is open, owned by this value, and closed once,
         // after its session has ended.
         unsafe { (self.wintun.close)(self.handle) };
