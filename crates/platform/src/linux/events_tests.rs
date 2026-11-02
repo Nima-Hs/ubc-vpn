@@ -20,12 +20,12 @@ use ubc_vpn_core::routes::Ipv4Net;
 
 use super::dns_tests::PREFIX;
 use super::events::{
-    self, GROUPS, LinuxEvents, Listener, Physical, Source, State, Wake, Watcher, changes,
+    self, GROUPS, LinuxEvents, Listener, Physical, SETTLE, Source, State, Wake, Watcher, changes,
     differs_from_capture, state, watch,
 };
 use super::netlink::{
-    self, AF_INET, AF_INET6, Address, IFF_RUNNING, IFF_UP, Link, RT_SCOPE_LINK, RT_TABLE_MAIN,
-    RTM_F_CLONED, RTN_UNICAST, Route,
+    self, AF_INET, AF_INET6, Address, IFA_F_DEPRECATED, IFA_F_TENTATIVE, IFF_RUNNING, IFF_UP, Link,
+    RT_SCOPE_LINK, RT_TABLE_MAIN, RTM_F_CLONED, RTN_UNICAST, Route,
 };
 use super::routes::LinuxRoutes;
 use super::routes_tests::{Outsider, Tun, as_root_in, ip_ok, say};
@@ -166,12 +166,56 @@ fn only_the_watched_interface_is_a_physical_change() {
         links[3].flags = IFF_UP;
     });
     assert_eq!(ours, [], "our own routes, or the tunnel");
-    // Somebody else's route through the watched interface is a change, as
-    // is the same route with our mark taken off.
+    // A default route of ours would not be the network's own router.
+    let our_default = events_for(|_, _, routes| {
+        let mut default = route(ip("0.0.0.0"), 0, Some(WIRE), LINUX_ROUTE_PROTOCOL);
+        default.gateway = Some(ip("192.168.0.99"));
+        routes.push(default);
+    });
+    assert_eq!(our_default, [], "a default route of ours");
+    // Only the routers of default routes count: not somebody else's other
+    // routes through the watched interface, nor a default route's metric.
     let theirs = events_for(|_, _, routes| {
         routes.push(route(ip("192.0.2.1"), 32, Some(WIRE), KERNEL));
+        routes.push(route(ip("203.0.113.0"), 24, Some(WIRE), KERNEL));
     });
-    assert_eq!(theirs, [PHYSICAL], "somebody else's route");
+    assert_eq!(theirs, [], "an unrelated route through the interface");
+    let metric = events_for(|_, _, routes| routes[0].priority = Some(20600));
+    assert_eq!(metric, [], "a default route's metric");
+    let moved = events_for(|_, _, routes| {
+        let mut default = routes[0].clone();
+        default.priority = Some(600);
+        default.table = 182;
+        routes[0] = default;
+    });
+    assert_eq!(
+        moved,
+        [],
+        "the same router in another table, at another metric"
+    );
+    let another = events_for(|_, _, routes| {
+        let mut default = routes[0].clone();
+        default.gateway = Some(ip("192.168.0.2"));
+        default.table = 182;
+        routes.push(default);
+    });
+    assert_eq!(another, [PHYSICAL], "another router, in any table");
+    let on_link = events_for(|_, _, routes| routes[0].gateway = None);
+    assert_eq!(
+        on_link,
+        [PHYSICAL],
+        "the default route straight onto the link"
+    );
+    // An address's flags are not the address: growing old (deprecated),
+    // still being checked, or renewed sends nothing.
+    for flags in [IFA_F_DEPRECATED, IFA_F_TENTATIVE, IFA_F_DEPRECATED | 0x80] {
+        let quiet = events_for(|_, addresses, _| {
+            for row in addresses.iter_mut().filter(|a| a.index == WIRE) {
+                row.flags = flags;
+            }
+        });
+        assert_eq!(quiet, [], "only the flags changed: {flags:#x}");
+    }
     let elsewhere = events_for(|_, addresses, routes| {
         routes.push(route(ip("203.0.113.0"), 24, Some(OTHER), KERNEL));
         addresses.push(address(OTHER, ip("203.0.113.21"), 24));
@@ -292,16 +336,22 @@ fn a_change_since_capture_is_noticed() {
 struct Script(Vec<io::Result<Wake>>);
 
 impl Source for Script {
-    fn wait(&mut self) -> io::Result<Wake> {
-        match self.0.is_empty() {
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Wake> {
+        let next = match self.0.is_empty() {
             true => Ok(Wake::Stop),
             false => self.0.remove(0),
+        };
+        // A wait runs out only when the worker gave it a time.
+        if let Ok(Wake::Timeout) = next {
+            assert!(timeout.is_some(), "a wait with no time ran out");
         }
+        next
     }
 }
 
 /// What the worker sends for `wakes`, starting from `start` and given the
-/// looks in `looks`, in order.
+/// looks in `looks`, in order, with a settle that has always ended by the
+/// next wake.
 fn worker_sends(
     start: &State,
     wakes: Vec<io::Result<Wake>>,
@@ -310,9 +360,82 @@ fn worker_sends(
     let looks = RefCell::new(looks);
     let look = || looks.borrow_mut().remove(0);
     let (sender, receiver) = mpsc::channel();
-    watch(&mut Script(wakes), &look, start.clone(), &sender);
+    watch(
+        &mut Script(wakes),
+        &look,
+        start.clone(),
+        Duration::ZERO,
+        &sender,
+    );
     drop(sender);
     receiver.into_iter().collect()
+}
+
+/// The usual network with the watched link stopped (`IFF_UP` only), or
+/// replaced by another interface of the same name.
+fn link_states() -> (State, State, State) {
+    let (addresses, routes) = usual();
+    let before = state_of(&links(), &addresses, &routes);
+    let mut down = links();
+    down[1].flags = IFF_UP;
+    let mut replaced = links();
+    replaced[1].index = 9;
+    replaced[1].flags = IFF_UP;
+    (
+        before,
+        state_of(&down, &addresses, &routes),
+        state_of(&replaced, &addresses, &routes),
+    )
+}
+
+// A roam between Wi-Fi access points drops the carrier for a moment, and
+// must not end the connection, as it does not on Windows. A link that
+// stays down past the settle is reported, as is one that comes back with
+// a different network; IPv6 changes are never held back.
+#[test]
+fn a_link_that_stops_working_is_reported_only_if_it_stays_so() {
+    let (before, down, replaced) = link_states();
+    let (_, other_network) = two_states();
+    let changed = || Ok(Wake::Changed);
+    let flap = worker_sends(
+        &before,
+        vec![changed(), changed()],
+        vec![Ok(down.clone()), Ok(before.clone())],
+    );
+    assert_eq!(flap, [], "a flap that came back as it was");
+    let lasting = vec![changed(), Ok(Wake::Timeout)];
+    let sent = worker_sends(&before, lasting, vec![Ok(down.clone()), Ok(down.clone())]);
+    assert_eq!(sent, [PHYSICAL], "a link that stayed down");
+    let sent = worker_sends(&before, vec![changed()], vec![Ok(down.clone())]);
+    assert_eq!(sent, [], "held, then the subscription ended");
+    let sent = worker_sends(
+        &before,
+        vec![changed(), changed()],
+        vec![Ok(down.clone()), Ok(other_network)],
+    );
+    assert_eq!(
+        sent,
+        [PHYSICAL],
+        "back with another network, before the settle ended"
+    );
+    let sent = worker_sends(&before, vec![changed()], vec![Ok(replaced)]);
+    assert_eq!(
+        sent,
+        [PHYSICAL],
+        "another interface of the same name, at once"
+    );
+    let mut down_v6 = down.clone();
+    down_v6
+        .ipv6_addresses
+        .push((OTHER, "2001:db8:3::10".parse().expect("v6"), 64));
+    let mut back_v6 = before.clone();
+    back_v6.ipv6_addresses = down_v6.ipv6_addresses.clone();
+    let sent = worker_sends(
+        &before,
+        vec![changed(), changed()],
+        vec![Ok(down_v6), Ok(back_v6)],
+    );
+    assert_eq!(sent, [IPV6], "an IPv6 change while the link was held");
 }
 
 fn two_states() -> (State, State) {
@@ -675,6 +798,135 @@ fn a_change_since_capture_is_reported() {
     });
 }
 
+// A notice that changes nothing the connection relies on sends nothing: an
+// address growing old and renewed, a default route moved to another
+// metric, somebody else's route through the interface. Another router is
+// still reported. The default routes are in a table no rule uses, so the
+// runner's own traffic never follows them.
+#[test]
+fn a_change_that_does_not_matter_is_not_reported() {
+    let test = "a_change_that_does_not_matter_is_not_reported";
+    as_root_in(module_path!(), "events quiet", test, || {
+        let wire = Veth::new("uve-quiet0");
+        let dev = wire.name.as_str();
+        let table = ["table", "182"];
+        ip_ok(&["-4", "addr", "add", "198.18.8.10/24", "dev", dev]);
+        let default = [
+            "-4",
+            "route",
+            "add",
+            "default",
+            "via",
+            "198.18.8.1",
+            "dev",
+            dev,
+        ];
+        ip_ok(&[&default[..], &table[..], &["metric", "100"]].concat());
+        thread::sleep(Duration::from_secs(2));
+        let physical = PhysicalNetwork {
+            interface: wire.name.clone(),
+            next_hop: Some(Ipv4Addr::new(198, 18, 8, 1)),
+            own_addresses: vec![Ipv4Addr::new(198, 18, 8, 10)],
+            on_link: Vec::new(),
+        };
+        let events = TEST_EVENTS.subscribe(&physical).expect("subscribe");
+
+        let change = ["-4", "addr", "change", "198.18.8.10/24", "dev", dev];
+        ip_ok(&[&change[..], &["valid_lft", "600", "preferred_lft", "0"]].concat());
+        let deprecated = netlink::addresses(AF_INET)
+            .expect("the addresses")
+            .into_iter()
+            .any(|a| {
+                a.v4() == Some(Ipv4Addr::new(198, 18, 8, 10)) && a.flags & IFA_F_DEPRECATED != 0
+            });
+        assert!(deprecated, "the address did not grow old");
+        ip_ok(
+            &[
+                &change[..],
+                &["valid_lft", "forever", "preferred_lft", "forever"],
+            ]
+            .concat(),
+        );
+        ip_ok(&[&default[..], &table[..], &["metric", "200"]].concat());
+        let old = [
+            "-4",
+            "route",
+            "del",
+            "default",
+            "via",
+            "198.18.8.1",
+            "dev",
+            dev,
+        ];
+        ip_ok(&[&old[..], &table[..], &["metric", "100"]].concat());
+        ip_ok(&[
+            "-4",
+            "route",
+            "add",
+            "203.0.113.0/24",
+            "via",
+            "198.18.8.1",
+            "dev",
+            dev,
+        ]);
+        let event = next_physical(&events, Duration::from_secs(4));
+        assert_eq!(event, None, "a change that does not matter was reported");
+
+        let other = [
+            "-4",
+            "route",
+            "add",
+            "default",
+            "via",
+            "198.18.8.2",
+            "dev",
+            dev,
+        ];
+        ip_ok(&[&other[..], &table[..], &["metric", "300"]].concat());
+        let event = next_physical(&events, Duration::from_secs(5));
+        assert_eq!(event, Some(PHYSICAL), "another router was not reported");
+    });
+}
+
+// A roam between Wi-Fi access points drops the carrier for a moment: that
+// sends nothing, as on Windows. A carrier that stays off is reported once
+// the settle has passed. The carrier is the peer's doing, as an access
+// point's would be.
+#[test]
+fn a_brief_carrier_drop_is_not_reported() {
+    let test = "a_brief_carrier_drop_is_not_reported";
+    as_root_in(module_path!(), "events flap", test, || {
+        let wire = Veth::new("uve-flap0");
+        let peer = format!("{}p", wire.name);
+        ip_ok(&["-4", "addr", "add", "198.18.9.10/24", "dev", &wire.name]);
+        thread::sleep(Duration::from_secs(2));
+        let physical = watching(&wire, Ipv4Addr::new(198, 18, 9, 10));
+        let events = TEST_EVENTS.subscribe(&physical).expect("subscribe");
+        let running = || find(&wire.name).is_some_and(|link| link.running());
+
+        ip_ok(&["link", "set", "dev", &peer, "down"]);
+        ip_ok(&["link", "set", "dev", &peer, "up"]);
+        assert!(wait_for(running), "the carrier did not come back");
+        let event = next_physical(&events, SETTLE + Duration::from_secs(2));
+        assert_eq!(event, None, "a brief carrier drop was reported");
+
+        let started = Instant::now();
+        ip_ok(&["link", "set", "dev", &peer, "down"]);
+        let event = next_physical(&events, SETTLE + Duration::from_secs(5));
+        let waited = started.elapsed();
+        ip_ok(&["link", "set", "dev", &peer, "up"]);
+        assert_eq!(
+            event,
+            Some(PHYSICAL),
+            "a lasting carrier drop was not reported"
+        );
+        assert!(
+            waited >= SETTLE / 2,
+            "reported before the settle: {waited:?}"
+        );
+    });
+}
+
 // When notices come faster than they are read, the real kernel says it
 // dropped some, and the socket goes on with those it kept: the worker
 // reports the loss (see the test of the worker above), never skips it.
@@ -691,9 +943,9 @@ fn the_kernel_reports_lost_notices() {
         for n in 1..=64 {
             netlink::add_address(index, Ipv4Addr::new(198, 18, 7, n), 32).expect("add an address");
         }
-        let first = listener.wait().expect("wait");
+        let first = listener.wait(None).expect("wait");
         assert_eq!(first, Wake::Overrun, "the loss was not reported");
-        let next = listener.wait().expect("wait");
+        let next = listener.wait(None).expect("wait");
         assert_eq!(next, Wake::Changed, "the notices kept were not read");
     });
 }

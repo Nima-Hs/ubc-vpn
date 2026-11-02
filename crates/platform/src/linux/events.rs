@@ -7,11 +7,27 @@
 //! reads every notice waiting, then lists the links, addresses and routes
 //! again and compares what matters with what it saw last:
 //!
-//! - `PhysicalChanged` when the watched interface is gone or replaced, is
-//!   taken down or brought up, or its link stops or starts working; when its
-//!   IPv4 addresses change; or when the IPv4 routes through it change, in any
-//!   table.
+//! - `PhysicalChanged` when what the connection relies on, as Windows
+//!   compares it, changes: the watched interface is gone or replaced, or its
+//!   link stops working (see below for how long); its IPv4 addresses change;
+//!   or the routers of its IPv4 default routes, in any table, change. A
+//!   route's metric, and any other route through the interface, do not
+//!   count: the gateway's own route keeps the tunnel working whatever
+//!   somebody else does to them, and a metric is what NetworkManager lowers
+//!   after a failed connectivity check.
 //! - `Ipv6Changed` when an IPv6 route or address changes on any interface.
+//!
+//! An address's flags and lifetimes do not count either, so an address
+//! growing old (deprecated) or renewed sends nothing.
+//!
+//! A link that stops working is reported only if it still differs after
+//! [`SETTLE`]: a roam between Wi-Fi access points drops the carrier for a
+//! moment, which on Windows keeps the connection, so it does here too
+//! (`consistency.md`). Once the settle ends, a fresh look is compared with
+//! the last one reported: the same interface back with the same addresses
+//! and routers sends nothing, anything else is reported. A link that comes
+//! back with a different network is reported as soon as it does. IPv6
+//! changes are never held back.
 //!
 //! Neither counts the product's own routes, which carry
 //! [`LINUX_ROUTE_PROTOCOL`]: the gateway's route, the tunnel's routes and
@@ -19,8 +35,7 @@
 //! name starts with [`TUN_PREFIX`]. IPv6 also leaves out link-local,
 //! multicast and loopback routes and addresses, and the copies of routes the
 //! kernel makes for itself. Since lists are compared, a notice that changes
-//! nothing that matters, such as an address's lifetime renewed, sends
-//! nothing.
+//! nothing that matters sends nothing.
 //!
 //! The first look is compared with the captured [`PhysicalNetwork`], so a
 //! change between capture and subscribe is reported too.
@@ -50,13 +65,16 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use rustix::event::{EventfdFlags, PollFd, PollFlags, eventfd, poll};
+use rustix::event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll};
 use rustix::io::Errno;
 use rustix::net::RecvFlags;
 
 use super::dns::TUN_PREFIX;
-use super::netlink::{self, AF_INET, AF_INET6, AF_UNSPEC, Address, Link, RTM_F_CLONED, Route};
+use super::netlink::{
+    self, AF_INET, AF_INET6, AF_UNSPEC, Address, Link, RTM_F_CLONED, RTN_UNICAST, Route,
+};
 use super::routes::{is_ours, os};
 #[cfg(doc)]
 use crate::LINUX_ROUTE_PROTOCOL;
@@ -76,7 +94,7 @@ const BOTH: [NetworkEvent; 2] = [NetworkEvent::PhysicalChanged, NetworkEvent::Ip
 /// Room for any one notice.
 const BUFFER: usize = 1 << 16;
 
-/// A route as compared: its table, destination and prefix length,
+/// An IPv6 route as compared: its table, destination and prefix length,
 /// interface, next hop, metric, kind, and whether it has several next hops.
 pub(super) type RouteKey = (
     u32,
@@ -109,8 +127,16 @@ pub(super) struct Physical {
     /// interface has its name.
     pub(super) link: Option<(u32, bool)>,
     pub(super) addresses: Vec<Ipv4Addr>,
-    /// The IPv4 routes through it that are not the product's.
-    pub(super) routes: Vec<RouteKey>,
+    /// The routers of its IPv4 default routes that are not the product's,
+    /// in any table: the unspecified address for one straight onto the link.
+    pub(super) routers: Vec<Ipv4Addr>,
+}
+
+impl Physical {
+    /// The interface is there and its link works.
+    fn working(&self) -> bool {
+        self.link.is_some_and(|(_, running)| running)
+    }
 }
 
 /// What a subscription compares from one look to the next.
@@ -157,10 +183,14 @@ pub(super) fn state(
         .iter()
         .filter(|row| Some(row.index) == index)
         .filter_map(Address::v4);
-    let through = routes
+    let routers = routes
         .iter()
-        .filter(|route| route.family == AF_INET && index.is_some() && route.oif == index)
-        .filter(|route| !is_ours(route));
+        .filter(|route| route.family == AF_INET && route.dst_len == 0 && route.kind == RTN_UNICAST)
+        .filter(|route| index.is_some() && route.oif == index && !is_ours(route))
+        .map(|route| match route.gateway {
+            Some(IpAddr::V4(router)) => router,
+            _ => Ipv4Addr::UNSPECIFIED,
+        });
     let ipv6_routes = routes
         .iter()
         .filter(|route| route.family == AF_INET6 && !is_ours(route) && !on_tunnel(route.oif))
@@ -177,7 +207,7 @@ pub(super) fn state(
         physical: Physical {
             link: link.map(|link| (link.index, link.running())),
             addresses: sorted(own.collect()),
-            routes: sorted(through.map(key).collect()),
+            routers: sorted(routers.collect()),
         },
         ipv6_routes: sorted(ipv6_routes.map(key).collect()),
         ipv6_addresses: sorted(ipv6_addresses.collect()),
@@ -204,21 +234,18 @@ fn look(watched: &str, tunnel_prefix: &str) -> io::Result<State> {
 /// every interface, so an address that has gone from this one is noticed
 /// only from the subscription's own first look onwards.)
 pub(super) fn differs_from_capture(now: &Physical, captured: &PhysicalNetwork) -> bool {
-    let working = now.link.is_some_and(|(_, running)| running);
     let new_address = now
         .addresses
         .iter()
         .any(|addr| !captured.own_addresses.contains(addr));
-    let by_hop = |hop: Ipv4Addr| {
-        now.routes
-            .iter()
-            .any(|route| route.2 == 0 && route.4 == Some(IpAddr::V4(hop)))
-    };
-    let hop_gone = captured.next_hop.is_some_and(|hop| !by_hop(hop));
-    !working || new_address || hop_gone
+    let hop_gone = captured
+        .next_hop
+        .is_some_and(|hop| !now.routers.contains(&hop));
+    !now.working() || new_address || hop_gone
 }
 
-/// The events for a change from `before` to `now`.
+/// The events for a change from `before` to `now`, with no settle.
+#[cfg(test)]
 pub(super) fn changes(before: &State, now: &State) -> Vec<NetworkEvent> {
     let mut events = Vec::new();
     if before.physical != now.physical {
@@ -231,6 +258,51 @@ pub(super) fn changes(before: &State, now: &State) -> Vec<NetworkEvent> {
     events
 }
 
+/// The events for `now`, compared with `last`, which becomes what was
+/// reported. A watched link that stopped working, and is still the same
+/// interface, is held back until `deadline`, which this sets to `settle`
+/// from now the first time; it is reported only if it still differs then.
+fn compare(
+    last: &mut State,
+    now: State,
+    deadline: &mut Option<Instant>,
+    settle: Duration,
+) -> Vec<NetworkEvent> {
+    let mut events = Vec::new();
+    let ipv6 = |state: &State| (state.ipv6_routes.clone(), state.ipv6_addresses.clone());
+    if ipv6(last) != ipv6(&now) {
+        events.push(NetworkEvent::Ipv6Changed);
+        last.ipv6_routes = now.ipv6_routes;
+        last.ipv6_addresses = now.ipv6_addresses;
+    }
+    if now.physical == last.physical {
+        // Back as it was, if it had gone: nothing to report.
+        *deadline = None;
+        return events;
+    }
+    let same = now.physical.link.map(|(index, _)| index) == last.physical.link.map(|l| l.0);
+    let stopped = last.physical.working() && now.physical.link.is_some() && !now.physical.working();
+    if same && stopped {
+        match *deadline {
+            None => {
+                *deadline = Some(Instant::now() + settle);
+                return events;
+            }
+            Some(until) if Instant::now() < until => return events,
+            Some(_) => {}
+        }
+    }
+    *deadline = None;
+    last.physical = now.physical;
+    events.insert(0, NetworkEvent::PhysicalChanged);
+    events
+}
+
+/// How long a watched link that stopped working has to come back as it was
+/// before that is reported: longer than a roam between Wi-Fi access points
+/// takes.
+pub(super) const SETTLE: Duration = Duration::from_secs(2);
+
 /// Why the worker woke.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Wake {
@@ -238,13 +310,15 @@ pub(super) enum Wake {
     Changed,
     /// The kernel dropped notices that did not fit.
     Overrun,
+    /// The time given ran out.
+    Timeout,
     /// The subscription was dropped.
     Stop,
 }
 
-/// Where the worker waits.
+/// Where the worker waits, for at most `timeout` when given.
 pub(super) trait Source {
-    fn wait(&mut self) -> io::Result<Wake>;
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Wake>;
 }
 
 /// A socket on the notice groups, and the event descriptor that says stop.
@@ -278,14 +352,19 @@ impl Drop for Listener {
 impl Source for Listener {
     /// Waits for notices, or to be stopped, and reads every notice waiting.
     /// Their content is not needed: the worker looks for itself.
-    fn wait(&mut self) -> io::Result<Wake> {
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Wake> {
+        let until = timeout.map(|timeout| Instant::now() + timeout);
         loop {
+            let left = until.map(|until| until.saturating_duration_since(Instant::now()));
+            let left = left.map(Timespec::try_from).transpose();
+            let left = left.map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
             let (ready, stopped) = {
                 let mut fds = [
                     PollFd::new(&self.socket, PollFlags::IN),
                     PollFd::new(&self.stop, PollFlags::IN),
                 ];
-                match poll(&mut fds, None) {
+                match poll(&mut fds, left.as_ref()) {
+                    Ok(0) if until.is_some() => return Ok(Wake::Timeout),
                     Ok(_) => {}
                     Err(Errno::INTR) => continue,
                     Err(error) => return Err(error.into()),
@@ -316,29 +395,35 @@ impl Source for Listener {
 }
 
 /// The worker: waits on `source`, looks again with `look` after every
-/// wake, and sends what changed since `last`, until stopped or nobody
-/// listens.
+/// wake, and sends what changed since `last` (see [`compare`], with
+/// `settle`), until stopped or nobody listens.
 pub(super) fn watch(
     source: &mut dyn Source,
     look: &dyn Fn() -> io::Result<State>,
     mut last: State,
+    settle: Duration,
     events: &Sender<NetworkEvent>,
 ) {
+    // When a watched link that stopped working is reported unless it is
+    // back as it was.
+    let mut deadline = None;
     loop {
-        let sent = match source.wait() {
+        let timeout =
+            deadline.map(|until: Instant| until.saturating_duration_since(Instant::now()));
+        let sent = match source.wait(timeout) {
             Ok(Wake::Stop) => return,
-            Ok(Wake::Changed) => match look() {
-                Ok(now) => {
-                    let changes = changes(&last, &now);
-                    last = now;
-                    changes
-                }
+            Ok(Wake::Changed | Wake::Timeout) => match look() {
+                Ok(now) => compare(&mut last, now, &mut deadline, settle),
                 // Could not look: say so the safe way.
-                Err(_) => BOTH.to_vec(),
+                Err(_) => {
+                    deadline = None;
+                    BOTH.to_vec()
+                }
             },
             // Notices were lost, so anything may have changed: say so, and
             // start again from how things are now.
             Ok(Wake::Overrun) => {
+                deadline = None;
                 if let Ok(now) = look() {
                     last = now;
                 }
@@ -385,7 +470,7 @@ impl NetworkEvents for Watcher {
         }
         let worker = std::thread::Builder::new()
             .name("network events".into())
-            .spawn(move || watch(&mut listener, &look, last, &events))
+            .spawn(move || watch(&mut listener, &look, last, SETTLE, &events))
             .map_err(os)?;
         let ending = Ending {
             stop,
