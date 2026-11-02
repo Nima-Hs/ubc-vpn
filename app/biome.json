@@ -23,6 +23,11 @@
       "indentWidth": 2
     }
   },
+  "yaml": {
+    "formatter": {
+      "indentWidth": 2
+    }
+  },
   "css": {
     "parser": {
       "tailwindDirectives": true

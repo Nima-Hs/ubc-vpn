@@ -63,16 +63,16 @@ It runs on CI only: where `CI` is not set it is skipped and says why, because it
 
 ## How it is built
 
-| Folder | What it is |
-| --- | --- |
-| `src/main` | The main process: window, tray, and the way to the service |
-| `src/main/channel` | The bridge client: starts `ubc-vpn bridge` and exchanges JSON lines with it |
-| `src/main/demo` | The fake service. Demo builds only |
-| `src/preload` | The only bridge to the interface: a short, fixed list of functions |
-| `src/renderer` | The interface: React, Tailwind, and the design system |
-| `src/shared` | Types and wording both sides use |
-| `src/shared/protocol` | Generated from the Rust types. Never edit these |
-| `tests` | Unit tests, a mock bridge that follows the contract, and `e2e` |
+| Folder                | What it is                                                                  |
+| --------------------- | --------------------------------------------------------------------------- |
+| `src/main`            | The main process: window, tray, and the way to the service                  |
+| `src/main/channel`    | The bridge client: starts `ubc-vpn bridge` and exchanges JSON lines with it |
+| `src/main/demo`       | The fake service. Demo builds only                                          |
+| `src/preload`         | The only bridge to the interface: a short, fixed list of functions          |
+| `src/renderer`        | The interface: React, Tailwind, and the design system                       |
+| `src/shared`          | Types and wording both sides use                                            |
+| `src/shared/protocol` | Generated from the Rust types. Never edit these                             |
+| `tests`               | Unit tests, a mock bridge that follows the contract, and `e2e`              |
 
 The interface runs sandboxed with no Node access, loads only the app's own files under a strict Content-Security-Policy, and cannot navigate, open windows, or make a network request. The bridge client never logs a line it sends or receives.
 
