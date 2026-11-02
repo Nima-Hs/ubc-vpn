@@ -59,6 +59,12 @@ defaults:
   run:
     shell: bash
 
+# Python writes no bytecode cache, which records the folder it was made in,
+# beside the test scripts. The gateway is also started with -B, which holds
+# where sudo clears the environment.
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
 jobs:
   load:
     name: load (${{ matrix.name }})

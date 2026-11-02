@@ -83,6 +83,8 @@ impl Gateway {
         let mut child = Command::new(python)
             // -I: Python takes no code or settings from the folder it runs in.
             .arg("-I")
+            // -B: and writes no bytecode cache beside the script.
+            .arg("-B")
             .arg(script("fake_gateway.py"))
             .args([dir.join("cert.pem"), dir.join("key.pem")])
             .arg(scenario)
