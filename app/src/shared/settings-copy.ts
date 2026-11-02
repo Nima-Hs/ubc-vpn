@@ -6,7 +6,7 @@
 
 import type { ProfilesError } from "./profiles";
 import type { StartMode } from "./protocol/StartMode";
-import type { UpdateStatus } from "./updates";
+import type { InstallNotice, UpdateStatus } from "./updates";
 
 export const SETTINGS = {
     title: "Settings",
@@ -59,6 +59,9 @@ export const UPDATES = {
     checkNow: "Check for updates now",
     lastChecked: (when: string) => `Last checked ${when}.`,
     neverChecked: "Not checked yet.",
+    restart: "Restart to update",
+    restartHint:
+        "UBC VPN disconnects, installs the update, starts again, and reconnects if it was connected.",
 } as const;
 
 /** Where updates stand, in a sentence; `null` when there is nothing to say yet. */
@@ -78,6 +81,8 @@ export function describeUpdate(status: UpdateStatus): string | null {
             return `Downloading version ${status.version}…`;
         case "ready":
             return `Version ${status.version} is downloaded and ready to install.`;
+        case "installing":
+            return `Installing version ${status.version}. Approve the administrator prompt to go on. It names an unknown publisher because UBC VPN's installer is not signed.`;
         case "failed":
             switch (status.reason) {
                 case "offline":
@@ -89,6 +94,20 @@ export function describeUpdate(status: UpdateStatus): string | null {
                 case "disk":
                     return "The update couldn't be saved. Check that your disk isn't full, then try again.";
             }
+    }
+}
+
+/** Why the last "Restart to update" installed nothing. */
+export function describeInstallNotice(notice: InstallNotice): string {
+    switch (notice) {
+        case "cancelled":
+            return "The update wasn't installed because the administrator prompt was cancelled. Nothing was changed, and UBC VPN reconnects if it was connected.";
+        case "failed":
+            return "The update couldn't be started, and nothing was changed. Try again, or install it from the releases page on GitHub.";
+        case "changed":
+            return "The downloaded update changed on disk, so it wasn't installed. UBC VPN downloads it again at the next check.";
+        case "not_disconnected":
+            return "UBC VPN couldn't disconnect first, so the update wasn't installed. Try again.";
     }
 }
 
