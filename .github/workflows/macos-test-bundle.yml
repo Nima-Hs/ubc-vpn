@@ -241,7 +241,12 @@ jobs:
             sleep 1
           done
           cat status.txt
-          "$FOLDER/ubc-vpn" status
+          if ! "$FOLDER/ubc-vpn" status; then
+            sudo launchctl list "$LABEL" || true
+            sudo cat "$log" || true
+            sudo launchctl remove "$LABEL" || true
+            exit 1
+          fi
           sudo launchctl list "$LABEL"
           sudo launchctl remove "$LABEL"
           for _ in $(seq 20); do
