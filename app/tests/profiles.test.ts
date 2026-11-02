@@ -311,4 +311,20 @@ describe("the commands that change profiles", () => {
         }
         expect(received()).toEqual([]);
     });
+
+    it("sends a Duo method only when it is one, or null for as typed", async () => {
+        const { runner, received } = client({ "profiles update": { line: VIEW } });
+        await runner.update(OTHER, { duo_method: "call" });
+        await runner.update(OTHER, { duo_method: null });
+        for (const odd of ["app", "Push", "", 1]) {
+            await expect(
+                runner.update(OTHER, { duo_method: odd as never }),
+                String(odd),
+            ).resolves.toEqual({ ok: false, error: "bad_input" });
+        }
+        expect(inputs(received())).toEqual([
+            { id: OTHER, duo_method: "call" },
+            { id: OTHER, duo_method: null },
+        ]);
+    });
 });
