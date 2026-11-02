@@ -5,7 +5,8 @@ name: Installer (Linux)
 # landed where, who can change it and that the service answers a standard
 # user, installs it again over itself, removes it, purges it, and checks
 # nothing is left. Then installs both packages in containers of the other
-# systems they are for. The rules come from docs/architecture.md, "What the
+# systems they are for, and upgrades the .rpm over itself in a Fedora
+# container that systemd runs, with the service running. The rules come from docs/architecture.md, "What the
 # installers must do".
 #
 # Nothing is signed. The packages and the source of their LGPL library are
@@ -301,6 +302,7 @@ jobs:
           sudo dpkg -i "$DEB"
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" no-conffiles
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" installed "$DEB"
+          sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" links
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" who-can-change
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" service
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
@@ -384,6 +386,17 @@ jobs:
         run: |
           bash "$CHECK" service-skipped "$RUNNER_TEMP/install.log"
           bash "$CHECK" installed "$PACKAGE"
+          bash "$CHECK" links
+          bash "$CHECK" as-staged "$RUNNER_TEMP/stage"
+      # rpm -U runs the new version's %post with 2, then the old one's
+      # %preun and %postun with 1, as an update does. The fedora-systemd job
+      # below does the same with the service running.
+      - name: An upgrade over itself keeps the links and the files
+        if: matrix.kind == 'rpm'
+        run: |
+          rpm -Uvh --replacepkgs "$PACKAGE"
+          bash "$CHECK" links
+          bash "$CHECK" installed "$PACKAGE"
           bash "$CHECK" as-staged "$RUNNER_TEMP/stage"
       - name: Removing it leaves nothing
         run: |
@@ -393,3 +406,79 @@ jobs:
             dnf remove -y ubc-vpn
           fi
           bash "$CHECK" gone
+
+  # The .rpm on Fedora with systemd running, in a container started on the
+  # runner with systemd as its first process: installed, its service
+  # started and owned by a standard user, then upgraded over itself with
+  # rpm -U, which runs the new version's %post with 2 and the old one's
+  # %preun and %postun with 1, as an update does; then removed. The image
+  # is the containers job's, pinned by digest; systemd and the tools the
+  # checks need come from Fedora's live archive, and nothing from it ships.
+  # The runner is GitHub's, thrown away after the job, which uses no
+  # secrets.
+  fedora-systemd:
+    name: Upgrade the .rpm in fedora with systemd
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: fedora@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+      CHECK: packaging/linux/tests/installer.sh
+      # Runs a command as root in the container, in the checkout.
+      IN_FEDORA: sudo podman exec --env UBC_VPN_TEST_THROWAWAY_MACHINE=1 --workdir /src fedora
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ubc-vpn-linux-x64-rpm-unsigned
+          path: ${{ runner.temp }}/package
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-stage-linux
+          path: ${{ runner.temp }}/stage
+      - name: Start Fedora with systemd
+        run: |
+          (cd "$RUNNER_TEMP/package" && sha256sum --check ubc-vpn.rpm.sha256)
+          echo "PACKAGE=/work/package/$(cd "$RUNNER_TEMP/package" && ls ubc-vpn-*.x86_64.rpm)" >> "$GITHUB_ENV"
+          sudo podman run --name base "$IMAGE" \
+            dnf install -y systemd sudo acl shadow-utils procps-ng cpio diffutils findutils
+          sudo podman commit base fedora-systemd
+          sudo podman run --detach --name fedora --systemd=always --privileged \
+            --volume "$GITHUB_WORKSPACE:/src:ro" --volume "$RUNNER_TEMP:/work:ro" \
+            fedora-systemd /usr/sbin/init
+          state=
+          for _ in $(seq 90); do
+            state=$(sudo podman exec fedora systemctl is-system-running 2> /dev/null || true)
+            case "$state" in running | degraded) break ;; esac
+            sleep 1
+          done
+          echo "systemd is $state"
+          case "$state" in running | degraded) ;; *) exit 1 ;; esac
+      - name: Install, with the service running and owned by a standard user
+        run: |
+          $IN_FEDORA bash "$CHECK" prepare
+          $IN_FEDORA dnf install -y "$PACKAGE"
+          $IN_FEDORA bash "$CHECK" installed "$PACKAGE"
+          $IN_FEDORA bash "$CHECK" links
+          $IN_FEDORA bash "$CHECK" service
+          $IN_FEDORA bash "$CHECK" status-as-user
+          $IN_FEDORA bash "$CHECK" remember-state /root/state.sha256
+      - name: Upgrade it over itself
+        run: |
+          $IN_FEDORA rpm -Uvh --replacepkgs "$PACKAGE"
+          $IN_FEDORA bash "$CHECK" links
+          $IN_FEDORA bash "$CHECK" installed "$PACKAGE"
+          $IN_FEDORA bash "$CHECK" as-staged /work/stage
+          $IN_FEDORA bash "$CHECK" who-can-change
+          $IN_FEDORA bash "$CHECK" service
+          $IN_FEDORA bash "$CHECK" state-kept /root/state.sha256
+          $IN_FEDORA bash "$CHECK" status-as-user
+      - name: Remove
+        run: |
+          $IN_FEDORA rpm -e ubc-vpn
+          $IN_FEDORA bash "$CHECK" gone
+      - name: What the service logged
+        if: failure()
+        run: sudo podman exec fedora journalctl -u ubc-vpn.service -o cat --no-pager | tail -n 200 || true

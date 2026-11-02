@@ -21,6 +21,8 @@
 #   installer.sh remember-files <file>      notes the package's files in <file>
 #   installer.sh remember-state <file>      notes state.json's SHA-256 in <file>
 #   installer.sh state-kept <file>          state.json is unchanged since then
+#   installer.sh links                      /usr/bin/ubc-vpn and /usr/bin/ubc-vpn-app are
+#                                           links to the client and the app
 #   installer.sh no-conffiles               dpkg keeps no file of the package as its own
 #   installer.sh scripts-twice              the install and removal scripts run twice
 #                                           on an update leave the service running
@@ -32,10 +34,15 @@
 #
 # And in a container, where systemd does not run:
 #   installer.sh installed <deb or rpm>     as above, for either package
+#   installer.sh links                      as above
 #   installer.sh service-skipped <log>      the install left out the service and said
 #                                           so in <log>, the package manager's output
 #   installer.sh gone                       after a removal (a purge for the .deb),
 #                                           nothing of the package is left
+#
+# The .rpm is also checked in a Fedora container that systemd runs, with
+# prepare, installed, links, as-staged, who-can-change, service,
+# status-as-user, remember-state, state-kept and gone.
 #
 # Each command stops with an error at the first thing that is wrong.
 #
@@ -284,8 +291,18 @@ case "$command" in
         done
         echo "without systemd, the service was left out and said so"
         ;;
+    links)
+        [ -L /usr/bin/ubc-vpn ] && [ "$(readlink /usr/bin/ubc-vpn)" = "$CLIENT" ] ||
+            fail "/usr/bin/ubc-vpn is not a link to $CLIENT"
+        # electron-builder's link, made by update-alternatives where there is
+        # one, so through /etc/alternatives.
+        [ -L /usr/bin/ubc-vpn-app ] && [ "$(readlink -f /usr/bin/ubc-vpn-app)" = "$APP/ubc-vpn-app" ] ||
+            fail "/usr/bin/ubc-vpn-app is not a link to $APP/ubc-vpn-app"
+        echo "/usr/bin/ubc-vpn and /usr/bin/ubc-vpn-app link to the client and the app"
+        ;;
     gone)
-        for path in "$APP" /usr/bin/ubc-vpn /usr/bin/ubc-vpn-app /etc/apparmor.d/ubc-vpn-app /etc/ubc-vpn /var/lib/ubc-vpn; do
+        for path in "$APP" /usr/bin/ubc-vpn /usr/bin/ubc-vpn-app /etc/apparmor.d/ubc-vpn-app /etc/ubc-vpn /var/lib/ubc-vpn \
+            "$UNIT" "$WANTS" /run/ubc-vpn; do
             [ ! -e "$path" ] && [ ! -L "$path" ] || fail "$path is left"
         done
         if command -v dpkg-query > /dev/null; then
