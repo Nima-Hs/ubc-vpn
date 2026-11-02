@@ -1,0 +1,8 @@
+dns
+dns policy
+dns policy empty
+dns foreign
+dns effective
+dns owner
+dns volatile
+dns catch all

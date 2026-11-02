@@ -1,0 +1,4 @@
+handle logs in
+handle rejects
+handle opens a tunnel connection
+handle closes a handed-over device

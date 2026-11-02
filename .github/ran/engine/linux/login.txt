@@ -1,0 +1,6 @@
+engine logs in
+engine refuses a wrong pin
+engine refuses single sign-on
+engine offers no single sign-on
+engine fetches a host-scan stub and runs nothing
+engine refuses a trusted certificate

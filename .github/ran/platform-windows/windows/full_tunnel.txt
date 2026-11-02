@@ -1,0 +1,4 @@
+full tunnel
+full tunnel no ipv6
+full tunnel foreign
+full tunnel unreachable neighbour

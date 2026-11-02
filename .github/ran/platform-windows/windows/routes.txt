@@ -1,0 +1,7 @@
+routes
+physical
+crash
+ipv6
+orphan row
+interface metric
+down interface

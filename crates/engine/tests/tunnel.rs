@@ -672,7 +672,9 @@ mod device {
         assert_eq!(event, Ok(TunnelEvent::ConnectionLost));
         assert!(waited < Duration::from_secs(75), "{waited:?}");
         assert!(!exists(&name), "{name:?} is left");
-        println!("RAN: tunnel reports a lost gateway after {waited:?}");
+        // The name on a line of its own, which the workflow matches whole.
+        println!("the lost gateway was reported after {waited:?}");
+        println!("RAN: tunnel reports a lost gateway");
     }
 
     // A cancel that comes once the device exists, while `open` is still
