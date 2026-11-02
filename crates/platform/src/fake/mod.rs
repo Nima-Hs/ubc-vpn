@@ -148,7 +148,9 @@ struct State {
     /// Addresses the OS lists but does not use, such as a disconnected
     /// adapter's tentative link-local one: no route comes with them.
     unused: Vec<AddressRow>,
-    subscribers: HashMap<u64, Sender<NetworkEvent>>,
+    /// Each live subscription: the interface it watches, and where its
+    /// events go.
+    subscribers: HashMap<u64, (String, Sender<NetworkEvent>)>,
     next_subscriber: u64,
     listeners: HashMap<String, Endpoint>,
     /// Checks that answer `Unobservable` where they would answer `Yes`.
@@ -176,6 +178,15 @@ struct State {
     router: Ipv4Addr,
     /// Destinations whose route check answers that it could not tell.
     untold_routes: HashSet<Ipv4Addr>,
+    /// IPv6 routes somebody else added: the interface, the destination and
+    /// its prefix length.
+    foreign_v6: Vec<(String, Ipv6Addr, u8)>,
+    /// IPv6 addresses somebody else added, with their interface.
+    addresses_v6: Vec<(String, Ipv6Addr)>,
+    /// Interfaces whose link somebody took down.
+    links_down: HashSet<String>,
+    /// Interfaces somebody turned IPv6 off for.
+    ipv6_off: HashSet<String>,
 }
 
 impl Default for State {
@@ -206,6 +217,10 @@ impl Default for State {
             reports_ipv6: true,
             router: ROUTER,
             untold_routes: HashSet::new(),
+            foreign_v6: Vec::new(),
+            addresses_v6: Vec::new(),
+            links_down: HashSet::new(),
+            ipv6_off: HashSet::new(),
         }
     }
 }
@@ -224,6 +239,27 @@ impl State {
         match self.unobservable_routes.contains(&dest) {
             true => Verified::Unobservable,
             false => self.confirmed(Op::VerifyRoute),
+        }
+    }
+
+    /// Tells every subscription watching `interface` that its network
+    /// changed, as an OS does when somebody changes the interface's
+    /// addresses or link.
+    fn physical_changed(&self, interface: &str) {
+        let watching = self.subscribers.values().filter(|(i, _)| i == interface);
+        for (_, subscriber) in watching {
+            let _ = subscriber.send(NetworkEvent::PhysicalChanged);
+        }
+    }
+
+    /// Tells every subscription that IPv6 changed on `interface`, unless it
+    /// is a tunnel this product configured.
+    fn ipv6_changed(&self, interface: &str) {
+        if self.mtus.contains_key(interface) {
+            return;
+        }
+        for (_, subscriber) in self.subscribers.values() {
+            let _ = subscriber.send(NetworkEvent::Ipv6Changed);
         }
     }
 }
@@ -325,12 +361,14 @@ impl Fake {
     }
 
     /// Gives the device `name` an address as somebody else would, such as
-    /// one an adapter kept from an earlier use.
+    /// one an adapter kept from an earlier use. A subscription watching the
+    /// device is told its network changed.
     pub fn add_foreign_address(&self, name: &str, address: Ipv4Addr) {
         let mut state = self.state();
         let addresses = state.addresses.entry(name.to_string()).or_default();
         if !addresses.contains(&address) {
             addresses.push(address);
+            state.physical_changed(name);
         }
     }
 
@@ -348,6 +386,12 @@ impl Fake {
         state.addresses.remove(name);
         state.mtus.remove(name);
         state.foreign.retain(|(interface, _)| interface != name);
+        state
+            .foreign_v6
+            .retain(|(interface, _, _)| interface != name);
+        state
+            .addresses_v6
+            .retain(|(interface, _)| interface != name);
         let routes = &mut state.applied.tunnel_routes;
         routes.retain(|(interface, _)| interface != name);
     }
@@ -473,7 +517,7 @@ impl Fake {
     /// Delivers `event` to every subscriber.
     pub fn send_event(&self, event: NetworkEvent) {
         let state = self.state();
-        for subscriber in state.subscribers.values() {
+        for (_, subscriber) in state.subscribers.values() {
             let _ = subscriber.send(event);
         }
     }

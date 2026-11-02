@@ -8,16 +8,16 @@ use std::process::{Command, Stdio};
 
 use ubc_vpn_core::routes::Ipv4Net;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, GetIpInterfaceEntry,
-    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
-    MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
+    CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2,
+    DeleteUnicastIpAddressEntry, GetIpInterfaceEntry, InitializeIpForwardEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
+    MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, IpDadStatePreferred};
 
-use super::full_tunnel_tests::foreign_v6;
 use super::routes::{
     WinRoutes, addr_of, address_table, best_route, checked, luid, prefix_of, routes_of,
-    up_interfaces, v4, value,
+    up_interfaces, v4, v6, value,
 };
 use super::wintun::Wintun;
 use crate::journal::Prefix;
@@ -203,6 +203,77 @@ impl Foreign for Outsider {
         let ours = rows.iter().filter(|row| value(&row.InterfaceLuid) == luid);
         ours.filter_map(|row| addr_of(&row.Address)).collect()
     }
+
+    fn add_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        let row = foreign_v6(interface, dest, prefix_len);
+        // SAFETY: the row is valid and initialised.
+        checked(unsafe { CreateIpForwardEntry2(&row) }).expect("add an IPv6 route");
+    }
+
+    fn remove_route_v6(&self, interface: &str, dest: Ipv6Addr, prefix_len: u8) {
+        let row = foreign_v6(interface, dest, prefix_len);
+        // SAFETY: the row is valid and initialised.
+        checked(unsafe { DeleteIpForwardEntry2(&row) }).expect("remove an IPv6 route");
+    }
+
+    fn add_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let row = ipv6_address(interface, address);
+        // SAFETY: the row is valid and initialised.
+        checked(unsafe { CreateUnicastIpAddressEntry(&row) }).expect("add an IPv6 address");
+    }
+
+    fn remove_address_v6(&self, interface: &str, address: Ipv6Addr) {
+        let row = ipv6_address(interface, address);
+        // SAFETY: the row is valid and initialised.
+        checked(unsafe { DeleteUnicastIpAddressEntry(&row) }).expect("remove an IPv6 address");
+    }
+
+    /// Only a test adapter's link: its Wintun session is ended or started
+    /// again.
+    fn set_link(&self, interface: &str, up: bool) {
+        super::wintun::set_link(interface, up);
+    }
+
+    fn bind_ipv6(&self, interface: &str, on: bool) {
+        let verb = if on { "Enable" } else { "Disable" };
+        let script = format!("{verb}-NetAdapterBinding -Name '{interface}' -ComponentID ms_tcpip6");
+        let done = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("powershell");
+        assert!(
+            done.status.success(),
+            "{verb} IPv6 on {interface}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+/// An IPv6 route through `interface`, with no next hop, that is not the
+/// product's.
+pub(super) fn foreign_v6(interface: &str, dest: Ipv6Addr, len: u8) -> MIB_IPFORWARD_ROW2 {
+    // SAFETY: plain data for which all zeroes is valid; then initialised.
+    let mut row: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+    // SAFETY: the pointer is to a valid row.
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceLuid.Value = luid(interface).expect("the interface");
+    row.DestinationPrefix.Prefix = v6(dest);
+    row.DestinationPrefix.PrefixLength = len;
+    row.NextHop = v6(Ipv6Addr::UNSPECIFIED);
+    row
+}
+
+/// A global IPv6 address on `interface`, as another program would add it.
+fn ipv6_address(interface: &str, address: Ipv6Addr) -> MIB_UNICASTIPADDRESS_ROW {
+    // SAFETY: plain data for which all zeroes is valid; then initialised.
+    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { std::mem::zeroed() };
+    // SAFETY: the pointer is to a valid row.
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.InterfaceLuid.Value = luid(interface).expect("the interface");
+    row.Address = v6(address);
+    row.OnLinkPrefixLength = 64;
+    row.DadState = IpDadStatePreferred;
+    row
 }
 
 // The shared rules, on the device that ships.

@@ -15,6 +15,7 @@ use windows_sys::Win32::NetworkManagement::Dns::{
 };
 
 use super::dns::{LOCAL, Lifetime, POLICY, Rule, WinDns, delete_rule_at, write_rule_at};
+use super::routes::WinRoutes;
 use super::routes_tests::{Cleanup, Outsider, ran, state_dir, turn, wintun};
 use super::security::wide;
 use crate::suite::{self, Foreign};
@@ -510,13 +511,14 @@ fn our_rules_do_not_outlast_a_restart() {
     ran("dns volatile");
 }
 
-// Full mode's catch-all, with the real DNS client: names under the split
-// domains still go to the split resolver, every other name to the
-// catch-all's. Another program's catch-all is reported and not fought, and
-// does not take the split names. Clearing the catch-all keeps the split
-// DNS; clearing the split DNS removes both.
+// Full mode's catch-all, with the real DNS client, by the shared rules:
+// names under the split domains still go to the split resolver, every other
+// name to the catch-all's; another program's catch-all is reported and not
+// fought; clearing the catch-all keeps the split DNS, and clearing the split
+// DNS removes both. Then, as for the split rules, the catch-all's key does
+// not outlast a restart.
 #[test]
-fn the_catch_all_takes_every_other_name() {
+fn passes_the_shared_catch_all_dns_check() {
     use windows_sys::Win32::Foundation::ERROR_CHILD_MUST_BE_VOLATILE;
     let _turn = turn();
     let Some(wintun) = wintun() else { return };
@@ -531,64 +533,56 @@ fn the_catch_all_takes_every_other_name() {
     std::thread::sleep(Duration::from_secs(3));
     let asked = Asked::default();
     let _servers = SERVERS.map(|server| Server::start(server, asked.clone()));
-    let catch_all = super::dns::CATCH_ALL;
-    WinDns.set_split_dns(tunnel, &chosen()).unwrap();
-    WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
-    // The DNS client takes the two rules in a moment after they are
-    // written; ask until it has, for a while, and keep every answer.
-    let started = std::time::Instant::now();
-    let mut answers = Vec::new();
-    let (split, other) = loop {
-        let split = resolvers_for(&asked, "host.suite.example");
-        let other = resolvers_for(&asked, "anything.example");
-        answers.push((started.elapsed().as_millis(), split.clone(), other.clone()));
-        let settled = split == [SERVERS[0]] && other == [SERVERS[1]];
-        if settled || started.elapsed() > Duration::from_secs(15) {
-            break (split, other);
+    let theirs = |present| {
+        let rule = Rule {
+            names: vec![".".to_string()],
+            servers: "192.0.2.99".to_string(),
+        };
+        match present {
+            true => write_rule_at(LOCAL, FOREIGN, &rule, None, Lifetime::Lasting).unwrap(),
+            false => delete_rule_at(LOCAL, FOREIGN).unwrap(),
         }
-        std::thread::sleep(Duration::from_millis(500));
     };
-    println!("CATCH-ALL answers {answers:?}");
-    assert_eq!(split, [SERVERS[0]]);
-    assert_eq!(other, [SERVERS[1]]);
-    assert_eq!(
-        WinDns.catch_all_dns_matches(&[SERVERS[1]]),
-        Verified::Unobservable
-    );
-    assert_eq!(WinDns.catch_all_dns_matches(&[SERVERS[0]]), Verified::No);
-    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
-    assert_eq!(WinDns.foreign_catch_all(), Ok(false));
-    assert_eq!(
-        lasting_child_of(&format!(r"{LOCAL}\{catch_all}")),
-        ERROR_CHILD_MUST_BE_VOLATILE
+    suite::check_catch_all_dns(
+        &WinDns,
+        tunnel,
+        &|name| resolvers_for(&asked, name),
+        &theirs,
     );
 
-    // Somebody else's catch-all.
-    let theirs = Rule {
-        names: vec![".".to_string()],
-        servers: "192.0.2.99".to_string(),
-    };
-    write_rule_at(LOCAL, FOREIGN, &theirs, None, Lifetime::Lasting).unwrap();
-    let foreign = WinDns.foreign_catch_all();
-    let matches = WinDns.catch_all_dns_matches(&[SERVERS[1]]);
-    let split = WinDns.split_dns_matches(&chosen());
-    WinDns.clear_catch_all_dns().unwrap();
-    let set = WinDns.set_catch_all_dns(&[SERVERS[1]]);
-    delete_rule_at(LOCAL, FOREIGN).unwrap();
-    assert_eq!(foreign, Ok(true));
-    assert_eq!(matches, Verified::No);
-    assert_eq!(split, Verified::Unobservable);
-    assert_eq!(set, Err(Error::AlreadyExists));
+    let catch_all = super::dns::CATCH_ALL;
     assert_eq!(super::dns::read_rule_at(LOCAL, catch_all), Ok(None));
-
-    // Clearing the catch-all keeps the split DNS; clearing that removes both.
     WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
-    WinDns.clear_catch_all_dns().unwrap();
-    assert_eq!(super::dns::read_rule_at(LOCAL, catch_all), Ok(None));
-    assert_eq!(WinDns.split_dns_matches(&chosen()), Verified::Unobservable);
-    WinDns.set_catch_all_dns(&[SERVERS[1]]).unwrap();
+    let volatile = lasting_child_of(&format!(r"{LOCAL}\{catch_all}"));
     WinDns.clear_split_dns().unwrap();
+    assert_eq!(volatile, ERROR_CHILD_MUST_BE_VOLATILE);
     assert_eq!(super::dns::read_rule_at(LOCAL, catch_all), Ok(None));
-    assert_eq!(WinDns.catch_all_dns_matches(&[SERVERS[1]]), Verified::No);
     ran("dns catch all");
+}
+
+// A change of routes and split DNS on a live connection, with the real DNS
+// client, by the shared rules (#194): some tunnel routes go while the others
+// stay, and split DNS is set again with other domains.
+#[test]
+fn passes_the_shared_live_route_change_check() {
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let tunnel = "ubc-vpn-live0";
+    let dir = state_dir("live");
+    let _adapter = wintun.adapter(tunnel);
+    let _routes = Cleanup(vec![dir.clone()]);
+    let _rules = DnsCleanup::new();
+    // The tunnel keeps the servers' addresses: configuring it would remove
+    // them, and the check does not need it.
+    for server in SERVERS {
+        Outsider.add_address(tunnel, server);
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let asked = Asked::default();
+    let _servers = SERVERS.map(|server| Server::start(server, asked.clone()));
+    let routes = WinRoutes::unchecked(&dir);
+    suite::check_live_route_change(&routes, &WinDns, tunnel, &|name| {
+        resolvers_for(&asked, name)
+    });
+    ran("live route change");
 }

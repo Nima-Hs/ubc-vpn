@@ -267,6 +267,50 @@ fn passes_the_shared_suite_and_ends_clean() {
     assert!(fake.state().listeners.is_empty());
 }
 
+/// Another interface, where somebody else's routes go.
+const OTHER: &str = "fake-other0";
+
+#[test]
+fn passes_the_shared_full_tunnel_check_and_ends_clean() {
+    let fake = Fake::new();
+    // The machine has no IPv6 leak path of its own.
+    fake.set_ipv6(true, false);
+    fake.configure_tunnel(TUNNEL, Ipv4Addr::new(198, 51, 100, 7), 1400)
+        .unwrap();
+    let restarted = || Box::new(fake.clone()) as Box<dyn Routes>;
+    suite::check_full_tunnel(&fake, &restarted, &fake, TUNNEL, OTHER);
+    assert_eq!(fake.applied(), Applied::default());
+    assert!(fake.foreign_routes().is_empty());
+}
+
+#[test]
+fn passes_the_shared_catch_all_dns_check_and_ends_clean() {
+    let fake = Fake::new();
+    let theirs = |present| fake.set_foreign_catch_all(present);
+    suite::check_catch_all_dns(&fake, TUNNEL, &|name| fake.resolvers_for(name), &theirs);
+    assert_eq!(fake.applied(), Applied::default());
+    // An OS that cannot observe its resolver still passes.
+    fake.cannot_observe(Op::VerifyDns, true);
+    fake.cannot_observe(Op::VerifyCatchAllDns, true);
+    suite::check_catch_all_dns(&fake, TUNNEL, &|name| fake.resolvers_for(name), &theirs);
+}
+
+#[test]
+fn passes_the_shared_live_route_change_check_and_ends_clean() {
+    let fake = Fake::new();
+    suite::check_live_route_change(&fake, &fake, TUNNEL, &|name| fake.resolvers_for(name));
+    assert_eq!(fake.applied(), Applied::default());
+}
+
+#[test]
+fn passes_the_shared_events_check_and_ends_clean() {
+    let fake = Fake::new();
+    let watching = fake.capture_physical(GATEWAY).unwrap();
+    suite::check_events(&fake, &fake, &fake, &watching, TUNNEL, OTHER);
+    assert_eq!(fake.applied(), Applied::default());
+    assert_eq!(fake.subscriptions(), 0, "the check's subscription stayed");
+}
+
 #[test]
 fn records_calls_in_order_and_the_resulting_state() {
     let fake = Fake::new();
