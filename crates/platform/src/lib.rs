@@ -427,7 +427,8 @@ pub trait Routes: Send + Sync {
     /// specific route such as a half of full mode. There, equally good
     /// routes through `interface` and elsewhere are `Unknown`.
     ///
-    /// It fails closed: `Unknown` when the table cannot be read.
+    /// It fails closed: `Unknown` when the table, or any route in it, cannot
+    /// be read.
     fn uses_interface(&self, dest: Ipv4Addr, interface: &str) -> Verified;
 
     /// What full mode can do about IPv6 on this machine now, read-only, for
@@ -501,7 +502,8 @@ pub trait Routes: Send + Sync {
     ///
     /// It fails closed on a tie: `Yes` only when every winning route goes
     /// through `interface`, `No` only when none does or no route matches,
-    /// and `Unknown` when they disagree or the table cannot be read.
+    /// and `Unknown` when they disagree or the table, or any route in it,
+    /// cannot be read.
     fn uses_interface_v6(&self, dest: Ipv6Addr, interface: &str) -> Verified;
 }
 

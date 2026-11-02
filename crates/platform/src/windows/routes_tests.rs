@@ -15,7 +15,11 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, IpDadStatePreferred};
 
 use super::full_tunnel_tests::foreign_v6;
-use super::routes::{WinRoutes, addr_of, address_table, checked, luid, v4, value};
+use super::journal::Prefix;
+use super::routes::{
+    WinRoutes, addr_of, address_table, best_route, checked, luid, prefix_of, routes_of,
+    up_interfaces, v4, value,
+};
 use super::wintun::Wintun;
 use crate::suite::{self, Foreign};
 use crate::{Error, Routes, Verified};
@@ -522,6 +526,7 @@ fn the_interface_metric_decides_between_equal_routes() {
         checked(unsafe { CreateIpForwardEntry2(row) }).expect("an IPv6 route");
     }
     let mut seen = Vec::new();
+    let mut best = Vec::new();
     for (low, high) in [(first, second), (second, first)] {
         set_interface_metric(low, AF_INET, 10);
         set_interface_metric(high, AF_INET, 50);
@@ -536,6 +541,10 @@ fn the_interface_metric_decides_between_equal_routes() {
                 routes.uses_interface_v6(dest_v6, low),
             ],
         ));
+        // Windows' own choice, which both adapters' IPv4 addresses allow it
+        // to make: the rule is Windows', not only ours.
+        let chosen = best_route(dest).map(|route| value(&route.InterfaceLuid));
+        best.push((low, chosen, luid(low)));
     }
     Outsider.remove_route(first, net);
     Outsider.remove_route(second, net);
@@ -546,9 +555,111 @@ fn the_interface_metric_decides_between_equal_routes() {
     step("the routes are gone");
 
     println!("METRIC {seen:?}");
+    println!("METRIC BEST {best:?}");
     for (low, verified) in seen {
         let expected = [Verified::Yes, Verified::No, Verified::Yes, Verified::No];
         assert_eq!(verified, expected, "{low} has the lower IPv4 metric");
     }
+    for (low, chosen, expected) in best {
+        let expected = expected.expect("the adapter");
+        assert_eq!(chosen, Ok(expected), "Windows' choice, {low} lower");
+    }
     ran("interface metric");
+}
+
+// Security rule: a route on an interface that is down carries nothing, so
+// it is never the way to its destination, for either family. Otherwise
+// full mode's halves left on a tunnel that is down would read `Yes` while
+// Windows sends the traffic out by the local network. The routes count
+// while the adapter is up, and are still in the table once it is down.
+#[test]
+fn a_route_on_a_down_interface_never_counts() {
+    let _turn = turn();
+    let Some(wintun) = wintun() else { return };
+    let tunnel = "ubc-vpn-down0";
+    let dir = state_dir("down");
+    let mut adapter = wintun.adapter(tunnel);
+    let _cleanup = Cleanup(vec![dir.clone()]);
+    let routes = WinRoutes::unchecked(&dir);
+    routes
+        .configure_tunnel(tunnel, Ipv4Addr::new(198, 18, 0, 8), 1400)
+        .unwrap();
+    let luid = luid(tunnel).unwrap();
+    let net: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+    let dest = Ipv4Addr::new(198, 51, 100, 9);
+    let net_v6 = Ipv6Addr::new(0x2001, 0xdb8, 0x6, 0, 0, 0, 0, 0);
+    let dest_v6 = Ipv6Addr::new(0x2001, 0xdb8, 0x6, 0, 0, 0, 0, 9);
+    let row_v6 = foreign_v6(tunnel, net_v6, 48);
+    let add_v6 = || {
+        // SAFETY: the row is valid and initialised.
+        checked(unsafe { CreateIpForwardEntry2(&row_v6) })
+    };
+    let wanted = [Prefix::V4(net), "2001:db8:6::/48".parse().unwrap()];
+    // Which of the two routes are in the system's table on the adapter.
+    let kept = || {
+        let mut rows = routes_of(AF_INET).expect("the IPv4 table");
+        rows.extend(routes_of(AF_INET6).expect("the IPv6 table"));
+        let ours: Vec<_> = rows
+            .iter()
+            .filter(|row| value(&row.InterfaceLuid) == luid)
+            .filter_map(prefix_of)
+            .collect();
+        wanted.map(|prefix| ours.contains(&prefix))
+    };
+    let answers = || {
+        [
+            routes.uses_interface(dest, tunnel),
+            routes.uses_interface_v6(dest_v6, tunnel),
+        ]
+    };
+    let is_up = || up_interfaces().expect("the interfaces").contains(&luid);
+
+    step("routes on the adapter while it is up");
+    Outsider.add_route(tunnel, net);
+    add_v6().expect("an IPv6 route");
+    let while_up = (is_up(), kept(), answers());
+
+    step("ending the adapter's session");
+    adapter.end_session();
+    let started = std::time::Instant::now();
+    while is_up() && started.elapsed() < std::time::Duration::from_secs(15) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let up_after = is_up();
+    // Should Windows drop the routes as the adapter goes down, they are
+    // added again, on the adapter that is down.
+    let kept_by_windows = kept();
+    if !kept_by_windows[0] {
+        Outsider.add_route(tunnel, net);
+    }
+    if !kept_by_windows[1] {
+        add_v6().expect("an IPv6 route on the adapter that is down");
+    }
+    let while_down = (kept(), answers());
+
+    Outsider.remove_route(tunnel, net);
+    // SAFETY: as above.
+    let _ = unsafe { DeleteIpForwardEntry2(&row_v6) };
+    step("the routes are gone");
+
+    println!("DOWN up: {while_up:?}");
+    println!("DOWN kept by Windows: {kept_by_windows:?}, still up: {up_after}");
+    println!("DOWN down: {while_down:?}");
+    let (up, kept_up, answers_up) = while_up;
+    assert!(up, "the adapter was not up with its session running");
+    assert_eq!(kept_up, [true, true], "the routes were not added");
+    assert_eq!(
+        answers_up,
+        [Verified::Yes, Verified::Yes],
+        "the routes did not count while the adapter was up"
+    );
+    assert!(!up_after, "the adapter is still up after its session ended");
+    let (kept_down, answers_down) = while_down;
+    assert_eq!(kept_down, [true, true], "the routes are not on the adapter");
+    assert_eq!(
+        answers_down,
+        [Verified::No, Verified::No],
+        "a route on the adapter that is down counted"
+    );
+    ran("down interface");
 }
