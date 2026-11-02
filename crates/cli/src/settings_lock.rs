@@ -37,7 +37,7 @@
 //! return later, it finds nobody waiting and lets the lock go at once. This
 //! program runs one command and ends, so nothing waits behind it.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use ubc_vpn_core::settings_cli::SettingsFailureCode;
 
-use crate::settings::{create_folder, folder_problem};
+use crate::private_fs::{create_folder, folder_problem, open_private};
 
 const LOCK: &str = "settings.json.lock";
 
@@ -168,12 +168,7 @@ fn open(path: &Path) -> io::Result<File> {
     if fs::symlink_metadata(path).is_ok_and(|found| !found.is_file()) {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(false);
-    // As for the settings file itself: the user's alone on Unix.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
+    open_private(path)
 }
 
 #[cfg(test)]
