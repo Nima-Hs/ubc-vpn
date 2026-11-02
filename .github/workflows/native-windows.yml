@@ -62,7 +62,7 @@ jobs:
         run: native/windows/base.sh /c/msys2-pinned
 
       - name: Build libopenconnect (MSYS2 UCRT64)
-        shell: C:\msys2-pinned\usr\bin\bash.exe -leo pipefail {0}
+        shell: C:\msys64\usr\bin\bash.exe -leo pipefail {0}
         env:
           MSYSTEM: UCRT64
           CHERE_INVOKING: "yes"
