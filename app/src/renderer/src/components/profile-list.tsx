@@ -1,10 +1,13 @@
+import { DUO, DUO_METHODS, describeDuo } from "@shared/copy";
 import type { ProfilesError, ProfilesResult } from "@shared/profiles";
+import type { DuoMethod } from "@shared/protocol/DuoMethod";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { ProfileView } from "@shared/protocol/ProfileView";
 import { describeProfileRefusal, PROFILES, SETTINGS, whereKept } from "@shared/settings-copy";
 import { Plus, Trash2 } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ChoiceList } from "@/components/ui/choice-list";
 import { Confirm } from "@/components/ui/confirm";
 import { Switch } from "@/components/ui/switch";
 import { Subheading, Text } from "@/components/ui/text";
@@ -131,6 +134,8 @@ function Editor({
     const [deleteError, setDeleteError] = useState<string | undefined>();
     /** Why the last change to saving the password was refused, said under it. */
     const [saveError, setSaveError] = useState<string | undefined>();
+    /** Why the last change of the Duo method was refused, said under it. */
+    const [duoError, setDuoError] = useState<string | undefined>();
     const noKeyring = keyring === "unavailable";
 
     const rename = async (event: FormEvent) => {
@@ -189,6 +194,30 @@ function Editor({
                     </Button>
                 </div>
             </form>
+            <ChoiceList<DuoMethod | "as_typed">
+                legend={DUO.legend}
+                value={profile.duo_method ?? "as_typed"}
+                disabled={busy}
+                note={duoError}
+                options={[
+                    ...DUO_METHODS.map((method) => ({
+                        value: method,
+                        label: describeDuo(method).label,
+                        hint: describeDuo(method).hint,
+                    })),
+                    // Offered only to keep a username saved with its own @ part.
+                    ...(profile.duo_method === null
+                        ? [{ value: "as_typed" as const, ...DUO.asTyped }]
+                        : []),
+                ]}
+                onChange={async (chosen) => {
+                    const duoMethod = chosen === "as_typed" ? null : chosen;
+                    const refused = await change(() =>
+                        api.profiles?.update(profile.id, { duo_method: duoMethod }),
+                    );
+                    setDuoError(refused === null ? undefined : describeProfileRefusal(refused));
+                }}
+            />
             <div className="-mx-4">
                 <Switch
                     label={PROFILES.savePassword}

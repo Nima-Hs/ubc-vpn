@@ -4,6 +4,7 @@
 // do, and decides at start whether the window is shown. No Electron import,
 // so the rules can be tested on their own.
 
+import type { LoginState } from "@shared/api";
 import { HIDDEN_ARG } from "@shared/profiles";
 import type { ConnState } from "@shared/protocol/ConnState";
 import type { GlobalSettings } from "@shared/protocol/GlobalSettings";
@@ -74,4 +75,15 @@ export function showsAfterSettings(platform: NodeJS.Platform, start: StartMode |
  */
 export function connectsAtStart(global: GlobalSettings, conn: ConnState | null): boolean {
     return global.auto_connect && conn?.state === "disconnected";
+}
+
+/**
+ * Whether the window must come forward because a login has just come to a
+ * question for the user, such as a Duo passcode at a connect the app
+ * started by itself at sign-in. Such a connect then waits for the user in
+ * plain sight: it never fails out of view, and never falls back to another
+ * method.
+ */
+export function asksTheUser(before: LoginState["phase"], after: LoginState["phase"]): boolean {
+    return after === "prompt" && before !== "prompt";
 }

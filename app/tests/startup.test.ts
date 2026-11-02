@@ -2,6 +2,7 @@ import { HIDDEN_ARG } from "@shared/profiles";
 import type { GlobalSettings } from "@shared/protocol/GlobalSettings";
 import { describe, expect, it } from "vitest";
 import {
+    asksTheUser,
     connectsAtStart,
     loginItemFor,
     showsAfterSettings,
@@ -88,5 +89,17 @@ describe("connecting when it starts", () => {
         expect(connectsAtStart(on, { state: "connecting" })).toBe(false);
         expect(connectsAtStart(on, { state: "login_needed" })).toBe(false);
         expect(connectsAtStart(on, null)).toBe(false);
+    });
+});
+
+describe("a question at a login", () => {
+    // A connect started by itself, at sign-in or for auto-connect, that comes
+    // to a question, such as a Duo passcode, brings the window forward.
+    it("brings the window forward when it comes, and only then", () => {
+        expect(asksTheUser("working", "prompt")).toBe(true);
+        expect(asksTheUser("idle", "prompt")).toBe(true);
+        expect(asksTheUser("prompt", "prompt")).toBe(false);
+        expect(asksTheUser("idle", "working")).toBe(false);
+        expect(asksTheUser("prompt", "failed")).toBe(false);
     });
 });

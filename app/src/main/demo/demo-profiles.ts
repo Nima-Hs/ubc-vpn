@@ -13,6 +13,7 @@ import {
     type ProfilesError,
     type ProfilesResult,
 } from "@shared/profiles";
+import type { DuoMethod } from "@shared/protocol/DuoMethod";
 import type { LiveRoutes } from "@shared/protocol/LiveRoutes";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
@@ -39,8 +40,8 @@ const campus = (): ProfileView => ({
 const lab = (): ProfileView => ({
     id: LAB,
     name: "Lab",
-    username: "someone.lab@app",
-    duo_method: "push",
+    username: "someone.lab",
+    duo_method: "call",
     routes: { subnets: ["198.51.100.0/24"], dns_domains: ["lab.campus.example"] },
     save_password: false,
     password_saved: false,
@@ -257,10 +258,15 @@ export function createDemoProfiles(
                     return "unknown_profile";
                 }
                 const next: Partial<ProfileView> = {};
+                let method = profile.duo_method;
                 if (changed.username !== undefined) {
-                    const username = changed.username === null ? null : changed.username.trim();
+                    let username = changed.username === null ? null : changed.username.trim();
                     if (username !== null && (username === "" || /\s/.test(username))) {
                         return "bad_username";
+                    }
+                    // As the client reads it: a known suffix becomes the method.
+                    if (username !== null) {
+                        [username, method] = splitDuo(username, method);
                     }
                     if (username !== profile.username) {
                         // A new username forgets the old one's password.
@@ -268,6 +274,14 @@ export function createDemoProfiles(
                         next.password_saved = false;
                     }
                 }
+                if (changed.duo_method !== undefined) {
+                    method = changed.duo_method;
+                }
+                const named = next.username ?? profile.username;
+                if (method !== null && named?.includes("@") === true) {
+                    return "username_has_method";
+                }
+                next.duo_method = method;
                 if (changed.save_password === true && scenario.stuckPassword === true) {
                     return "keyring_not_cleared";
                 }
@@ -339,4 +353,26 @@ export function createDemoProfiles(
             view = scenario.view?.(fresh()) ?? fresh();
         },
     };
+}
+
+/**
+ * A username and the Duo method it leaves, as the client splits one typed
+ * with a suffix (`crates/core/src/duo.rs`): a known suffix becomes the
+ * method, a passcode is dropped, any other `@` is sent as typed, and a
+ * plain name keeps `method`, or gets push.
+ */
+function splitDuo(username: string, method: DuoMethod | null): [string, DuoMethod | null] {
+    const at = username.lastIndexOf("@");
+    if (at < 0) {
+        return [username, method ?? "push"];
+    }
+    const [account, suffix] = [username.slice(0, at), username.slice(at + 1).toLowerCase()];
+    const known: Record<string, DuoMethod> = {
+        app: "push",
+        call: "call",
+        phone: "call",
+        sms: "sms",
+    };
+    const named = /^[0-9]{6}$/.test(suffix) ? "passcode" : known[suffix];
+    return named === undefined || account.includes("@") ? [username, null] : [account, named];
 }

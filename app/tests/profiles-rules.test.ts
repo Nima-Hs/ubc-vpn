@@ -171,8 +171,13 @@ describe("what the screen may send for profiles", () => {
             ID,
             { username: null, save_password: false },
         ]);
+        // The Duo method, or `null` for a username sent as typed.
+        expect(takeUpdate([ID, { duo_method: "call" }])).toEqual([ID, { duo_method: "call" }]);
+        expect(takeUpdate([ID, { duo_method: null }])).toEqual([ID, { duo_method: null }]);
         const refused: unknown[][] = [
             [ID, {}],
+            [ID, { duo_method: "app" }],
+            [ID, { duo_method: 1 }],
             [ID, { password: "x" }],
             [ID, { username: "someone", password: "x" }],
             [ID, { save_password: "yes" }],
@@ -294,5 +299,26 @@ describe("the tray menu during a login", () => {
             enabled: false,
         });
         expect(submenu.slice(1).every((item) => item.enabled === false)).toBe(true);
+    });
+});
+
+describe("the Duo method, as the demo keeps it", () => {
+    it("is changed on its own, keeps the saved password, and is split from a typed suffix", async () => {
+        const profiles = createDemoProfiles();
+        profiles.setScenario("settings");
+        const first = await view(profiles.list());
+        const id = first.global.active_profile;
+        const before = first.profiles.find((profile) => profile.id === id);
+        expect(before?.duo_method).toBe("push");
+        const called = await view(profiles.update(id, { duo_method: "call" }));
+        const after = called.profiles.find((profile) => profile.id === id);
+        expect(after?.duo_method).toBe("call");
+        expect(after?.password_saved).toBe(before?.password_saved);
+        const typed = await view(profiles.update(id, { username: "someone.dept@sms" }));
+        const split = typed.profiles.find((profile) => profile.id === id);
+        expect([split?.username, split?.duo_method]).toEqual(["someone.dept", "sms"]);
+        await expect(
+            profiles.update(id, { username: "someone@example.test", duo_method: "push" }),
+        ).resolves.toEqual({ ok: false, error: "username_has_method" });
     });
 });

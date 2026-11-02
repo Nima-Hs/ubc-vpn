@@ -6,6 +6,7 @@ import {
     loginHasScreen,
 } from "@shared/copy";
 import { useEffect, useRef } from "react";
+import { DuoSwitcher } from "@/components/duo-switcher";
 import { ProfileSwitcher } from "@/components/profile-switcher";
 import { TunnelSwitch, useTunnelOutcomeText } from "@/components/tunnel-choice";
 import { TunnelDetails } from "@/components/tunnel-details";
@@ -15,6 +16,7 @@ import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
 import { cn } from "@/lib/cn";
+import { useLoginMethod } from "@/lib/profiles";
 import { api, useSnapshot } from "@/lib/store";
 import { LoginView } from "./login-view";
 
@@ -34,6 +36,7 @@ export function ConnectionView() {
         state.link === "ready" && state.conn.state === "connected" ? state.conn.tunnel : null;
     const noticeCopy = notice === null ? null : describeActionError(notice);
     const loggingIn = loginHasScreen(state, login);
+    const method = useLoginMethod();
 
     // When a login ends, the keyboard goes back to the one button, so the
     // next key press does something and focus is never left on nothing.
@@ -57,7 +60,7 @@ export function ConnectionView() {
                 <LoginView login={login} />
                 {/* Read out, politely, as the login moves on. */}
                 <p role="status" className="sr-only">
-                    {loginAnnouncement(login)}
+                    {loginAnnouncement(login, method)}
                 </p>
             </main>
         );
@@ -89,6 +92,10 @@ export function ConnectionView() {
 
             {/* Which profile Connect uses, when there is more than one. */}
             <ProfileSwitcher />
+
+            {/* How that profile confirms the login with Duo, saved in it:
+                offered where Connect is, and out of the way once connected. */}
+            {action?.kind === "connect" && <DuoSwitcher />}
 
             {/* Read out, politely, whenever the state, the notice or a switch's outcome changes. */}
             <p role="status" className="sr-only">

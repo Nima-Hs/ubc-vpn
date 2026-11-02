@@ -22,6 +22,7 @@ import {
     secureSession,
 } from "./security";
 import {
+    asksTheUser,
     connectsAtStart,
     type LoginItem,
     loginItemFor,
@@ -261,7 +262,13 @@ async function start(): Promise<void> {
             show();
         }
     }
+    // A question at a login comes forward, whoever started the login.
+    let phase = controller.getSnapshot().login.phase;
     controller.subscribe((snapshot) => {
+        if (asksTheUser(phase, snapshot.login.phase)) {
+            show();
+        }
+        phase = snapshot.login.phase;
         icons.show(trayKind(snapshot.state, snapshot.tunnel));
         tray?.update(snapshot.state, snapshot.login.phase !== "idle", snapshot.tunnel);
     });
