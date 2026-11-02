@@ -47,7 +47,9 @@ The end-to-end tests keep the app's window off the screen when run on your own c
 
 On your own computer they also never reach a real client, the installed service, your settings or your saved password: the apps they launch do not inherit `UBC_VPN_CLI`, `UBC_VPN_DEV` or any `UBC_VPN_SYSTEM_*` variable from your shell. Every app they start goes through [`tests/e2e/launch.ts`](tests/e2e/launch.ts), which filters the environment ([`tests/e2e/safe-env.ts`](tests/e2e/safe-env.ts)), and a unit test fails if a spec starts one any other way. A test that needs one of those variables sets it itself. Only `CI=true` counts as CI, and there nothing is removed.
 
-The end-to-end test saves a screenshot of every state to `test-results/screens`, or to `SCREENSHOT_DIR` if that is set. On Linux without a display, run it under `xvfb-run`.
+The end-to-end tests are one spec per screen or topic in `tests/e2e` (`login.spec.ts`, `routes.spec.ts` and so on). Each spec calls `useApp()` from [`tests/e2e/fixture.ts`](tests/e2e/fixture.ts), which launches an app of its own for that spec and closes it after the spec's last test, so no spec depends on what another one did or on the order they run in. After each spec it checks that nothing was blocked or broken in the window and that nothing was written in the installed product's folder. A spec whose tests only launch apps of their own calls `guardInstalledFolder()` instead.
+
+The end-to-end tests save a screenshot of every state to `test-results/screens`, or to `SCREENSHOT_DIR` if that is set. On Linux without a display, run them under `xvfb-run`.
 
 `pnpm test:system` is the one test with no stand-in in it ([`tests/system/real.spec.ts`](tests/system/real.spec.ts)). It starts `ubc-vpn-service --dev`, starts the production build of the app with `UBC_VPN_DEV=1`, and drives the window: the service is found and claimed, routes are checked and saved, a login is answered, the connection comes up and goes down, a login is cancelled, a wrong password is refused. On CI the workflow builds the two programs and names them, as here:
 
