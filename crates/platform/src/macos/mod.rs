@@ -1,12 +1,14 @@
 //! macOS: the channel is a Unix socket (see `unix`), and the folders are the
 //! system's and the user's `Application Support`. Routes are set through a
-//! routing socket (`routes`). DNS, network events and full mode are not
+//! routing socket (`routes`), and split DNS through the dynamic store
+//! (`dns`). Network events, full mode and the catch-all DNS are not
 //! implemented yet and report that they are unsupported, each from a file of
 //! its own.
 
 mod dns;
 #[cfg(test)]
 mod dns_tests;
+mod dynamic_store;
 mod events;
 #[cfg(test)]
 mod events_tests;

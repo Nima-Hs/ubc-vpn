@@ -23,21 +23,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ubc_vpn_core::routes::Ipv4Net;
 
+use super::dns::SessionDns;
+use super::dns_tests::{self, LIVE_SERVICE, Lookups};
 use super::route_socket::{self, Change, IOC_IN, IOC_INOUT, Interface, Route, V4Address, ioc};
 use super::routes::{
     BEFORE_ADD, MacRoutes, OURS, Present, boot, counts, is_utun_name, present, through, tunnel,
     winners,
 };
-use crate::fake::Fake;
 use crate::journal::{Boot, Journal, Prefix, Row, Store};
 use crate::suite::{self, Foreign};
 use crate::{Error, Mode, Platform, Routes, Verified, lock};
 
-fn net(text: &str) -> Ipv4Net {
+pub(super) fn net(text: &str) -> Ipv4Net {
     text.parse().expect("a network")
 }
 
-fn ip(text: &str) -> Ipv4Addr {
+pub(super) fn ip(text: &str) -> Ipv4Addr {
     text.parse().expect("an address")
 }
 
@@ -575,7 +576,7 @@ const CHILD: &str = "UBC_VPN_ROUTES_CHILD";
 const CRASH: &str = "UBC_VPN_CRASH_CHILD";
 
 /// How long one routing test's process may take.
-const DEADLINE: Duration = Duration::from_secs(150);
+pub(super) const DEADLINE: Duration = Duration::from_secs(150);
 
 /// Every destination the routing tests use. Nothing else is ever touched.
 const TEST_RANGES: [&str; 4] = [
@@ -587,7 +588,7 @@ const TEST_RANGES: [&str; 4] = [
 
 /// Writes one whole line in one call, so that nothing another thread prints
 /// can land inside it: CI looks for these lines.
-fn say(line: &str) {
+pub(super) fn say(line: &str) {
     let line = format!("\n{line}\n");
     std::io::stderr().write_all(line.as_bytes()).expect("say");
 }
@@ -600,6 +601,13 @@ static TURN: Mutex<()> = Mutex::new(());
 /// and says `RAN AS ROOT: <ran>` when it passed. In that process, which
 /// runs nothing else, it runs `body` itself.
 fn alone_as_root(test: &str, ran: &str, body: impl FnOnce()) {
+    alone_as_root_in(module_path!(), test, ran, body);
+}
+
+/// As [`alone_as_root`], for a test in the module `module`, as
+/// `module_path!()` gives it. Tests of other parts that change the machine,
+/// such as DNS, take turns with these.
+pub(super) fn alone_as_root_in(module: &str, test: &str, ran: &str, body: impl FnOnce()) {
     match std::env::var(CHILD) {
         Ok(child) if child == test => {
             regain_root();
@@ -620,11 +628,13 @@ fn alone_as_root(test: &str, ran: &str, body: impl FnOnce()) {
         say(&format!("SKIPPED, needs root: {ran}"));
         return;
     }
+    // The test's name as the harness filters it, without the crate's.
+    let (_, module) = module.split_once("::").expect("a module of this crate");
     let _turn = lock(&TURN);
     let status = Command::new(std::env::current_exe().expect("this program"))
         .args([
             "--exact",
-            &format!("os::routes_tests::{test}"),
+            &format!("{module}::{test}"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -638,7 +648,7 @@ fn alone_as_root(test: &str, ran: &str, body: impl FnOnce()) {
 /// Becomes root again, if this process started while a channel test was
 /// somebody else: it inherited that user as its effective one, but its real
 /// user is root.
-fn regain_root() {
+pub(super) fn regain_root() {
     // SAFETY: no preconditions.
     if unsafe { libc::geteuid() } != 0 {
         // SAFETY: no preconditions.
@@ -649,7 +659,7 @@ fn regain_root() {
 
 /// Ends this process, saying where, if a test is stuck, having removed the
 /// tests' routes first.
-fn watchdog() {
+pub(super) fn watchdog() {
     thread::spawn(|| {
         thread::sleep(DEADLINE);
         say("HUNG: a routing test is stuck");
@@ -674,7 +684,7 @@ fn scrub(dirs: &[PathBuf]) {
 }
 
 /// Removes, when dropped, what a test may have left.
-struct Cleanup(Vec<PathBuf>);
+pub(super) struct Cleanup(pub(super) Vec<PathBuf>);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -686,7 +696,7 @@ impl Drop for Cleanup {
 }
 
 /// A journal folder of the test's own.
-fn state_dir(tag: &str) -> PathBuf {
+pub(super) fn state_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ubc-vpn-routes-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
@@ -701,14 +711,14 @@ fn journal_rows(dir: &Path) -> Vec<Row> {
 
 /// A `utun` device, which lasts as long as this value: the kernel removes
 /// it, and every route through it, when its control socket closes.
-struct Utun {
-    _control: OwnedFd,
-    name: String,
+pub(super) struct Utun {
+    pub(super) control: OwnedFd,
+    pub(super) name: String,
 }
 
 /// Opens a `utun` device, as the VPN engine does: a kernel control socket
 /// connected to `com.apple.net.utun_control`.
-fn utun() -> Utun {
+pub(super) fn utun() -> Utun {
     // SAFETY: no pointers are passed.
     let socket = unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
     assert!(socket >= 0, "socket: {}", std::io::Error::last_os_error());
@@ -761,10 +771,7 @@ fn utun() -> Utun {
     let name = std::ffi::CStr::from_bytes_until_nul(&name).expect("a name");
     let name = name.to_str().expect("a name").to_string();
     say(&format!("UTUN: {name}"));
-    Utun {
-        _control: control,
-        name,
-    }
+    Utun { control, name }
 }
 
 fn find(name: &str) -> Option<Interface> {
@@ -797,7 +804,7 @@ fn routes_to(dest: Ipv4Net) -> Vec<(u16, Option<Ipv4Addr>, bool)> {
 
 /// Changes routes and addresses as somebody other than the product: with
 /// the same calls, but unmarked and recorded nowhere.
-struct Outsider;
+pub(super) struct Outsider;
 
 impl Foreign for Outsider {
     fn add_route(&self, interface: &str, net: Ipv4Net) {
@@ -898,9 +905,8 @@ fn passes_the_shared_route_suite_on_a_utun() {
     );
 }
 
-// A change of routes on a live connection (#194). Split DNS on macOS is its
-// own part, not written yet, so the DNS half of the check runs against the
-// fake's resolver; the routes are real.
+// A change of routes and split DNS on a live connection (#194), both real:
+// lookups are seen on the device, as in the DNS tests.
 #[test]
 fn passes_the_shared_live_route_change_check_on_a_utun() {
     alone_as_root(
@@ -914,8 +920,10 @@ fn passes_the_shared_live_route_change_check_on_a_utun() {
             routes
                 .configure_tunnel(&device.name, ip("198.18.0.9"), 1300)
                 .expect("configure");
-            let dns = Fake::new();
-            let resolvers_for = |name: &str| dns.resolvers_for(name);
+            let dns = SessionDns::new(LIVE_SERVICE);
+            let _gone = dns_tests::Removed(dns.key());
+            let lookups = Lookups::new(&device);
+            let resolvers_for = |name: &str| lookups.resolvers_for(name);
             suite::check_live_route_change(&routes, &dns, &device.name, &resolvers_for);
         },
     );
