@@ -1,7 +1,8 @@
 //! macOS: the channel is a Unix socket (see `unix`), and the folders are the
-//! system's and the user's `Application Support`. Routes, DNS and network
-//! events are not implemented yet and report that they are unsupported, each
-//! from a file of its own.
+//! system's and the user's `Application Support`. Routes are set through a
+//! routing socket (`routes`). DNS, network events and full mode are not
+//! implemented yet and report that they are unsupported, each from a file of
+//! its own.
 
 mod dns;
 #[cfg(test)]
@@ -11,6 +12,7 @@ mod events;
 mod events_tests;
 #[cfg(test)]
 mod full_tunnel_tests;
+mod route_socket;
 mod routes;
 #[cfg(test)]
 mod routes_tests;
@@ -65,9 +67,9 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
 }
 
 /// The routes, DNS and network events the platform uses.
-pub(crate) fn parts(_mode: Mode, _paths: &Paths) -> Parts {
+pub(crate) fn parts(mode: Mode, paths: &Paths) -> Parts {
     Parts {
-        routes: Arc::new(routes::MacRoutes),
+        routes: Arc::new(routes::MacRoutes::new(mode, paths)),
         dns: Arc::new(dns::MacDns),
         events: Arc::new(events::MacEvents),
     }
