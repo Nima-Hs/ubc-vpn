@@ -219,6 +219,52 @@ mod tests {
         println!("RAN: device refused without the right to make one");
     }
 
+    /// What the shell started from this process was given: the targets
+    /// of its descriptors.
+    fn a_childs_files() -> Vec<String> {
+        let listed = std::process::Command::new("/bin/sh")
+            .args(["-c", r#"for fd in /proc/$$/fd/*; do readlink "$fd"; done"#])
+            .output()
+            .expect("the shell runs");
+        assert!(listed.status.success(), "{listed:?}");
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        let files: Vec<String> = listed.lines().map(str::to_string).collect();
+        // Its input is /dev/null, so the listing worked.
+        assert!(files.iter().any(|file| file == "/dev/null"), "{files:?}");
+        files
+    }
+
+    // Security rule: the device is ours alone from the moment it is opened,
+    // before the library makes it close-on-exec. A program started then
+    // holds no copy. The device has an `ubcvpn` name, and closing the
+    // descriptor removes it. Only as root, where the workflow allows it.
+    #[test]
+    fn as_root_a_device_is_close_on_exec_and_goes_on_close() {
+        if std::env::var_os("UBC_VPN_TEST_DEVICE").is_none() {
+            println!("SKIPPED: making a tunnel device needs UBC_VPN_TEST_DEVICE");
+            return;
+        }
+        let (fd, name) = open().expect("a device as root");
+        assert!(ours(&field(name.as_bytes())).is_some(), "{name:?}");
+        let link = std::path::Path::new("/sys/class/net").join(&name);
+        assert!(link.exists(), "no link {name:?}");
+        // SAFETY: `fd` is open, and `F_GETFD` takes no third argument.
+        let flags = unsafe { fcntl(fd.as_raw_fd(), F_GETFD) };
+        assert!(flags >= 0 && flags & FD_CLOEXEC != 0, "{flags}");
+        let files = a_childs_files();
+        assert!(
+            !files.iter().any(|file| file == "/dev/net/tun"),
+            "{files:?}"
+        );
+        drop(fd);
+        wait_until_gone(&name);
+        assert!(
+            !link.exists(),
+            "{name:?} is left after its descriptor closed"
+        );
+        println!("RAN: device is close-on-exec and goes on close");
+    }
+
     // A made-up link is gone at once; waiting for it returns without
     // using up the limit.
     #[test]
