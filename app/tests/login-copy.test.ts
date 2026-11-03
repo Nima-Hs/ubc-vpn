@@ -214,7 +214,8 @@ describe("the demo login", () => {
         );
         for (const name of DEMO_LOGIN_SCENARIOS) {
             login.setScenario(name);
-            expect(seen.at(-1)?.phase, name).not.toBe("idle");
+            // Each shows something: a bare idle state would show nothing.
+            expect(seen.at(-1), name).not.toEqual({ phase: "idle" });
         }
         expect(
             DEMO_LOGIN_SCENARIOS.filter((name) => name.startsWith("login-failed-")),

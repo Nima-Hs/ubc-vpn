@@ -60,7 +60,11 @@ export interface LoginPrompt {
  * to the command-line client and nowhere else.
  */
 export type LoginState =
-    | { phase: "idle" }
+    /**
+     * `passwordNotSaved`: the last login worked, but the password the profile
+     * was to save could not be saved. Stays until the next login starts.
+     */
+    | { phase: "idle"; passwordNotSaved?: true }
     /** The client is busy: starting, or acting on the last answer. */
     | { phase: "working" }
     | { phase: "prompt"; prompt: LoginPrompt }

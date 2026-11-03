@@ -110,6 +110,7 @@ export const TUNNEL = {
 /** One thing the mock `connect --json` does next. See `mock-cli.mjs`. */
 export type CliStep =
     | { prompt: { id: number; kind: string; label: string; message?: string }; expect?: string }
+    | { notSaved: true }
     | { done: true }
     | { error: { code: string; message: string } }
     | { raw: string }

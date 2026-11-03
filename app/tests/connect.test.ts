@@ -282,6 +282,40 @@ describe("how a login ends badly", () => {
         expect(runner.start()).toBe(true);
     });
 
+    it("says a password was not saved until the next login starts", async () => {
+        const { runner, states } = login([{ notSaved: true }, { done: true }]);
+        runner.start();
+        await until(() => states.at(-1)?.phase === "idle", "the end");
+        expect(states.at(-1)).toEqual({ phase: "idle", passwordNotSaved: true });
+        // The next login says nothing of the last one.
+        const { runner: next, states: nextStates } = login([{ done: true }]);
+        next.start();
+        await until(() => nextStates.at(-1)?.phase === "idle", "the end");
+        expect(nextStates.at(-1)).toEqual({ phase: "idle" });
+    });
+
+    it("forgets a password not saved when the same runner starts again", async () => {
+        const cli = mockCli([{ notSaved: true }, { done: true }], {
+            laterLogins: [[{ done: true }]],
+        });
+        const states: LoginState[] = [];
+        const runner = new ConnectRunner({
+            command: cli.command,
+            args: cli.args,
+            onState: (state) => states.push(state),
+            disconnect: async () => {},
+            minStartGapMs: 0,
+        });
+        cleanups.push(() => runner.stop());
+        runner.start();
+        await until(() => states.at(-1)?.phase === "idle", "the first end");
+        expect(states.at(-1)).toEqual({ phase: "idle", passwordNotSaved: true });
+        await until(() => runner.start(), "the next start");
+        expect(states.at(-1)).toEqual({ phase: "working" });
+        await until(() => states.at(-1)?.phase === "idle", "the second end");
+        expect(states.at(-1)).toEqual({ phase: "idle" });
+    });
+
     it.each([
         // No newline: with no limit, the app would wait on this for ever.
         ["a line that never ends", "x".repeat(MAX_LINE_BYTES + 10)],
@@ -323,6 +357,7 @@ describe("how a login ends badly", () => {
 
     it("accepts exactly the lines the contract names", () => {
         expect(isCliMessage({ type: "done" })).toBe(true);
+        expect(isCliMessage({ type: "password_not_saved" })).toBe(true);
         expect(isCliMessage({ type: "prompt", id: 0, kind: "code", label: "" })).toBe(true);
         expect(isCliMessage({ type: "prompt", id: -1, kind: "code", label: "" })).toBe(false);
         expect(isCliMessage({ type: "prompt", id: 1.5, kind: "code", label: "" })).toBe(false);

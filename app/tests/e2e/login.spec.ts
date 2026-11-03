@@ -14,6 +14,7 @@ import {
     newProfile,
     offScreen,
     page,
+    said,
     scenario,
     shoot,
     useApp,
@@ -212,6 +213,18 @@ test("the button that shows a password can be pressed once its tooltip is up", a
     await page.getByRole("button", { name: "Hide password" }).click();
     await expect(field).toHaveAttribute("type", "password");
     await scenario("disconnected");
+});
+
+test("a password that could not be saved is said on the connection screen", async () => {
+    // On the screen itself: the copy kept for screen readers does not count.
+    const text = said("Your password could not be saved in the keyring");
+    await scenario("connected");
+    await expect(text).toHaveCount(0);
+    await scenario("login-password-not-saved");
+    await expect(text).toBeVisible();
+    await shoot("login-password-not-saved");
+    await scenario("disconnected");
+    await expect(text).toHaveCount(0);
 });
 
 test("a typed password is kept nowhere: not in a message, a log or the profile", async () => {

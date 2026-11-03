@@ -4,6 +4,7 @@ import {
     describeActionError,
     loginAnnouncement,
     loginHasScreen,
+    PASSWORD_NOT_SAVED,
 } from "@shared/copy";
 import { useEffect, useRef } from "react";
 import { DuoSwitcher } from "@/components/duo-switcher";
@@ -36,6 +37,7 @@ export function ConnectionView() {
         state.link === "ready" && state.conn.state === "connected" ? state.conn.tunnel : null;
     const noticeCopy = notice === null ? null : describeActionError(notice);
     const loggingIn = loginHasScreen(state, login);
+    const passwordNotSaved = login.phase === "idle" && login.passwordNotSaved === true;
     const method = useLoginMethod();
 
     // When a login ends, the keyboard goes back to the one button, so the
@@ -99,7 +101,8 @@ export function ConnectionView() {
 
             {/* Read out, politely, whenever the state, the notice or a switch's outcome changes. */}
             <p role="status" className="sr-only">
-                {copy.title}. {copy.body} {noticeCopy?.text} {outcomeText}
+                {copy.title}. {copy.body} {noticeCopy?.text}{" "}
+                {passwordNotSaved && PASSWORD_NOT_SAVED} {outcomeText}
             </p>
 
             {/* With something in it, keeps a minimum height, so when the text is
@@ -121,6 +124,12 @@ export function ConnectionView() {
                     </Panel>
                 )}
             </div>
+
+            {passwordNotSaved && (
+                <Panel tone="attention" className="shrink-0">
+                    <Text>{PASSWORD_NOT_SAVED}</Text>
+                </Panel>
+            )}
 
             {noticeCopy !== null && (
                 <Panel tone="attention" className="shrink-0">

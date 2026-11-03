@@ -44,6 +44,10 @@ pub enum CliMessage {
         #[cfg_attr(test, ts(optional))]
         message: Option<String>,
     },
+    /// The login worked and the connect goes ahead, but the password the
+    /// profile was to save could not be saved. Comes before `done`, once at
+    /// most.
+    PasswordNotSaved,
     /// Login succeeded and the service accepted the connect request. Always
     /// the last line. Connection progress follows on the channel.
     Done,

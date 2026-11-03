@@ -15,6 +15,7 @@
 // The config is `{ steps: [...], log, pids }`. Each step is one thing the
 // client does next:
 //   { prompt: { id, kind, label, message? }, expect? }  ask, and wait for the answer
+//   { notSaved: true }                                  says the password was not saved
 //   { done: true }                                      the last line, on success
 //   { error: { code, message } }                        the last line, on failure
 //   { raw: "..." }                                      write this text as it is
@@ -61,6 +62,8 @@ function next() {
     } else if (step.prompt !== undefined) {
         waiting = step;
         write({ type: "prompt", ...step.prompt });
+    } else if (step.notSaved) {
+        write({ type: "password_not_saved" }, next);
     } else if (step.done) {
         last({ type: "done" }, 0);
     } else if (step.error !== undefined) {
