@@ -205,7 +205,7 @@ export function launcherScript(
         "$start = [System.Diagnostics.ProcessStartInfo]::new()",
         "$start.FileName = $env:UBC_VPN_INSTALLER",
         `$start.Arguments = '${options.setupArgs}'`,
-        `$start.Verb = '${options.verb}'`,
+        `$start.Verb = 'runas'`,
         "$start.UseShellExecute = $true",
         "$start.WindowStyle = 'Hidden'",
         "try { $setup = [System.Diagnostics.Process]::Start($start) } catch {",
