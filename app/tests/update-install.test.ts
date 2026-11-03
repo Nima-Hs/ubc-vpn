@@ -6,6 +6,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { LinkState } from "@shared/api";
 import type { InstallNotice } from "@shared/updates";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -17,6 +18,8 @@ import {
     leaveResume,
     restartToUpdate,
     takeResume,
+    tunnelDown,
+    tunnelUp,
     windowsLaunch,
 } from "../src/main/update/install";
 import type { ReadyInstaller } from "../src/main/update/updater";
@@ -195,6 +198,30 @@ describe("starting the setup program on Windows", () => {
         expect(launchedFrom(2)).toBe("cancelled");
         expect(launchedFrom(1)).toBe("failed");
         expect(launchedFrom(null)).toBe("failed");
+    });
+});
+
+describe("what counts as a connection to take down", () => {
+    const ready = (state: string): LinkState =>
+        ({ link: "ready", conn: { state } }) as unknown as LinkState;
+
+    it("is one that is up or on its way, and those come back afterwards", () => {
+        expect(tunnelUp(ready("connected"))).toBe(true);
+        expect(tunnelUp(ready("connecting"))).toBe(true);
+        for (const state of ["disconnected", "disconnecting", "failed", "login_needed"]) {
+            expect(tunnelUp(ready(state)), state).toBe(false);
+        }
+        expect(tunnelUp({ link: "starting" })).toBe(false);
+    });
+
+    it("is gone only when the service says so", () => {
+        for (const state of ["disconnected", "failed", "login_needed"]) {
+            expect(tunnelDown(ready(state)), state).toBe(true);
+        }
+        for (const state of ["connected", "connecting", "disconnecting"]) {
+            expect(tunnelDown(ready(state)), state).toBe(false);
+        }
+        expect(tunnelDown({ link: "unavailable", reason: "not_running" })).toBe(false);
     });
 });
 

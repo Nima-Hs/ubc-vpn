@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { copyFile, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { LinkState } from "@shared/api";
 import type { InstallNotice } from "@shared/updates";
 import { checkInstaller, type UpdateFile, UpdateRefused } from "./list";
 import type { ReadyInstaller } from "./updater";
@@ -140,7 +141,7 @@ export function windowsLaunch(path: string, systemRoot: string) {
     ].join("\n");
     return {
         file: join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-        args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+        args: ["-NoProfile", "-NonInteractive", "-Command", script],
         env: { SystemRoot: systemRoot, UBC_VPN_INSTALLER: path },
     };
 }
@@ -178,6 +179,23 @@ export async function restartToUpdate(
     }
     const notice = await installUpdate(ready, steps).catch((): InstallNotice => "failed");
     updater.endInstall(notice);
+}
+
+/**
+ * Whether there is a connection to take down before installing, and to bring
+ * back afterwards: one that is up or on its way. The setup program stops the
+ * service, so a connection under way must not be left to it.
+ */
+export function tunnelUp(state: LinkState): boolean {
+    return state.link === "ready" && ["connected", "connecting"].includes(state.conn.state);
+}
+
+/** Whether the service says no connection is left: disconnected, or one that ended. */
+export function tunnelDown(state: LinkState): boolean {
+    return (
+        state.link === "ready" &&
+        ["disconnected", "failed", "login_needed"].includes(state.conn.state)
+    );
 }
 
 /** How long a disconnect before an update may take. */

@@ -152,7 +152,7 @@ The app updates itself through the installer, as a person would, with no code si
 5. **Installing.** "Restart to update" disconnects the VPN through the service, cleanly. The app then copies the installer into a fresh folder made for this run, checks its size and SHA-256 again there, and runs that copy silently, which takes one admin prompt (UAC on Windows, which says "Unknown publisher" because nothing is signed). The setup program replaces the app and the service, the app starts again, and it reconnects if it was connected. If the user cancels the prompt, nothing changes: the app reconnects if it was connected and says the update was not installed.
    - **On Windows** the app asks PowerShell's `Start-Process -Verb RunAs` to start the copy with `/S --updated --force-run`. It passes the path in the environment, never inside the script, and the full path of `powershell.exe` under `%SystemRoot%`. `--force-run` has the setup program start the app when it is done. Exit code 1223 (`ERROR_CANCELLED`) means the user said no at the prompt.
    - **Reconnecting** after the update uses a note, `resume.json`, that the app leaves in the updates folder only when it was connected. The next start reads and deletes it, and connects once the service has said it is disconnected, as pressing Connect would, MFA included.
-   - **Waiting:** the disconnect has 30 seconds to finish. If it does not, nothing is installed and the app says so.
+   - **Waiting:** a connection on its way counts as connected, since the setup program stops the service. The disconnect has 30 seconds to finish. If it does not, nothing is installed and the app says so.
    - **A copy that fails the second check** is not run. The downloaded installer is dropped and downloaded again at the next check.
 
 ### The update list
@@ -209,7 +209,7 @@ The signed bytes are JSON too:
 
 What it does not stop:
 
-- **A program already running as the user.** It could change the file between the last check and the moment the setup program opens it, but it could as well start its own program behind its own admin prompt, which looks the same while nothing is signed. The fresh folder and the second check leave it the least time.
+- **A program already running as the user.** It could change the file between the last check and the moment the setup program opens it, or put a library beside it for the setup program to load, because the user can write to that folder. It could as well start its own program behind its own admin prompt, which looks the same while nothing is signed. The fresh folder and the second check leave it the least time.
 - **Withholding updates (a freeze).** Lists do not expire, by design. Someone who can block GitHub can keep the app on its version; Settings shows when it last checked. Someone with a token that can change this repository's releases can do the same without the app noticing: replace `update-list.json` with an older, validly signed list, which the app refuses as not newer, or delete the release. The check succeeds and finds nothing new. They still cannot make the app install anything the owner did not sign.
 - **A setup program that is not signed.** Windows shows "Unknown publisher". Signing is reconsidered after v0.1.0 (see "Open points").
 
