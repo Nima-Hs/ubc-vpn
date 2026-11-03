@@ -638,6 +638,13 @@ describe("what keeps the launcher's tests off the desktop", () => {
         }
     });
 
+    it("refuses text that can elevate, and allows it once the start is gone", () => {
+        const elevating = `$start.Verb = 'runas'\n$setup = ${SETUP_START}`;
+        expect(() => checkedScript(elevating)).toThrow(/administrator/);
+        expect(checkedScript("$start.Verb = 'runas'\n$setup = $null")).toContain("runas");
+        expect(checkedScript(`$start.Verb = ''\n$setup = ${SETUP_START}`)).toContain(SETUP_START);
+    });
+
     it("gives tests a script with no message, and with no elevated start left in it", () => {
         const plain = testScript({ verb: "" });
         expect(plain).not.toMatch(/WScript|Popup/);
