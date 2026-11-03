@@ -16,7 +16,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { windowsLaunch } from "../src/main/update/install";
 import { leaveNote, RESUME_NOTE } from "../src/main/update/resume";
 
@@ -46,6 +46,11 @@ const appProcesses = (): string[] =>
         .filter((line) => line.includes("UBC VPN.exe"));
 
 describe.runIf(REAL)("a real update on a runner", () => {
+    // The app it started outlives the test otherwise, and can hold up the job.
+    afterAll(() => {
+        spawnSync("taskkill", ["/F", "/T", "/IM", "UBC VPN.exe"], { stdio: "ignore" });
+    });
+
     it("replaces the running app, starts the new one, and the new one finds its note", async () => {
         const installer = process.env.UBC_VPN_TEST_NEW_INSTALLER as string;
         const version = process.env.UBC_VPN_TEST_NEW_VERSION as string;

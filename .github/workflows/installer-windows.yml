@@ -301,11 +301,17 @@ jobs:
         run: |
           pwsh -NoProfile -File "$CHECK" install "$RUNNER_TEMP"/old/ubc-vpn-setup-*-x64.exe
           pwsh -NoProfile -File "$CHECK" service
+      # The app it leaves running must not hold up the step, so the output goes
+      # to a file, not a pipe, and the run has a limit of its own.
       - name: Update it, as the app does
         env:
           UBC_VPN_TEST_REAL_UPDATE: "1"
+          NO_COLOR: "1"
         run: |
-          pnpm exec vitest run tests/update-real.test.ts --maxWorkers=1 | tee "$RUNNER_TEMP/update.txt"
+          status=0
+          timeout 780 pnpm exec vitest run tests/update-real.test.ts --maxWorkers=1 >"$RUNNER_TEMP/update.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/update.txt"
+          echo "the test run ended with status $status"
           # The test skips itself anywhere else; here it must run.
           grep -q "1 passed" "$RUNNER_TEMP/update.txt"
       - name: The updated service is running and answers
