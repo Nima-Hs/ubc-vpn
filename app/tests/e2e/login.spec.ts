@@ -186,6 +186,34 @@ test("a password is hidden until shown, and hidden again when sent or the window
     await scenario("disconnected");
 });
 
+// A click by a person comes after the pointer has rested on the button for
+// longer than the tooltip takes to appear, unlike Playwright's own click.
+test("the button that shows a password can be pressed once its tooltip is up", async () => {
+    await scenario("login-password");
+    const field = passwordField();
+    await field.fill("hunter2-not-real");
+    const show = page.getByRole("button", { name: "Show password" });
+    await show.hover();
+    const tooltip = page.locator("[data-radix-popper-content-wrapper]");
+    await expect(tooltip).toBeVisible();
+    const tooltipBox = await tooltip.boundingBox();
+    const buttonBox = await show.boundingBox();
+    expect(tooltipBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+    if (tooltipBox !== null && buttonBox !== null) {
+        // Beside the button, on the side it asks for, and not on top of it.
+        expect(tooltipBox.x + tooltipBox.width).toBeLessThanOrEqual(buttonBox.x);
+        const middle = (box: { y: number; height: number }) => box.y + box.height / 2;
+        expect(Math.abs(middle(tooltipBox) - middle(buttonBox))).toBeLessThanOrEqual(1);
+    }
+    // Whatever is under the pointer takes the click: it must be the button.
+    await show.click({ timeout: 5_000 });
+    await expect(field).toHaveAttribute("type", "text");
+    await page.getByRole("button", { name: "Hide password" }).click();
+    await expect(field).toHaveAttribute("type", "password");
+    await scenario("disconnected");
+});
+
 test("a typed password is kept nowhere: not in a message, a log or the profile", async () => {
     // A copy of its own, with a profile of its own, so the whole profile can
     // be read once it has closed: a running app holds some of its files.
