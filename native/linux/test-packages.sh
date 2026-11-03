@@ -3,7 +3,8 @@
 # of the Ubuntu archive: ocserv for the native Linux workflow's probe and the
 # engine's ocserv tests (crates/engine/tests/ocserv/start.sh), and the D-Bus
 # headers and pkg-config that building the command-line client on Linux
-# needs (its keyring links the system's libdbus-1 at run time).
+# needs (its keyring links the system's libdbus-1 at run time), and the
+# ar, tar and xz that fpm writes the Linux .deb with.
 #
 # Only for a throwaway CI runner on Ubuntu 22.04 or 24.04: it fetches
 # package lists as root and installs packages. Never run it on a machine
@@ -26,10 +27,33 @@ declare -A PINNED_jammy=(
     [ocserv]=1.1.3-1
     [pkg-config]=0.29.2-1ubuntu3
     [libdbus-1-dev]=1.12.20-2ubuntu4.1
+    # The packaging tools, below.
+    [binutils]=2.38-4ubuntu2.12
+    [binutils-common]=2.38-4ubuntu2.12
+    [binutils-x86-64-linux-gnu]=2.38-4ubuntu2.12
+    [libbinutils]=2.38-4ubuntu2.12
+    [libctf0]=2.38-4ubuntu2.12
+    [libctf-nobfd0]=2.38-4ubuntu2.12
+    [tar]=1.34+dfsg-1ubuntu0.1.22.04.6
+    [xz-utils]=5.2.5-2ubuntu1.1
+    [liblzma5]=5.2.5-2ubuntu1.1
+    [liblzma-dev]=5.2.5-2ubuntu1.1
 )
 declare -A PINNED_noble=(
     [pkg-config]=1.8.1-2build1
     [libdbus-1-dev]=1.14.10-4ubuntu4.1
+)
+# The packaging tools: the ar (binutils), tar and xz (xz-utils) that fpm
+# writes the Linux .deb with, and the libraries of theirs that do the work
+# (liblzma5 compresses for xz). Each binutils package needs the others at
+# its own version, so all are pinned, and liblzma-dev, which the runner's
+# image has, needs liblzma5 at its own. The runner's image may hold newer
+# copies than the snapshot, so these, and only these, may be downgraded to
+# their pins: they are asked for alone, apt may download no other package
+# and remove none, and each must be at its pin afterwards.
+declare -A PACKAGING_TOOLS=(
+    [binutils]=1 [binutils-common]=1 [binutils-x86-64-linux-gnu]=1 [libbinutils]=1
+    [libctf0]=1 [libctf-nobfd0]=1 [tar]=1 [xz-utils]=1 [liblzma5]=1 [liblzma-dev]=1
 )
 # The snapshot's release file for each suite, as fetched from it. A dated
 # snapshot never changes, so the lists must start from exactly these:
@@ -58,6 +82,28 @@ for package in "$@"; do
     [ -n "${PINNED[$package]:-}" ] || fail "$package is not a pinned test package on $codename"
     wanted+=("$package=${PINNED[$package]}")
 done
+tools=0
+for package in "$@"; do
+    [ -z "${PACKAGING_TOOLS[$package]:-}" ] || tools=$((tools + 1))
+done
+install_opts=()
+if [ "$tools" -gt 0 ]; then
+    [ "$tools" = $# ] || fail "ask for the packaging tools alone, not with other packages"
+    install_opts=(--allow-downgrades --no-remove)
+    for package in "$@"; do
+        before=$(dpkg-query -W -f '${Version}' "$package" 2>/dev/null || true)
+        if [ -z "$before" ]; then
+            change="to be installed"
+        elif [ "$before" = "${PINNED[$package]}" ]; then
+            change="already at its pin"
+        elif dpkg --compare-versions "$before" gt "${PINNED[$package]}"; then
+            change="newer than its pin, to be downgraded"
+        else
+            change="older than its pin, to be upgraded"
+        fi
+        echo "$package: the runner has ${before:-none}, pinned ${PINNED[$package]}: $change"
+    done
+fi
 
 
 # Only the snapshot is asked: the machine's own sources are set aside for
@@ -248,14 +294,24 @@ fi
 # lists. Listed as if nothing were downloaded yet, so that every package is
 # checked, cached or not. An empty list, with packages still to install,
 # means something is wrong with the lists.
-listing=$(sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$work/empty/" install -y \
-    --no-install-recommends --print-uris "${wanted[@]}" | grep "^'" || true)
+# If apt cannot, its whole plan is shown, such as what it would remove.
+plan=$(sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$work/empty/" install -y \
+    --no-install-recommends "${install_opts[@]}" --print-uris "${wanted[@]}") ||
+    { echo "$plan" >&2; fail "apt cannot install the pinned packages as asked"; }
+listing=$(grep "^'" <<<"$plan" || true)
 uris=$(cut -d "'" -f 2 <<<"$listing")
 [ -n "$uris" ] || all_in_place "$@" || fail "apt would download nothing, yet not every package is installed"
 echo "Packages to download:"
 echo "${listing:-(none)}"
 stray=$(grep -v "^$snapshot_url/" <<<"$uris" || true)
 [ -z "$stray" ] || fail "these packages are not from the snapshot: $stray"
+# With the packaging tools, which may be downgraded, nothing else may change.
+if [ "$tools" -gt 0 ] && [ -n "$listing" ]; then
+    while read -r _ name _ _; do
+        [ -n "${PACKAGING_TOOLS[${name%%_*}]:-}" ] ||
+            fail "apt would also download ${name%%_*}, which is not a packaging tool"
+    done <<<"$listing"
+fi
 
 if [ -n "$listing" ]; then
     missing=0
@@ -264,7 +320,7 @@ if [ -n "$listing" ]; then
     done <<<"$listing"
     if [ "$missing" = 1 ]; then
         retry sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$debs/" install -y \
-            --no-install-recommends --download-only "${wanted[@]}"
+            --no-install-recommends "${install_opts[@]}" --download-only "${wanted[@]}"
         own_cache
         echo "Packages: downloaded from $snapshot_url"
     else
@@ -304,7 +360,7 @@ check_cache
 printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
 sudo chmod 755 /usr/sbin/policy-rc.d
 sudo apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$debs/" install -y --no-install-recommends \
-    --no-download "${wanted[@]}"
+    "${install_opts[@]}" --no-download "${wanted[@]}"
 sudo rm /usr/sbin/policy-rc.d
 own_cache
 rm -rf "$work" "$lists/partial" "$debs/partial"

@@ -9,7 +9,10 @@
 //   no fuse that file does not know (a newer Electron may add one, and it
 //   must be reviewed before it ships);
 // - the app's code is in the archive, and the licence texts are beside it;
-// - nothing an updater would read is in the app or in the output folder.
+// - nothing an updater would read is in the app or in the output folder;
+// - the packages in the output folder are as that file requires, where it
+//   has a checkOutput function (Linux: the .deb's scripts, dependencies,
+//   conffiles and links).
 //
 // The states are written out in those files, not read from
 // electron-builder.yml, so a change to that file cannot also change what
@@ -81,6 +84,10 @@ async function check(expected, appFolder, outputFolder) {
         if (!seen.has(name)) {
             problems.push(`fuse ${name} is not on the program's wire`);
         }
+    }
+    // The packages themselves, where the system's file checks them.
+    if (outputFolder !== undefined && expected.checkOutput !== undefined) {
+        problems.push(...expected.checkOutput(outputFolder));
     }
     return problems;
 }

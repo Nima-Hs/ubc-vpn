@@ -1,14 +1,78 @@
 # How the app is packaged on Linux: everything in electron-builder.yml, which
-# this extends, and Linux's own settings below. The rules it follows are in
-# docs/architecture.md, "What the installers must do".
-#
-# Not built yet: the target is a placeholder until the .deb and .rpm
-# packages are added, and `pnpm package:linux` and `pnpm check:package:linux`
-# say so and fail.
+# this extends, and Linux's own settings below. `pnpm package:linux` builds
+# the .deb into dist/. The rules it follows are in docs/architecture.md,
+# "What the installers must do".
 
 extends: electron-builder.yml
 
 linux:
+  # The app's program in /opt/UBC VPN, and the name of electron-builder's
+  # /usr/bin link to it. Not `ubc-vpn`: that command is the command-line
+  # client's (decision G19), linked below.
+  executableName: ubc-vpn-app
+  synopsis: UBC VPN app and command-line client
+  description: >-
+    A desktop app and command-line client for the UBC VPN.
+    Not made by or affiliated with the University of British Columbia.
+  category: Network
+  # No e-mail address: the package's issues page is where to write.
+  maintainer: UBC VPN <https://github.com/Nima-Hs/ubc-vpn/issues>
+  vendor: Nima Hashemi
+  # What packaging/linux/stage.sh gathers: the service and the command-line
+  # client with libopenconnect.so.5, the file itself, in one folder
+  # (resources/bin), their licence texts, and the policy the service
+  # installs. Copied as they are; check-package and the installer workflow
+  # compare them with the stage byte for byte.
+  extraResources:
+    - from: stage/bin
+      to: bin
+    - from: stage/licenses
+      to: licenses
+    - from: stage/policy.json
+      to: policy.json
   target:
-    - target: dir
+    - target: deb
       arch: [x64]
+
+deb:
+  packageName: ubc-vpn
+  artifactName: ubc-vpn_${version}_${arch}.${ext}
+  # Our scripts, which hold electron-builder's own in full and add the
+  # service's install and removal (packaging/linux). electron-builder has no
+  # script before removal, so fpm is given ours directly.
+  afterInstall: ../packaging/linux/after-install.sh
+  afterRemove: ../packaging/linux/after-remove.sh
+  fpm:
+    - --before-remove
+    - ../packaging/linux/before-remove.sh
+    # /usr/bin/ubc-vpn, a link to the client (stage/links).
+    - stage/links/ubc-vpn=/usr/bin/ubc-vpn
+  # Setting these replaces electron-builder's own list, so the first line
+  # is that list for Electron, as electron-builder 26.18.0 has it. The rest
+  # is ours:
+  # - libgbm1 and libasound2, which the Electron program links and neither
+  #   that list nor libgtk-3-0 brings. Ubuntu 24.04 renamed libasound2 to
+  #   libasound2t64.
+  # - systemd-resolved, for split DNS. Debian 12 and Ubuntu 24.04 have it as
+  #   a package of its own; on Ubuntu 22.04 it is part of systemd 249, and
+  #   systemd moved it out in 251.3-2.
+  # - libdbus-1-3, which the client's keyring loads.
+  # - What libopenconnect.so.5 links (native/linux/README.md). Ubuntu 24.04
+  #   renamed libgnutls30 to libgnutls30t64, which also provides the old name.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - libgbm1
+    - libasound2 | libasound2t64
+    - systemd-resolved | systemd (<< 251.3-2~)
+    - libdbus-1-3
+    - libgnutls30 (>= 3.7.3) | libgnutls30t64
+    - zlib1g
+    - libc6 (>= 2.34)

@@ -70,7 +70,7 @@ stranger() {
     sudo -u nobody env -i HOME=/nonexistent PATH=/usr/bin:/bin "$CLIENT" "$@"
 }
 run_service() {
-    sudo env -i "$SERVICE" "$@"
+    sudo /usr/bin/env -i "$SERVICE" "$@"
 }
 install_service() {
     run_service install --policy "$work/policy.json" "$@"
