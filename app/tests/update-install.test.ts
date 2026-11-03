@@ -670,8 +670,8 @@ describe("what keeps the launcher's tests off the desktop", () => {
         const handler = parent.indexOf('process.on("uncaughtException"');
         expect(handler).toBeGreaterThanOrEqual(0);
         expect(handler).toBeLessThan(parent.indexOf("require("));
-        // An error while it loads goes to another dialog, past that handler. The
-        // real test of this, which would show that dialog if it failed, is CI's.
+        // And nothing throws out of its top level. Provoking an error while it loads
+        // could show that dialog if this failed, so the test that does is CI's.
         const outer = /^try \{$/m.exec(parent);
         expect(outer).not.toBeNull();
         expect(outer?.index).toBeLessThan(parent.indexOf("require("));

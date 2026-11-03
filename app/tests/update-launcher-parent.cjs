@@ -6,9 +6,8 @@
 // Before anything else: in Electron an uncaught error is a real dialog on the desktop.
 process.on("uncaughtException", () => process.exit(1));
 
-// An error while this file loads does not reach that handler in Electron: it goes
-// to Electron's own "App threw an error during load" dialog. So nothing here may
-// throw out of the top level.
+// And nothing here throws out of the top level, so that an error while this file
+// loads never depends on how Electron passes it on.
 try {
     const { spawn } = require("node:child_process");
     const { readFileSync, writeFileSync } = require("node:fs");
