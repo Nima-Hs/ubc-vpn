@@ -9,5 +9,6 @@ stop and start again
 disabled job enabled
 uninstall keeps data when asked
 elsewhere refused
+open folder changes nothing
 planted state emptied
 uninstall leaves nothing

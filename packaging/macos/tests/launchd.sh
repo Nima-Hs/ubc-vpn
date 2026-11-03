@@ -268,6 +268,24 @@ grep -qF "only from $SERVICE" "$work/refused.txt" || fail "it was refused for an
 sudo rm -rf "$elsewhere"
 ran "elsewhere refused"
 
+# --- 10b. A service in a folder others could change changes nothing ---------
+
+open_folder=/Library/PrivilegedHelperTools/uvt-open
+sudo mkdir -m 775 "$open_folder"
+sudo cp -p "$SERVICE" "$open_folder/"
+sed 's/vpn\.example\.test/other.example.test/' "$work/policy.json" > "$work/other-policy.json"
+policy_before=$(sha "$DATA/policy.json")
+pid=$(pid_now)
+if sudo /usr/bin/env -i "$open_folder/ubc-vpn-service" install --policy "$work/other-policy.json" 2> "$work/refused.txt"; then
+    fail "a service in an open folder was installed"
+fi
+cat "$work/refused.txt"
+grep -qF "can be changed by other users: $open_folder" "$work/refused.txt" || fail "it was refused for another reason"
+[ "$(sha "$DATA/policy.json")" = "$policy_before" ] || fail "the refused install wrote the policy"
+[ "$(pid_now)" = "$pid" ] || fail "the refused install stopped the service"
+sudo rm -rf "$open_folder"
+ran "open folder changes nothing"
+
 # --- 11. A data folder anyone could have made is emptied --------------------
 
 run_service uninstall
