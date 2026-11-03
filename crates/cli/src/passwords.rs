@@ -59,8 +59,10 @@ pub(crate) fn same_username(username: &str, saved_for: &str) -> bool {
 pub(crate) struct Lookup {
     /// The saved password it may send, if any.
     pub(crate) password: Option<Secret>,
-    /// Whether a password that works may be saved afterwards: the profile
-    /// saves its password, and the keyring could be read.
+    /// Whether a password that works may be saved afterwards: false only if
+    /// the keyring could not be read just now. Whether the profile saves its
+    /// password is not settled here: the user can change that at the password
+    /// question, so [`keep`] looks when the login has worked.
     pub(crate) may_save: bool,
 }
 
@@ -73,7 +75,7 @@ pub(crate) fn usable(dir: &Path, profile: &Profile, err: &mut dyn Write) -> Look
         may_save,
     };
     if !profile.save_password {
-        return nothing(false);
+        return nothing(true);
     }
     let saved = match keys::keyring().load(profile.id.as_str()) {
         Ok(Some(saved)) => saved,
@@ -235,6 +237,15 @@ fn keep_locked(
     username: &str,
     password: &Secret,
 ) -> Result<(), SettingsFailureCode> {
+    // A profile that does not save has nothing to do with the lock, which
+    // may be stuck or missing here. Reading needs none, and one that cannot
+    // read is left to the look under the lock, which says so.
+    if let Ok(found) = read_profiles(dir) {
+        let profile = found.profiles.profile(id);
+        if !profile.is_ok_and(|profile| profile.save_password) {
+            return Ok(());
+        }
+    }
     let _changing = change(dir)?;
     let profiles = read_profiles(dir)?.profiles;
     let Ok(profile) = profiles.profile(id) else {
