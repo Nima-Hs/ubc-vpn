@@ -29,18 +29,18 @@
 //!   SIGTERM and wait until it has removed its routes and DNS and ended, for
 //!   as long as the unit's `TimeoutStopSec` allows.
 
-use std::fs::{self, DirBuilder, OpenOptions, Permissions};
-use std::io::{self, Write};
-use std::os::unix::fs::{
-    DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, fchown, lchown,
-};
+use std::fs;
+use std::io;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rustix::fs::OFlags;
-
+use crate::unix::root_files::{
+    Expected, check_root, clear, make_root_folder, names_in, real_folder, remove_file,
+    set_root_folder, write_root_file,
+};
 use crate::{Error, Mode, Result};
 
 /// The unit, as `install` writes it.
@@ -339,80 +339,13 @@ pub(crate) fn prepare_in(folders: &Folders, fresh: bool) -> Result<()> {
     }
     // The policy folder is set as it must be, whoever made it.
     match real_folder(&folders.policy)? {
-        true => {}
-        false => make(&folders.policy, POLICY_FOLDER_MODE)?,
+        true => set_root_folder(&folders.policy, POLICY_FOLDER_MODE)?,
+        false => make_root_folder(&folders.policy, POLICY_FOLDER_MODE)?,
     }
-    lchown(&folders.policy, Some(0), Some(0))?;
-    fs::set_permissions(&folders.policy, Permissions::from_mode(POLICY_FOLDER_MODE))?;
     // The state folder is made when missing, and otherwise left as it is.
     if !real_folder(&folders.state)? {
-        make(&folders.state, STATE_FOLDER_MODE)?;
-        lchown(&folders.state, Some(0), Some(0))?;
-        fs::set_permissions(&folders.state, Permissions::from_mode(STATE_FOLDER_MODE))?;
+        make_root_folder(&folders.state, STATE_FOLDER_MODE)?;
     }
-    Ok(())
-}
-
-/// Whether `path` is a real folder: `false` when there is nothing there,
-/// and an error when something else is, a link included.
-fn real_folder(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(found) if found.is_dir() => Ok(true),
-        Ok(_) => Err(Error::Failed(format!(
-            "{} is not a folder; run a fresh install",
-            path.display()
-        ))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Removes whatever is at `path`. A link is removed itself, never what it
-/// points to.
-fn clear(path: &Path) -> Result<()> {
-    let removed = match fs::symlink_metadata(path) {
-        Ok(found) if found.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(error) => Err(error),
-    };
-    match removed {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
-        _ => Ok(()),
-    }
-}
-
-/// Removes the file or link `path`. Nothing there is fine.
-fn remove_file(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
-        _ => Ok(()),
-    }
-}
-
-/// Makes the folder `path` with `mode`. Its owner and mode are set after.
-fn make(path: &Path, mode: u32) -> Result<()> {
-    Ok(DirBuilder::new().mode(mode).create(path)?)
-}
-
-/// Writes `bytes` as `name` in `dir`, root's with `mode` whatever the umask,
-/// replacing any. It is written beside it first and then moved into place,
-/// so a reader never sees half of it. A file or link left in the way by an
-/// earlier run is removed, never followed.
-pub(crate) fn write_root_file(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<()> {
-    let next = dir.join(format!(".{name}.new"));
-    remove_file(&next)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
-        .open(&next)?;
-    file.write_all(bytes)?;
-    fchown(&file, Some(0), Some(0))?;
-    file.set_permissions(Permissions::from_mode(mode))?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&next, dir.join(name))?;
     Ok(())
 }
 
@@ -422,37 +355,14 @@ pub(crate) fn verify_in(folders: &Folders, fresh: bool) -> Result<()> {
     // above it are root's and changed by root alone.
     crate::unix::state::check_folder(Mode::Installed, policy_dir)
         .map_err(|error| Error::Failed(format!("{}: {error}", policy_dir.display())))?;
-    let exactly = |path: &Path, mode: u32, file: bool| -> Result<()> {
-        let found = fs::symlink_metadata(path)?;
-        let kind = if file {
-            found.is_file()
-        } else {
-            found.is_dir()
-        };
-        if !kind || found.uid() != 0 || found.gid() != 0 || found.mode() & 0o7777 != mode {
-            return Err(Error::Failed(format!(
-                "{} is not root's with mode {mode:o}",
-                path.display()
-            )));
-        }
-        Ok(())
-    };
-    exactly(policy_dir, POLICY_FOLDER_MODE, false)?;
-    exactly(&policy_dir.join(POLICY), POLICY_MODE, true)?;
+    check_root(policy_dir, Expected::Folder, POLICY_FOLDER_MODE)?;
+    check_root(&policy_dir.join(POLICY), Expected::File, POLICY_MODE)?;
     // The same check the service makes of its state folder.
     crate::unix::state::check_folder(Mode::Installed, state)
         .map_err(|error| Error::Failed(format!("{}: {error}", state.display())))?;
     if fresh {
-        exactly(state, STATE_FOLDER_MODE, false)?;
-        let names = |dir: &Path| -> Result<Vec<String>> {
-            let mut found = Vec::new();
-            for entry in fs::read_dir(dir)? {
-                found.push(entry?.file_name().to_string_lossy().into_owned());
-            }
-            found.sort();
-            Ok(found)
-        };
-        let (policies, states) = (names(policy_dir)?, names(state)?);
+        check_root(state, Expected::Folder, STATE_FOLDER_MODE)?;
+        let (policies, states) = (names_in(policy_dir)?, names_in(state)?);
         if policies != [POLICY] || !states.is_empty() {
             let mut extra: Vec<String> = policies.into_iter().filter(|n| n != POLICY).collect();
             extra.extend(states);

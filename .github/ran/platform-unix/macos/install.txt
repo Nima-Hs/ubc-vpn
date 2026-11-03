@@ -1,0 +1,8 @@
+install policy
+install fresh
+install update
+install verify
+install access list
+install folder above
+install group
+install remove

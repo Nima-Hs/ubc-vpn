@@ -3,7 +3,7 @@
 //! routing socket (`routes`), and split DNS through the dynamic store
 //! (`dns`). Network events, full mode and the catch-all DNS are not
 //! implemented yet and report that they are unsupported, each from a file of
-//! its own.
+//! its own. The service is installed through `install`.
 
 mod dns;
 #[cfg(test)]
@@ -14,6 +14,7 @@ mod events;
 mod events_tests;
 #[cfg(test)]
 mod full_tunnel_tests;
+pub mod install;
 mod route_socket;
 mod routes;
 #[cfg(test)]

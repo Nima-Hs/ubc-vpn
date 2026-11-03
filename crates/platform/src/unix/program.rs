@@ -35,6 +35,7 @@ use std::path::{Component, Path, PathBuf};
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, fstat, openat, statat};
 use rustix::io::Errno;
 
+use super::acl;
 use crate::{Error, Result};
 
 pub(crate) const NOT_FULL_PATH: &str = "the service's folder is not a plain full path";
@@ -200,7 +201,6 @@ fn judge(opened: &OwnedFd, kind: Kind, path: &Path) -> Result<()> {
     if Mode::from_raw_mode(found.st_mode).intersects(OTHERS_WRITE) {
         return Err(kind.too_open(path));
     }
-    #[cfg(target_os = "macos")]
     if acl::allows(opened).map_err(|error| cannot(error, path))? {
         return Err(kind.too_open(path));
     }
@@ -216,79 +216,4 @@ fn refuse(why: &str, path: &Path) -> Error {
 fn cannot(error: impl Into<std::io::Error>, path: &Path) -> Error {
     let error: std::io::Error = error.into();
     Error::Failed(format!("{} ({error})", refusal(CANNOT_CHECK, path)))
-}
-
-/// macOS access lists, which can grant writing that the mode does not show.
-#[cfg(target_os = "macos")]
-mod acl {
-    use std::ffi::{c_int, c_void};
-    use std::io;
-    use std::os::fd::{AsFd, AsRawFd};
-    use std::ptr::null_mut;
-
-    // From <sys/acl.h>.
-    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
-    const ACL_FIRST_ENTRY: c_int = 0;
-    const ACL_NEXT_ENTRY: c_int = -1;
-    const ACL_EXTENDED_DENY: c_int = 2;
-
-    // SAFETY: these are libSystem's declarations of the functions, with
-    // `acl_t` and `acl_entry_t` as opaque pointers and the enums as `int`.
-    unsafe extern "C" {
-        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
-        fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
-        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
-        fn acl_free(object: *mut c_void) -> c_int;
-    }
-
-    /// Frees the access list when dropped.
-    struct List(*mut c_void);
-
-    impl Drop for List {
-        fn drop(&mut self) {
-            // SAFETY: the list came from `acl_get_fd_np` and is freed once.
-            unsafe { acl_free(self.0) };
-        }
-    }
-
-    /// Whether the open folder or file `opened` has an access list entry
-    /// that allows anything. Entries that only deny take rights away. Every
-    /// entry is read: macOS keeps deny entries first, so an allow entry is
-    /// often not the first.
-    pub(super) fn allows(opened: impl AsFd) -> io::Result<bool> {
-        let fd = opened.as_fd().as_raw_fd();
-        // SAFETY: `fd` is open for the length of the call.
-        let list = unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) };
-        if list.is_null() {
-            let error = io::Error::last_os_error();
-            // No access list at all.
-            if error.raw_os_error() == Some(libc::ENOENT) {
-                return Ok(false);
-            }
-            return Err(error);
-        }
-        let list = List(list);
-        let mut id = ACL_FIRST_ENTRY;
-        loop {
-            let mut entry = null_mut();
-            // SAFETY: the list is valid until dropped, and `entry` is a
-            // valid out pointer.
-            if unsafe { acl_get_entry(list.0, id, &mut entry) } != 0 {
-                let error = io::Error::last_os_error();
-                // The end of the list is EINVAL; anything else could hide
-                // an entry, so the check cannot tell.
-                if error.raw_os_error() == Some(libc::EINVAL) {
-                    return Ok(false);
-                }
-                return Err(error);
-            }
-            id = ACL_NEXT_ENTRY;
-            let mut tag: c_int = 0;
-            // SAFETY: `entry` points into the list, and `tag` is a valid out
-            // pointer.
-            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != ACL_EXTENDED_DENY {
-                return Ok(true);
-            }
-        }
-    }
 }

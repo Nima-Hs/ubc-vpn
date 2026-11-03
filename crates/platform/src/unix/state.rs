@@ -6,7 +6,8 @@
 //! installed, the folder and every folder above it are real folders (no
 //! links), root's, and writable by root alone, and a file read from it is a
 //! real file, root's, and writable by root alone. Dev mode's folder and files
-//! are the developer's own and writable by them alone.
+//! are the developer's own and writable by them alone. On macOS an access list
+//! entry that allows anything breaks the rule too (see `unix::acl`).
 //!
 //! Anything that breaks the rule is refused and left as it was found, never
 //! fixed: whatever someone else made there cannot be trusted afterwards,
@@ -22,7 +23,7 @@ use rustix::io::Errno;
 #[cfg(feature = "dev-mode")]
 use rustix::process::geteuid;
 
-use super::set_mode;
+use super::{acl, set_mode};
 use crate::{Error, Mode, Result};
 
 pub(crate) const NOT_A_FOLDER: &str = "the state folder is a link or not a folder";
@@ -108,9 +109,9 @@ pub(crate) fn check_folder(mode: Mode, dir: &Path) -> Result<()> {
             NOT_A_FOLDER
         } else {
             match broken(mode, &found) {
-                None => continue,
+                None if !acl::path_allows(at)? => continue,
+                None | Some(Broken::Open) => TOO_OPEN,
                 Some(Broken::Owner) => WRONG_OWNER,
-                Some(Broken::Open) => TOO_OPEN,
             }
         };
         return Err(Error::Failed(broken.to_string()));
@@ -155,13 +156,13 @@ pub(crate) fn read(mode: Mode, dir: &Path, file: &Path) -> Result<Option<Vec<u8>
         NOT_A_FILE
     } else {
         match broken(mode, &found) {
-            None => {
+            None if !acl::allows(&opened)? => {
                 let mut bytes = Vec::new();
                 opened.read_to_end(&mut bytes)?;
                 return Ok(Some(bytes));
             }
+            None | Some(Broken::Open) => FILE_OPEN,
             Some(Broken::Owner) => FILE_OWNER,
-            Some(Broken::Open) => FILE_OPEN,
         }
     };
     Err(Error::Failed(broken.to_string()))

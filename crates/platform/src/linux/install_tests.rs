@@ -10,7 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, Permissions};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, lchown, symlink};

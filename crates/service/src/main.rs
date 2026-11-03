@@ -269,10 +269,10 @@ fn dev() -> Result<Parts, String> {
 /// `install` and `uninstall`, run as an administrator by the Windows setup
 /// program, and as root by the macOS and Linux packages' scripts. The same
 /// steps on every OS; `ubc_vpn_platform::install` does each of them. On
-/// macOS it cannot do any yet, so there it stops before anything is
-/// changed. On Linux the policy and the state are in two folders, and the
-/// calls given the data folder, which is the policy's, do the same to the
-/// state's.
+/// macOS it cannot register the service yet, so there it stops before
+/// anything is changed. On Linux the policy and the state are in two folders,
+/// and the calls given the data folder, which is the policy's, do the same to
+/// the state's.
 mod setup {
     use std::path::{Path, PathBuf};
 
@@ -299,19 +299,12 @@ mod setup {
     /// valid or the folder is not safe.
     pub fn install(policy: &Path, fresh: bool) -> Result<(), String> {
         let policy = install::read_policy(policy)?;
-        let program = std::env::current_exe()
-            .map_err(|e| format!("The service cannot tell where it is: {e}."))?;
-        // Never register a service whose folder others could change: the
-        // same check the service makes when it starts, done before anything
-        // is changed.
-        let _folder = ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())?;
-        let command_line = os::quoted(&program)
-            .map_err(|_| format!("The service's path cannot be used: {}.", program.display()))?;
         let paths = paths()?;
         let mut steps = System {
             data: paths.policy_dir.clone(),
             paths,
-            command_line,
+            command_line: String::new(),
+            _folder: None,
         };
         install::install(&mut steps, &policy, fresh)
     }
@@ -321,9 +314,25 @@ mod setup {
         data: PathBuf,
         paths: Paths,
         command_line: String,
+        /// This program's folder as checked, held until the install ends.
+        _folder: Option<ubc_vpn_platform::program::ProgramFolder>,
     }
 
     impl install::Steps for System {
+        fn check_program(&mut self) -> Result<(), String> {
+            let program = std::env::current_exe()
+                .map_err(|e| format!("The service cannot tell where it is: {e}."))?;
+            // Never register a service whose folder others could change: the
+            // same check the service makes when it starts, done before
+            // anything is changed.
+            let folder = ubc_vpn_platform::program::check(&program).map_err(|e| e.to_string())?;
+            self._folder = Some(folder);
+            self.command_line = os::quoted(&program).map_err(|_| {
+                format!("The service's path cannot be used: {}.", program.display())
+            })?;
+            Ok(())
+        }
+
         fn holds_an_owner(&mut self) -> bool {
             // `StateDir::open` makes the folder when it is missing; only one
             // that is already there can hold an owner.
