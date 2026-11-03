@@ -765,6 +765,9 @@ describe("telling the user about an update", () => {
         expect(seen).toEqual([["unfinished"], ["unfinished", "profile_gone"]]);
         await subject.check();
         expect(subject.view().after).toEqual(["unfinished", "profile_gone"]);
+        subject.clearSaid();
+        expect(subject.view().after).toEqual([]);
+        subject.say("stale");
         subject.beginInstall();
         expect(subject.view().after).toEqual([]);
     });

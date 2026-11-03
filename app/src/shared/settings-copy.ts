@@ -60,8 +60,9 @@ export const UPDATES = {
     lastChecked: (when: string) => `Last checked ${when}.`,
     neverChecked: "Not checked yet.",
     restart: "Restart to update",
+    dismiss: "Dismiss",
     restartHint:
-        "UBC VPN disconnects, installs the update, starts again, and reconnects the profile that was connected.",
+        "UBC VPN disconnects, installs the update, starts again, and reconnects if you were connected.",
 } as const;
 
 /** Where updates stand, in a sentence; `null` when there is nothing to say yet. */
@@ -101,7 +102,7 @@ export function describeUpdate(status: UpdateStatus): string | null {
 export function describeInstallNotice(notice: InstallNotice): string {
     switch (notice) {
         case "cancelled":
-            return "The update wasn't installed because the administrator prompt was cancelled. Nothing was changed, and UBC VPN reconnects the profile that was connected.";
+            return "The update wasn't installed because the administrator prompt was cancelled. Nothing was changed.";
         case "failed":
             return "The update couldn't be started, and nothing was changed. Try again, or install it from the releases page on GitHub.";
         case "changed":

@@ -12,6 +12,7 @@ import { Controller } from "../src/main/controller";
 import type { ServiceLink } from "../src/main/link";
 import {
     clearOldCopies,
+    connectAtStart,
     knownProfile,
     leaveNote,
     MAX_NOTE_BYTES,
@@ -115,6 +116,10 @@ describe("what a start makes of the note", () => {
         });
     });
 
+    it("stays quiet when the app is newer than the note: the user has moved on", () => {
+        expect(planResume(NOTE, "0.3.0", NOW).notice).toBeNull();
+    });
+
     it("connects nothing from a note over a day old, or from the future", () => {
         const stale = { notice: "stale", reconnect: false, profile: null };
         const atLimit = { ...NOTE, at: NOW - STALE_NOTE_MS };
@@ -154,21 +159,21 @@ describe("bringing a connection back", () => {
     it("connects nothing, and says so, when the profile is gone", async () => {
         const { done, said, steps } = reconnecting([CAMPUS]);
         await reconnectTo(LAB, steps);
-        expect(done).toEqual([]);
+        expect(done).toEqual(["show"]);
         expect(said).toEqual(["profile_gone"]);
     });
 
     it("connects nothing, and says so, when it does not know the profile", async () => {
         const { done, said, steps } = reconnecting();
         await reconnectTo(null, steps);
-        expect(done).toEqual([]);
+        expect(done).toEqual(["show"]);
         expect(said).toEqual(["reconnect_unknown"]);
     });
 
     it("connects nothing, and says so, when the profiles cannot be read", async () => {
         const { done, said, steps } = reconnecting(null);
         await reconnectTo(CAMPUS, steps);
-        expect(done).toEqual([]);
+        expect(done).toEqual(["show"]);
         expect(said).toEqual(["reconnect_unavailable"]);
         const failing = reconnecting();
         failing.steps.profileIds = async () => {
@@ -254,7 +259,7 @@ describe("the start after an update", () => {
         await leaveNote(folder, NOTE);
         const run = start({ link: "unavailable", reason: "not_running" }, [CAMPUS], 30);
         await expect(run.run()).resolves.toBe(false);
-        expect(run.done).toEqual([]);
+        expect(run.done).toEqual(["show"]);
         expect(run.said).toEqual(["reconnect_unavailable"]);
         expect(noted()).toBe(true);
     });
@@ -271,7 +276,7 @@ describe("the start after an update", () => {
         await leaveNote(folder, { ...NOTE, at: NOW - STALE_NOTE_MS - 1 });
         const run = start(DISCONNECTED);
         await expect(run.run()).resolves.toBe(false);
-        expect(run.done).toEqual([]);
+        expect(run.done).toEqual(["show"]);
         expect(run.said).toEqual(["stale"]);
         expect(noted()).toBe(false);
     });
@@ -281,7 +286,16 @@ describe("the start after an update", () => {
         const run = start(DISCONNECTED);
         await expect(run.run()).resolves.toBe(true);
         expect(run.said).toEqual(["unfinished"]);
-        expect(run.done).toEqual(["show", `connect ${CAMPUS}`]);
+        expect(run.done).toEqual(["show", "show", `connect ${CAMPUS}`]);
+    });
+
+    it("clears old copies of the installer, with or without a note", async () => {
+        const old = join(folder, "run-old");
+        await mkdir(old);
+        const when = (NOW - OLD_COPY_MS - 60_000) / 1000;
+        utimesSync(old, when, when);
+        await start(DISCONNECTED).run();
+        expect(existsSync(old)).toBe(false);
     });
 
     it("clears whatever is in the note's place and carries on", async () => {
@@ -290,6 +304,48 @@ describe("the start after an update", () => {
         const run = start(DISCONNECTED);
         await expect(run.run()).resolves.toBe(false);
         expect(noted()).toBe(false);
+    });
+});
+
+describe("connecting at start", () => {
+    const steps = (resumes: boolean | "fails", folderName: string | null = "updates") => {
+        const done: string[] = [];
+        return {
+            done,
+            run: () =>
+                connectAtStart({
+                    folder: folderName,
+                    resume: async (name) => {
+                        done.push(`resume ${name}`);
+                        if (resumes === "fails") {
+                            throw new Error("made up");
+                        }
+                        return resumes;
+                    },
+                    connectIfAsked: () => done.push("as the settings ask"),
+                }),
+        };
+    };
+
+    it("reads the note first, and connects as asked only if that left it open", async () => {
+        const open = steps(false);
+        await open.run();
+        expect(open.done).toEqual(["resume updates", "as the settings ask"]);
+    });
+
+    it("stands aside for a reconnect", async () => {
+        const taken = steps(true);
+        await taken.run();
+        expect(taken.done).toEqual(["resume updates"]);
+    });
+
+    it("connects as asked in a copy with no folder, and if the note fails", async () => {
+        const none = steps(true, null);
+        await none.run();
+        expect(none.done).toEqual(["as the settings ask"]);
+        const failing = steps("fails");
+        await failing.run();
+        expect(failing.done).toEqual(["resume updates", "as the settings ask"]);
     });
 });
 
@@ -329,12 +385,14 @@ describe("which profile a connection is for", () => {
                 return () => listeners.delete(listener);
             },
         } as unknown as ServiceLink;
-        const set = (conn: string) => {
-            state = { link: "ready", conn: { state: conn } } as unknown as LinkState;
+        const setLink = (next: LinkState) => {
+            state = next;
             for (const listener of listeners) {
                 listener(state);
             }
         };
+        const set = (conn: string) =>
+            setLink({ link: "ready", conn: { state: conn } } as unknown as LinkState);
         let active = CAMPUS;
         const started: (string | null | undefined)[] = [];
         let busy = false;
@@ -359,6 +417,7 @@ describe("which profile a connection is for", () => {
         return {
             controller,
             set,
+            setLink,
             started,
             choose: (id: string) => {
                 active = id;
@@ -389,6 +448,16 @@ describe("which profile a connection is for", () => {
         await failed.controller.connect();
         failed.loginEnded();
         expect(failed.controller.connectionProfile()).toBeNull();
+    });
+
+    it("is kept through a bridge that restarts with the tunnel still up", async () => {
+        const { controller, set, setLink } = setUp();
+        await controller.connect();
+        set("connected");
+        setLink({ link: "starting" });
+        expect(controller.connectionProfile()).toBe(CAMPUS);
+        set("connected");
+        expect(controller.connectionProfile()).toBe(CAMPUS);
     });
 
     it("is kept when a login ends with the connection up", async () => {

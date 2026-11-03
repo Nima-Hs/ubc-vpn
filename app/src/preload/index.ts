@@ -55,6 +55,7 @@ const api: VpnApi = {
         get: () => invoke(UPDATES_IPC.get),
         checkNow: () => invoke(UPDATES_IPC.checkNow),
         install: () => invoke(UPDATES_IPC.install),
+        dismiss: () => invoke(UPDATES_IPC.dismiss),
         onChange: (listener: (view: UpdateView) => void) => {
             const handler = (_event: unknown, view: UpdateView) => listener(view);
             ipcRenderer.on(UPDATES_IPC.changed, handler);

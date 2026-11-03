@@ -202,6 +202,14 @@ export class Updater {
         }
     }
 
+    /** Takes back what `say` said: the user has dismissed it, or connected. */
+    clearSaid(): void {
+        if (this.after.length > 0) {
+            this.after = [];
+            this.publish(this.status);
+        }
+    }
+
     subscribe(listener: (view: UpdateView) => void): () => void {
         this.listeners.add(listener);
         return () => this.listeners.delete(listener);

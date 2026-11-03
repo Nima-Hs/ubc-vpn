@@ -65,6 +65,10 @@ export function registerUpdates(
         takeNothing(args);
         void updater.check();
     });
+    handleFromInterface(window, devServerUrl, UPDATES_IPC.dismiss, (...args) => {
+        takeNothing(args);
+        updater.clearSaid();
+    });
     handleFromInterface(window, devServerUrl, UPDATES_IPC.install, (...args) => {
         takeNothing(args);
         void install();

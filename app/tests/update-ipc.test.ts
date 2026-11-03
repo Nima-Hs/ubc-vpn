@@ -16,6 +16,27 @@ const { registerUpdates } = await import("../src/main/update/ipc");
 const { APP_ORIGIN } = await import("../src/main/security");
 
 describe("what the interface may ask of the updater", () => {
+    it("dismisses what the app had to say, only when asked with no arguments", () => {
+        const frame = { origin: APP_ORIGIN };
+        const window = {
+            webContents: { mainFrame: frame, send: () => {} },
+            isDestroyed: () => false,
+        };
+        const updater = {
+            view: () => null,
+            check: vi.fn(),
+            subscribe: () => () => {},
+            clearSaid: vi.fn(),
+        };
+        registerUpdates(window as never, undefined, updater as never, async () => {});
+        const handler = handlers.get(UPDATES_IPC.dismiss);
+        const event = { senderFrame: frame };
+        expect(() => handler?.(event, "x")).toThrow("refused");
+        expect(updater.clearSaid).not.toHaveBeenCalled();
+        handler?.(event);
+        expect(updater.clearSaid).toHaveBeenCalledTimes(1);
+    });
+
     it("installs only when asked with no arguments, from the interface", () => {
         const frame = { origin: APP_ORIGIN };
         const window = {
