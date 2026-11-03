@@ -132,6 +132,54 @@ fn a_state_folder_others_could_change_is_refused() {
     assert_eq!(owner_and_mode(&temp), (me(), 0o777), "changed it");
 }
 
+// Security rule: on macOS an access list can let a user write whatever the
+// mode says, so an entry that allows anything is refused on the folder, a
+// folder above it and a state file, even behind an entry that denies. Entries
+// that only deny pass.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_state_folder_or_file_with_an_allow_entry_is_refused() {
+    let Some(sandbox) = Sandbox::root("state access list", Mode::Installed) else {
+        return;
+    };
+    let dir = sandbox.dir.join("state");
+    let state = open(Mode::Installed, &dir).expect("open");
+    let file = dir.join("state.json");
+    state.write("state.json", b"{}").expect("write");
+    assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
+
+    add_entry(&dir, "everyone deny delete");
+    add_entry(&sandbox.dir, "everyone deny delete");
+    add_entry(&file, "everyone deny write");
+    assert_eq!(
+        state.read("state.json"),
+        Ok(Some(b"{}".to_vec())),
+        "deny entries alone"
+    );
+    add_entry(&dir, "everyone allow add_file");
+    assert_eq!(
+        open(Mode::Installed, &dir).map(drop),
+        refused(TOO_OPEN),
+        "the folder, an allow entry behind a deny entry"
+    );
+    clear_entries(&dir);
+    add_entry(&sandbox.dir, "everyone allow delete_child");
+    assert_eq!(
+        open(Mode::Installed, &dir).map(drop),
+        refused(TOO_OPEN),
+        "a folder above"
+    );
+    clear_entries(&sandbox.dir);
+    add_entry(&file, "everyone allow write");
+    assert_eq!(
+        state.read("state.json"),
+        Err(Error::Failed(FILE_OPEN.into())),
+        "the file, an allow entry behind a deny entry"
+    );
+    clear_entries(&file);
+    assert_eq!(state.read("state.json"), Ok(Some(b"{}".to_vec())));
+}
+
 // Security rule: a state file is read only when it is a real file that
 // nobody but the service's user owns or may change. A link is not followed,
 // and a pipe does not hold the service.

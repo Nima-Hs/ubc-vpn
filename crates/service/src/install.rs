@@ -29,6 +29,10 @@ pub fn read_policy(path: &Path) -> Result<Vec<u8>, String> {
 /// implementation is in the service binary; the order and the stopping
 /// points are here, in [`install`], where they are tested.
 pub trait Steps {
+    /// Checks the folder this program is in and works out the command line it
+    /// is registered with. Changes nothing, so it comes before everything that
+    /// does.
+    fn check_program(&mut self) -> Result<(), String>;
     /// Whether the data folder is already there with an owner the service
     /// would accept (see [`holds_an_owner`]). Asked only before a fresh
     /// install.
@@ -46,9 +50,10 @@ pub trait Steps {
     fn start(&mut self) -> Result<(), String>;
 }
 
-/// Installs, with `policy` already read and checked: the data folder and the
-/// policy in it, then the check of that folder, and only then the service,
-/// which is started. The first step that fails stops it there, so a data
+/// Installs, with `policy` already read and checked: this program's own check,
+/// then the data folder and the policy in it, then the check of that folder,
+/// and only then the service, which is started. The first step that fails stops
+/// it there, so a program that may not be installed changes nothing, and a data
 /// folder that is not as it was set up never gets a service registered.
 ///
 /// A fresh install keeps a data folder that holds an owner, and goes on as
@@ -59,6 +64,7 @@ pub trait Steps {
 /// service claimed afresh. Only the administrators can make a folder that
 /// passes, so anything else is still emptied.
 pub fn install(steps: &mut impl Steps, policy: &[u8], fresh: bool) -> Result<(), String> {
+    steps.check_program()?;
     let fresh = fresh && !steps.holds_an_owner();
     steps.prepare_data_folder(fresh)?;
     steps.write_policy(policy)?;
@@ -102,6 +108,9 @@ mod tests {
     }
 
     impl Steps for Recorded {
+        fn check_program(&mut self) -> Result<(), String> {
+            self.step("check program")
+        }
         fn holds_an_owner(&mut self) -> bool {
             self.taken.push("check owner".to_string());
             self.owner
@@ -128,6 +137,7 @@ mod tests {
         let mut steps = Recorded::default();
         install(&mut steps, b"{}", true).unwrap();
         let all = [
+            "check program",
             "check owner",
             "prepare fresh",
             "write policy",
@@ -140,8 +150,30 @@ mod tests {
         install(&mut steps, b"{}", false).unwrap();
         assert_eq!(
             steps.taken,
-            ["prepare", "write policy", "verify", "register", "start"]
+            [
+                "check program",
+                "prepare",
+                "write policy",
+                "verify",
+                "register",
+                "start"
+            ]
         );
+    }
+
+    // Security rule: a program whose folder is not safe, or whose path cannot
+    // be registered, changes nothing at all.
+    #[test]
+    fn a_program_that_fails_its_check_changes_nothing() {
+        let mut steps = Recorded {
+            fail: Some("check program"),
+            ..Recorded::default()
+        };
+        assert_eq!(
+            install(&mut steps, b"{}", true),
+            Err("check program failed".to_string())
+        );
+        assert_eq!(steps.taken, ["check program"]);
     }
 
     // Security rule: a data folder that is not as it was set up, such as one
@@ -160,6 +192,7 @@ mod tests {
         assert_eq!(
             steps.taken,
             [
+                "check program",
                 "check owner",
                 "prepare fresh",
                 "write policy",
@@ -179,6 +212,7 @@ mod tests {
         };
         install(&mut steps, b"{}", true).unwrap();
         let all = [
+            "check program",
             "check owner",
             "prepare",
             "write policy",

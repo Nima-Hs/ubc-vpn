@@ -16,6 +16,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::*;
+use crate::unix::root_files::set_root_folder;
 
 /// Set in a test's own process to the test's name.
 const CHILD: &str = "UBC_VPN_INSTALL_TEST_CHILD";
@@ -315,6 +316,170 @@ fn install_verify_as_root() {
             "a folder above it others can change"
         );
         set_mode(&scratch.0, 0o755);
+    });
+}
+
+fn add_entry(path: &Path, entry: &str) {
+    let status = Command::new("/bin/chmod")
+        .arg("+a")
+        .arg(entry)
+        .arg(path)
+        .status()
+        .expect("run chmod");
+    assert!(status.success(), "chmod +a {entry}");
+}
+
+fn clear_entries(path: &Path) {
+    let status = Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(path)
+        .status()
+        .expect("run chmod");
+    assert!(status.success(), "chmod -N");
+}
+
+// Security rule: an access list can let a user write whatever the mode says,
+// so an entry that allows anything is refused on the folder, a folder above it
+// and the policy, even behind an entry that denies. Entries that only deny
+// pass. A folder emptied and made again does not lose what the folder above
+// hands on, so that is refused before anything is touched.
+#[test]
+fn install_access_list_as_root() {
+    as_root("access list", "install_access_list_as_root", |scratch| {
+        let data = scratch.data();
+        installed(&data);
+        let policy = data.join(POLICY);
+        let places = [
+            (data.as_path(), "the folder"),
+            (scratch.0.as_path(), "the folder above"),
+            (policy.as_path(), "the policy"),
+        ];
+        for (place, name) in places {
+            add_entry(place, "everyone deny delete");
+            verify_data_folder(&data, true)
+                .unwrap_or_else(|why| panic!("deny entries alone on {name}: {why}"));
+            add_entry(place, "everyone allow write");
+            assert!(
+                verify_data_folder(&data, true).is_err(),
+                "an allow entry behind a deny entry on {name}"
+            );
+            clear_entries(place);
+            add_entry(place, "everyone allow write");
+            assert!(
+                verify_data_folder(&data, true).is_err(),
+                "an allow entry on {name}"
+            );
+            clear_entries(place);
+            verify_data_folder(&data, true).expect("as installed again");
+        }
+
+        // A folder above that hands an allow entry on to what is made in it.
+        let state = data.join("state.json");
+        fs::write(&state, b"kept").unwrap();
+        add_entry(
+            &scratch.0,
+            "everyone allow add_file,file_inherit,directory_inherit,only_inherit",
+        );
+        assert!(
+            prepare_data_folder(&data, true).is_err(),
+            "an inherited one"
+        );
+        assert_eq!(fs::read(&state).unwrap(), b"kept", "nothing was emptied");
+        clear_entries(&scratch.0);
+    });
+}
+
+// Security rule: nothing is touched while someone else could swap the folder,
+// which root is about to empty, make and write into, for something else.
+#[test]
+fn install_folder_above_as_root() {
+    as_root("folder above", "install_folder_above_as_root", |scratch| {
+        let data = scratch.data();
+        installed(&data);
+        let state = data.join("state.json");
+        fs::write(&state, b"kept").unwrap();
+        let untouched = || {
+            assert_eq!(fs::read(&state).unwrap(), b"kept", "it was emptied");
+            assert_eq!(names_in(&data).unwrap(), [POLICY, "state.json"]);
+            assert_eq!(owner_group_and_mode(&data), (0, 0, FOLDER_MODE));
+        };
+
+        for fresh in [true, false] {
+            set_mode(&scratch.0, 0o775);
+            assert!(prepare_data_folder(&data, fresh).is_err(), "group write");
+            untouched();
+            set_mode(&scratch.0, 0o755);
+
+            lchown(&scratch.0, Some(STRANGER), None).unwrap();
+            assert!(prepare_data_folder(&data, fresh).is_err(), "another owner");
+            untouched();
+            lchown(&scratch.0, Some(0), None).unwrap();
+
+            add_entry(&scratch.0, "everyone allow delete_child");
+            assert!(prepare_data_folder(&data, fresh).is_err(), "an access list");
+            untouched();
+            clear_entries(&scratch.0);
+        }
+
+        // Setting a folder's owner and mode refuses a link put in its place,
+        // and leaves what it points to as it is.
+        let target = scratch.0.join("target");
+        folder(&target, 0o700);
+        let swapped = scratch.0.join("swapped");
+        symlink(&target, &swapped).unwrap();
+        assert!(set_root_folder(&swapped, FOLDER_MODE).is_err(), "a link");
+        assert_eq!(owner_group_and_mode(&target).2, 0o700, "followed the link");
+
+        // Nothing is made either, and a folder above that is a link is refused.
+        let missing = scratch.0.join("missing");
+        let above = scratch.0.join("above");
+        symlink(&missing, &above).unwrap();
+        assert!(prepare_data_folder(&above.join("data"), true).is_err());
+        assert!(fs::symlink_metadata(&missing).is_err());
+
+        set_mode(&scratch.0, 0o775);
+        let another = scratch.0.join("another");
+        assert!(prepare_data_folder(&another, true).is_err(), "group write");
+        assert!(fs::symlink_metadata(&another).is_err(), "it was made");
+        set_mode(&scratch.0, 0o755);
+    });
+}
+
+// A folder the service remade has the group of the folder above, and may hold
+// an owner, so a fresh install keeps it. It is safe, so an install gets past
+// it, with what is in it. A group that comes with anything unsafe is not fixed.
+#[test]
+fn install_group_as_root() {
+    as_root("group", "install_group_as_root", |scratch| {
+        let data = scratch.data();
+        installed(&data);
+        let state = data.join("state.json");
+        fs::write(&state, br#"{"owner":"501"}"#).unwrap();
+
+        lchown(&data, None, Some(80)).unwrap();
+        prepare_data_folder(&data, false).expect("prepare");
+        write_policy(&data, SOME_POLICY).expect("policy");
+        verify_data_folder(&data, false).expect("verify");
+        assert_eq!(owner_group_and_mode(&data), (0, 0, FOLDER_MODE));
+        assert_eq!(fs::read(&state).unwrap(), br#"{"owner":"501"}"#);
+
+        set_mode(&data, 0o775);
+        lchown(&data, None, Some(80)).unwrap();
+        prepare_data_folder(&data, false).expect("prepare");
+        assert_eq!(owner_group_and_mode(&data), (0, 80, 0o775), "group write");
+        assert!(verify_data_folder(&data, false).is_err());
+        set_mode(&data, 0o755);
+
+        add_entry(&data, "everyone allow add_file");
+        prepare_data_folder(&data, false).expect("prepare");
+        assert_eq!(owner_group_and_mode(&data).1, 80, "an access list");
+        assert!(verify_data_folder(&data, false).is_err());
+        clear_entries(&data);
+
+        lchown(&data, Some(STRANGER), None).unwrap();
+        prepare_data_folder(&data, false).expect("prepare");
+        assert_eq!(owner_group_and_mode(&data).1, 80, "another owner");
+        assert!(verify_data_folder(&data, false).is_err());
     });
 }
 

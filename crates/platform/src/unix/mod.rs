@@ -19,7 +19,8 @@
 //! - **A folder nobody else can change.** Installed: the socket's folder and
 //!   every folder above it are real folders (no symlinks) owned by root and
 //!   writable by root alone. Dev: the folder is the current user's, mode
-//!   0700. `listen` creates the last folder when it is missing, and both
+//!   0700. On macOS an access list entry that allows anything breaks the rule
+//!   too (see `acl`). `listen` creates the last folder when it is missing, and both
 //!   `listen` and `connect` refuse a folder that breaks the rule. The lock
 //!   file is the listener's alone (0600), so no other user can hold the lock.
 //! - **The caller is who the kernel says**: the peer's effective user ID,
@@ -68,6 +69,7 @@
 //! [`Error::NotTheService`]. That fails closed, and packaging has to keep the
 //! clients outside such a sandbox.
 
+pub(crate) mod acl;
 pub(crate) mod interrupt;
 pub mod program;
 pub(crate) mod root_files;
@@ -209,7 +211,7 @@ fn check_one(folder: &Path, owner: u32, forbidden: u32) -> Result<()> {
         NOT_A_FOLDER
     } else if found.uid() != owner {
         WRONG_OWNER
-    } else if found.mode() & forbidden != 0 {
+    } else if found.mode() & forbidden != 0 || acl::path_allows(folder)? {
         TOO_OPEN
     } else {
         return Ok(());

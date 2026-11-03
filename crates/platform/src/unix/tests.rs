@@ -582,6 +582,69 @@ fn a_clients_socket_is_closed_on_exec() {
     assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
 }
 
+/// Adds an access list entry.
+#[cfg(target_os = "macos")]
+fn add_entry(path: &Path, entry: &str) {
+    let status = std::process::Command::new("/bin/chmod")
+        .arg("+a")
+        .arg(entry)
+        .arg(path)
+        .status()
+        .expect("run chmod");
+    assert!(status.success(), "chmod +a {entry}");
+}
+
+/// Removes every access list entry.
+#[cfg(target_os = "macos")]
+fn clear_entries(path: &Path) {
+    let status = std::process::Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(path)
+        .status()
+        .expect("run chmod");
+    assert!(status.success(), "chmod -N");
+}
+
+// Security rule: on macOS an access list can let a user write whatever the
+// mode says, so `listen` and `connect` refuse a folder, or one above it, with
+// an entry that allows anything. Entries that only deny pass.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_allow_entry_on_the_channels_folder_is_refused() {
+    let Some(sandbox) = Sandbox::root("channel access list", Mode::Installed) else {
+        return;
+    };
+    let folder = sandbox.folder("ch", 0o755);
+    let listen = || sandbox.transport().listen(&socket_in(&folder));
+
+    add_entry(&folder, "everyone deny delete");
+    add_entry(&folder, "everyone allow add_file");
+    assert_eq!(listen().err(), failed(TOO_OPEN), "behind a deny entry");
+    clear_entries(&folder);
+    add_entry(&sandbox.dir, "everyone allow delete_child");
+    assert_eq!(listen().err(), failed(TOO_OPEN), "a folder above");
+    clear_entries(&sandbox.dir);
+
+    add_entry(&folder, "everyone deny delete");
+    add_entry(&sandbox.dir, "everyone deny delete");
+    let listener = listen().expect("deny entries alone");
+    let connect = || sandbox.transport().connect(&socket_in(&folder));
+    assert!(connect().is_ok(), "deny entries alone");
+
+    // A client finds it refused too, with the service already listening.
+    add_entry(&folder, "everyone allow add_file");
+    assert_eq!(connect().err(), Some(Error::NotTheService), "the folder");
+    clear_entries(&folder);
+    add_entry(&sandbox.dir, "everyone allow delete_child");
+    assert_eq!(
+        connect().err(),
+        Some(Error::NotTheService),
+        "a folder above"
+    );
+    clear_entries(&sandbox.dir);
+    drop(listener);
+}
+
 // Security rule: the socket's folder cannot be changed by anyone else.
 #[test]
 fn listen_refuses_a_folder_others_could_change() {

@@ -9,16 +9,21 @@
 //! **The data folder.** `/Library/Application Support/UBC VPN` holds the
 //! policy, the state and the channel's socket, so every user's client must
 //! reach it and only root may change it: root's, 0755, with `policy.json`
-//! root's, 0644. On a fresh install it is emptied, since anyone may have made
-//! it; on an update its contents are kept. Because the state is in it, a
-//! folder that is there already is never fixed: one that others could change
-//! cannot be trusted afterwards, so the check after it fails and the install
-//! stops (see `unix::state`).
+//! root's, 0644. The folders above it are checked before anything is touched,
+//! so nobody can swap the folder while root works on it. On a fresh install it
+//! is emptied, since anyone may have made it; on an update its contents are
+//! kept. Because the state is in it, a folder that is there already is never
+//! fixed: one that others could change cannot be trusted afterwards, so the
+//! check after it fails and the install stops (see `unix::state`). Its group
+//! alone is set on one that passes that check: a group without write changes
+//! nothing about who can write, and a folder the service remade itself has the
+//! group of the folder above.
 //!
 //! Not built yet: registering with launchd. Those calls change nothing and
 //! fail with [`Error::Unsupported`], and `quoted` is the first of them that
 //! `ubc-vpn-service install` makes, so it stops before anything is changed.
 
+use std::os::unix::fs::lchown;
 use std::path::Path;
 
 use crate::unix::root_files::{
@@ -67,17 +72,29 @@ pub fn unregister(_name: &str) -> Result<()> {
     Err(Error::Unsupported)
 }
 
-/// Makes the data folder `dir`, or on a `fresh` install empties it first. A
-/// folder that is kept is left as it is found: [`verify_data_folder`] judges
-/// it.
+/// Makes the data folder `dir`, or on a `fresh` install empties it first.
+/// Nothing is touched unless only root can change the folders above it. A
+/// folder that is kept is left as it is found, for [`verify_data_folder`] to
+/// judge, but for the group of one that is safe.
 pub fn prepare_data_folder(dir: &Path, fresh: bool) -> Result<()> {
+    let above = dir.parent().ok_or(Error::InvalidInput)?;
+    check_data_folder(above)?;
     if fresh {
         clear(dir)?;
     }
     if !real_folder(dir)? {
         make_root_folder(dir, FOLDER_MODE)?;
+    } else if check_data_folder(dir).is_ok() {
+        lchown(dir, None, Some(0))?;
     }
     Ok(())
+}
+
+/// The check the service makes of its state folder: `dir` and every folder
+/// above it are root's and changed by root alone.
+fn check_data_folder(dir: &Path) -> Result<()> {
+    crate::unix::state::check_folder(Mode::Installed, dir)
+        .map_err(|error| Error::Failed(format!("{}: {error}", dir.display())))
 }
 
 /// Writes `policy` as `policy.json` in the data folder `dir`.
@@ -89,10 +106,7 @@ pub fn write_policy(dir: &Path, policy: &[u8]) -> Result<()> {
 /// as the service and the client will check it, and after a fresh install
 /// that it holds the policy alone.
 pub fn verify_data_folder(dir: &Path, fresh: bool) -> Result<()> {
-    // The folder and every folder above it are root's and changed by root
-    // alone: the same check the service makes of its state folder.
-    crate::unix::state::check_folder(Mode::Installed, dir)
-        .map_err(|error| Error::Failed(format!("{}: {error}", dir.display())))?;
+    check_data_folder(dir)?;
     check_root(dir, Expected::Folder, FOLDER_MODE)?;
     check_root(&dir.join(POLICY), Expected::File, POLICY_MODE)?;
     if fresh {

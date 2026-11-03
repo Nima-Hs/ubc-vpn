@@ -7,13 +7,12 @@
 
 use std::fs::{self, DirBuilder, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{
-    DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, fchown, lchown,
-};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, fchown};
 use std::path::Path;
 
 use rustix::fs::OFlags;
 
+use super::acl;
 use crate::{Error, Result};
 
 /// Whether `path` is a real folder: `false` when there is nothing there,
@@ -59,10 +58,16 @@ pub(crate) fn make_root_folder(path: &Path, mode: u32) -> Result<()> {
     set_root_folder(path, mode)
 }
 
-/// Gives the folder `path` to root, with `mode` whatever the umask.
+/// Gives the folder `path` to root, with `mode` whatever the umask. Done
+/// through the folder as opened, so a link put in its place is refused and
+/// what it points to stays as it is.
 pub(crate) fn set_root_folder(path: &Path, mode: u32) -> Result<()> {
-    lchown(path, Some(0), Some(0))?;
-    fs::set_permissions(path, Permissions::from_mode(mode))?;
+    let folder = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::DIRECTORY).bits() as i32)
+        .open(path)?;
+    fchown(&folder, Some(0), Some(0))?;
+    folder.set_permissions(Permissions::from_mode(mode))?;
     Ok(())
 }
 
@@ -96,7 +101,7 @@ pub(crate) enum Expected {
 }
 
 /// Checks that `path` is a real folder or file, not a link, root's and root's
-/// group's, with exactly `mode`.
+/// group's, with exactly `mode`, and no access list entry that allows anything.
 pub(crate) fn check_root(path: &Path, expected: Expected, mode: u32) -> Result<()> {
     let found = fs::symlink_metadata(path)?;
     let kind = match expected {
@@ -106,6 +111,12 @@ pub(crate) fn check_root(path: &Path, expected: Expected, mode: u32) -> Result<(
     if !kind || found.uid() != 0 || found.gid() != 0 || found.mode() & 0o7777 != mode {
         return Err(Error::Failed(format!(
             "{} is not root's with mode {mode:o}",
+            path.display()
+        )));
+    }
+    if acl::path_allows(path)? {
+        return Err(Error::Failed(format!(
+            "{} has an access list that lets others change it",
             path.display()
         )));
     }
