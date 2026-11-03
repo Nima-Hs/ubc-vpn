@@ -312,7 +312,8 @@ jobs:
         if: failure()
         run: |
           journalctl -u ubc-vpn.service -o cat --no-pager | tail -n 200 || true
-          { sudo cat "$RUNNER_TEMP/systemd/ocserv.log" 2> /dev/null || true; } \
+          { sudo cat "$RUNNER_TEMP/systemd/ocserv.log" 2> /dev/null || true
+            sudo journalctl --no-pager -o short-precise -t ocserv || true; } \
             | grep -viE 'password' | grep -vE 'TLS\[' \
             | sed -E 's/[A-Za-z0-9+\/=_-]{16,}/[hidden]/g' | tail -n 100
 
