@@ -39,6 +39,8 @@ import {
     launchWindows,
     restartToUpdate,
     takeResume,
+    tunnelDown,
+    tunnelUp,
 } from "./update/install";
 import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
 import { profileFolder } from "./user-data";
@@ -198,14 +200,6 @@ async function start(): Promise<void> {
         app.getVersion(),
         mayUpdate({ packaged: app.isPackaged, release: __RELEASE__, demo: __DEMO__ }),
     );
-    const isConnected = () => {
-        const state = link.getState();
-        return state.link === "ready" && state.conn.state === "connected";
-    };
-    const isDisconnected = () => {
-        const state = link.getState();
-        return state.link === "ready" && state.conn.state === "disconnected";
-    };
     // Only Windows can install yet; elsewhere no update is ever ready.
     const launch: Launcher =
         process.platform === "win32"
@@ -218,11 +212,11 @@ async function start(): Promise<void> {
         }
         await restartToUpdate(updater, {
             folder,
-            connected: isConnected,
+            connected: () => tunnelUp(link.getState()),
             disconnect: () =>
                 disconnectAndWait({
                     disconnect: () => controller.disconnect(),
-                    isDisconnected,
+                    isDisconnected: () => tunnelDown(link.getState()),
                     subscribe: (listener) => controller.subscribe(listener),
                 }),
             launch,
@@ -244,7 +238,8 @@ async function start(): Promise<void> {
                 if (link.getState().link === "starting") {
                     return false;
                 }
-                if (isDisconnected()) {
+                const state = link.getState();
+                if (state.link === "ready" && state.conn.state === "disconnected") {
                     connectFromTray(show, () => controller.connect());
                 }
                 return true;
