@@ -33,6 +33,7 @@ import {
 import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray/icon";
 import { appImage, createTray, followStateOnTaskbar } from "./tray/tray";
 import { TunnelSwitch } from "./tunnel-switch";
+import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
 import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
 
@@ -184,6 +185,14 @@ async function start(): Promise<void> {
         });
     }
     registerDemo?.(window);
+    // Updates: only an installed app checks, downloads or reaches the
+    // network for them; a demo or test run shows that it cannot update.
+    const updater = createUpdater(
+        app.getVersion(),
+        mayUpdate({ packaged: app.isPackaged, release: __RELEASE__, demo: __DEMO__ }),
+    );
+    registerUpdates(window, devServerUrl, updater);
+    updater.start();
     // The Settings screen and the profiles. Every view of the profiles that a
     // change answers with goes to the window and to the tray menu, so both
     // show them as they are, whichever made the change. Only an installed
@@ -200,6 +209,7 @@ async function start(): Promise<void> {
             demoProfiles ?? new ProfilesRunner(settingsCommand(app, process)),
             (view) => {
                 latestProfiles = view;
+                updater.setAutomatic(view.global.auto_update);
                 tunnelSwitch?.fromProfiles(view);
                 if (!window.isDestroyed()) {
                     window.webContents.send(PROFILES_IPC.changed, view);
@@ -352,6 +362,7 @@ async function start(): Promise<void> {
         icons.dispose();
         profiles?.stop();
         tunnelSwitch?.dispose();
+        updater.dispose();
     });
 
     // If the interface's process dies, start it again, but not in a loop.

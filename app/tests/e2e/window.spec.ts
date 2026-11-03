@@ -112,6 +112,7 @@ test("the window renders, locked down", async () => {
         process: typeof (globalThis as { process?: unknown }).process,
         api: Object.keys(window.ubcVpn).sort(),
         profiles: Object.keys(window.ubcVpn.profiles ?? {}).sort(),
+        updates: Object.keys(window.ubcVpn.updates).sort(),
     }));
     expect(exposed.require).toBe("undefined");
     expect(exposed.process).toBe("undefined");
@@ -133,6 +134,7 @@ test("the window renders, locked down", async () => {
         "retry",
         "saveRoutes",
         "setTunnel",
+        "updates",
     ]);
     // The Settings screen's: none takes or returns a password.
     expect(exposed.profiles).toEqual([
@@ -147,6 +149,8 @@ test("the window renders, locked down", async () => {
         "switchTo",
         "update",
     ]);
+    // Updates: the interface reads where they stand and asks for a check, nothing more.
+    expect(exposed.updates).toEqual(["checkNow", "get", "onChange"]);
 });
 
 test("the interface's process is confined", async () => {

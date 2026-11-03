@@ -22,6 +22,12 @@ export default defineConfig(({ mode }) => {
         // later the profiles. On in every build since the client's commands
         // for it arrived (#208); the demo build has a fake of its own.
         __SETTINGS__: JSON.stringify(true),
+        // Only the build an installer is made from (`pnpm package:win`, with
+        // `--mode release`). The updater needs it as well as an installed
+        // app: `ELECTRON_FORCE_IS_PACKAGED` makes any run look installed, so
+        // that alone must never let a test or development run reach GitHub
+        // or the updates folder.
+        __RELEASE__: JSON.stringify(mode === "release"),
     };
     return {
         main: {

@@ -12,6 +12,7 @@ import { Confirm } from "@/components/ui/confirm";
 import { Panel } from "@/components/ui/panel";
 import { Switch } from "@/components/ui/switch";
 import { Heading, Subheading, Text } from "@/components/ui/text";
+import { UpdateSettings } from "@/components/update-settings";
 import { useProfiles } from "@/lib/profiles";
 import { api } from "@/lib/store";
 
@@ -101,6 +102,14 @@ export default function SettingsView() {
                             setForgotten(done),
                         )
                     }
+                />
+            )}
+
+            {held.state === "ready" && (
+                <UpdateSettings
+                    automatic={held.view.global.auto_update}
+                    busy={busy}
+                    onAutomatic={(on) => void change(() => api.profiles?.setUpdates(on))}
                 />
             )}
 

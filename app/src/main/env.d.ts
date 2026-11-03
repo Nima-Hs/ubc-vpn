@@ -8,3 +8,6 @@ declare const __LOGS__: boolean;
 
 /** `true` only in builds that have the Settings screen. See `electron.vite.config.ts`. */
 declare const __SETTINGS__: boolean;
+
+/** `true` only in the build an installer is made from. See `electron.vite.config.ts`. */
+declare const __RELEASE__: boolean;
