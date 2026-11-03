@@ -26,6 +26,9 @@ on:
       - packaging/linux/**
       - native/linux/test-packages.sh
       - .github/ran/systemd/**
+      # The launchd job and its test.
+      - packaging/macos/**
+      - .github/ran/launchd/**
       # Last, so it wins: a change to Markdown files alone starts nothing.
       # None is built, tested or shipped. Any other file still counts.
       - "!**/*.md"
@@ -47,6 +50,9 @@ on:
       - packaging/linux/**
       - native/linux/test-packages.sh
       - .github/ran/systemd/**
+      # The launchd job and its test.
+      - packaging/macos/**
+      - .github/ran/launchd/**
       - "!**/*.md"
   workflow_dispatch:
 
@@ -322,3 +328,109 @@ jobs:
         run: |
           if ip -o link show | grep ubcvpn; then exit 1; fi
           echo "No ubcvpn link is left."
+
+  # The launchd job, installed by `ubc-vpn-service install` from a release
+  # build placed where the macOS package will put it, and tried for real by
+  # packaging/macos/tests/launchd.sh: running under launchd, owned,
+  # reinstalled, killed and started again, stopped and removed. Nothing
+  # connects. On GitHub's macOS runners, where sudo needs no password; they
+  # are thrown away after the job. The job uses no secrets.
+  launchd:
+    name: launchd job (macos)
+    runs-on: macos-15
+    timeout-minutes: 30
+    # `actions: read` is for downloading our libopenconnect from the native
+    # library workflow's newest good run on main.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      FOLDER: /Library/PrivilegedHelperTools/io.github.nima-hs.ubc-vpn
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # As in engine.yml: only a run started by a push to main counts, and
+      # the commit the library was built from must be on main.
+      - name: Fetch the native library built on main
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: native-macos.yml
+          ARTIFACT: libopenconnect-macos-arm64
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$WORKFLOW" --branch main \
+            --event push --status success --limit 1 --json databaseId,headSha \
+            --jq '.[0] | "\(.databaseId) \(.headSha)"')
+          read -r id sha <<<"$run"
+          [[ $id =~ ^[0-9]+$ ]]
+          echo "Run $id of $WORKFLOW, at commit $sha"
+          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir download
+          mkdir native
+          tar -xzf "download/$ARTIFACT.tar.gz" -C native
+          if [ -d "native/$ARTIFACT" ]; then mv "native/$ARTIFACT" unwrapped && rmdir native && mv unwrapped native; fi
+          # macOS records it as recipe.commit.
+          commit=$(jq -r '.recipe.commit // empty' native/manifest.json)
+          [[ $commit =~ ^[0-9a-f]{40}$ ]]
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
+          echo "The library was built from $commit; main is $status of it."
+          [ "$status" = ahead ] || [ "$status" = identical ]
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        timeout-minutes: 4
+        run: rustup toolchain install
+      # Restores the build of our dependencies, keyed by the toolchain, the
+      # OS, the job and the lockfile.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: platform-unix-launchd
+          # Pull requests restore main's caches but save none of their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # One program at a time, with the real engine only, as a release
+      # builds them. No rpath: the engine loads the library by its full path.
+      - name: Build the service and the client
+        env:
+          UBC_VPN_NATIVE_DIR: ${{ runner.temp }}/native
+          RUSTFLAGS: ""
+        run: |
+          for package in ubc-vpn-service ubc-vpn-cli; do
+            cargo build --locked --release -p "$package" --features real-engine
+          done
+
+      # Root's, as the package will install them: the service refuses to run
+      # from a folder anyone else could change. The libraries are the files
+      # themselves, never the link bundle.sh adds for the linker. Copied as
+      # they are, so their ad-hoc signatures stay.
+      - name: Place the release build where the job starts it
+        run: |
+          sudo install -d -o root -g wheel -m 1755 /Library/PrivilegedHelperTools
+          sudo install -d -o root -g wheel -m 755 "$FOLDER"
+          sudo install -o root -g wheel -m 755 target/release/ubc-vpn-service target/release/ubc-vpn "$FOLDER/"
+          find "$RUNNER_TEMP/native/lib" -maxdepth 1 -type f -name '*.dylib' \
+            -exec sudo install -o root -g wheel -m 644 {} "$FOLDER/" \;
+          ls -ln "$FOLDER"
+
+      - name: Install, use and remove the job
+        env:
+          UBC_VPN_TEST_THROWAWAY_MACHINE: "1"
+        run: bash packaging/macos/tests/launchd.sh "$RUNNER_TEMP/launchd" 2>&1 | tee launchd.log
+
+      # A check that is skipped passes, so prove from the log that each ran.
+      - name: Every check ran
+        run: |
+          bash .github/ran/check.sh .github/ran/launchd/macos "RAN: " launchd.log
+
+      - name: What the service logged
+        if: failure()
+        run: |
+          sudo launchctl print system/io.github.nima-hs.ubc-vpn || true
+          sudo tail -n 100 "/Library/Application Support/UBC VPN/service.log" || true

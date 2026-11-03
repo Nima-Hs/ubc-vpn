@@ -71,7 +71,7 @@ mod os;
 mod os;
 
 /// Registering the service and making its data folder. The same calls on
-/// every OS; on macOS registering is unsupported until it is built.
+/// every OS.
 pub use os::install;
 
 /// Running as a Windows service, started by the service manager.
