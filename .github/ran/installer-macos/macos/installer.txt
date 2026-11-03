@@ -1,0 +1,12 @@
+install
+files as packaged
+who can change
+installed app
+service
+app starts
+owner
+update over itself
+scripts twice
+failed update
+removal
+install again

@@ -29,10 +29,10 @@
     "check:licenses": "node scripts/check-licenses.mjs",
     "icons": "node scripts/make-icons.mjs",
     "package:win": "node node_modules/electron/install.js && pnpm build:release && pnpm check:build && electron-builder --win --publish never",
-    "package:mac": "node scripts/not-built-yet.mjs macOS",
+    "package:mac": "node node_modules/electron/install.js && pnpm build && pnpm check:build && electron-builder --mac --config electron-builder.mac.yml --publish never",
     "package:linux": "node node_modules/electron/install.js && pnpm build && pnpm check:build && electron-builder --linux --config electron-builder.linux.yml --publish never",
     "check:package:win": "node scripts/check-package.mjs win dist/win-unpacked dist",
-    "check:package:mac": "node scripts/check-package.mjs mac dist/mac-arm64 dist",
+    "check:package:mac": "node scripts/check-package.mjs mac \"dist/mac-arm64/UBC VPN.app\" dist",
     "check:package:linux": "node scripts/check-package.mjs linux dist/linux-unpacked dist"
   },
   "dependencies": {

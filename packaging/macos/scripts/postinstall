@@ -1,0 +1,94 @@
+#!/bin/bash
+# Runs as root when the package has put the app in /Applications, on a first
+# install and on an update. It may run more than once for one install, so it
+# is safe to repeat.
+#
+# The service and its libraries come from beside this script, in the folder
+# macOS unpacks the package's scripts to, which only root can change, and never
+# from the app: the admin group can write to /Applications, so whoever could
+# swap a file there before this copied it could have it run as root.
+#
+# The new folder is made in full beside the old one and moved into place, so a
+# running service is never overwritten, and `ubc-vpn-service install` stops it
+# only then, removing its routes and DNS, keeps the state and the owner, and
+# starts the new one. An install that fails puts the old folder back.
+set -euo pipefail
+
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+here=$(cd "$(dirname "$0")" && pwd)
+LABEL=io.github.nima-hs.ubc-vpn
+HELPERS=/Library/PrivilegedHelperTools
+FOLDER=$HELPERS/$LABEL
+NEXT=$FOLDER.next
+OLD=$FOLDER.old
+JOB=/Library/LaunchDaemons/$LABEL.plist
+LINK=/usr/local/bin/ubc-vpn
+CLIENT="/Applications/UBC VPN.app/Contents/Resources/bin/ubc-vpn"
+
+fail() { echo "ubc-vpn postinstall: $*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || fail "not root"
+# $3 is the volume being installed on. The package allows only the startup disk.
+[ "${3:-/}" = / ] || fail "UBC VPN installs only on the startup disk, not $3"
+
+# A first install has no job yet. Only root can write to that folder.
+fresh=--fresh
+if [ -e "$JOB" ]; then
+    fresh=
+fi
+
+# Macs have this folder, but nothing says they must. One that is there is left
+# as it is: the service's check judges it.
+[ -e "$HELPERS" ] || install -d -o root -g wheel -m 1755 "$HELPERS"
+
+# Left by a run that was cut short. An old folder with no current one is put
+# back first, so that the update below still has it to go back to.
+if [ -e "$OLD" ] && [ ! -e "$FOLDER" ]; then
+    mv "$OLD" "$FOLDER"
+fi
+rm -rf "$NEXT" "$OLD"
+
+install -d -o root -g wheel -m 755 "$NEXT"
+for file in "$here"/service/*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || fail "$file is not a file"
+    case $file in
+        *.dylib) mode=644 ;;
+        *) mode=755 ;;
+    esac
+    install -o root -g wheel -m "$mode" "$file" "$NEXT/"
+done
+
+updating=
+if [ -e "$FOLDER" ]; then
+    updating=1
+    mv "$FOLDER" "$OLD"
+fi
+mv "$NEXT" "$FOLDER"
+
+# shellcheck disable=SC2086 # $fresh is one word or none.
+if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.json" $fresh; then
+    echo "ubc-vpn postinstall: the install failed; putting back what was there" >&2
+    if [ -n "$updating" ]; then
+        rm -rf "$FOLDER"
+        mv "$OLD" "$FOLDER"
+        # The old service, should the failed install have stopped it. Without
+        # --fresh this keeps the state, and it may fail for the same reason.
+        /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.json" || true
+    else
+        # Nothing to go back to: no job may be left starting a missing program.
+        /usr/bin/env -i "$FOLDER/ubc-vpn-service" uninstall --keep-data || true
+        rm -rf "$FOLDER"
+    fi
+    exit 1
+fi
+rm -rf "$OLD"
+
+# The command `ubc-vpn` (decision G19), which runs as the user, so it is the
+# app's client. A file of someone else's in its place is left, and said.
+install -d -o root -g wheel -m 755 /usr/local/bin
+if [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
+    ln -sfn "$CLIENT" "$LINK"
+else
+    echo "ubc-vpn postinstall: $LINK is someone else's, so the command is not linked" >&2
+fi

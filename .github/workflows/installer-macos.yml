@@ -1,0 +1,215 @@
+name: Installer (macOS)
+
+# Builds the macOS .pkg with the service, the command-line client and the
+# libraries, installs it as root on a runner, checks what landed where and who
+# can change it, that the app starts and that the service answers a standard
+# user, updates it over itself, makes an update fail, removes it and checks
+# nothing is left. The rules come from docs/architecture.md, "What the
+# installers must do".
+#
+# Nothing is signed beyond the ad-hoc signatures the linker and bundle.sh give.
+# The package and the source of its LGPL libraries are kept as artifacts for a
+# few days, for trying by hand; they are not a release.
+#
+# What this cannot show: the Installer app's admin prompt, Gatekeeper's check of
+# a downloaded package and the background item notice. `installer` run with sudo
+# has none of them. They are for a person on a real Mac.
+
+on:
+  pull_request:
+    paths:
+      - app/**
+      - packaging/macos/**
+      - packaging/windows/policy.json
+      - crates/**
+      - native/macos/**
+      - native/check-patches.sh
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/installer-macos.yml
+      - .github/ran/check.sh
+      - .github/ran/installer-macos/**
+      # Last, so it wins: a change to Markdown files alone starts nothing.
+      - "!**/*.md"
+  push:
+    branches: [main]
+    paths:
+      - app/**
+      - packaging/macos/**
+      - packaging/windows/policy.json
+      - crates/**
+      - native/macos/**
+      - native/check-patches.sh
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/installer-macos.yml
+      - .github/ran/check.sh
+      - .github/ran/installer-macos/**
+      - "!**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    name: Build the package
+    # The image native-macos.yml builds the library on.
+    runs-on: macos-15
+    # Room for a build of every library from source with nothing cached.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the three builds apply the same patch
+        run: bash native/check-patches.sh
+
+      # The same build as the Native library (macOS) workflow's, from the
+      # sources pinned in native/macos/versions.env, with nothing restored from
+      # a cache. Built here, so the source the package points to is from the
+      # same run as the libraries in it.
+      - name: Build libopenconnect
+        run: bash native/macos/build.sh "$RUNNER_TEMP/native-build"
+      - name: Bundle and check libopenconnect
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: bash native/macos/bundle.sh "$RUNNER_TEMP/native-build" "$RUNNER_TEMP/native"
+
+      # A stalled download would otherwise hold the job until its own limit.
+      - name: Install the pinned Rust toolchain
+        id: toolchain
+        timeout-minutes: 4
+        continue-on-error: true
+        run: rustup toolchain install
+      - name: Install the pinned Rust toolchain, second try
+        if: steps.toolchain.outcome != 'success'
+        timeout-minutes: 4
+        run: rustup toolchain install
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Install the app's packages
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Stage the programs and the libraries
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          version=$(node -p "require('./app/package.json').version")
+          packaging/macos/stage.sh "$RUNNER_TEMP/native" \
+            "run $GITHUB_RUN_ID of the Installer (macOS) workflow, from commit $GITHUB_SHA: $RUN_URL" \
+            "$RUNNER_TEMP/sources/ubc-vpn-$version-macos-arm64-sources.tar.gz"
+
+      # electron-builder runs pkgbuild and productbuild by name, with the PATH
+      # pnpm gives it, so this looks with the same one.
+      - name: The tools that write the package
+        working-directory: app
+        run: pnpm exec bash ../packaging/macos/check-tools.sh
+      - name: Build the .pkg
+        working-directory: app
+        run: pnpm package:mac
+      - name: The app is fused and licensed, the package is as it should be, and there is no updater
+        working-directory: app
+        run: pnpm check:package:mac
+
+      - name: Note the package's SHA-256
+        working-directory: app/dist
+        run: |
+          shasum -a 256 ubc-vpn-*-arm64.pkg | tee ubc-vpn.pkg.sha256
+          read -r hash file < ubc-vpn.pkg.sha256
+          printf '### %s\n\nSHA-256: `%s`\n\n' "$file" "$hash" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the .pkg
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-macos-arm64-pkg-unsigned
+          path: |
+            app/dist/ubc-vpn-*-arm64.pkg
+            app/dist/ubc-vpn.pkg.sha256
+          if-no-files-found: error
+          retention-days: 7
+      # A tarball, to keep the modes. For the job below only.
+      - name: Pack the stage
+        run: tar -C app -czf stage.tar.gz stage
+      - name: Pass the stage on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-stage-macos
+          path: stage.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep the source of the LGPL libraries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ubc-vpn-macos-arm64-sources
+          path: ${{ runner.temp }}/sources/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # Installs, updates and removes the .pkg as root, on a runner of the same
+  # image that did not build it and is thrown away after the job. The job uses
+  # no secrets.
+  install:
+    name: Install the .pkg
+    needs: package
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: app/.node-version
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Install the app's packages, for its package check
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ubc-vpn-macos-arm64-pkg-unsigned
+          path: ${{ runner.temp }}/pkg
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-stage-macos
+          path: ${{ runner.temp }}/stage
+      - name: Find the .pkg and unpack the stage
+        run: |
+          (cd "$RUNNER_TEMP/pkg" && shasum -a 256 --check ubc-vpn.pkg.sha256)
+          echo "PKG=$RUNNER_TEMP/pkg/$(cd "$RUNNER_TEMP/pkg" && ls ubc-vpn-*-arm64.pkg)" >> "$GITHUB_ENV"
+          tar -xzf "$RUNNER_TEMP/stage/stage.tar.gz" -C "$RUNNER_TEMP/stage"
+      - name: Install, update and remove the package
+        env:
+          UBC_VPN_TEST_THROWAWAY_MACHINE: "1"
+        run: |
+          bash packaging/macos/tests/installer.sh "$PKG" "$RUNNER_TEMP/stage/stage" "$RUNNER_TEMP/installer" 2>&1 | tee installer.log
+      # A check that is skipped passes, so prove from the log that each ran.
+      - name: Every check ran
+        run: |
+          bash .github/ran/check.sh .github/ran/installer-macos/macos "RAN: " installer.log
+      - name: What the installer and the service logged
+        if: failure()
+        run: |
+          sudo launchctl print system/io.github.nima-hs.ubc-vpn || true
+          sudo tail -n 100 "/Library/Application Support/UBC VPN/service.log" || true
+          sudo grep -E 'installd|postinstall|ubc-vpn' /var/log/install.log | tail -n 100 || true

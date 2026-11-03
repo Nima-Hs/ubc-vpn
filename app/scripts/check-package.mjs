@@ -12,7 +12,8 @@
 // - nothing an updater would read is in the app or in the output folder;
 // - the packages in the output folder are as that file requires, where it
 //   has a checkOutput function (Linux: the .deb's scripts, dependencies,
-//   conffiles and links).
+//   conffiles and links; macOS: the .pkg's scripts, owners and where it may
+//   install).
 //
 // The states are written out in those files, not read from
 // electron-builder.yml, so a change to that file cannot also change what
@@ -100,10 +101,6 @@ if (!SYSTEMS.includes(system) || appFolder === undefined) {
     process.exit(2);
 }
 const expected = await import(`./package-files/${system}.mjs`);
-if (expected.NOT_BUILT_YET !== undefined) {
-    console.error(`check-package: ${expected.NOT_BUILT_YET}`);
-    process.exit(1);
-}
 const problems = await check(expected, appFolder, outputFolder);
 for (const problem of problems) {
     console.error(`check-package: ${problem}`);
