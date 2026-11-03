@@ -42,7 +42,13 @@ import {
     whenDown,
 } from "./update/install";
 import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
-import { knownProfile, type ReconnectSteps, reconnectTo, resumeAtStart } from "./update/resume";
+import {
+    connectAtStart,
+    knownProfile,
+    type ReconnectSteps,
+    reconnectTo,
+    resumeAtStart,
+} from "./update/resume";
 import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
 
@@ -115,6 +121,8 @@ async function start(): Promise<void> {
             devServerUrl,
             profiles: () => profiles,
             tunnelSwitch: () => tunnelSwitch,
+            saySomethingAboutAnUpdate: (say) =>
+                say ? updater.say("unfinished") : updater.clearSaid(),
             loginItem: () => loginItemAsked,
         });
         link = demo.link;
@@ -219,29 +227,38 @@ async function start(): Promise<void> {
         window,
         devServerUrl,
         updater,
-        createInstall(updater, (folder) => ({
-            folder,
-            connected: () => tunnelUp(link.getState()),
-            connectedProfile: () =>
-                knownProfile(
-                    controller.connectionProfile(),
-                    latestProfiles?.profiles.map((one) => one.id) ?? null,
-                ),
-            disconnect: () =>
-                disconnectAndWait({ ...linkDown, disconnect: () => link.disconnect() }),
-            whenDownLater: (then) => whenDown(linkDown, then),
-            // Only Windows can install yet; elsewhere no update is ever ready.
-            launch: launcherFor(process.platform, {
-                systemRoot: process.env.SystemRoot ?? "C:\\Windows",
-                app: process.execPath,
-                pid: process.pid,
-                env: process.env,
+        createInstall(
+            updater,
+            (folder) => ({
+                folder,
+                connected: () => tunnelUp(link.getState()),
+                connectedProfile: () =>
+                    knownProfile(
+                        controller.connectionProfile(),
+                        latestProfiles?.profiles.map((one) => one.id) ?? null,
+                    ),
+                disconnect: () =>
+                    disconnectAndWait({ ...linkDown, disconnect: () => link.disconnect() }),
+                // Only Windows can install yet; elsewhere no update is ever ready.
+                launch: launcherFor(process.platform, {
+                    systemRoot: process.env.SystemRoot ?? "C:\\Windows",
+                    app: process.execPath,
+                    pid: process.pid,
+                    env: process.env,
+                }),
+                reconnect: (profile) => void reconnectTo(profile, reconnectSteps),
+                quit,
+                now: () => Date.now(),
             }),
-            reconnect: (profile) => void reconnectTo(profile, reconnectSteps),
-            quit,
-            now: () => Date.now(),
-        })),
+            (then) => whenDown(linkDown, then),
+        ),
     );
+    // What the app had to say about an update is out of date once connected.
+    controller.subscribe((snapshot) => {
+        if (snapshot.state.link === "ready" && snapshot.state.conn.state === "connected") {
+            updater.clearSaid();
+        }
+    });
     updater.start();
     // The Settings screen and the profiles. Every view of the profiles that a
     // change answers with goes to the window and to the tray menu, so both
@@ -358,45 +375,45 @@ async function start(): Promise<void> {
                 // Said where the tunnel is chosen, instead of reading for ever.
                 tunnelSwitch?.readFailed();
             }
-            // Back from an update: says how it went, and brings back the
-            // connection it took down, which then is the only one started.
-            const updatesFolder = updater.folder();
-            const resumed =
-                updatesFolder !== null &&
-                (await resumeAtStart({
-                    ...reconnectSteps,
-                    folder: updatesFolder,
-                    version: app.getVersion(),
-                    now: () => Date.now(),
-                    state: () => link.getState(),
-                    subscribe: (listener) => controller.subscribe(listener),
-                }));
-            if (!result.ok) {
-                return;
-            }
-            const global = result.value.global;
-            if (app.isPackaged && startupSupported(process.platform)) {
+            const global = result.ok ? result.value.global : null;
+            if (global !== null && app.isPackaged && startupSupported(process.platform)) {
                 loginItems.apply(loginItemFor(global.start, process.platform));
             }
-            if (!global.auto_connect || resumed) {
-                return;
-            }
-            const once = (state: LinkState): boolean => {
-                if (state.link === "starting") {
-                    return false;
-                }
-                if (connectsAtStart(global, state.link === "ready" ? state.conn : null)) {
-                    connectFromTray(show, () => controller.connect());
-                }
-                return true;
-            };
-            if (!once(controller.getSnapshot().state)) {
-                const stop = controller.subscribe((snapshot) => {
-                    if (once(snapshot.state)) {
-                        stop();
+            // Back from an update: says how it went, and brings back the
+            // connection it took down, which then is the only one started.
+            await connectAtStart({
+                folder: updater.folder(),
+                resume: (folder) =>
+                    resumeAtStart({
+                        ...reconnectSteps,
+                        folder,
+                        version: app.getVersion(),
+                        now: () => Date.now(),
+                        state: () => link.getState(),
+                        subscribe: (listener) => controller.subscribe(listener),
+                    }),
+                connectIfAsked: () => {
+                    if (global === null || !global.auto_connect) {
+                        return;
                     }
-                });
-            }
+                    const once = (state: LinkState): boolean => {
+                        if (state.link === "starting") {
+                            return false;
+                        }
+                        if (connectsAtStart(global, state.link === "ready" ? state.conn : null)) {
+                            connectFromTray(show, () => controller.connect());
+                        }
+                        return true;
+                    };
+                    if (!once(controller.getSnapshot().state)) {
+                        const stop = controller.subscribe((snapshot) => {
+                            if (once(snapshot.state)) {
+                                stop();
+                            }
+                        });
+                    }
+                },
+            });
         });
     }
 

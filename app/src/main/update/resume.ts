@@ -10,7 +10,7 @@ import type { LinkState } from "@shared/api";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { AfterUpdateNotice } from "@shared/updates";
 import { isProfileId } from "../channel/validate";
-import { parseVersion } from "./semver";
+import { isNewer, parseVersion } from "./semver";
 
 export const RESUME_NOTE = "resume.json";
 /** Far more than a note needs. Past this it is not read. */
@@ -108,7 +108,8 @@ export function planResume(note: ResumeNote, version: string, now: number): Resu
         return { notice: "stale", reconnect: false, profile: null };
     }
     return {
-        notice: version === note.target ? null : "unfinished",
+        // A newer version than the note's means the user has moved on themselves.
+        notice: version === note.target || isNewer(version, note.target) ? null : "unfinished",
         reconnect: note.connected,
         profile: note.profile,
     };
@@ -130,22 +131,28 @@ export interface ReconnectSteps {
  */
 export async function reconnectTo(profile: ProfileId | null, steps: ReconnectSteps): Promise<void> {
     if (profile === null) {
-        steps.say("reconnect_unknown");
+        tell(steps, "reconnect_unknown");
         return;
     }
     const ids = await steps.profileIds().catch(() => null);
     if (ids === null) {
-        steps.say("reconnect_unavailable");
+        tell(steps, "reconnect_unavailable");
         return;
     }
     if (!ids.includes(profile)) {
-        steps.say("profile_gone");
+        tell(steps, "profile_gone");
         return;
     }
     steps.show();
     if (!steps.connect(profile)) {
         steps.say("reconnect_busy");
     }
+}
+
+/** Says something, with the window forward: the app may have started in the tray. */
+function tell(steps: Pick<ReconnectSteps, "show" | "say">, notice: AfterUpdateNotice): void {
+    steps.show();
+    steps.say(notice);
 }
 
 /**
@@ -212,7 +219,7 @@ export async function resumeAtStart(steps: ResumeSteps): Promise<boolean> {
     }
     const plan = planResume(note, steps.version, steps.now());
     if (plan.notice !== null) {
-        steps.say(plan.notice);
+        tell(steps, plan.notice);
     }
     if (!plan.reconnect) {
         await clearNote(steps.folder);
@@ -224,7 +231,7 @@ export async function resumeAtStart(steps: ResumeSteps): Promise<boolean> {
         steps.serviceWaitMs ?? SERVICE_WAIT_MS,
     );
     if (!reached) {
-        steps.say("reconnect_unavailable");
+        tell(steps, "reconnect_unavailable");
         return false;
     }
     await clearNote(steps.folder);
@@ -233,6 +240,21 @@ export async function resumeAtStart(steps: ResumeSteps): Promise<boolean> {
         await reconnectTo(plan.profile, steps);
     }
     return true;
+}
+
+/**
+ * What a start does about connecting: comes back from an update if there is a
+ * note, and only if that did not deal with it, connects as the settings ask.
+ */
+export async function connectAtStart(steps: {
+    folder: string | null;
+    resume(folder: string): Promise<boolean>;
+    connectIfAsked(): void;
+}): Promise<void> {
+    const resumed = steps.folder !== null && (await steps.resume(steps.folder).catch(() => false));
+    if (!resumed) {
+        steps.connectIfAsked();
+    }
 }
 
 /** Removes copies of the installer left from earlier runs. Never fails. */

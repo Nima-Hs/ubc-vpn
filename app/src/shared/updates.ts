@@ -58,7 +58,7 @@ export type AfterUpdateNotice =
 
 export interface UpdateView {
     status: UpdateStatus;
-    /** Said until the next "Restart to update"; empty otherwise. */
+    /** Said until it is dismissed, a connection is made, or the next "Restart to update". */
     after: readonly AfterUpdateNotice[];
     /** Said after a "Restart to update" that did not install; `null` otherwise. */
     notice: InstallNotice | null;
@@ -77,6 +77,8 @@ export interface UpdatesApi {
      * one is ready. The outcome arrives through `onChange`.
      */
     install(): Promise<void>;
+    /** Puts away what the app had to say after an update. */
+    dismiss(): Promise<void>;
     onChange(listener: (view: UpdateView) => void): () => void;
 }
 
@@ -84,6 +86,7 @@ export const UPDATES_IPC = {
     get: "updates:get",
     checkNow: "updates:check-now",
     install: "updates:install",
+    dismiss: "updates:dismiss",
     /** From the main process: where updates now stand. */
     changed: "updates:changed",
 } as const;
