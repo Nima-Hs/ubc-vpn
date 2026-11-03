@@ -68,7 +68,7 @@ function steps(
         launchedPath?: string;
         launchedBytes?: Buffer;
         note?: unknown;
-        later?: () => void;
+        late?: string | null;
         reconnected?: string | null;
     } = {};
     const given: InstallSteps = {
@@ -79,9 +79,9 @@ function steps(
             done.push("disconnect");
             return options.down ?? "down";
         },
-        whenDownLater: (then) => {
+        disconnectRanLate: (profile) => {
             done.push("watch");
-            seen.later = then;
+            seen.late = profile;
         },
         launch: async (path) => {
             done.push("launch");
@@ -201,13 +201,22 @@ describe("restart to update", () => {
         expect(done).toEqual(["disconnect"]);
     });
 
-    it("brings the connection back if a disconnect that ran late finishes after all", async () => {
+    it("watches a disconnect that ran late, for that profile", async () => {
         const { given, done, seen } = steps({ connected: true, down: "late" });
         await expect(installUpdate(ready, given)).resolves.toBe("not_disconnected");
         expect(done).toEqual(["disconnect", "watch"]);
-        seen.later?.();
-        expect(done).toEqual(["disconnect", "watch", "reconnect"]);
-        expect(seen.reconnected).toBe(PROFILE);
+        expect(seen.late).toBe(PROFILE);
+    });
+
+    it("takes over a connection an earlier press took down late", async () => {
+        const { given, seen, done } = steps({ connected: false });
+        given.carried = { profile: "fedcba9876543210fedcba9876543210" };
+        await installUpdate(ready, given);
+        expect(done).toEqual(["disconnect", "launch", "quit"]);
+        expect(seen.note).toMatchObject({
+            connected: true,
+            profile: "fedcba9876543210fedcba9876543210",
+        });
     });
 });
 
@@ -238,12 +247,57 @@ describe("one install at a time, and only of a ready update", () => {
         const begin = vi.fn(() => ready);
         const makeSteps = vi.fn(() => steps().given);
         const updater = { beginInstall: begin, endInstall: () => {}, folder: () => null };
-        await createInstall(updater, makeSteps)();
+        await createInstall(updater, makeSteps, () => () => {})();
         expect(makeSteps).not.toHaveBeenCalled();
         expect(begin).not.toHaveBeenCalled();
         const able = { beginInstall: begin, endInstall: () => {}, folder: () => folder };
-        await createInstall(able, makeSteps)();
+        await createInstall(able, makeSteps, () => () => {})();
         expect(makeSteps).toHaveBeenCalledWith(folder);
+    });
+
+    it("brings the connection back when a late disconnect finishes", async () => {
+        const updater = { beginInstall: () => ready, endInstall: () => {}, folder: () => folder };
+        const first = steps({ connected: true, down: "late" });
+        let finished = () => {};
+        const install = createInstall(
+            updater,
+            () => first.given,
+            (then) => {
+                finished = then;
+                return () => {};
+            },
+        );
+        await install();
+        expect(first.done).toEqual(["disconnect"]);
+        finished();
+        expect(first.done).toEqual(["disconnect", "reconnect"]);
+        expect(first.seen.reconnected).toBe(PROFILE);
+    });
+
+    it("stops watching at a second press, which takes that connection over", async () => {
+        const updater = { beginInstall: () => ready, endInstall: () => {}, folder: () => folder };
+        const first = steps({ connected: true, down: "late" });
+        const second = steps({ connected: false });
+        const given = [first.given, second.given];
+        const stop = vi.fn();
+        let finished = () => {};
+        const install = createInstall(
+            updater,
+            () => given.shift() as InstallSteps,
+            (then) => {
+                finished = then;
+                return stop;
+            },
+        );
+        await install();
+        expect(stop).not.toHaveBeenCalled();
+        await install();
+        expect(stop).toHaveBeenCalledTimes(1);
+        expect(second.done).toEqual(["disconnect", "launch", "quit"]);
+        expect(second.seen.note).toMatchObject({ connected: true, profile: PROFILE });
+        // And a third has nothing to take over.
+        expect(first.done).not.toContain("reconnect");
+        void finished;
     });
 });
 
@@ -311,18 +365,19 @@ describe("how the setup program is started on Windows", () => {
         return { child, start: start as unknown as typeof spawn, calls: start };
     }
 
-    it("runs the launcher on its own, with the kept environment", async () => {
+    it("runs the launcher with the real options, from the one place they are", async () => {
         const { child, start, calls } = fakeSpawn();
         const launched = launchWindows(LAUNCHER, start)("x.exe");
         const [file, args, options] = calls.mock.calls[0] as unknown as [
             string,
             string[],
-            { env: Record<string, string>; detached: boolean; stdio: unknown },
+            Record<string, unknown>,
         ];
         const expected = windowsLaunch("x.exe", LAUNCHER);
         expect([file, args]).toEqual([expected.file, expected.args]);
-        expect(options.env).toEqual(expected.env);
-        expect(options.detached).toBe(true);
+        expect(options).toEqual({ ...expected.options, env: expected.env });
+        // PowerShell started detached exits at once and runs nothing.
+        expect(options).not.toHaveProperty("detached");
         child.stdout.emit("data", "started\r\n");
         await expect(launched).resolves.toBe("started");
         expect(child.unref).toHaveBeenCalled();
@@ -398,7 +453,13 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
 
     async function standIns(
         setupExit: number,
-        change: { limitMs?: number; fallbackMs?: number; setupBody?: string } = {},
+        change: {
+            limitMs?: number;
+            fallbackMs?: number;
+            appWaitMs?: number;
+            tell?: string;
+            setupBody?: string;
+        } = {},
     ) {
         const { setupBody = "", ...timing } = change;
         const run = join(folder, "run-standin");
@@ -413,7 +474,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         const app = join(folder, "app.mjs");
         await writeFile(
             app,
-            `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(appMark)}, "ran");\n`,
+            `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(appMark)}, String(Date.now()));\n`,
         );
         const script = launcherScript({ verb: "", setupArgs: "", appArgs: `"${app}"`, ...timing });
         const env = {
@@ -486,12 +547,70 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         await new Promise((done) => setTimeout(done, 4_000));
     }, 60_000);
 
-    it("starts nothing when there is no app left to start", async () => {
-        const { script, env, appMark } = await standIns(3);
+    it("tells the user when there is no app left to start", async () => {
+        const told = join(folder, "told");
+        const { script, env, appMark } = await standIns(3, {
+            appWaitMs: 100,
+            tell: `[System.IO.File]::WriteAllText('${told}', 'told')`,
+        });
         const { code } = runScript(script, { ...env, UBC_VPN_APP: join(folder, "gone.exe") });
         expect(code).toBe(0);
-        await new Promise((done) => setTimeout(done, 500));
+        expect(existsSync(told)).toBe(true);
         expect(existsSync(appMark)).toBe(false);
+    }, 60_000);
+
+    it("tells the user nothing when the app starts", async () => {
+        const told = join(folder, "told");
+        const { script, env, appMark } = await standIns(0, {
+            tell: `[System.IO.File]::WriteAllText('${told}', 'told')`,
+        });
+        runScript(script, env);
+        await expect.poll(() => existsSync(appMark), { timeout: 15_000 }).toBe(true);
+        expect(existsSync(told)).toBe(false);
+    }, 60_000);
+
+    it("has a message for the user in the production script", () => {
+        expect(launcherScript()).toContain("WScript.Shell).Popup('UBC VPN could not be started");
+    });
+
+    it("waits for the program file to arrive, if setup has moved it", async () => {
+        const later = join(folder, "arrives.cmd");
+        const { script, env, setupMark } = await standIns(0, { appWaitMs: 20_000 });
+        const { spawn: start } = await import("node:child_process");
+        const running = start(
+            POWERSHELL.file,
+            ["-NoProfile", "-NonInteractive", "-Command", script],
+            {
+                env: {
+                    SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+                    ...env,
+                    UBC_VPN_APP: later,
+                },
+                stdio: "ignore",
+                windowsHide: true,
+            },
+        );
+        const ended = new Promise((done) => running.on("close", done));
+        await expect.poll(() => existsSync(setupMark), { timeout: 15_000 }).toBe(true);
+        await new Promise((done) => setTimeout(done, 1_500));
+        const arrived = join(folder, "arrived");
+        await writeFile(later, `@echo off\r\necho ran> "${arrived}"\r\n`);
+        await ended;
+        await expect.poll(() => existsSync(arrived), { timeout: 15_000 }).toBe(true);
+    }, 60_000);
+
+    it("waits for the app to have quit before starting it again", async () => {
+        const { script, env, appMark } = await standIns(0);
+        const { spawn: start } = await import("node:child_process");
+        const app = start(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], {
+            stdio: "ignore",
+        });
+        const gone = new Promise<number>((done) => app.on("close", () => done(Date.now())));
+        const { code } = runScript(script, { ...env, UBC_VPN_APP_PID: String(app.pid) });
+        expect(code).toBe(0);
+        const quitAt = await gone;
+        await expect.poll(() => existsSync(appMark), { timeout: 15_000 }).toBe(true);
+        expect(Number(readFileSync(appMark, "utf8"))).toBeGreaterThanOrEqual(quitAt - 500);
     }, 60_000);
 });
 

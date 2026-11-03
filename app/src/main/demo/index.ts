@@ -21,6 +21,9 @@ import { createDemoLogs, DEMO_LOG_SCENARIOS } from "./demo-logs";
 import { createDemoProfiles, DEMO_PROFILES_SCENARIOS } from "./demo-profiles";
 import { createDemoSettings, DEMO_SETTINGS_SCENARIOS } from "./demo-settings";
 
+/** The scenario where the app has something to say after an update. */
+const UPDATE_NOTICE_SCENARIO = "update-did-not-finish";
+
 /** What the demo needs from the app that is made after it. */
 export interface DemoApp {
     devServerUrl: string | undefined;
@@ -30,6 +33,8 @@ export interface DemoApp {
     tunnelSwitch: () => TunnelSwitch | undefined;
     /** The last request to start at sign-in, which a demo only records. */
     loginItem: () => LoginItem | null;
+    /** Has the updater say what it says after an update, or take that back. */
+    saySomethingAboutAnUpdate: (say: boolean) => void;
 }
 
 /** The fakes a demo build uses in place of the service and the client. */
@@ -69,9 +74,11 @@ export function createDemo(app: DemoApp): Demo {
             ...DEMO_SETTINGS_SCENARIOS,
             ...DEMO_LOG_SCENARIOS,
             ...DEMO_PROFILES_SCENARIOS,
+            UPDATE_NOTICE_SCENARIO,
         ]);
         handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
             if (typeof name === "string") {
+                app.saySomethingAboutAnUpdate(name === UPDATE_NOTICE_SCENARIO);
                 // A login state, or a connection state with no login under way.
                 demoLogin?.setScenario(name);
                 demo.setScenario(name);

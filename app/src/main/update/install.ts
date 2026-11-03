@@ -41,8 +41,10 @@ export interface InstallSteps {
     /** The profile that connection is for, or `null` if the app does not know. */
     connectedProfile(): ProfileId | null;
     disconnect(): Promise<Disconnected>;
-    /** Calls `then` if a disconnect that ran late finishes after all. */
-    whenDownLater(then: () => void): void;
+    /** A disconnect ran late: watches for it to finish, then brings this profile back. */
+    disconnectRanLate(profile: ProfileId | null): void;
+    /** The connection an earlier press took down late, which this one takes over. */
+    carried?: { profile: ProfileId | null } | undefined;
     launch: Launcher;
     /** Brings back the connection for this profile, and says so if it cannot. */
     reconnect(profile: ProfileId | null): void;
@@ -95,15 +97,15 @@ export async function installUpdate(
     ready: ReadyInstaller,
     steps: InstallSteps,
 ): Promise<InstallNotice | null> {
-    const wasConnected = steps.connected();
-    const profile = wasConnected ? steps.connectedProfile() : null;
+    const wasConnected = steps.carried !== undefined || steps.connected();
+    const profile = steps.carried?.profile ?? (wasConnected ? steps.connectedProfile() : null);
     if (wasConnected) {
         const down = await steps.disconnect();
         if (down === "refused") {
             return "not_disconnected";
         }
         if (down === "late") {
-            steps.whenDownLater(() => steps.reconnect(profile));
+            steps.disconnectRanLate(profile);
             return "not_disconnected";
         }
     }
@@ -146,6 +148,11 @@ export async function installUpdate(
 export const SETUP_LIMIT_MS = 10 * 60 * 1000;
 /** How long it waits instead if the setup program cannot be waited for. */
 export const SETUP_FALLBACK_MS = 2 * 60 * 1000;
+/** How long it waits for the program file to be there, if it is not. */
+export const APP_FILE_WAIT_MS = 2 * 60 * 1000;
+/** How it tells the user if it cannot start the app. */
+const TELL_USER =
+    "[void](New-Object -ComObject WScript.Shell).Popup('UBC VPN could not be started after the update. Install it again from the releases page on GitHub.', 0, 'UBC VPN', 48)";
 /** Said by the launcher once the setup program has been started. */
 const STARTED_LINE = "started";
 
@@ -167,6 +174,9 @@ const STARTED_LINE = "started";
  *   the setup program cannot be waited for, the launcher waits a fixed time
  *   instead, so that a running setup has a chance to finish. If it is still
  *   running at the limit, the app is started all the same.
+ * - **If there is no program to start,** because a failed install took it away,
+ *   it waits a little in case the file is on its way, then shows a message: with
+ *   no app, nothing else can say so.
  * - **It deletes its copy of the installer** only once the setup program has
  *   ended. Otherwise the copy may be in use, and a later start clears it.
  */
@@ -177,6 +187,8 @@ export function launcherScript(
         appArgs?: string;
         limitMs?: number;
         fallbackMs?: number;
+        appWaitMs?: number;
+        tell?: string;
     } = {},
 ): string {
     const options = {
@@ -185,6 +197,8 @@ export function launcherScript(
         appArgs: "",
         limitMs: SETUP_LIMIT_MS,
         fallbackMs: SETUP_FALLBACK_MS,
+        appWaitMs: APP_FILE_WAIT_MS,
+        tell: TELL_USER,
         ...change,
     };
     return [
@@ -208,13 +222,19 @@ export function launcherScript(
         `  try { [System.Threading.Thread]::Sleep(${options.fallbackMs}) } catch {}`,
         "}",
         "try { [System.Diagnostics.Process]::GetProcessById([int]$env:UBC_VPN_APP_PID).WaitForExit(30000) | Out-Null } catch {}",
-        "if ([System.IO.File]::Exists($env:UBC_VPN_APP)) {",
+        // Setup may have moved the program and not yet copied the new one.
+        `$deadline = [DateTime]::UtcNow.AddMilliseconds(${options.appWaitMs})`,
+        "while (-not [System.IO.File]::Exists($env:UBC_VPN_APP) -and [DateTime]::UtcNow -lt $deadline) { [System.Threading.Thread]::Sleep(1000) }",
+        "$running = $false",
+        "try {",
         "  $app = [System.Diagnostics.ProcessStartInfo]::new()",
         "  $app.FileName = $env:UBC_VPN_APP",
         `  $app.Arguments = '${options.appArgs}'`,
         "  $app.UseShellExecute = $false",
-        "  try { [System.Diagnostics.Process]::Start($app) | Out-Null } catch {}",
-        "}",
+        "  $running = $null -ne [System.Diagnostics.Process]::Start($app)",
+        "} catch {}",
+        // The one thing left that can tell the user: the app is not there to.
+        `if (-not $running) { try { ${options.tell} } catch {} }`,
         "if ($ended) { try { [System.IO.Directory]::Delete([System.IO.Path]::GetDirectoryName($env:UBC_VPN_INSTALLER), $true) } catch {} }",
         "exit 0",
     ].join("\n");
@@ -261,7 +281,30 @@ export interface WindowsLauncher {
     env: NodeJS.ProcessEnv;
 }
 
-/** The command that starts the launcher for the installer at `path`. */
+/**
+ * The first stage, which is what is spawned. A process Node starts with
+ * `detached` has no console, and PowerShell then exits at once and runs nothing.
+ * One started without it is in a job that ends with the app, so it would not
+ * outlive the app. But what that process itself starts is outside the job. So
+ * this stage only starts the launcher, which inherits its standard output, and
+ * passes on its exit code for as long as the app is there to read it.
+ */
+export function firstStage(script: string): string {
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    return [
+        "try {",
+        "  $inner = [System.Diagnostics.ProcessStartInfo]::new()",
+        "  $inner.FileName = [System.IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')",
+        `  $inner.Arguments = '-NoProfile -NonInteractive -EncodedCommand ${encoded}'`,
+        "  $inner.UseShellExecute = $false",
+        "  $launcher = [System.Diagnostics.Process]::Start($inner)",
+        "  $launcher.WaitForExit()",
+        "  exit $launcher.ExitCode",
+        "} catch { exit 1 }",
+    ].join("\n");
+}
+
+/** The command that starts the launcher for the installer at `path`, and how. */
 export function windowsLaunch(path: string, launcher: WindowsLauncher, script = launcherScript()) {
     const env: Record<string, string> = {};
     for (const name of KEPT_ENVIRONMENT) {
@@ -272,7 +315,13 @@ export function windowsLaunch(path: string, launcher: WindowsLauncher, script = 
     }
     return {
         file: join(launcher.systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-        args: ["-NoProfile", "-NonInteractive", "-Command", script],
+        args: ["-NoProfile", "-NonInteractive", "-Command", firstStage(script)],
+        options: {
+            // Not the app's folder, which the setup program must be able to remove.
+            cwd: join(launcher.systemRoot, "System32"),
+            stdio: ["ignore", "pipe", "ignore"] as ["ignore", "pipe", "ignore"],
+            windowsHide: true,
+        },
         env: {
             ...env,
             SystemRoot: launcher.systemRoot,
@@ -292,14 +341,8 @@ export function launchedFrom(code: number | null): Launched {
 export function launchWindows(launcher: WindowsLauncher, start: typeof spawn = spawn): Launcher {
     return (path) =>
         new Promise((done) => {
-            const { file, args, env } = windowsLaunch(path, launcher);
-            // On its own, as it must outlive the app.
-            const child = start(file, args, {
-                env,
-                detached: true,
-                stdio: ["ignore", "pipe", "ignore"],
-                windowsHide: true,
-            });
+            const { file, args, env, options } = windowsLaunch(path, launcher);
+            const child = start(file, args, { ...options, env });
             child.on("error", () => done("failed"));
             child.on("close", (code) => done(launchedFrom(code)));
             let said = "";
@@ -342,16 +385,37 @@ export async function restartToUpdate(
     updater.endInstall(notice);
 }
 
-/** The button's action: nothing in a copy that cannot update, which has no folder. */
+/**
+ * The button's action: nothing in a copy that cannot update, which has no
+ * folder. While a disconnect that ran late is being watched, one more press takes
+ * over that connection and the watch ends, so nothing reconnects under the prompt.
+ */
 export function createInstall(
     updater: InstallingUpdater & { folder(): string | null },
-    steps: (folder: string) => InstallSteps,
+    steps: (folder: string) => Omit<InstallSteps, "disconnectRanLate" | "carried">,
+    watchDown: (then: () => void) => () => void,
 ): () => Promise<void> {
+    let late: { profile: ProfileId | null; stop: () => void } | null = null;
     return async () => {
         const folder = updater.folder();
-        if (folder !== null) {
-            await restartToUpdate(updater, steps(folder));
+        if (folder === null) {
+            return;
         }
+        const given = steps(folder);
+        const carried = late === null ? undefined : { profile: late.profile };
+        late?.stop();
+        late = null;
+        await restartToUpdate(updater, {
+            ...given,
+            carried,
+            disconnectRanLate: (profile) => {
+                const stop = watchDown(() => {
+                    late = null;
+                    given.reconnect(profile);
+                });
+                late = { profile, stop };
+            },
+        });
     };
 }
 
@@ -418,22 +482,29 @@ export function disconnectAndWait(
     });
 }
 
-/** Calls `then` if the service says the connection is gone within the limit. */
+/**
+ * Calls `then` if the service says the connection is gone within the limit.
+ * Returns what stops the watch.
+ */
 export function whenDown(
     link: { isDisconnected(): boolean; subscribe(listener: () => void): () => void },
     then: () => void,
     limitMs = LATE_DISCONNECT_LIMIT_MS,
-): void {
+): () => void {
     if (link.isDisconnected()) {
         then();
-        return;
+        return () => {};
     }
-    const timer = setTimeout(() => stop(), limitMs);
+    const end = () => {
+        clearTimeout(timer);
+        stop();
+    };
+    const timer = setTimeout(end, limitMs);
     const stop = link.subscribe(() => {
         if (link.isDisconnected()) {
-            clearTimeout(timer);
-            stop();
+            end();
             then();
         }
     });
+    return end;
 }

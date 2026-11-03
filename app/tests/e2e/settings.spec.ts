@@ -42,6 +42,19 @@ test("settings: automatic updates are on, and a test run says it cannot update i
     await tab("Connection").click();
 });
 
+test("after an update: what the app has to say is on the first screen, until dismissed", async () => {
+    await scenario("update-did-not-finish");
+    await tab("Connection").click();
+    const said = page.getByText("The update didn't finish");
+    await expect(said).toBeVisible();
+    await tab("Settings").click();
+    await expect(said).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss" }).click();
+    await expect(said).toHaveCount(0);
+    await tab("Connection").click();
+    await expect(said).toHaveCount(0);
+});
+
 test("settings: starting in the tray registers the app with --hidden", async () => {
     test.skip(process.platform === "linux", "Linux has no start at sign-in yet");
     await scenario("settings");

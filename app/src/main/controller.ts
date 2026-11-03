@@ -126,6 +126,11 @@ export class Controller {
     }
 
     private forgetEndedConnection(state: LinkState): void {
+        // Only the service can say a connection ended. A bridge that restarts
+        // says nothing about the tunnel, which outlives it.
+        if (state.link !== "ready") {
+            return;
+        }
         const up = tunnelIsUp(state);
         if (this.wasUp && !up) {
             this.startedFor = null;
