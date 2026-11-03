@@ -181,7 +181,7 @@ mod tests {
     fn consoles(test: &str) -> bool {
         let ci = std::env::var_os("GITHUB_ACTIONS").is_some();
         match ci {
-            true => println!("RAN: {test}"),
+            true => ubc_vpn_test_lines::whole_line!("RAN: {test}"),
             false => println!("SKIPPED: {test} (it would open a window; CI runs it)"),
         }
         ci

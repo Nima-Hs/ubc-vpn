@@ -1,0 +1,11 @@
+[package]
+name = "ubc-vpn-test-lines"
+description = "Writes the lines CI reads from a test's output, whole. For tests only; nothing shipped depends on it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

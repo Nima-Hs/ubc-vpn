@@ -24,7 +24,8 @@
 set -euo pipefail
 
 fail() { echo "error: $*" >&2; exit 1; }
-ran() { echo "RAN: $1"; }
+# In one write and on a line of its own: the workflow requires the whole line.
+ran() { printf '\nRAN: %s\n' "$1"; }
 
 [ $# -eq 1 ] || fail "usage: systemd.sh <folder>"
 [ "${UBC_VPN_TEST_THROWAWAY_MACHINE:-}" = 1 ] || fail "only for a throwaway CI runner"

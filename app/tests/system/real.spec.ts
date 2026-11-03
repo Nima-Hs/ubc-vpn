@@ -116,8 +116,8 @@ let app: ElectronApplication | undefined;
 let page: Page;
 let shots = 0;
 
-/** A line in the test's own output: what the workflow reads to see that it ran. */
-const tell = (line: string) => void process.stdout.write(`${line}\n`);
+/** A whole line in the test's own output: what the workflow reads to see that it ran. */
+const tell = (line: string) => void process.stdout.write(`\n${line}\n`);
 
 function makeHome(): void {
     // Only this user may read or write them: the client refuses a settings

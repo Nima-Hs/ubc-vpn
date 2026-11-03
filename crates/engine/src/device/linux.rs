@@ -232,7 +232,7 @@ mod tests {
             return;
         }
         assert_eq!(open().err(), Some(TunnelError::Failed));
-        println!("RAN: device refused without the right to make one");
+        ubc_vpn_test_lines::whole_line!("RAN: device refused without the right to make one");
     }
 
     /// What the shell started from this process was given: the targets
@@ -282,7 +282,7 @@ mod tests {
             !link.exists(),
             "{name:?} is left after its descriptor closed"
         );
-        println!("RAN: device is close-on-exec and goes on close");
+        ubc_vpn_test_lines::whole_line!("RAN: device is close-on-exec and goes on close");
     }
 
     // Security rule: every vhost-net descriptor is sealed, one closed since

@@ -53,6 +53,13 @@ else
   fail "each missing name should be listed"; cat "$work/out"
 fi
 
+printf '%s\n' "RAN: full tunnel" "test other ... RAN: dns" "ok" "RAN: events" > "$work/mid.log"
+if [ "$(check "$lists" "RAN: " "$work/mid.log")" = 1 ] && grep -qF "The test 'dns'" "$work/out"; then
+  pass "a line said in the middle of another does not count"
+else
+  fail "'test other ... RAN: dns' must not satisfy 'dns'"; cat "$work/out"
+fi
+
 if [ "$(check "$lists" "RAN AS ROOT: " "$work/all.log")" = 1 ]; then
   pass "the prefix is part of the line"
 else
@@ -128,6 +135,34 @@ for dir in "$here"/*/*/; do
     fail "${dir#"$here"/} is not well formed:"; cat "$work/out"
   fi
 done
+
+# A plain print can land in the middle of the harness's own line, where the
+# check does not count it, so the test fails at random: tests say these lines
+# with ubc_vpn_test_lines::whole_line!. <folder>: the status, with the plain
+# prints it found in $work/out.
+plain() {
+  local status=0
+  grep -rnE 'print(ln)?!\("(\\n)?RAN( AS ROOT)?:' --include='*.rs' "$1" > "$work/out" || status=$?
+  echo "$status"
+}
+mkdir -p "$work/plain"
+printf '%s\n' 'fn a() { println!("RAN: a"); }' > "$work/plain/a.rs"
+if [ "$(plain "$work/plain")" = 0 ]; then
+  pass "a plain print of a RAN line is found"
+else
+  fail "a plain print of a RAN line should be found"
+fi
+printf '%s\n' 'fn a() { whole_line!("RAN: a"); println!("CHILD RAN: a"); }' > "$work/plain/a.rs"
+if [ "$(plain "$work/plain")" = 1 ]; then
+  pass "other lines are not plain prints of a RAN line"
+else
+  fail "only plain prints of a RAN line should be found"; cat "$work/out"
+fi
+if [ "$(plain "$here/../../crates")" = 1 ]; then
+  pass "no test prints a RAN line plainly"
+else
+  fail "say these with ubc_vpn_test_lines::whole_line!:"; cat "$work/out"
+fi
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failed." >&2

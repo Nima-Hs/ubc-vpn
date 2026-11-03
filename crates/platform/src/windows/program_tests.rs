@@ -191,7 +191,7 @@ fn a_safe_folder_inside_an_open_one_is_refused() {
         panic!("a folder under one every user may change passed");
     };
     assert!(why.contains(&*open.to_string_lossy()), "{why}");
-    println!("RAN: program folder");
+    ubc_vpn_test_lines::whole_line!("RAN: program folder");
 }
 
 /// A new folder under ProgramData that only SYSTEM and the administrators
@@ -252,7 +252,7 @@ fn a_file_others_could_change_is_refused() {
         why.contains("libsomething.dll") && why.contains("S-1-5-32-545"),
         "{why}"
     );
-    println!("RAN: program file");
+    ubc_vpn_test_lines::whole_line!("RAN: program file");
 }
 
 // Security rule: a link in the path is refused, even one an administrator
@@ -282,7 +282,7 @@ fn a_link_in_the_path_is_refused() {
         panic!("a path through a link passed");
     };
     assert!(why.contains("is a link"), "{why}");
-    println!("RAN: program link");
+    ubc_vpn_test_lines::whole_line!("RAN: program link");
 }
 
 // Security rule: the service's own folder is held to every right that
@@ -312,5 +312,5 @@ fn a_folder_users_may_add_to_is_refused() {
         why.contains(&*named) && why.contains("S-1-5-32-545"),
         "{why}"
     );
-    println!("RAN: program add");
+    ubc_vpn_test_lines::whole_line!("RAN: program add");
 }

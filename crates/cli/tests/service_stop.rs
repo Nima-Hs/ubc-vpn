@@ -166,5 +166,5 @@ fn sigterm_removes_everything_before_the_service_exits() {
     bridge.until(r#"{"type":"service_unavailable"}"#);
     client.end();
     drop(home);
-    println!("RAN: service stop");
+    ubc_vpn_test_lines::whole_line!("RAN: service stop");
 }

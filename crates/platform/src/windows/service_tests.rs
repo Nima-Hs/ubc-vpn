@@ -51,7 +51,7 @@ fn skip(what: &str) {
 
 /// CI searches the log for this line to prove the elevated test ran.
 fn ran(test: &str) {
-    println!("RAN: {test}");
+    ubc_vpn_test_lines::whole_line!("RAN: {test}");
 }
 
 // Run by `cargo test`, this is not under the service manager, and `run` must

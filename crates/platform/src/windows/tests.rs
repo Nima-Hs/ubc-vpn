@@ -297,7 +297,7 @@ fn a_low_integrity_program_cannot_even_read() {
 /// CI searches the log for these lines to prove that the tests which can
 /// be skipped ran.
 fn ran(test: &str) {
-    println!("RAN: {test}");
+    ubc_vpn_test_lines::whole_line!("RAN: {test}");
 }
 
 // The whole contract, with a real second user. It runs against the installed

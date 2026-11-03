@@ -282,7 +282,7 @@ mod tests {
             return;
         }
         assert!(child("console", CREATE_NEW_CONSOLE).contains("CHILD RAN: console"));
-        println!("RAN: console");
+        ubc_vpn_test_lines::whole_line!("RAN: console");
     }
 
     fn mode(input: &Handle) -> u32 {

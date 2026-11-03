@@ -159,7 +159,7 @@ fn a_rejected_certificate_means_nothing_is_sent() {
     assert!(seen.hashes[0].starts_with("pin-sha256:") && seen.hashes[0].len() == 55);
     assert!(seen.fields.is_empty() && !handle.certificate_accepted());
     assert_eq!(gateway.requests(), Vec::<String>::new());
-    println!("RAN: handle rejects");
+    ubc_vpn_test_lines::whole_line!("RAN: handle rejects");
 }
 
 // The whole path through the binding: resolve, judge, fill in, cookie. This
@@ -210,7 +210,7 @@ fn an_accepted_certificate_and_a_filled_form_give_a_cookie() {
             .iter()
             .all(|request| request.contains(r#""listener": "main""#))
     );
-    println!("RAN: handle logs in");
+    ubc_vpn_test_lines::whole_line!("RAN: handle logs in");
 }
 
 // Security rule: the record that the certificate callback accepted is
@@ -418,7 +418,7 @@ fn a_handed_over_device_is_closed_with_the_handle_and_not_before() {
         Ok(0),
         "left open after the handle was freed"
     );
-    println!("RAN: handle closes a handed-over device");
+    ubc_vpn_test_lines::whole_line!("RAN: handle closes a handed-over device");
 }
 
 // The callbacks are freed when the handle is, and not before: the library
@@ -460,7 +460,7 @@ fn a_certificate_the_system_trusts_is_still_judged_and_nothing_is_sent() {
     assert_eq!(seen.hashes.len(), 1, "the judge was not asked");
     assert!(seen.fields.is_empty() && handle.cookie().is_none());
     assert_eq!(gateway.requests(), Vec::<String>::new());
-    println!("RAN: handle judges a trusted certificate");
+    ubc_vpn_test_lines::whole_line!("RAN: handle judges a trusted certificate");
 }
 
 // What a form says reaches the callback as the gateway sent it: its message,
@@ -603,7 +603,7 @@ fn a_cookie_opens_a_tunnel_connection_and_the_assignment_is_read() {
     );
     assert!(seen.lock().unwrap().fields.is_empty());
     assert_eq!(connects(&gateway), (1, 1));
-    println!("RAN: handle opens a tunnel connection");
+    ubc_vpn_test_lines::whole_line!("RAN: handle opens a tunnel connection");
 }
 
 // Security rule: the record that the certificate callback accepted is

@@ -308,5 +308,5 @@ fn the_service_and_the_client_work_together() {
     for secret in [PASSWORD, CODE, COOKIE, "wrong-password-0000"] {
         assert!(!said.contains(secret), "{secret} was written:\n{said}");
     }
-    println!("RAN: system");
+    ubc_vpn_test_lines::whole_line!("RAN: system");
 }

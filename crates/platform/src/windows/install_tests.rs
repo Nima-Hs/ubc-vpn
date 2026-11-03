@@ -342,7 +342,7 @@ fn installs_updates_and_uninstalls() {
     remove_data_folder(&data).unwrap();
     assert!(!data.exists());
     remove_data_folder(&data).unwrap();
-    println!("RAN: install");
+    ubc_vpn_test_lines::whole_line!("RAN: install");
 }
 
 // A service that is still starting takes no stop request. Removing it then
@@ -389,7 +389,7 @@ fn a_service_still_starting_is_stopped_and_removed() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
-    println!("RAN: install while starting");
+    ubc_vpn_test_lines::whole_line!("RAN: install while starting");
 }
 
 // A service this run created, and could not then set up, is deleted, so a
@@ -421,5 +421,5 @@ fn a_service_it_cannot_set_up_is_removed_again() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
-    println!("RAN: install unconfigured");
+    ubc_vpn_test_lines::whole_line!("RAN: install unconfigured");
 }

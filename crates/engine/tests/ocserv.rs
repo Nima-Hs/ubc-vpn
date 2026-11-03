@@ -233,7 +233,7 @@ fn a_real_gateway_takes_the_login_and_the_cookie_for_a_tunnel() {
     let connected = lines.contains(&"Got CONNECT response: HTTP/1.1 200 CONNECTED")
         && lines.iter().any(|line| line.starts_with("CSTP connected."));
     assert!(connected, "the engine's connection was not taken:\n{said}");
-    println!("RAN: ocserv takes a login and a tunnel connection");
+    ubc_vpn_test_lines::whole_line!("RAN: ocserv takes a login and a tunnel connection");
 }
 
 // Security rule: no blind retries, against a real gateway too. A wrong

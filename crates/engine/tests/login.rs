@@ -176,7 +176,7 @@ fn a_good_login_returns_the_cookie_and_the_address() {
         !attempt.lines.lock().unwrap().is_empty(),
         "nothing was logged"
     );
-    println!("RAN: engine logs in");
+    ubc_vpn_test_lines::whole_line!("RAN: engine logs in");
 }
 
 // Security rule: the cookie, all of it, and every answer are registered with
@@ -224,7 +224,7 @@ fn a_wrong_pin_sends_nothing_and_asks_nothing() {
     assert_eq!(attempt.result, Err(LoginError::PinMismatch));
     assert!(attempt.prompts.is_empty());
     assert_eq!(stand_in.requests(), Vec::<String>::new());
-    println!("RAN: engine refuses a wrong pin");
+    ubc_vpn_test_lines::whole_line!("RAN: engine refuses a wrong pin");
 }
 
 // Security rule: turning the system's trust off is what keeps the password
@@ -241,7 +241,7 @@ fn a_certificate_the_system_trusts_still_needs_the_pin() {
     assert_eq!(attempt.result, Err(LoginError::PinMismatch));
     assert!(attempt.prompts.is_empty());
     assert_eq!(stand_in.requests(), Vec::<String>::new());
-    println!("RAN: engine refuses a trusted certificate");
+    ubc_vpn_test_lines::whole_line!("RAN: engine refuses a trusted certificate");
 }
 
 // Security rule: no blind retries. A form shown again is a rejection: the
@@ -442,7 +442,7 @@ fn a_login_offers_no_single_sign_on() {
     // The first request is the one that says what this client can do.
     assert!(requests[0].contains("capabilities"), "{requests:?}");
     assert_eq!(sent(&stand_in, "single-sign-on"), 0, "{requests:?}");
-    println!("RAN: engine offers no single sign-on");
+    ubc_vpn_test_lines::whole_line!("RAN: engine offers no single sign-on");
 }
 
 // Security rule: no single sign-on and no external browser. A gateway that
@@ -530,7 +530,7 @@ fn a_single_sign_on_form_fails_at_once_and_nothing_listens() {
     assert_eq!(ended, Some((Err(LoginError::Failed), 0)));
     // Nothing went to the login page the gateway named.
     assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
-    println!("RAN: engine refuses single sign-on");
+    ubc_vpn_test_lines::whole_line!("RAN: engine refuses single sign-on");
 }
 
 // Security rule: one handle for one attempt. A handle asked for a cookie a
@@ -732,7 +732,7 @@ fn a_host_scan_stub_on_the_gateway_is_fetched_and_not_run() {
     assert!(requests[1].contains("/CACHE/stub"), "{requests:?}");
     assert_eq!(sent(&stand_in, NAME), 0);
     assert_eq!(sent(&stand_in, r#""listener": "other""#), 0);
-    println!("RAN: engine fetches a host-scan stub and runs nothing");
+    ubc_vpn_test_lines::whole_line!("RAN: engine fetches a host-scan stub and runs nothing");
 }
 
 // A login that is waiting on the gateway stops when another thread cancels
@@ -852,7 +852,7 @@ fn a_key_log_named_in_the_environment_is_never_written() {
         "the control wrote no key log: the test cannot see one"
     );
     assert!(!run(false), "a TLS key log was written");
-    println!("RAN: engine writes no key log");
+    ubc_vpn_test_lines::whole_line!("RAN: engine writes no key log");
 }
 
 // A cancel that is already set stops the login before anything is contacted.

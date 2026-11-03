@@ -30,3 +30,4 @@ workspace = true
 [dev-dependencies]
 ubc-vpn-engine = { workspace = true, features = ["fake"] }
 ubc-vpn-platform = { workspace = true, features = ["fake"] }
+ubc-vpn-test-lines.workspace = true
