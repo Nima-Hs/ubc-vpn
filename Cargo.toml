@@ -16,6 +16,7 @@ publish = false
 ubc-vpn-core = { path = "crates/core" }
 ubc-vpn-engine = { path = "crates/engine" }
 ubc-vpn-platform = { path = "crates/platform" }
+ubc-vpn-test-lines = { path = "crates/test-lines" }
 
 # Debug and test builds keep only line tables for our own crates, enough for
 # file and line in a panic's backtrace, and no debug info for dependencies.

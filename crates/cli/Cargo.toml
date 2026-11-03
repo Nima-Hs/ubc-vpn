@@ -35,3 +35,4 @@ workspace = true
 ubc-vpn-engine = { workspace = true, features = ["fake"] }
 ubc-vpn-platform = { workspace = true, features = ["fake"] }
 ubc-vpn-service = { path = "../service" }
+ubc-vpn-test-lines.workspace = true

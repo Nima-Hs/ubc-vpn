@@ -289,5 +289,5 @@ fn an_interrupt_leaves_the_terminal_and_the_service_as_they_should_be() {
     for secret in [PASSWORD, CODE, BLIND] {
         assert!(!said.contains(secret), "{secret} was written:\n{said}");
     }
-    println!("RAN: interrupts");
+    ubc_vpn_test_lines::whole_line!("RAN: interrupts");
 }

@@ -354,5 +354,5 @@ fn the_real_keyring_saves_reads_and_forgets() {
     assert!(secrets.load(PROFILE).unwrap().is_none());
     secrets.forget_all().unwrap();
     assert!(secrets.load(OTHER).unwrap().is_none());
-    println!("RAN: real keyring");
+    ubc_vpn_test_lines::whole_line!("RAN: real keyring");
 }

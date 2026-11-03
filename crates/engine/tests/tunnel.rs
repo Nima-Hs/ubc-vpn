@@ -197,7 +197,7 @@ fn a_wrong_pin_sends_nothing() {
     assert_eq!(failed(&opened), TunnelError::PinMismatch);
     assert_eq!(stand_in.requests(), Vec::<String>::new());
     assert!(opened.events.try_recv().is_err());
-    println!("RAN: tunnel refuses a wrong pin");
+    ubc_vpn_test_lines::whole_line!("RAN: tunnel refuses a wrong pin");
 }
 
 // Security rule: system trust is off on the tunnel's handle too. A
@@ -219,7 +219,7 @@ fn a_certificate_the_system_trusts_still_needs_the_pin() {
     );
     assert_eq!(failed(&opened), TunnelError::PinMismatch);
     assert_eq!(stand_in.requests(), Vec::<String>::new());
-    println!("RAN: tunnel refuses a trusted certificate");
+    ubc_vpn_test_lines::whole_line!("RAN: tunnel refuses a trusted certificate");
 }
 
 // A session as a login returns it opens a tunnel connection. A login returns
@@ -401,7 +401,7 @@ fn a_tunnel_asks_for_no_dtls_and_tries_none() {
         .iter()
         .filter(|line| line.contains(r#""listener": "udp""#));
     assert_eq!(udp.count(), 0, "{requests:?}");
-    println!("RAN: tunnel asks for no dtls");
+    ubc_vpn_test_lines::whole_line!("RAN: tunnel asks for no dtls");
 }
 
 // On macOS only the superuser may make a `utun` device, and the ordinary
@@ -458,7 +458,7 @@ fn refused_at_the_device_step(engine: &OpenConnect, library: Library, stand_in: 
     assert_eq!(failed(&opened), TunnelError::Failed);
     assert_eq!(connects(stand_in), (1, 1));
     assert!(opened.events.try_recv().is_err());
-    println!("RAN: tunnel refuses at the device step");
+    ubc_vpn_test_lines::whole_line!("RAN: tunnel refuses at the device step");
 }
 
 /// Tests that make a device, which run only where the workflow allows it:
@@ -740,7 +740,7 @@ mod device {
         tunnel.close(CloseMode::KeepSession);
         assert_eq!(events.try_recv(), Ok(TunnelEvent::Closed));
         assert!(events.try_recv().is_err(), "more than one event");
-        println!("RAN: tunnel makes and removes a device");
+        ubc_vpn_test_lines::whole_line!("RAN: tunnel makes and removes a device");
     }
 
     // Logging off tells the gateway, with a disconnect packet; keeping the
@@ -765,7 +765,7 @@ mod device {
         let sent = logged(&stand_in, Duration::from_secs(5), one);
         assert!(sent, "{:?}", stand_in.requests());
         assert_eq!(connects(&stand_in), (3, 3));
-        println!("RAN: tunnel logs off only when asked");
+        ubc_vpn_test_lines::whole_line!("RAN: tunnel logs off only when asked");
     }
 
     // Security rule: a session the gateway ends is "log in again", sent once
@@ -831,7 +831,7 @@ mod device {
         assert!(!exists(&name), "{name:?} is left");
         // The name on a line of its own, which the workflow matches whole.
         println!("the lost gateway was reported after {waited:?}");
-        println!("RAN: tunnel reports a lost gateway");
+        ubc_vpn_test_lines::whole_line!("RAN: tunnel reports a lost gateway");
     }
 
     // A cancel that comes once the device exists, while `open` is still
@@ -876,7 +876,9 @@ mod device {
                     assert!(sent, "{:?}", stand_in.requests());
                     std::thread::sleep(Duration::from_secs(1));
                     assert!(opened.events.try_recv().is_err(), "an event was sent");
-                    println!("RAN: tunnel cancelled once its device exists, try {attempt}");
+                    ubc_vpn_test_lines::whole_line!(
+                        "RAN: tunnel cancelled once its device exists, try {attempt}"
+                    );
                     return;
                 }
                 Ok(_) => end(opened, Some(CloseMode::KeepSession)),
@@ -952,7 +954,7 @@ mod device {
             assert!(!listed.lines().any(|line| line == file), "{file}: {listed}");
         }
         end(opened, Some(CloseMode::LogOff));
-        println!("RAN: tunnel gives a child no device descriptor");
+        ubc_vpn_test_lines::whole_line!("RAN: tunnel gives a child no device descriptor");
     }
 
     // Security rule: a program the process starts while a tunnel runs holds
@@ -1007,7 +1009,7 @@ mod device {
         assert!(sockets.contains(&control.as_raw_fd()), "{listed}");
         assert!(!sockets.contains(&device), "{device}: {listed}");
         end(opened, Some(CloseMode::LogOff));
-        println!("RAN: tunnel gives a child no device descriptor");
+        ubc_vpn_test_lines::whole_line!("RAN: tunnel gives a child no device descriptor");
     }
 
     // Packets really pass through the `utun` device both ways, which shows
@@ -1067,6 +1069,6 @@ mod device {
             "{requests:?}"
         );
         end(opened, Some(CloseMode::LogOff));
-        println!("RAN: tunnel passes traffic through the device");
+        ubc_vpn_test_lines::whole_line!("RAN: tunnel passes traffic through the device");
     }
 }

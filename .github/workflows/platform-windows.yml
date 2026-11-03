@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - crates/platform/**
+      - crates/test-lines/**
       - crates/core/**
       - native/windows/wintun.pin
       - Cargo.lock
@@ -24,6 +25,7 @@ on:
     branches: [main]
     paths:
       - crates/platform/**
+      - crates/test-lines/**
       - crates/core/**
       - native/windows/wintun.pin
       - Cargo.lock

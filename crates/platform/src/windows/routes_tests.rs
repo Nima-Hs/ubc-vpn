@@ -33,7 +33,7 @@ pub(super) fn skip(what: &str) {
 /// CI searches the log for these lines to prove the tests that can be
 /// skipped ran.
 pub(super) fn ran(test: &str) {
-    println!("RAN: {test}");
+    ubc_vpn_test_lines::whole_line!("RAN: {test}");
 }
 
 /// One routing test at a time: they share the gateway's address and the

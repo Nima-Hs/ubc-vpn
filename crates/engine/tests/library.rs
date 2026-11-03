@@ -303,7 +303,7 @@ fn a_planted_copy_is_not_loaded_and_does_not_run() {
         set.push((SEARCH, &path));
     }
     let report = run(libs, &planted, &set);
-    println!("RAN: {report} from {LIBS}");
+    ubc_vpn_test_lines::whole_line!("RAN: {report} from {LIBS}");
     let version = report.split('"').nth(1).unwrap_or_default();
     assert!(
         report.starts_with("Ok(") && ffi::is_pinned(version),

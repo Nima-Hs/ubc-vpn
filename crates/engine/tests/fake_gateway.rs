@@ -24,7 +24,7 @@ fn login(scenario: &str) -> Option<(Value, Value, Gateway)> {
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("{scenario} {path}: {e}: {line}"))
     };
     let (first, second) = (reply("/", ""), reply("/auth", ANSWERS));
-    println!("RAN: gateway {scenario}");
+    ubc_vpn_test_lines::whole_line!("RAN: gateway {scenario}");
     Some((first, second, gateway))
 }
 
@@ -209,5 +209,5 @@ fn sms_refuses_the_text_request_and_takes_a_texted_code() {
         "{texted}"
     );
     assert!(gives_cookie(&reply(&xml("someone@12345678"))));
-    println!("RAN: gateway sms");
+    ubc_vpn_test_lines::whole_line!("RAN: gateway sms");
 }

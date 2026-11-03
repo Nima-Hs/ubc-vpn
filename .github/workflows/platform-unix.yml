@@ -12,6 +12,7 @@ on:
   pull_request:
     paths:
       - crates/platform/**
+      - crates/test-lines/**
       - crates/core/**
       # The programs this workflow builds and looks into on macOS.
       - crates/service/**
@@ -33,6 +34,7 @@ on:
     branches: [main]
     paths:
       - crates/platform/**
+      - crates/test-lines/**
       - crates/core/**
       # The programs this workflow builds and looks into on macOS.
       - crates/service/**

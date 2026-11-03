@@ -242,6 +242,7 @@ crates/
   platform/         the OS seam: routes, DNS, tunnel, service setup; real and fake
   service/          the privileged service program
   cli/              the command-line client
+  test-lines/       writes the lines CI requires from a test's output; tests only
 app/                Electron app
 native/             pinned build recipes and patches for libopenconnect, per OS
 packaging/          installer scripts and service definitions, per OS

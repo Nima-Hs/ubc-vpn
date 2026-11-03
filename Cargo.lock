@@ -1171,6 +1171,7 @@ dependencies = [
  "ubc-vpn-engine",
  "ubc-vpn-platform",
  "ubc-vpn-service",
+ "ubc-vpn-test-lines",
 ]
 
 [[package]]
@@ -1190,6 +1191,7 @@ dependencies = [
  "cc",
  "serde_json",
  "ubc-vpn-core",
+ "ubc-vpn-test-lines",
 ]
 
 [[package]]
@@ -1200,6 +1202,7 @@ dependencies = [
  "libc",
  "rustix",
  "ubc-vpn-core",
+ "ubc-vpn-test-lines",
  "windows-sys 0.61.2",
 ]
 
@@ -1211,7 +1214,12 @@ dependencies = [
  "ubc-vpn-core",
  "ubc-vpn-engine",
  "ubc-vpn-platform",
+ "ubc-vpn-test-lines",
 ]
+
+[[package]]
+name = "ubc-vpn-test-lines"
+version = "0.1.0"
 
 [[package]]
 name = "uds_windows"

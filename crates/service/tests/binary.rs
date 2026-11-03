@@ -403,7 +403,7 @@ fn the_service_starts_with_the_bundled_runtime_beside_it() {
     let (refused, stderr) = run_program(&broken, &[], None);
     let _ = std::fs::remove_dir_all(broken.parent().unwrap());
     assert!(refused && !stderr.contains("ubc-vpn-service: "), "{stderr}");
-    println!("RAN: bundled runtime");
+    ubc_vpn_test_lines::whole_line!("RAN: bundled runtime");
 }
 
 // Security rule: a build with dev mode never installs or removes the

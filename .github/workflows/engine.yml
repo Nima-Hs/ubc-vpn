@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - crates/engine/**
+      - crates/test-lines/**
       - native/linux/test-packages.sh
       - crates/core/**
       - crates/platform/**
@@ -28,6 +29,7 @@ on:
     branches: [main]
     paths:
       - crates/engine/**
+      - crates/test-lines/**
       - native/linux/test-packages.sh
       - crates/core/**
       - crates/platform/**

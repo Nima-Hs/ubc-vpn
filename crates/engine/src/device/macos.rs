@@ -243,7 +243,7 @@ mod tests {
             return;
         }
         assert_eq!(open().err(), Some(TunnelError::Failed));
-        println!("RAN: device refused without the right to make one");
+        ubc_vpn_test_lines::whole_line!("RAN: device refused without the right to make one");
     }
 
     /// The numbers of the sockets the shell started from this process was
@@ -304,7 +304,7 @@ mod tests {
             !exists(&name),
             "{name:?} is left after its descriptor closed"
         );
-        println!("RAN: device is close-on-exec and goes on close");
+        ubc_vpn_test_lines::whole_line!("RAN: device is close-on-exec and goes on close");
     }
 
     // A made-up interface is gone at once; waiting for it returns without
