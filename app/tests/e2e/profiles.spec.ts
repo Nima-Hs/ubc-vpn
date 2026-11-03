@@ -1,7 +1,7 @@
 // Profiles, in Settings, on the main screen and beside the password question.
 
 import { expect, test } from "@playwright/test";
-import { heading, page, scenario, shoot, tab, useApp } from "./fixture";
+import { heading, page, said, scenario, shoot, tab, useApp } from "./fixture";
 
 useApp();
 
@@ -41,9 +41,13 @@ test("profiles: added, renamed, used and deleted, with the last one kept", async
     await name.fill("Lab 2");
     await page.getByRole("button", { name: "Rename" }).click();
     await expect(profileRow("Lab 2")).toBeVisible();
-    await page.getByLabel("CWL username").fill("someone.lab@app");
+    // Typed with the Duo suffix, as before there was a choice: the suffix
+    // becomes the method, and the username is kept without it.
+    await page.getByLabel("CWL username").fill("someone.lab@call");
     await page.getByRole("button", { name: "Save username" }).click();
-    await expect(profileRow("Lab 2")).toContainText("someone.lab@app");
+    await expect(profileRow("Lab 2")).toContainText("someone.lab");
+    await expect(profileRow("Lab 2")).not.toContainText("@call");
+    await expect(page.getByRole("radio", { name: /Phone call/ })).toBeChecked();
     await shoot("profiles-editing");
     await page.getByRole("button", { name: "Done" }).click();
 
@@ -78,6 +82,50 @@ test("profiles: added, renamed, used and deleted, with the last one kept", async
     await expect(profileRow("UBC VPN")).toContainText("In use");
     await scenario("settings");
     await tab("Connection").click();
+});
+
+test("the Duo method: chosen in the editor and on the main screen, and named while waiting", async () => {
+    await scenario("settings");
+    await scenario("disconnected");
+    await tab("Settings").click();
+    await page.getByRole("button", { name: "Edit UBC VPN" }).click();
+    const methods = page.getByRole("group", { name: "Duo method" });
+    // Push unless chosen, each with what it means.
+    await expect(methods.getByRole("radio", { name: /Duo push/ })).toBeChecked();
+    await expect(methods).toContainText("(faculty and staff)");
+    await expect(methods).toContainText("(type the 6-digit code each time)");
+    await methods.getByRole("radio", { name: /Phone call/ }).click();
+    await expect(methods.getByRole("radio", { name: /Phone call/ })).toBeChecked();
+    await shoot("profiles-duo-method");
+    await page.getByRole("button", { name: "Done" }).click();
+
+    // The main screen shows the same choice, and changes it in the profile.
+    await tab("Connection").click();
+    const quick = page.getByLabel("Duo", { exact: true });
+    await expect(quick).toHaveValue("call");
+    await quick.selectOption("sms");
+    await expect(quick).toHaveValue("sms");
+    await shoot("duo-switcher");
+    await tab("Settings").click();
+    await page.getByRole("button", { name: "Edit UBC VPN" }).click();
+    await expect(page.getByRole("radio", { name: /Text message/ })).toBeChecked();
+    await page.getByRole("button", { name: "Done" }).click();
+    await tab("Connection").click();
+
+    // While UBC is answered, the hint is the method's.
+    await scenario("login-working");
+    await expect(heading()).toHaveText("Logging in");
+    await expect(said("Enter the code from your text message.")).toBeVisible();
+    await scenario("disconnected");
+    await quick.selectOption("call");
+    await scenario("login-working");
+    await expect(said("Answer the Duo call.")).toBeVisible();
+    await scenario("disconnected");
+    await quick.selectOption("push");
+    await scenario("login-working");
+    await expect(said("Approve the Duo push on your phone.")).toBeVisible();
+    await scenario("settings");
+    await scenario("disconnected");
 });
 
 test("profiles: chosen from the main screen, for the next connect while connected", async () => {

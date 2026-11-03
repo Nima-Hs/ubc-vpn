@@ -3,9 +3,10 @@
 // made here or from the tray.
 
 import type { ProfilesError, ProfilesResult } from "@shared/profiles";
+import type { DuoMethod } from "@shared/protocol/DuoMethod";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import { useEffect, useState } from "react";
-import { api } from "@/lib/store";
+import { api, useSnapshot } from "@/lib/store";
 
 export type HeldProfiles =
     | { state: "loading" }
@@ -45,4 +46,19 @@ export function useProfiles(): { held: HeldProfiles; reload: () => void } {
     }, [attempt]);
 
     return { held, reload: () => setAttempt((before) => before + 1) };
+}
+
+/**
+ * The Duo method of the profile a login is for: the one in use when it
+ * started, or the active one. `undefined` until the profiles are read, or
+ * in a build without them.
+ */
+export function useLoginMethod(): DuoMethod | null | undefined {
+    const { held } = useProfiles();
+    const loginProfile = useSnapshot((snapshot) => snapshot.loginProfile);
+    if (held.state !== "ready") {
+        return undefined;
+    }
+    const bound = loginProfile ?? held.view.global.active_profile;
+    return held.view.profiles.find((profile) => profile.id === bound)?.duo_method;
 }

@@ -2,6 +2,7 @@
 // is shown, and why a login failed.
 
 import type { LinkState, LoginPrompt, LoginState } from "../api";
+import type { DuoMethod } from "../protocol/DuoMethod";
 import type { LoginErrorCode } from "../protocol/LoginErrorCode";
 import type { PromptKind } from "../protocol/PromptKind";
 import { FAILURES, type Failure } from "./failures";
@@ -11,6 +12,67 @@ export const LOGIN_WORKING = {
     title: "Logging in",
     body: "Waiting for UBC to answer. If you approve logins on your phone, check it now.",
 } as const;
+
+/** The Duo methods, in the order they are offered. */
+export const DUO_METHODS: readonly DuoMethod[] = ["push", "call", "sms", "passcode"];
+
+/**
+ * How a login is confirmed with Duo, as the profile editor and the main
+ * screen offer it. The same words on every system.
+ */
+export const DUO = {
+    legend: "Duo method",
+    /** Beside the quick choice on the main screen. */
+    short: "Duo",
+    options: {
+        push: { label: "Duo push", short: "Push", hint: "Approve the login in Duo Mobile." },
+        call: { label: "Phone call", short: "Call", hint: "(faculty and staff)" },
+        sms: { label: "Text message", short: "Text", hint: "Get a code by text message." },
+        passcode: {
+            label: "Passcode",
+            short: "Passcode",
+            hint: "(type the 6-digit code each time)",
+        },
+    },
+    /** A username saved with an @ part UBC does not document: sent as it is. */
+    asTyped: {
+        label: "As typed in the username",
+        short: "As typed",
+        hint: "The username already says how to confirm.",
+    },
+    /** Under the quick choice once one is saved. */
+    saved: "Saved for this profile.",
+} as const;
+
+/** The words for a method, or for a username sent as typed. */
+export function describeDuo(method: DuoMethod | null): {
+    label: string;
+    short: string;
+    hint: string;
+} {
+    return method === null ? DUO.asTyped : DUO.options[method];
+}
+
+/**
+ * The words while the gateway is being answered, for the Duo method the
+ * login uses: what to do on the phone, if anything. `undefined` when the
+ * method is not known.
+ */
+export function describeWorking(method: DuoMethod | null | undefined): {
+    title: string;
+    body: string;
+} {
+    switch (method) {
+        case "push":
+            return { title: LOGIN_WORKING.title, body: "Approve the Duo push on your phone." };
+        case "call":
+            return { title: LOGIN_WORKING.title, body: "Answer the Duo call." };
+        case "sms":
+            return { title: LOGIN_WORKING.title, body: "Enter the code from your text message." };
+        default:
+            return LOGIN_WORKING;
+    }
+}
 
 /**
  * Whether the login has the screen. It does whenever one is under way, with
@@ -100,7 +162,7 @@ const LOGIN_FAILURES: Record<LoginErrorCode, Failure> = {
     // made up.
     check_username: {
         title: "Check your username",
-        body: "UBC did not take the login. Check your username: it is your CWL username, your department and the way to confirm, as CWL.dept@method, for example jdoe.dept@app.",
+        body: "UBC did not take the login. Check your username and Duo method in Settings: the username is your CWL username and department, for example jdoe.dept.",
         retry: true,
     },
     pin_mismatch: FAILURES.pin_mismatch,
@@ -147,11 +209,19 @@ export function describeLoginFailure(
     return { ...failure, ...(detail !== "" && { detail }) };
 }
 
-/** A login under way, in one sentence or two, for a screen reader. */
-export function loginAnnouncement(login: Exclude<LoginState, { phase: "idle" }>): string {
+/**
+ * A login under way, in one sentence or two, for a screen reader. `method`
+ * is the Duo method the login uses, when known.
+ */
+export function loginAnnouncement(
+    login: Exclude<LoginState, { phase: "idle" }>,
+    method?: DuoMethod | null,
+): string {
     switch (login.phase) {
-        case "working":
-            return `${LOGIN_WORKING.title}. ${LOGIN_WORKING.body}`;
+        case "working": {
+            const copy = describeWorking(method);
+            return `${copy.title}. ${copy.body}`;
+        }
         case "cancelling":
             return `${LOGIN_CANCELLING.title}. ${LOGIN_CANCELLING.body}`;
         case "prompt": {

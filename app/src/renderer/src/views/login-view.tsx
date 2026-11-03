@@ -3,9 +3,9 @@ import {
     describeLoginFailure,
     describePrompt,
     describeReveal,
+    describeWorking,
     isSecretKind,
     LOGIN_CANCELLING,
-    LOGIN_WORKING,
     revealAfter,
 } from "@shared/copy";
 import { type FormEvent, useEffect, useRef, useState } from "react";
@@ -15,6 +15,7 @@ import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
 import { TextField } from "@/components/ui/text-field";
+import { useLoginMethod } from "@/lib/profiles";
 import { api } from "@/lib/store";
 
 type Active = Exclude<LoginState, { phase: "idle" }>;
@@ -121,6 +122,8 @@ function Prompt({ prompt }: { prompt: LoginPrompt }) {
 
 /** A login under way: a question, a wait, or what went wrong. */
 export function LoginView({ login }: { login: Active }) {
+    // What to do on the phone while UBC is answered, for the Duo method.
+    const working = describeWorking(useLoginMethod());
     // Escape gives the login up from anywhere on the screen.
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
@@ -159,9 +162,9 @@ export function LoginView({ login }: { login: Active }) {
                 <section className="flex shrink-0 animate-arrive flex-col gap-2">
                     <div className="flex items-center gap-3">
                         <StatusIndicator tone="busy" size="lg" />
-                        <Heading>{LOGIN_WORKING.title}</Heading>
+                        <Heading>{working.title}</Heading>
                     </div>
-                    <Text tone="secondary">{LOGIN_WORKING.body}</Text>
+                    <Text tone="secondary">{working.body}</Text>
                 </section>
                 <div className="flex min-h-24 flex-1 flex-col" />
                 <Button block size="lg" className="shrink-0" onClick={() => void api.cancelLogin()}>

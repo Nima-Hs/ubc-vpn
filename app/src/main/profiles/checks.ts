@@ -1,10 +1,14 @@
 // The checks on what the Settings screen sends, before anything else
 // happens. No Electron import, so they can be tested on their own.
 
-import { START_MODES, startupSupported } from "@shared/profiles";
+import { type ProfileChange, START_MODES, startupSupported } from "@shared/profiles";
+import type { DuoMethod } from "@shared/protocol/DuoMethod";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { StartMode } from "@shared/protocol/StartMode";
-import { isProfileId } from "../channel/validate";
+import { isDuoMethod, isProfileId } from "../channel/validate";
+
+/** The fields `update` may change; anything else is refused. */
+const UPDATE_FIELDS: readonly string[] = ["username", "duo_method", "save_password"];
 
 /** The arguments of a startup change, or a refusal. */
 export function takeStartup(
@@ -54,9 +58,7 @@ export function takeRename(args: readonly unknown[]): [ProfileId, string] {
 }
 
 /** A profile and what to change in it, or a refusal. */
-export function takeUpdate(
-    args: readonly unknown[],
-): [ProfileId, { username?: string | null; save_password?: boolean }] {
+export function takeUpdate(args: readonly unknown[]): [ProfileId, ProfileChange] {
     const [id, change] = args;
     if (
         args.length !== 2 ||
@@ -68,11 +70,16 @@ export function takeUpdate(
         throw new Error("refused");
     }
     const fields = Object.keys(change);
-    const { username, save_password: savePassword } = change as Record<string, unknown>;
+    const {
+        username,
+        duo_method: duoMethod,
+        save_password: savePassword,
+    } = change as Record<string, unknown>;
     if (
         fields.length === 0 ||
-        fields.some((field) => field !== "username" && field !== "save_password") ||
+        fields.some((field) => !UPDATE_FIELDS.includes(field)) ||
         (fields.includes("username") && username !== null && !isText(username)) ||
+        (fields.includes("duo_method") && !isDuoMethod(duoMethod)) ||
         (fields.includes("save_password") && typeof savePassword !== "boolean")
     ) {
         throw new Error("refused");
@@ -81,6 +88,7 @@ export function takeUpdate(
         id,
         {
             ...(fields.includes("username") && { username: username as string | null }),
+            ...(fields.includes("duo_method") && { duo_method: duoMethod as DuoMethod | null }),
             ...(fields.includes("save_password") && { save_password: savePassword as boolean }),
         },
     ];

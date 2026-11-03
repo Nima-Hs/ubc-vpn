@@ -9,6 +9,7 @@
 // only whether one is saved.
 
 import type { SettingsError } from "./api";
+import type { DuoMethod } from "./protocol/DuoMethod";
 import type { ProfileFailureCode } from "./protocol/ProfileFailureCode";
 import type { ProfileId } from "./protocol/ProfileId";
 import type { ProfilesView } from "./protocol/ProfilesView";
@@ -31,17 +32,26 @@ export interface ProfilesApi {
     /** A new profile with this name and nothing else yet. */
     create(name: string): Promise<ProfilesResult>;
     rename(id: ProfileId, name: string): Promise<ProfilesResult>;
-    /** Changes the username, whether the password is saved, or both. Either forgets a saved password. */
-    update(
-        id: ProfileId,
-        change: { username?: string | null; save_password?: boolean },
-    ): Promise<ProfilesResult>;
+    /**
+     * Changes the username, the Duo method, whether the password is saved, or
+     * any of them. A new username, or saving turned off, forgets a saved
+     * password; a new method keeps it.
+     */
+    update(id: ProfileId, change: ProfileChange): Promise<ProfilesResult>;
     /** Deletes a profile, and its saved password. The last one cannot be deleted. */
     remove(id: ProfileId): Promise<ProfilesResult>;
     /** Makes a profile the one the next connect uses. */
     switchTo(id: ProfileId): Promise<ProfilesResult>;
     /** Calls `listener` whenever the profiles change, here or from the tray. */
     onChange(listener: (view: ProfilesView) => void): () => void;
+}
+
+/** What `update` may change. A field left out is not changed. */
+export interface ProfileChange {
+    username?: string | null;
+    /** `null` sends the username as typed. */
+    duo_method?: DuoMethod | null;
+    save_password?: boolean;
 }
 
 export const PROFILES_IPC = {

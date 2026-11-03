@@ -1,9 +1,13 @@
 import type { LinkState, LoginState } from "@shared/api";
 import {
+    DUO,
+    DUO_METHODS,
     describe as describe_,
+    describeDuo,
     describeLoginFailure,
     describePrompt,
     describeReveal,
+    describeWorking,
     isSecretKind,
     LOGIN_WORKING,
     loginAnnouncement,
@@ -137,7 +141,7 @@ describe("the words around a login", () => {
             },
             { phase: "failed", code: "wrong_password", message: "" },
         ];
-        expect(states.map(loginAnnouncement)).toEqual([
+        expect(states.map((state) => loginAnnouncement(state))).toEqual([
             "Logging in. Waiting for UBC to answer. If you approve logins on your phone, check it now.",
             "Cancelling. Stopping the login. This takes a moment.",
             "Your password. It is sent to UBC and nowhere else.",
@@ -145,6 +149,29 @@ describe("the words around a login", () => {
             "Your password. Login failed.",
             expect.stringContaining("Login refused. UBC did not accept"),
         ]);
+    });
+
+    it("says what to do on the phone for each Duo method while waiting", () => {
+        expect(describeWorking("push").body).toBe("Approve the Duo push on your phone.");
+        expect(describeWorking("call").body).toBe("Answer the Duo call.");
+        expect(describeWorking("sms").body).toBe("Enter the code from your text message.");
+        // A passcode was typed already, and an unknown method promises nothing.
+        expect(describeWorking("passcode")).toEqual(LOGIN_WORKING);
+        expect(describeWorking(null)).toEqual(LOGIN_WORKING);
+        expect(describeWorking(undefined)).toEqual(LOGIN_WORKING);
+        expect(loginAnnouncement({ phase: "working" }, "call")).toBe(
+            "Logging in. Answer the Duo call.",
+        );
+    });
+
+    it("names every Duo method, push first, with the owner's short notes", () => {
+        expect(DUO_METHODS).toEqual(["push", "call", "sms", "passcode"]);
+        expect(describeDuo("push").label).toBe("Duo push");
+        expect(describeDuo("call").hint).toBe("(faculty and staff)");
+        expect(describeDuo("passcode").hint).toBe("(type the 6-digit code each time)");
+        expect(describeDuo(null)).toEqual(DUO.asTyped);
+        // No example tells the user to type the method into the username.
+        expect(describeLoginFailure("check_username", "").body).not.toContain("@");
     });
 });
 

@@ -210,6 +210,19 @@ describe("settings set-tunnel", () => {
         expect(isProfilesView({ ...VIEW, full_tunnel: "forbidden" })).toBe(true);
     });
 
+    it("needs each profile's Duo method to be one, or null for as typed", () => {
+        const withMethod = (duo_method: unknown) => ({
+            ...VIEW,
+            profiles: VIEW.profiles.map((profile) => ({ ...profile, duo_method })),
+        });
+        for (const method of ["push", "call", "sms", "passcode", null]) {
+            expect(isProfilesView(withMethod(method)), String(method)).toBe(true);
+        }
+        for (const method of ["app", "", 1, undefined]) {
+            expect(isProfilesView(withMethod(method)), String(method)).toBe(false);
+        }
+    });
+
     it("knows every reply the contract names, and nothing else", () => {
         const ok = (live: unknown) => ({ type: "ok", tunnel: "split", live });
         for (const live of [

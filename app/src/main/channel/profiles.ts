@@ -9,7 +9,7 @@
 // the interface is given them, as `settings.ts` does. No command ever takes a
 // password: the client refuses unknown fields, and none is ever sent.
 
-import type { ProfilesError, ProfilesResult } from "@shared/profiles";
+import type { ProfileChange, ProfilesError, ProfilesResult } from "@shared/profiles";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import type { ProfilesView } from "@shared/protocol/ProfilesView";
 import type { RouteSet } from "@shared/protocol/RouteSet";
@@ -21,6 +21,7 @@ import { encodeLine } from "./framing";
 import { OneLineCalls, type OneLineOptions } from "./one-line";
 import { MAX_SHOWN_LENGTH } from "./settings";
 import {
+    isDuoMethod,
     isProfileFailure,
     isProfileId,
     isProfilesView,
@@ -47,7 +48,7 @@ export interface ProfilesService {
     /** A new profile with this name and nothing else: no username, no routes, no saved password. */
     create(name: string): Promise<ProfilesResult>;
     rename(id: ProfileId, name: string): Promise<ProfilesResult>;
-    /** Changes the username, whether the password is saved, or both. Either change forgets a saved password. */
+    /** Changes the username, the Duo method, whether the password is saved, or any of them. */
     update(id: ProfileId, change: ProfileChange): Promise<ProfilesResult>;
     /** Deletes a profile and forgets its saved password. The last one cannot be deleted. */
     remove(id: ProfileId): Promise<ProfilesResult>;
@@ -62,11 +63,7 @@ export interface ProfilesService {
     stop(): void;
 }
 
-/** What `profiles update` may change. A field left out is not changed. */
-export interface ProfileChange {
-    username?: string | null;
-    save_password?: boolean;
-}
+export type { ProfileChange };
 
 /** Each command, as its fixed arguments. */
 export const PROFILES_ARGS = {
@@ -194,10 +191,16 @@ export class ProfilesRunner implements ProfilesService {
     }
 
     update(id: ProfileId, change: ProfileChange): Promise<ProfilesResult> {
-        // Only the two fields the contract names, whatever else was passed.
+        // Only the fields the contract names, whatever else was passed.
         const input: Record<string, unknown> = { id };
         if (change.username !== undefined) {
             input.username = change.username;
+        }
+        if (change.duo_method !== undefined) {
+            if (!isDuoMethod(change.duo_method)) {
+                return Promise.resolve({ ok: false, error: "bad_input" });
+            }
+            input.duo_method = change.duo_method;
         }
         if (change.save_password !== undefined) {
             input.save_password = change.save_password;

@@ -1069,6 +1069,18 @@ describe("how the client is started", () => {
         ).toMatchObject({ args: ["connect", "--json"], dev: false });
     });
 
+    // Every connect the app starts, by hand or by itself at sign-in, uses the
+    // Duo method saved in the profile: it never names one for itself.
+    it("never overrides the saved Duo method", () => {
+        const where = { resourcesPath: "/opt/app/resources", platform: "linux" as const };
+        for (const env of [{}, { UBC_VPN_DEV: "1" }]) {
+            for (const isPackaged of [true, false]) {
+                const { args } = connectCommand({ isPackaged }, { ...where, env });
+                expect(args).not.toContain("--duo");
+            }
+        }
+    });
+
     it("gets the dev-mode variables only in dev mode", async () => {
         const spawned = vi.mocked(spawn);
         const env = { ...process.env, XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/someone" };
