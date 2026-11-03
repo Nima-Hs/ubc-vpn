@@ -3,8 +3,9 @@
 # of the Ubuntu archive: ocserv for the native Linux workflow's probe and the
 # engine's ocserv tests (crates/engine/tests/ocserv/start.sh), and the D-Bus
 # headers and pkg-config that building the command-line client on Linux
-# needs (its keyring links the system's libdbus-1 at run time), and the
-# ar, tar and xz that fpm writes the Linux .deb with.
+# needs (its keyring links the system's libdbus-1 at run time), the ar, tar
+# and xz that fpm writes the Linux .deb with, and rpm, whose rpmbuild the
+# Linux installer workflow builds the .rpm with.
 #
 # Only for a throwaway CI runner on Ubuntu 22.04 or 24.04: it fetches
 # package lists as root and installs packages. Never run it on a machine
@@ -27,6 +28,7 @@ declare -A PINNED_jammy=(
     [ocserv]=1.1.3-1
     [pkg-config]=0.29.2-1ubuntu3
     [libdbus-1-dev]=1.12.20-2ubuntu4.1
+    [rpm]=4.17.0+dfsg1-4build1
     # The packaging tools, below.
     [binutils]=2.38-4ubuntu2.12
     [binutils-common]=2.38-4ubuntu2.12

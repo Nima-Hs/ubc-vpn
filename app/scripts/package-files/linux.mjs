@@ -1,7 +1,7 @@
 // What scripts/check-package.mjs requires of the packaged Linux app: the
 // folder electron-builder made (dist/linux-unpacked) or the folder it was
 // installed to (/opt/UBC VPN), and, given electron-builder's output folder,
-// the .deb in it. Paths are relative to the app folder.
+// the .deb and the .rpm in it. Paths are relative to the app folder.
 //
 // The states are written out here, not read from electron-builder.linux.yml,
 // so a change to that file cannot also change what the check accepts. The
@@ -69,7 +69,7 @@ export const LEFTOVER_FILES = ["resources/default_app.asar", "version"];
 /** Where the app's code would be if it were outside the archive. */
 export const UNPACKED_APP = "resources/app";
 
-/** The .deb's name for the package. */
+/** The packages' name. */
 const PACKAGE = "ubc-vpn";
 
 /**
@@ -95,15 +95,34 @@ const DEB_DEPENDS = [
     "libc6 (>= 2.34)",
 ];
 
+/** The .rpm's requirements, in the same order, as `rpm --requires` lists them (in any order). */
+const RPM_REQUIRES = [
+    "gtk3",
+    "libnotify",
+    "nss",
+    "libXScrnSaver",
+    "(libXtst or libXtst6)",
+    "xdg-utils",
+    "at-spi2-core",
+    "(libuuid or libuuid1)",
+    "mesa-libgbm",
+    "alsa-lib",
+    "systemd-resolved",
+    "dbus-libs",
+    "gnutls >= 3.7.3",
+    "zlib",
+    "glibc >= 2.34",
+];
+
 /** Where the packages put the app, and the names electron-builder fills in. */
 const TEMPLATE_NAMES = { executable: PROGRAM, sanitizedProductName: "UBC VPN" };
 
 /** The command-line client's link (decision G19), and what it points to. */
-const CLIENT_LINK = "./usr/bin/ubc-vpn";
+const CLIENT_LINK = "/usr/bin/ubc-vpn";
 const CLIENT = "/opt/UBC VPN/resources/bin/ubc-vpn";
 
 /** The library, as the folder check requires it: a file, never a link. */
-const LIBRARY = "./opt/UBC VPN/resources/bin/libopenconnect.so.5";
+const LIBRARY = "/opt/UBC VPN/resources/bin/libopenconnect.so.5";
 
 /**
  * electron-builder's own install script `name` (after-install or
@@ -149,7 +168,9 @@ function debFiles(deb) {
             throw new Error(`dpkg-deb listed a line this check cannot read: ${line}`);
         }
         const [, mode, owner, rest] = entry;
-        const [path, target] = mode.startsWith("l") ? rest.split(" -> ") : [rest];
+        const [listed, target] = mode.startsWith("l") ? rest.split(" -> ") : [rest];
+        // From `/`, as rpm lists them, without the trailing slash of a folder.
+        const path = listed.replace(/^\./, "").replace(/(.)\/$/, "$1") || "/";
         files.set(path, { mode, owner, target });
     }
     return files;
@@ -202,32 +223,102 @@ function checkDeb(deb) {
         rmSync(control, { recursive: true, force: true });
     }
 
-    const files = debFiles(deb);
+    return [...problems, ...checkFiles(".deb", debFiles(deb))];
+}
+
+/**
+ * What every package's files must be, by path from `/` (mode as `ls`
+ * shows it, owner as user/group, link target): root's, changeable by root
+ * alone, the client's link, and the library a file.
+ */
+function checkFiles(kind, files) {
+    const problems = [];
     for (const [path, file] of files) {
         // fpm writes owners by number, which dpkg-deb lists as 0/0.
         if (file.owner !== "root/root" && file.owner !== "0/0") {
-            problems.push(`${path} in the .deb belongs to ${file.owner}, not root`);
+            problems.push(`${path} in the ${kind} belongs to ${file.owner}, not root`);
         }
         // Only root may change what it installs (scripts/after-pack.cjs).
         if (!file.mode.startsWith("l") && (file.mode[5] === "w" || file.mode[8] === "w")) {
-            problems.push(`${path} in the .deb can be changed by others (${file.mode})`);
+            problems.push(`${path} in the ${kind} can be changed by others (${file.mode})`);
         }
     }
     const link = files.get(CLIENT_LINK);
     if (!link?.mode.startsWith("l") || link.target !== CLIENT) {
-        problems.push(`${CLIENT_LINK} in the .deb is not a link to ${CLIENT}`);
+        problems.push(`${CLIENT_LINK} in the ${kind} is not a link to ${CLIENT}`);
     }
     if (!files.get(LIBRARY)?.mode.startsWith("-")) {
-        problems.push(`${LIBRARY} in the .deb is not a file`);
+        problems.push(`${LIBRARY} in the ${kind} is not a file`);
     }
     return problems;
 }
 
+/** rpm's answer to a query of the package `rpm`. */
+function rpmQuery(rpm, ...args) {
+    return execFileSync("rpm", ["--query", "--package", ...args, rpm], { encoding: "utf8" });
+}
+
+function checkRpm(rpm) {
+    const problems = [];
+    const name = rpmQuery(rpm, "--queryformat", "%{NAME}");
+    if (name !== PACKAGE) {
+        problems.push(`the .rpm is named ${name}, not ${PACKAGE}`);
+    }
+    // rpm adds requirements of its own (rpmlib, the scripts' shell), so
+    // ours must all be there and nothing else of a package's.
+    const requires = rpmQuery(rpm, "--requires")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("rpmlib(") && !line.startsWith("/"))
+        .sort();
+    if (requires.join(", ") !== [...RPM_REQUIRES].sort().join(", ")) {
+        problems.push(`the .rpm requires ${requires.join(", ")}, not ${RPM_REQUIRES.join(", ")}`);
+    }
+    const configs = rpmQuery(rpm, "--configfiles").trim();
+    if (configs !== "") {
+        problems.push(`the .rpm has config files: ${configs.split("\n").join(", ")}`);
+    }
+    const scripts = rpmQuery(rpm, "--scripts");
+    for (const template of ["after-install", "after-remove"]) {
+        if (!scripts.includes(electronBuilderScript(template))) {
+            problems.push(`the .rpm's scripts lack electron-builder's ${template} script`);
+        }
+    }
+    const prerm = new URL("../../../packaging/linux/before-remove.sh", import.meta.url);
+    if (!scripts.includes(readFileSync(prerm, "utf8").trimEnd())) {
+        problems.push("the .rpm's scripts lack packaging/linux/before-remove.sh");
+    }
+
+    const files = new Map();
+    const listing = rpmQuery(
+        rpm,
+        "--queryformat",
+        "[%{FILEMODES:perms}\t%{FILEUSERNAME}/%{FILEGROUPNAME}\t%{FILELINKTOS}\t%{FILENAMES}\n]",
+    );
+    for (const line of listing.split("\n").filter(Boolean)) {
+        const [mode, owner, target, path] = line.split("\t");
+        files.set(path, { mode, owner, target: target || undefined });
+        if (path.startsWith("/usr/lib/.build-id")) {
+            problems.push(`the .rpm has rpmbuild's link ${path}`);
+        }
+    }
+    return [...problems, ...checkFiles(".rpm", files)];
+}
+
 /** Checks the packages in electron-builder's output folder. */
 export function checkOutput(outputFolder) {
-    const debs = readdirSync(outputFolder).filter((name) => name.endsWith(".deb"));
-    if (debs.length !== 1) {
-        return [`${debs.length} .deb packages in ${outputFolder}, not 1`];
+    const problems = [];
+    const checks = [
+        [".deb", checkDeb],
+        [".rpm", checkRpm],
+    ];
+    for (const [kind, check] of checks) {
+        const found = readdirSync(outputFolder).filter((name) => name.endsWith(kind));
+        if (found.length !== 1) {
+            problems.push(`${found.length} ${kind} packages in ${outputFolder}, not 1`);
+        } else {
+            problems.push(...check(join(outputFolder, found[0])));
+        }
     }
-    return checkDeb(join(outputFolder, debs[0]));
+    return problems;
 }

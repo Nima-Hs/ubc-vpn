@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Checks the .deb as the installer workflow installs, updates and removes it
-# (.github/workflows/installer-linux.yml). One command per step:
+# Checks the .deb and the .rpm as the installer workflow installs, updates
+# and removes them (.github/workflows/installer-linux.yml). One command per
+# step, on a runner, for the .deb:
 #
 #   installer.sh prepare                    closes /opt as a system's own is, adds a
 #                                           standard user with an app profile
@@ -20,6 +21,8 @@
 #   installer.sh remember-files <file>      notes the package's files in <file>
 #   installer.sh remember-state <file>      notes state.json's SHA-256 in <file>
 #   installer.sh state-kept <file>          state.json is unchanged since then
+#   installer.sh links                      /usr/bin/ubc-vpn and /usr/bin/ubc-vpn-app are
+#                                           links to the client and the app
 #   installer.sh no-conffiles               dpkg keeps no file of the package as its own
 #   installer.sh scripts-twice              the install and removal scripts run twice
 #                                           on an update leave the service running
@@ -28,6 +31,18 @@
 #                                           dpkg's record, <file> from remember-files
 #   installer.sh purge                      apt-get purge
 #   installer.sh purged <file>              nothing is left but the user's data
+#
+# And in a container, where systemd does not run:
+#   installer.sh installed <deb or rpm>     as above, for either package
+#   installer.sh links                      as above
+#   installer.sh service-skipped <log>      the install left out the service and said
+#                                           so in <log>, the package manager's output
+#   installer.sh gone                       after a removal (a purge for the .deb),
+#                                           nothing of the package is left
+#
+# The .rpm is also checked in a Fedora container that systemd runs, with
+# prepare, installed, links, as-staged, who-can-change, service,
+# status-as-user, remember-state, state-kept and gone.
 #
 # Each command stops with an error at the first thing that is wrong.
 #
@@ -107,7 +122,11 @@ case "$command" in
     installed)
         need_arg
         packaged=$(mktemp -d)
-        dpkg-deb --extract "$arg" "$packaged"
+        case "$arg" in
+            *.deb) dpkg-deb --extract "$arg" "$packaged" ;;
+            *.rpm) rpm2cpio "$arg" | (cd "$packaged" && cpio --extract --make-directories --preserve-modification-time --quiet) ;;
+            *) fail "not a .deb or .rpm: $arg" ;;
+        esac
         count=0
         while IFS= read -r -d '' entry; do
             path=${entry#"$packaged"}
@@ -262,6 +281,37 @@ case "$command" in
         [ -z "$status" ] || [[ $status == *" not-installed" ]] || fail "dpkg says $status"
         ! compgen -G "/var/lib/dpkg/info/$PACKAGE.*" > /dev/null || fail "dpkg's scripts for $PACKAGE are left"
         echo "nothing is left but the user's data in $PROFILE"
+        ;;
+    service-skipped)
+        need_arg
+        grep -qF "systemd is not running, so the UBC VPN service was not installed." "$arg" ||
+            fail "the install did not say it left out the service"
+        for path in "$UNIT" /etc/ubc-vpn /var/lib/ubc-vpn; do
+            [ ! -e "$path" ] || fail "$path was made without systemd"
+        done
+        echo "without systemd, the service was left out and said so"
+        ;;
+    links)
+        [ -L /usr/bin/ubc-vpn ] && [ "$(readlink /usr/bin/ubc-vpn)" = "$CLIENT" ] ||
+            fail "/usr/bin/ubc-vpn is not a link to $CLIENT"
+        # electron-builder's link, made by update-alternatives where there is
+        # one, so through /etc/alternatives.
+        [ -L /usr/bin/ubc-vpn-app ] && [ "$(readlink -f /usr/bin/ubc-vpn-app)" = "$APP/ubc-vpn-app" ] ||
+            fail "/usr/bin/ubc-vpn-app is not a link to $APP/ubc-vpn-app"
+        echo "/usr/bin/ubc-vpn and /usr/bin/ubc-vpn-app link to the client and the app"
+        ;;
+    gone)
+        for path in "$APP" /usr/bin/ubc-vpn /usr/bin/ubc-vpn-app /etc/apparmor.d/ubc-vpn-app /etc/ubc-vpn /var/lib/ubc-vpn \
+            "$UNIT" "$WANTS" /run/ubc-vpn; do
+            [ ! -e "$path" ] && [ ! -L "$path" ] || fail "$path is left"
+        done
+        if command -v dpkg-query > /dev/null; then
+            status=$(dpkg-query -W -f '${Status}' "$PACKAGE" 2> /dev/null || true)
+            [ -z "$status" ] || [[ $status == *" not-installed" ]] || fail "dpkg says $status"
+        else
+            ! rpm -q "$PACKAGE" > /dev/null || fail "rpm still has $PACKAGE"
+        fi
+        echo "nothing of the package is left"
         ;;
     *)
         fail "unknown command: $command"

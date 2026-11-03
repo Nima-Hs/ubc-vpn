@@ -14,6 +14,11 @@
 #
 # It is safe to run again: electron-builder's part sets the same things
 # again, and `install` brings an installed service up to date.
+#
+# The .rpm runs this, and after-remove.sh, with /bin/sh, whatever the first
+# line says: fpm gives rpm no other interpreter. electron-builder's part
+# uses bash's `[[`, which works where sh is bash, as on Fedora, and fails
+# the same way in electron-builder's own .rpm files elsewhere.
 
 # electron-builder's own script for its packages, as it supplies it
 # (app-builder-lib/templates/linux/after-install.tpl), unchanged: the

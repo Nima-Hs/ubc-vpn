@@ -1,6 +1,6 @@
 # How the app is packaged on Linux: everything in electron-builder.yml, which
 # this extends, and Linux's own settings below. `pnpm package:linux` builds
-# the .deb into dist/. The rules it follows are in docs/architecture.md,
+# the .deb and the .rpm into dist/. The rules it follows are in docs/architecture.md,
 # "What the installers must do".
 
 extends: electron-builder.yml
@@ -32,6 +32,8 @@ linux:
       to: policy.json
   target:
     - target: deb
+      arch: [x64]
+    - target: rpm
       arch: [x64]
 
 deb:
@@ -76,3 +78,44 @@ deb:
     - libgnutls30 (>= 3.7.3) | libgnutls30t64
     - zlib1g
     - libc6 (>= 2.34)
+
+# The same package for Fedora, with the same scripts and files. An .rpm's
+# scripts get the number of versions installed instead of a word; the
+# scripts handle both.
+rpm:
+  packageName: ubc-vpn
+  artifactName: ubc-vpn-${version}.${arch}.${ext}
+  afterInstall: ../packaging/linux/after-install.sh
+  afterRemove: ../packaging/linux/after-remove.sh
+  fpm:
+    - --before-remove
+    - ../packaging/linux/before-remove.sh
+    # Without the links rpmbuild adds under /usr/lib/.build-id: every
+    # Electron app would own the same ones, so two such packages could not
+    # be installed together.
+    - --rpm-rpmbuild-define
+    - _build_id_links none
+    # Options go before this path: fpm reads everything after it as paths.
+    - stage/links/ubc-vpn=/usr/bin/ubc-vpn
+  # As for the .deb: electron-builder's own list for Electron first, then
+  # mesa-libgbm and alsa-lib (libgbm and libasound, which the Electron
+  # program links), systemd-resolved (a package of its own on Fedora),
+  # dbus-libs (libdbus-1,
+  # for the client's keyring), and what libopenconnect.so.5 links. Fedora's
+  # zlib is provided by zlib-ng-compat.
+  depends:
+    - gtk3
+    - libnotify
+    - nss
+    - libXScrnSaver
+    - (libXtst or libXtst6)
+    - xdg-utils
+    - at-spi2-core
+    - (libuuid or libuuid1)
+    - mesa-libgbm
+    - alsa-lib
+    - systemd-resolved
+    - dbus-libs
+    - gnutls >= 3.7.3
+    - zlib
+    - glibc >= 2.34
