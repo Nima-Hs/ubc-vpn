@@ -14,6 +14,7 @@ import {
     mkdirSync,
     mkdtempSync,
     readdirSync,
+    readFileSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
@@ -104,9 +105,13 @@ describe("the installed client in a desktop session", () => {
     });
 });
 
+/** Settings a client that looked in the runtime folder would answer from. */
+const PLANTED_SETTINGS = '{"username":"planted-user"}';
+
 describe("what those two variables cannot do", () => {
     let scratch: string;
     let planted: string;
+    let plantedSettings: string;
     let listeners: Server[];
     let touched: string[];
 
@@ -134,6 +139,8 @@ describe("what those two variables cannot do", () => {
         mkdirSync(dev, { recursive: true, mode: 0o700 });
         mkdirSync(product, { mode: 0o700 });
         chmodSync(planted, 0o700);
+        plantedSettings = join(product, "settings.json");
+        writeFileSync(plantedSettings, PLANTED_SETTINGS, { mode: 0o600 });
         await listen(join(dev, "service.sock"));
         await listen(join(product, "service.sock"));
         await listen(join(planted, "service.sock"));
@@ -157,7 +164,7 @@ describe("what those two variables cannot do", () => {
             child.once("close", (status) => done(`${status}: ${said}`));
         });
 
-    it("does not make the client look for the service in the runtime folder", async () => {
+    it("does not make the client look for the service or settings in the runtime folder", async () => {
         for (const args of [
             ["status"],
             ["profiles", "list", "--json"],
@@ -174,11 +181,14 @@ describe("what those two variables cannot do", () => {
     it("does not make the client keep anything in the runtime folder", async () => {
         const before = readdirSync(planted, { recursive: true }).map(String).sort();
         const runner = profiles({ XDG_RUNTIME_DIR: planted });
-        const listed = await runner.list();
-        expect(listed.ok).toBe(true);
+        const changed = await runner.setStartup("tray", false);
+        expect(changed.ok).toBe(true);
         expect(readdirSync(planted, { recursive: true }).map(String).sort()).toEqual(before);
-        // The settings stay in the home folder.
-        expect(existsSync(join(home, ".config", "ubc-vpn"))).toBe(true);
+        expect(readFileSync(plantedSettings, "utf8")).toBe(PLANTED_SETTINGS);
+        // The change is in the home folder.
+        const kept = readFileSync(join(home, ".config", "ubc-vpn", "settings.json"), "utf8");
+        expect(kept).toContain("tray");
+        expect((await runner.setStartup("off", false)).ok).toBe(true);
     });
 
     it("cannot make the client run a program as the bus", async () => {
