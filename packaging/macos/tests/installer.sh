@@ -146,6 +146,12 @@ who_can_change() {
     [ "$(owner_and_mode "$LINK" | cut -d' ' -f1)" = 0:0 ] || fail "$LINK is $(owner_and_mode "$LINK")"
 }
 
+# A system's own /usr/local and /usr/local/bin. The runner's may not be, and the
+# link is made only in folders only root can change. Section 14 tries others.
+ls -ldn /usr/local /usr/local/bin || true
+sudo chown root:wheel /usr/local /usr/local/bin
+sudo chmod 755 /usr/local /usr/local/bin
+
 # --- 0. The package's minimum macOS stops an install ------------------------
 
 # It is what keeps UBC VPN off a macOS older than 14: dyld does not refuse a
@@ -395,13 +401,127 @@ sudo test ! -e "$STATE" || fail "the old state came back"
 sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
 ran "install again"
 
-# --- 14. A command of someone else's keeps its place ----------------------------
+# --- 14. Nothing but our link is changed in /usr/local ---------------------------
 
+# Run with each of the things that could be there. Every time: the service is
+# installed, nothing there is changed, no link is made, the reason is given
+# with the client's full path, and the removal leaves it all as it was.
+good=$(mktemp -d "$work/good-XXXXXX")
+rmdir "$good"
+pkgutil --expand-full "$pkg" "$good"
+postinstall="$good/$LABEL.pkg/Scripts/postinstall"
+place=$work/place
+mkdir "$place"
+sudo chown 501:80 "$place"
+sudo chmod 700 "$place"
+sudo touch "$place/marker"
+sudo chown 501:80 "$place/marker"
+describe() { sudo stat -f '%N %Su:%Sg %Lp %T%Y' "$@"; }
+installed_without_link() { # <what it is about> <paths to compare, as they were>
+    local about=$1
+    shift
+    local before after
+    before=$(describe "$@")
+    sudo /usr/bin/env -i "$postinstall" "$pkg" /Applications / > "$work/place.txt" 2>&1 || {
+        cat "$work/place.txt"
+        fail "$about: the install failed"
+    }
+    cat "$work/place.txt"
+    service_is_right
+    grep -qF "the ubc-vpn command is not linked" "$work/place.txt" || fail "$about: nothing said so"
+    grep -qF "$BIN/ubc-vpn" "$work/place.txt" || fail "$about: the full path was not given"
+    after=$(describe "$@")
+    [ "$after" = "$before" ] || fail "$about: it changed: $after"
+    sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
+    after=$(describe "$@")
+    [ "$after" = "$before" ] || fail "$about: the removal changed it: $after"
+}
+owned_by_root=$(stat -f '%Su:%Sg %Lp' /usr/local/bin)
+
+# A file of someone else's, and a link of someone else's, at the link's place.
 echo "someone else's" | sudo tee "$LINK" > /dev/null
-install_pkg > "$work/kept.txt" 2>&1
-service_is_right
-[ "$(cat "$LINK")" = "someone else's" ] || fail "the install replaced someone else's $LINK"
-sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
-[ "$(cat "$LINK")" = "someone else's" ] || fail "the removal took someone else's $LINK"
+installed_without_link "a file there" "$LINK"
+[ "$(cat "$LINK")" = "someone else's" ] || fail "the install replaced a file at $LINK"
 sudo rm -f "$LINK"
-ran "another command kept"
+sudo ln -s /bin/ls "$LINK"
+installed_without_link "a link there" "$LINK"
+[ "$(readlink "$LINK")" = /bin/ls ] || fail "the install replaced a link at $LINK"
+sudo rm -f "$LINK"
+
+# Folders as Homebrew leaves them on an Intel Mac: the user's, in the admin group.
+sudo chown 501:80 /usr/local/bin
+sudo chmod 775 /usr/local/bin
+installed_without_link "/usr/local/bin the user's" /usr/local/bin
+[ ! -e "$LINK" ] || fail "a link was made in a folder the user can change"
+# Our own link, in such a folder: it is not ours to change or remove there.
+sudo -u "#501" ln -s "$BIN/ubc-vpn" "$LINK"
+installed_without_link "our link in the user's folder" "$LINK" /usr/local/bin
+[ "$(readlink "$LINK")" = "$BIN/ubc-vpn" ] || fail "the removal took a link in a folder the user can change"
+sudo rm -f "$LINK"
+sudo chown root:wheel /usr/local/bin
+sudo chmod 755 /usr/local/bin
+
+sudo chown 501:80 /usr/local
+sudo chmod 775 /usr/local
+installed_without_link "/usr/local the user's" /usr/local /usr/local/bin
+[ ! -e "$LINK" ] || fail "a link was made under a folder the user can change"
+sudo chown root:wheel /usr/local
+sudo chmod 755 /usr/local
+
+# An access list that lets someone else write.
+sudo chmod +a "everyone allow add_file" /usr/local/bin
+installed_without_link "an access list on /usr/local/bin" /usr/local/bin
+[ ! -e "$LINK" ] || fail "a link was made in a folder others can change"
+sudo chmod -N /usr/local/bin
+
+# A link in the folder's place, to a folder of the user's.
+sudo mv /usr/local/bin "$work/bin-aside"
+sudo ln -s "$place" /usr/local/bin
+installed_without_link "/usr/local/bin a link" /usr/local/bin "$place" "$place/marker"
+[ ! -e "$place/ubc-vpn" ] && [ ! -L "$place/ubc-vpn" ] || fail "a link was made through a link"
+[ "$(sudo ls -A "$place")" = marker ] || fail "the folder behind the link changed"
+sudo rm -f /usr/local/bin
+
+# No folder at all: it is not made.
+installed_without_link "no /usr/local/bin" /usr/local
+[ ! -e /usr/local/bin ] || fail "the install made /usr/local/bin"
+sudo mv "$work/bin-aside" /usr/local/bin
+
+[ "$(stat -f '%Su:%Sg %Lp' /usr/local/bin)" = "$owned_by_root" ] || fail "the test left /usr/local/bin as $(stat -f '%Su:%Sg %Lp' /usr/local/bin)"
+sudo rm -rf "$place"
+ran "nothing else changed in /usr/local"
+
+# --- 15. Nothing in the app runs as root, or goes into the service ---------------
+
+# The admin group can write to /Applications. So with every file a package
+# script could use swapped there, as it stands when the script runs: nothing of
+# it runs, and the service, its libraries and the policy are the package's.
+install_pkg
+sudo rm -rf "$work/ran-from-app"
+planted=$(mktemp "$work/planted-XXXXXX")
+cat > "$planted" <<EOF
+#!/bin/sh
+/usr/bin/touch "$work/ran-from-app"
+EOF
+for name in ubc-vpn ubc-vpn-service; do
+    sudo cp "$planted" "$BIN/$name"
+    sudo chmod 755 "$BIN/$name"
+done
+sudo cp "$planted" "$APP/Contents/MacOS/UBC VPN"
+sudo chmod 755 "$APP/Contents/MacOS/UBC VPN"
+for name in $LIBRARIES; do
+    echo planted | sudo tee "$BIN/$name" > /dev/null
+done
+echo '{"gateway":"planted.example.test","pins":[]}' | sudo tee "$APP/Contents/Resources/policy.json" > /dev/null
+sudo /usr/bin/env -i "$postinstall" "$pkg" /Applications /
+[ ! -e "$work/ran-from-app" ] || fail "the install ran something from the app"
+service_is_right
+for name in $(ls -A "$FOLDER"); do
+    cmp "$stage/pkg-scripts/service/$name" "$FOLDER/$name"
+done
+cmp "$DATA/policy.json" "$stage/pkg-scripts/policy.json"
+sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
+[ ! -e "$work/ran-from-app" ] || fail "the removal ran something from the app"
+[ ! -e "$FOLDER" ] && [ ! -e "$APP" ] || fail "the removal left something"
+rm -rf "$good"
+ran "nothing runs from the app"

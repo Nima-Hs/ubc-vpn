@@ -22,7 +22,18 @@ CLIENT="$APP/Contents/Resources/bin/ubc-vpn"
 
 /usr/bin/env -i "$FOLDER/ubc-vpn-service" uninstall
 
-if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$CLIENT" ]; then
+# Only our own link, and only in a folder that is what the install required:
+# one that is real and root's alone. Anything else there is not ours to touch.
+only_root_changes() {
+    local mode
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    [ "$(stat -f %u "$1")" = 0 ] || return 1
+    mode=$(stat -f %Lp "$1")
+    [ $((0$mode & 022)) = 0 ] || return 1
+    ! ls -lde "$1" | grep -qE '^ *[0-9]+: .* allow '
+}
+if only_root_changes /usr/local && only_root_changes /usr/local/bin &&
+    [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$CLIENT" ]; then
     rm -f "$LINK"
 fi
 rm -rf "$APP"

@@ -15,4 +15,5 @@ job on disk not loaded
 removal
 failed first install
 install again
-another command kept
+nothing else changed in /usr/local
+nothing runs from the app

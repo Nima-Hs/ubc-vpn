@@ -91,11 +91,24 @@ fi
 rm -rf "$OLD"
 
 # The command `ubc-vpn` (decision G19), which runs as the user, so it is the
-# app's client. A file of someone else's in its place is left, and said. The
-# folder is made only when missing: one that is there is not ours to change.
-[ -e /usr/local/bin ] || install -d -o root -g wheel -m 755 /usr/local/bin
-if [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
-    ln -sfn "$CLIENT" "$LINK"
-else
-    echo "ubc-vpn postinstall: $LINK is someone else's, so the command is not linked" >&2
+# app's client, and nothing here ever runs it. Nothing is changed in /usr/local
+# but the link itself, and that only if both folders are real, root's and
+# changeable by root alone. Anything else there is left as it is, and said.
+only_root_changes() {
+    local mode
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    [ "$(stat -f %u "$1")" = 0 ] || return 1
+    mode=$(stat -f %Lp "$1")
+    [ $((0$mode & 022)) = 0 ] || return 1
+    ! ls -lde "$1" | grep -qE '^ *[0-9]+: .* allow '
+}
+not_linked() {
+    echo "ubc-vpn postinstall: the ubc-vpn command is not linked: $1. Run it by its full path: $CLIENT" >&2
+}
+if ! only_root_changes /usr/local || ! only_root_changes /usr/local/bin; then
+    not_linked "/usr/local/bin is not a folder only root can change"
+elif [ ! -e "$LINK" ] && [ ! -L "$LINK" ]; then
+    ln -s "$CLIENT" "$LINK"
+elif [ ! -L "$LINK" ] || [ "$(readlink "$LINK")" != "$CLIENT" ]; then
+    not_linked "$LINK is something else's"
 fi
