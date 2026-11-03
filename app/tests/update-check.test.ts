@@ -697,6 +697,54 @@ describe.runIf(process.platform === "win32")("an updates folder on Windows", () 
     });
 });
 
+describe("handing over the installer for restart to update", () => {
+    it("hands over only a ready installer, once, and checks nothing meanwhile", async () => {
+        const nothing = updater();
+        expect(nothing.beginInstall()).toBeNull();
+        github.release("0.2.0", installer);
+        const subject = updater();
+        await subject.check();
+        const ready = subject.beginInstall();
+        expect(ready?.version).toBe("0.2.0");
+        expect(subject.view().status).toEqual({ phase: "installing", version: "0.2.0" });
+        expect(subject.beginInstall()).toBeNull();
+        const before = github.asked.length;
+        await subject.check();
+        expect(github.asked.length).toBe(before);
+    });
+
+    it("says why nothing was installed, and keeps the installer for another try", async () => {
+        github.release("0.2.0", installer);
+        const subject = updater();
+        await subject.check();
+        subject.beginInstall();
+        subject.endInstall("cancelled");
+        expect(subject.view()).toMatchObject({
+            status: { phase: "ready", version: "0.2.0" },
+            notice: "cancelled",
+        });
+        expect(subject.readyInstaller()).not.toBeNull();
+        // A new check clears the notice.
+        await subject.check();
+        expect(subject.view().notice).toBeNull();
+    });
+
+    it("drops an installer that changed on disk, to download it again", async () => {
+        github.release("0.2.0", installer);
+        const subject = updater();
+        await subject.check();
+        subject.beginInstall();
+        subject.endInstall("changed");
+        expect(subject.view()).toMatchObject({
+            status: { phase: "failed", reason: "refused" },
+            notice: "changed",
+        });
+        expect(subject.readyInstaller()).toBeNull();
+        await subject.check();
+        expect(subject.view().status).toEqual({ phase: "ready", version: "0.2.0" });
+    });
+});
+
 describe("which runs may update", () => {
     it("needs a release build as well as an installed app", () => {
         expect(mayUpdate({ packaged: true, release: true, demo: false })).toBe(true);
