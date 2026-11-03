@@ -144,6 +144,8 @@ export async function installUpdate(
 
 /** How long the launcher waits for the setup program, in milliseconds. */
 export const SETUP_LIMIT_MS = 10 * 60 * 1000;
+/** How long it waits instead if the setup program cannot be waited for. */
+export const SETUP_FALLBACK_MS = 2 * 60 * 1000;
 /** Said by the launcher once the setup program has been started. */
 const STARTED_LINE = "started";
 
@@ -160,17 +162,31 @@ const STARTED_LINE = "started";
  *   the setup program's exit code says: some of electron-builder's failure paths
  *   `Quit` with no exit code set, so it cannot be trusted. The new app compares
  *   its version with the note to learn whether the update took. The setup program
- *   is not given `--force-run`, so this is the only start. It then deletes its
- *   copy of the installer.
- * - **If the setup program is still running at the limit**, it starts nothing.
+ *   is not given `--force-run`, so this is the only start.
+ * - **Whatever goes wrong after the prompt is approved, the app is started.** If
+ *   the setup program cannot be waited for, the launcher waits a fixed time
+ *   instead, so that a running setup has a chance to finish. If it is still
+ *   running at the limit, the app is started all the same.
+ * - **It deletes its copy of the installer** only once the setup program has
+ *   ended. Otherwise the copy may be in use, and a later start clears it.
  */
 export function launcherScript(
-    options: { verb: string; setupArgs: string; appArgs: string } = {
+    change: {
+        verb?: string;
+        setupArgs?: string;
+        appArgs?: string;
+        limitMs?: number;
+        fallbackMs?: number;
+    } = {},
+): string {
+    const options = {
         verb: "runas",
         setupArgs: "/S --updated",
         appArgs: "",
-    },
-): string {
+        limitMs: SETUP_LIMIT_MS,
+        fallbackMs: SETUP_FALLBACK_MS,
+        ...change,
+    };
     return [
         "$start = [System.Diagnostics.ProcessStartInfo]::new()",
         "$start.FileName = $env:UBC_VPN_INSTALLER",
@@ -182,11 +198,15 @@ export function launcherScript(
         "  if ($_.Exception.InnerException.NativeErrorCode -eq 1223) { exit 2 }",
         "  exit 1",
         "}",
-        "if ($null -eq $setup) { exit 1 }",
-        `[Console]::Out.WriteLine('${STARTED_LINE}')`,
-        "[Console]::Out.Flush()",
-        `try { $ended = $setup.WaitForExit(${SETUP_LIMIT_MS}) } catch { $ended = $false }`,
-        "if (-not $ended) { exit 3 }",
+        // From here the prompt has been approved: nothing stops the app being started.
+        `try { [Console]::Out.WriteLine('${STARTED_LINE}'); [Console]::Out.Flush() } catch {}`,
+        "$ended = $false",
+        "try {",
+        "  if ($null -eq $setup) { throw 'no handle' }",
+        `  $ended = $setup.WaitForExit(${options.limitMs})`,
+        "} catch {",
+        `  try { [System.Threading.Thread]::Sleep(${options.fallbackMs}) } catch {}`,
+        "}",
         "try { [System.Diagnostics.Process]::GetProcessById([int]$env:UBC_VPN_APP_PID).WaitForExit(30000) | Out-Null } catch {}",
         "if ([System.IO.File]::Exists($env:UBC_VPN_APP)) {",
         "  $app = [System.Diagnostics.ProcessStartInfo]::new()",
@@ -195,7 +215,7 @@ export function launcherScript(
         "  $app.UseShellExecute = $false",
         "  try { [System.Diagnostics.Process]::Start($app) | Out-Null } catch {}",
         "}",
-        "try { [System.IO.Directory]::Delete([System.IO.Path]::GetDirectoryName($env:UBC_VPN_INSTALLER), $true) } catch {}",
+        "if ($ended) { try { [System.IO.Directory]::Delete([System.IO.Path]::GetDirectoryName($env:UBC_VPN_INSTALLER), $true) } catch {} }",
         "exit 0",
     ].join("\n");
 }
