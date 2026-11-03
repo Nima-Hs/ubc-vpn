@@ -28,6 +28,7 @@ import {
     type UpdaterOptions,
     updatePlatform,
 } from "../src/main/update/updater";
+import { ENDLESS_CAP_BYTES, ENDLESS_CAP_ITEMS, EndlessMeter } from "./endless-fake";
 import { listBody, makeKey, signList, type TestKey } from "./update-harness";
 
 const key = makeKey();
@@ -43,11 +44,32 @@ type Answer = {
     redirected?: boolean;
 };
 
+/**
+ * A body that never ends, in chunks of `size` bytes. Past `cap` bytes the stream
+ * fails, so a limit that has gone fails its test and fills neither memory nor disk.
+ */
+function endless(size: number, cap = ENDLESS_CAP_BYTES) {
+    const meter = new EndlessMeter(cap);
+    const stream = new ReadableStream<Uint8Array>(
+        {
+            pull(controller) {
+                meter.take(size);
+                controller.enqueue(new Uint8Array(size).fill(0x20));
+            },
+        },
+        { highWaterMark: 0 },
+    );
+    return { stream, meter };
+}
+
 class FakeGitHub {
     readonly asked: string[] = [];
     readonly answers = new Map<string, Answer | (() => never)>();
+    /** A redirect loop with no limit ends here, not when memory does. */
+    private readonly requests = new EndlessMeter(ENDLESS_CAP_ITEMS);
 
     readonly fetch: Fetch = async (url, init) => {
+        this.requests.take(1);
         this.asked.push(url);
         expect(init.redirect).toBe("manual");
         const answer = this.answers.get(url);
@@ -236,16 +258,10 @@ describe("checking for an update", () => {
     it("stops a download that passes the size the list gives, and keeps none of it", async () => {
         github.release("0.2.0", installer);
         // A download that never ends: it must be cut off near the size, not read whole.
-        let served = 0;
-        const endless = new ReadableStream<Uint8Array>({
-            pull(controller) {
-                served += 64 * 1024;
-                controller.enqueue(new Uint8Array(64 * 1024));
-            },
-        });
-        github.answers.set(github.installerUrl("0.2.0"), { body: endless });
+        const { stream, meter } = endless(64 * 1024);
+        github.answers.set(github.installerUrl("0.2.0"), { body: stream });
         const [subject, status] = await checked();
-        expect(served).toBeLessThanOrEqual(4 * 64 * 1024);
+        expect(meter.served).toBeLessThanOrEqual(4 * 64 * 1024);
         expect(status).toEqual({ phase: "failed", reason: "refused" });
         expect(subject.readyInstaller()).toBeNull();
         expect(readdirSync(folder)).toEqual([]);
@@ -571,34 +587,20 @@ describe("one thing at a time, when the setting changes during a check", () => {
 });
 
 describe("limits on what GitHub sends", () => {
-    /** A body that never ends, in chunks of `size` bytes, counting what was pulled. */
-    function endless(size: number) {
-        const counted = { served: 0 };
-        const stream = new ReadableStream<Uint8Array>(
-            {
-                pull(controller) {
-                    counted.served += size;
-                    controller.enqueue(new Uint8Array(size).fill(0x20));
-                },
-            },
-            { highWaterMark: 0 },
-        );
-        return { stream, counted };
-    }
-
     it("stops reading a release description at its limit, while it streams", async () => {
-        const { stream, counted } = endless(64 * 1024);
+        const { stream, meter } = endless(64 * 1024);
         github.answers.set(LATEST_RELEASE_URL, { body: stream });
         expect((await checked())[1]).toEqual({ phase: "failed", reason: "refused" });
-        expect(counted.served).toBeLessThanOrEqual(MAX_RELEASE_BYTES + 64 * 1024);
+        expect(meter.served).toBeLessThanOrEqual(MAX_RELEASE_BYTES + 64 * 1024);
     });
 
     it("cuts an installer off at one chunk past the size the list gives", async () => {
         github.release("0.2.0", installer);
-        const { stream, counted } = endless(4);
+        // Each chunk is a write to disk, so this one stops much sooner.
+        const { stream, meter } = endless(4, 64 * 1024);
         github.answers.set(github.installerUrl("0.2.0"), { body: stream });
         expect((await checked())[1]).toEqual({ phase: "failed", reason: "refused" });
-        expect(counted.served).toBeLessThanOrEqual(installer.length + 4);
+        expect(meter.served).toBeLessThanOrEqual(installer.length + 4);
     });
 
     it("gives up on a body that goes quiet", async () => {
