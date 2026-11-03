@@ -122,7 +122,9 @@ export const BRIDGE_ENV = [
 
 /**
  * Passed on as well when the client is started in dev mode, and only then:
- * where a dev-mode service listens. The installed client does not read them.
+ * where a dev-mode service listens. The installed client's own code reads
+ * neither. On Linux the system's D-Bus library does read `XDG_RUNTIME_DIR`;
+ * see {@link SESSION_BUS_ENV}.
  */
 export const DEV_ENV = [
     // Linux: the per-user runtime folder.
@@ -132,14 +134,60 @@ export const DEV_ENV = [
 ] as const;
 
 /**
+ * Passed on as well on Linux, and only there: how the system's D-Bus library
+ * finds the session bus, which is the way to the desktop's keyring. Only that
+ * library reads them, in the installed client. Which service the client talks
+ * to and which files it uses never depend on them
+ * (`crates/platform/src/unix/tests.rs`, `app/tests/session/keyring.test.ts`).
+ * macOS's Keychain and Windows' Credential Manager need nothing from the
+ * environment.
+ *
+ * Each is passed only in the form a session sets it, by {@link sessionBusValue}.
+ */
+export const SESSION_BUS_ENV = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] as const;
+
+/**
+ * One local socket. The library also takes `unixexec:`, which runs a program,
+ * `autolaunch:`, `tcp:`, and lists of addresses to try: no session needs them,
+ * and the variable could otherwise make the client start a program.
+ */
+const LOCAL_BUS_ADDRESS = /^unix:(?:path=\/[^,;]*|abstract=[^,;]+)(?:,guid=[0-9a-fA-F]+)?$/;
+
+/** The value to pass on for one of {@link SESSION_BUS_ENV}, or `undefined` for none. */
+function sessionBusValue(
+    name: (typeof SESSION_BUS_ENV)[number],
+    value: string | undefined,
+): string | undefined {
+    if (value === undefined) {
+        return undefined;
+    }
+    const usable =
+        name === "DBUS_SESSION_BUS_ADDRESS"
+            ? LOCAL_BUS_ADDRESS.test(value)
+            : // The XDG rules say to ignore a relative value.
+              value.startsWith("/");
+    return usable ? value : undefined;
+}
+
+/**
  * The bridge's environment: the entries of {@link BRIDGE_ENV} that are set,
- * those of {@link DEV_ENV} too in dev mode, and nothing else.
+ * those of {@link DEV_ENV} too in dev mode, those of {@link SESSION_BUS_ENV}
+ * on Linux, and nothing else.
  */
 export function bridgeEnv(
     env: Record<string, string | undefined>,
     dev = false,
+    platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
     const kept: Record<string, string> = {};
+    if (platform === "linux") {
+        for (const name of SESSION_BUS_ENV) {
+            const value = sessionBusValue(name, env[name]);
+            if (value !== undefined) {
+                kept[name] = value;
+            }
+        }
+    }
     for (const name of dev ? [...BRIDGE_ENV, ...DEV_ENV] : BRIDGE_ENV) {
         const value = env[name];
         if (value !== undefined) {

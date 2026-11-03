@@ -18,6 +18,8 @@
 #                                           the package's policy
 #   installer.sh status-as-user             a standard user's `ubc-vpn status` answers,
 #                                           and that user owns the service
+#   installer.sh no-runtime-dir             the service, client and library do not
+#                                           name XDG_RUNTIME_DIR
 #   installer.sh remember-files <file>      notes the package's files in <file>
 #   installer.sh remember-state <file>      notes state.json's SHA-256 in <file>
 #   installer.sh state-kept <file>          state.json is unchanged since then
@@ -222,6 +224,23 @@ case "$command" in
         [ "$(stat -c '%u %a' "$SOCKET")" = "$(id -u "$USER_NAME") 600" ] || fail "$USER_NAME does not own the service"
         [ -f "$STATE" ] || fail "no $STATE"
         echo "$USER_NAME's ubc-vpn status said $status, and $USER_NAME owns the service"
+        ;;
+    no-runtime-dir)
+        # The app gives the client XDG_RUNTIME_DIR for the system's D-Bus
+        # library. Neither program of ours, nor the library the client loads,
+        # may read it: only dev mode does, and that is not built in here.
+        for file in "$SERVICE" "$CLIENT" "$LIBRARY"; do
+            ! grep -qaF XDG_RUNTIME_DIR "$file" || fail "$file names XDG_RUNTIME_DIR"
+        done
+        # Text in the program is found, or the above would prove nothing.
+        grep -qaF /run/ubc-vpn/service.sock "$CLIENT" || fail "grep cannot read $CLIENT"
+        # For the record: which system libraries they load read it for themselves.
+        ldd "$CLIENT" "$LIBRARY" | awk '$3 ~ /^\// { print $3 }' | sort -u | while read -r file; do
+            if grep -qaF XDG_RUNTIME_DIR "$file"; then
+                echo "reads it: $file"
+            fi
+        done
+        echo "the service, the client and the library do not read XDG_RUNTIME_DIR"
         ;;
     remember-files)
         need_arg

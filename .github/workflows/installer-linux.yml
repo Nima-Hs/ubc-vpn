@@ -293,6 +293,36 @@ jobs:
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" status-as-user
           sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" remember-state "$RUNNER_TEMP/state.sha256"
 
+      # Saving a password. The installed client, started by the app's own code
+      # with the environment the app gives it, in a session with a real Secret
+      # Service. gnome-keyring is a test tool, pinned in test-packages.sh, and
+      # never shipped; the script checks every package again on a cache hit.
+      - name: Installed programs have no use for the runtime folder
+        run: sudo UBC_VPN_TEST_THROWAWAY_MACHINE=1 bash "$CHECK" no-runtime-dir
+      - name: Restore the pinned keyring
+        id: keyring-packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: test-packages-noble-${{ hashFiles('native/linux/test-packages.sh') }}-gnome-keyring
+      - name: Install the pinned keyring
+        env:
+          TEST_PACKAGES_CACHE: /var/tmp/ubc-vpn-test-packages
+        run: |
+          mkdir "$RUNNER_TEMP/keyring-packages"
+          bash native/linux/test-packages.sh "$RUNNER_TEMP/keyring-packages" gnome-keyring
+      - name: Save the pinned keyring
+        if: steps.keyring-packages.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/tmp/ubc-vpn-test-packages
+          key: ${{ steps.keyring-packages.outputs.cache-primary-key }}
+      - name: The installed client reaches the keyring, as the app starts it
+        working-directory: app
+        env:
+          UBC_VPN_TEST_THROWAWAY_MACHINE: "1"
+        run: bash ../packaging/linux/tests/keyring-session.sh
+
       # Installing over an existing install is how an update arrives: the
       # old version's scripts keep the service and its data, and the new
       # one's brings the unit up to date and starts it again; the owner in

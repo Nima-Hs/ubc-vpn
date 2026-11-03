@@ -20,6 +20,7 @@ import {
     type BridgeStatus,
     bridgeEnv,
     DEV_ENV,
+    SESSION_BUS_ENV,
 } from "../src/main/channel/bridge";
 import { bridgeCommand } from "../src/main/channel/cli";
 import {
@@ -883,7 +884,11 @@ describe("how the bridge is started", () => {
                       "WINDIR",
                   ]
                 : ["__CF_USER_TEXT_ENCODING"];
-        const allowed = [...BRIDGE_ENV.map((name) => name.toUpperCase()), ...fromTheSystem];
+        const allowed = [
+            ...BRIDGE_ENV.map((name) => name.toUpperCase()),
+            ...(process.platform === "linux" ? SESSION_BUS_ENV : []),
+            ...fromTheSystem,
+        ];
         expect(names.filter((name) => !allowed.includes(name))).toEqual([]);
         if (process.platform !== "win32") {
             expect(names).not.toContain("PATH");
@@ -891,10 +896,18 @@ describe("how the bridge is started", () => {
     });
 
     it("passes on where a dev-mode service listens only in dev mode", async () => {
-        const env = { HOME: "/home/someone", XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/x" };
-        expect(bridgeEnv(env)).toEqual({ HOME: "/home/someone" });
-        expect(bridgeEnv(env, true)).toEqual(env);
-        expect(bridgeEnv({ ...env, SECRET_TOKEN: "x" }, true)).toEqual(env);
+        const env = { HOME: "/home/someone", TMPDIR: "/tmp/x" };
+        const runtime = { XDG_RUNTIME_DIR: "/run/user/1000" };
+        for (const platform of ["win32", "darwin"] as const) {
+            expect(bridgeEnv({ ...env, ...runtime }, false, platform)).toEqual({
+                HOME: "/home/someone",
+            });
+            expect(bridgeEnv({ ...env, ...runtime }, true, platform)).toEqual({
+                ...env,
+                ...runtime,
+            });
+        }
+        expect(bridgeEnv({ ...env, SECRET_TOKEN: "x" }, true, "linux")).toEqual(env);
         expect(DEV_ENV).toEqual(["XDG_RUNTIME_DIR", "TMPDIR"]);
         // And that is what the bridge is really started with.
         const spawned = vi.mocked(spawn);
@@ -903,19 +916,137 @@ describe("how the bridge is started", () => {
             const { last } = start([{}], { env: { ...process.env, ...env }, dev });
             await until(() => last() === "ready", "ready");
             const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
-            expect(Object.keys(options.env ?? {}).includes("XDG_RUNTIME_DIR"), String(dev)).toBe(
-                dev,
-            );
+            expect(Object.keys(options.env ?? {}).includes("TMPDIR"), String(dev)).toBe(dev);
         }
     });
 
     it("keeps only the listed variables, and only those that are set", () => {
-        expect(bridgeEnv({ HOME: "/home/someone", SECRET_TOKEN: "x", APPDATA: undefined })).toEqual(
-            {
-                HOME: "/home/someone",
-            },
-        );
+        const env = { HOME: "/home/someone", SECRET_TOKEN: "x", APPDATA: undefined };
+        expect(bridgeEnv(env, false, "linux")).toEqual({ HOME: "/home/someone" });
+        expect(bridgeEnv(env, false, "win32")).toEqual({ HOME: "/home/someone" });
         expect(bridgeEnv({})).toEqual({});
+    });
+
+    // Every variable anyone might think to hand on, and a few that would do
+    // harm. What each system's client gets is written out here, not read
+    // from the lists, so a name added to a list fails this test.
+    const EVERYTHING = {
+        SystemRoot: "C:\\Windows",
+        ProgramData: "C:\\ProgramData",
+        APPDATA: "C:\\Users\\someone\\AppData\\Roaming",
+        USERPROFILE: "C:\\Users\\someone",
+        TEMP: "C:\\Temp",
+        TMP: "C:\\Temp",
+        HOME: "/home/someone",
+        XDG_CONFIG_HOME: "/home/someone/.config",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+        TMPDIR: "/tmp/someone",
+        // Not the session bus's business, or the client's.
+        DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/tmp/evil",
+        DBUS_STARTER_ADDRESS: "unix:path=/tmp/evil",
+        DBUS_STARTER_BUS_TYPE: "session",
+        DBUS_VERBOSE: "1",
+        DISPLAY: ":0",
+        WAYLAND_DISPLAY: "wayland-0",
+        XDG_DATA_HOME: "/tmp/evil",
+        XDG_SESSION_TYPE: "wayland",
+        PATH: "/tmp/evil",
+        LD_PRELOAD: "/tmp/evil.so",
+        LD_LIBRARY_PATH: "/tmp/evil",
+        NODE_OPTIONS: "--no-warnings",
+        UBC_VPN_CLI: "/tmp/evil",
+        SSLKEYLOGFILE: "/tmp/evil",
+        SECRET_TOKEN: "made-up-secret",
+        VPN_PASSWORD: "made-up-secret",
+    };
+    const FOR_EVERY_SYSTEM = [
+        "APPDATA",
+        "HOME",
+        "ProgramData",
+        "SystemRoot",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "XDG_CONFIG_HOME",
+    ];
+    const names = (env: Record<string, string>) => Object.keys(env).sort();
+    const sorted = (...lists: string[][]) => lists.flat().sort();
+
+    it("gives each system's installed client exactly its own list", () => {
+        expect(names(bridgeEnv(EVERYTHING, false, "linux"))).toEqual(
+            sorted(FOR_EVERY_SYSTEM, ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]),
+        );
+        expect(names(bridgeEnv(EVERYTHING, false, "darwin"))).toEqual(sorted(FOR_EVERY_SYSTEM));
+        expect(names(bridgeEnv(EVERYTHING, false, "win32"))).toEqual(sorted(FOR_EVERY_SYSTEM));
+    });
+
+    it("gives each system's dev-mode client that list and where its service listens", () => {
+        expect(names(bridgeEnv(EVERYTHING, true, "linux"))).toEqual(
+            sorted(FOR_EVERY_SYSTEM, ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "TMPDIR"]),
+        );
+        for (const platform of ["darwin", "win32"] as const) {
+            expect(names(bridgeEnv(EVERYTHING, true, platform))).toEqual(
+                sorted(FOR_EVERY_SYSTEM, ["XDG_RUNTIME_DIR", "TMPDIR"]),
+            );
+        }
+    });
+
+    it("passes values on as they are, and starts the client for this system's list", () => {
+        const kept = bridgeEnv(EVERYTHING, false, "linux");
+        expect(kept.DBUS_SESSION_BUS_ADDRESS).toBe(EVERYTHING.DBUS_SESSION_BUS_ADDRESS);
+        expect(kept.XDG_RUNTIME_DIR).toBe(EVERYTHING.XDG_RUNTIME_DIR);
+        expect(bridgeEnv(EVERYTHING)).toEqual(bridgeEnv(EVERYTHING, false, process.platform));
+    });
+
+    it("passes on a session bus address only if it is one local socket", () => {
+        const address = (value: string) =>
+            bridgeEnv({ DBUS_SESSION_BUS_ADDRESS: value }, false, "linux").DBUS_SESSION_BUS_ADDRESS;
+        for (const good of [
+            "unix:path=/run/user/1000/bus",
+            "unix:path=/tmp/dbus-AbCd,guid=0123456789abcdef",
+            "unix:abstract=/tmp/dbus-AbCd,guid=0123456789abcdef",
+            "unix:abstract=/tmp/dbus-AbCd",
+        ]) {
+            expect(address(good), good).toBe(good);
+        }
+        for (const bad of [
+            "",
+            // Runs a program.
+            "unixexec:path=/tmp/evil",
+            "unixexec:path=/tmp/evil,argv1=x",
+            "autolaunch:",
+            "autolaunch:scope=*user",
+            "tcp:host=example.test,port=1234",
+            "nonce-tcp:host=example.test,port=1234,noncefile=/tmp/n",
+            "launchd:env=X",
+            "systemd:",
+            // A list: the library tries each in turn, so the first is no comfort.
+            "unix:path=/run/user/1000/bus;unixexec:path=/tmp/evil",
+            "unix:path=/run/user/1000/bus,guid=abc;tcp:host=example.test",
+            // Other keys, and other ways of saying where.
+            "unix:path=/run/user/1000/bus,runtime=yes",
+            "unix:runtime=yes",
+            "unix:tmpdir=/tmp",
+            "unix:dir=/tmp",
+            "unix:path=relative/bus",
+            "unix:path=",
+            "unix:abstract=",
+            "unix:path=/run/user/1000/bus,guid=not-hex",
+            " unix:path=/run/user/1000/bus",
+            "UNIX:path=/run/user/1000/bus",
+        ]) {
+            expect(address(bad), bad).toBeUndefined();
+        }
+    });
+
+    it("passes on the runtime folder only as an absolute path", () => {
+        const runtime = (value: string) =>
+            bridgeEnv({ XDG_RUNTIME_DIR: value }, false, "linux").XDG_RUNTIME_DIR;
+        expect(runtime("/run/user/1000")).toBe("/run/user/1000");
+        for (const bad of ["", "run", "./run", "../run"]) {
+            expect(runtime(bad), bad).toBeUndefined();
+        }
     });
 
     it("works in the client's own folder, wherever the app was started from", async () => {
