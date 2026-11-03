@@ -10,7 +10,7 @@ mac:
   # bundled library again, and so change it.
   identity: null
   # The oldest macOS supported, the libraries' own minimum.
-  minimumSystemVersion: "13.0"
+  minimumSystemVersion: "14.0"
   category: public.app-category.utilities
   # What packaging/macos/stage.sh gathers for the app: the command-line client
   # and the libraries it loads, which run as the user, and their licence texts.

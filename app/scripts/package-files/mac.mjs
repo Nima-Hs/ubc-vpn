@@ -109,8 +109,8 @@ function checkPackage(pkg) {
         if (!/hostArchitectures="arm64"/.test(distribution)) {
             problems.push("the .pkg's Distribution does not name arm64 alone");
         }
-        if (!/os-version min="13\.0"/.test(distribution)) {
-            problems.push("the .pkg's Distribution does not require macOS 13.0");
+        if (!/os-version min="14\.0"/.test(distribution)) {
+            problems.push("the .pkg's Distribution does not require macOS 14.0");
         }
         if (!/enable_localSystem="true"/.test(distribution)) {
             problems.push("the .pkg cannot install on the startup disk");
