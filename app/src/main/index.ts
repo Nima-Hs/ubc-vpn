@@ -260,7 +260,7 @@ async function start(): Promise<void> {
     // Why the app did not reconnect is out of date once connected.
     controller.subscribe((snapshot) => {
         if (snapshot.state.link === "ready" && snapshot.state.conn.state === "connected") {
-            updater.connectionMade();
+            updater.clearSaid();
         }
     });
     updater.start();
