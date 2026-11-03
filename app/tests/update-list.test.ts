@@ -16,6 +16,7 @@ import {
     UpdateRefused,
     verifyUpdateList,
 } from "../src/main/update/list";
+import { EndlessMeter } from "./endless-fake";
 import { listBody, makeKey, sha256, signList } from "./update-harness";
 
 const key = makeKey();
@@ -243,16 +244,16 @@ describe("checking a downloaded installer", () => {
     });
 
     it("reads at most one byte past the size, however long the file is", async () => {
-        let served = 0;
+        const meter = new EndlessMeter();
         const endless = {
             read: async (buffer: Buffer, offset: number, length: number) => {
+                meter.take(length);
                 buffer.fill(0, offset, offset + length);
-                served += length;
                 return { bytesRead: length };
             },
         };
         await expect(checkInstaller(endless, entry)).rejects.toThrow(/size/);
-        expect(served).toBe(entry.size + 1);
+        expect(meter.served).toBe(entry.size + 1);
     });
 
     it("refuses a file that is longer or shorter", async () => {

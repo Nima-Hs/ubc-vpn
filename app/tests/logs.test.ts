@@ -12,6 +12,7 @@ import { LogBook, type LogFeed, takeDiagnostics, takeLine, takePage } from "../s
 import { COPY_GAP_MS, CopyGate, copyReport, followWindow, logHandlers } from "../src/main/logs/ipc";
 import { composeReport, REPORT_LINES } from "../src/main/logs/report";
 import { pause, until } from "./bridge-harness";
+import { ENDLESS_CAP_ITEMS, EndlessMeter } from "./endless-fake";
 
 /** Obviously fake. Searched for wherever a secret must not turn up. */
 const COOKIE = "Zq7-made-up-0123456789";
@@ -557,9 +558,11 @@ describe("the log the app keeps", () => {
         const { book: opened, state } = book();
         let seq = 0;
         state.page = null;
+        const meter = new EndlessMeter(ENDLESS_CAP_ITEMS);
         const endless: LogFeed = {
             watch: async () => {},
             fetch: async () => {
+                meter.take(1);
                 seq += 1;
                 return { run: 1, lines: [line(seq)], next: seq, dropped: false };
             },
