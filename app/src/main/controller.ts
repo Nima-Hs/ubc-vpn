@@ -1,8 +1,12 @@
-import type { ActionResult, LoginState, Snapshot } from "@shared/api";
+import type { ActionResult, LinkState, LoginState, Snapshot } from "@shared/api";
 import type { ProfileId } from "@shared/protocol/ProfileId";
 import { type TunnelStatus, UNREAD_TUNNEL } from "@shared/tunnel";
 import type { LoginRunner } from "./channel/connect";
 import type { ServiceLink } from "./link";
+
+function tunnelIsUp(state: LinkState): boolean {
+    return state.link === "ready" && ["connected", "connecting"].includes(state.conn.state);
+}
 
 /** Makes the thing that runs a login, given where to report its progress. */
 export type LoginFactory = (onState: (state: LoginState) => void) => LoginRunner;
@@ -22,10 +26,16 @@ export class Controller {
     private readonly unsubscribe: () => void;
     private readonly loginRunner: LoginRunner | null;
     private closeHides = false;
+    private wasUp = false;
     private login: LoginState = { phase: "idle" };
     /** The profile the login under way is for, while there is one. */
     private loginProfile: ProfileId | null = null;
     private tunnel: TunnelStatus = UNREAD_TUNNEL;
+    /**
+     * The profile of the connection the app last started, for as long as it
+     * lasts. `null` if the app did not start it, or does not know.
+     */
+    private startedFor: ProfileId | null = null;
     /** Which profile a login started now is for: the active one, as the app knows it. */
     private profileForLogin: () => ProfileId | null = () => null;
 
@@ -49,12 +59,19 @@ export class Controller {
             development,
         };
         // A change of state makes any earlier notice out of date.
-        this.unsubscribe = link.subscribe((state) => this.publish({ state, notice: null }));
+        this.unsubscribe = link.subscribe((state) => {
+            this.forgetEndedConnection(state);
+            this.publish({ state, notice: null });
+        });
         this.loginRunner =
             login?.((state) => {
                 this.login = state;
                 if (state.phase === "idle") {
                     this.loginProfile = null;
+                    // A login that ended with nothing up started nothing.
+                    if (!tunnelIsUp(this.link.getState())) {
+                        this.startedFor = null;
+                    }
                 }
                 this.publish({ state: this.link.getState(), notice: null });
             }) ?? null;
@@ -81,12 +98,44 @@ export class Controller {
         }
         // One at a time: a second press while a login is under way does nothing.
         // The login is bound to the profile in use now, whatever is chosen while it runs.
-        const profile = this.profileForLogin();
-        if (this.loginRunner.start(profile)) {
-            this.loginProfile = profile;
-            this.publish({ state: this.link.getState(), notice: null });
-        }
+        this.startLogin(this.profileForLogin());
         return Promise.resolve();
+    }
+
+    /**
+     * Starts a login for this profile, whichever is in use now. Returns
+     * `false`, and does nothing, if one is under way or this build cannot.
+     */
+    connectTo(profile: ProfileId): boolean {
+        return this.startLogin(profile);
+    }
+
+    /** The profile of the connection now up, or `null` if the app does not know it. */
+    connectionProfile(): ProfileId | null {
+        return this.startedFor;
+    }
+
+    private startLogin(profile: ProfileId | null): boolean {
+        if (this.loginRunner === null || !this.loginRunner.start(profile)) {
+            return false;
+        }
+        this.loginProfile = profile;
+        this.startedFor = profile;
+        this.publish({ state: this.link.getState(), notice: null });
+        return true;
+    }
+
+    private forgetEndedConnection(state: LinkState): void {
+        // Only the service can say a connection ended. A bridge that restarts
+        // says nothing about the tunnel, which outlives it.
+        if (state.link !== "ready") {
+            return;
+        }
+        const up = tunnelIsUp(state);
+        if (this.wasUp && !up) {
+            this.startedFor = null;
+        }
+        this.wasUp = up;
     }
 
     /**

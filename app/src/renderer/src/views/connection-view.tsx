@@ -16,9 +16,11 @@ import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
+import { UpdateNotices } from "@/components/update-notices";
 import { cn } from "@/lib/cn";
 import { useLoginMethod } from "@/lib/profiles";
 import { api, useSnapshot } from "@/lib/store";
+import { useUpdates } from "@/lib/updates";
 import { LoginView } from "./login-view";
 
 const run: Record<ActionKind, () => Promise<void>> = {
@@ -39,6 +41,7 @@ export function ConnectionView() {
     const loggingIn = loginHasScreen(state, login);
     const passwordNotSaved = login.phase === "idle" && login.passwordNotSaved === true;
     const method = useLoginMethod();
+    const updates = useUpdates();
 
     // When a login ends, the keyboard goes back to the one button, so the
     // next key press does something and focus is never left on nothing.
@@ -59,6 +62,7 @@ export function ConnectionView() {
                     mode={copy.mode}
                     className="shrink-0"
                 />
+                <UpdateNotices view={updates} />
                 <LoginView login={login} />
                 {/* Read out, politely, as the login moves on. */}
                 <p role="status" className="sr-only">
@@ -130,6 +134,8 @@ export function ConnectionView() {
                     <Text>{PASSWORD_NOT_SAVED}</Text>
                 </Panel>
             )}
+
+            <UpdateNotices view={updates} />
 
             {noticeCopy !== null && (
                 <Panel tone="attention" className="shrink-0">

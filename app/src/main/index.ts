@@ -33,7 +33,22 @@ import {
 import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray/icon";
 import { appImage, createTray, followStateOnTaskbar } from "./tray/tray";
 import { TunnelSwitch } from "./tunnel-switch";
+import {
+    createInstall,
+    disconnectAndWait,
+    launcherFor,
+    tunnelDown,
+    tunnelUp,
+    whenDown,
+} from "./update/install";
 import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
+import {
+    connectAtStart,
+    knownProfile,
+    type ReconnectSteps,
+    reconnectTo,
+    resumeAtStart,
+} from "./update/resume";
 import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
 
@@ -106,6 +121,12 @@ async function start(): Promise<void> {
             devServerUrl,
             profiles: () => profiles,
             tunnelSwitch: () => tunnelSwitch,
+            saySomethingAboutAnUpdate: (notices) => {
+                updater.clearSaid();
+                for (const notice of notices) {
+                    updater.say(notice);
+                }
+            },
             loginItem: () => loginItemAsked,
         });
         link = demo.link;
@@ -191,7 +212,57 @@ async function start(): Promise<void> {
         app.getVersion(),
         mayUpdate({ packaged: app.isPackaged, release: __RELEASE__, demo: __DEMO__ }),
     );
-    registerUpdates(window, devServerUrl, updater);
+    // How a connection comes back after an update, or after one that did not
+    // happen. The same for both: the window first, as a login may ask something.
+    const reconnectSteps: ReconnectSteps = {
+        profileIds: async () => {
+            const listed = await profiles?.list();
+            return listed?.ok === true ? listed.value.profiles.map((one) => one.id) : null;
+        },
+        show: () => show(),
+        connect: (profile) => controller.connectTo(profile),
+        say: (notice) => updater.say(notice),
+    };
+    const linkDown = {
+        isDisconnected: () => tunnelDown(link.getState()),
+        subscribe: (listener: () => void) => controller.subscribe(listener),
+    };
+    registerUpdates(
+        window,
+        devServerUrl,
+        updater,
+        createInstall(
+            updater,
+            (folder) => ({
+                folder,
+                connected: () => tunnelUp(link.getState()),
+                connectedProfile: () =>
+                    knownProfile(
+                        controller.connectionProfile(),
+                        latestProfiles?.profiles.map((one) => one.id) ?? null,
+                    ),
+                disconnect: () =>
+                    disconnectAndWait({ ...linkDown, disconnect: () => link.disconnect() }),
+                // Only Windows can install yet; elsewhere no update is ever ready.
+                launch: launcherFor(process.platform, {
+                    systemRoot: process.env.SystemRoot ?? "C:\\Windows",
+                    app: process.execPath,
+                    pid: process.pid,
+                    env: process.env,
+                }),
+                reconnect: (profile) => void reconnectTo(profile, reconnectSteps),
+                quit,
+                now: () => Date.now(),
+            }),
+            (then) => whenDown(linkDown, then),
+        ),
+    );
+    // Why the app did not reconnect is out of date once connected.
+    controller.subscribe((snapshot) => {
+        if (snapshot.state.link === "ready" && snapshot.state.conn.state === "connected") {
+            updater.connectionMade();
+        }
+    });
     updater.start();
     // The Settings screen and the profiles. Every view of the profiles that a
     // change answers with goes to the window and to the tray menu, so both
@@ -296,7 +367,7 @@ async function start(): Promise<void> {
     // connects if the user asked it to. It connects as the tray does, with
     // the window shown first, because a login may have a question to ask.
     if (__SETTINGS__ && profiles !== undefined) {
-        void profiles.list().then((result) => {
+        void profiles.list().then(async (result) => {
             // macOS waits for the settings to say whether the window belongs in the tray.
             if (
                 inTray &&
@@ -307,31 +378,46 @@ async function start(): Promise<void> {
             if (!result.ok) {
                 // Said where the tunnel is chosen, instead of reading for ever.
                 tunnelSwitch?.readFailed();
-                return;
             }
-            const global = result.value.global;
-            if (app.isPackaged && startupSupported(process.platform)) {
+            const global = result.ok ? result.value.global : null;
+            if (global !== null && app.isPackaged && startupSupported(process.platform)) {
                 loginItems.apply(loginItemFor(global.start, process.platform));
             }
-            if (!global.auto_connect) {
-                return;
-            }
-            const once = (state: LinkState): boolean => {
-                if (state.link === "starting") {
-                    return false;
-                }
-                if (connectsAtStart(global, state.link === "ready" ? state.conn : null)) {
-                    connectFromTray(show, () => controller.connect());
-                }
-                return true;
-            };
-            if (!once(controller.getSnapshot().state)) {
-                const stop = controller.subscribe((snapshot) => {
-                    if (once(snapshot.state)) {
-                        stop();
+            // Back from an update: says how it went, and brings back the
+            // connection it took down, which then is the only one started.
+            await connectAtStart({
+                folder: updater.folder(),
+                resume: (folder) =>
+                    resumeAtStart({
+                        ...reconnectSteps,
+                        folder,
+                        version: app.getVersion(),
+                        now: () => Date.now(),
+                        state: () => link.getState(),
+                        subscribe: (listener) => controller.subscribe(listener),
+                    }),
+                connectIfAsked: () => {
+                    if (global === null || !global.auto_connect) {
+                        return;
                     }
-                });
-            }
+                    const once = (state: LinkState): boolean => {
+                        if (state.link === "starting") {
+                            return false;
+                        }
+                        if (connectsAtStart(global, state.link === "ready" ? state.conn : null)) {
+                            connectFromTray(show, () => controller.connect());
+                        }
+                        return true;
+                    };
+                    if (!once(controller.getSnapshot().state)) {
+                        const stop = controller.subscribe((snapshot) => {
+                            if (once(snapshot.state)) {
+                                stop();
+                            }
+                        });
+                    }
+                },
+            });
         });
     }
 

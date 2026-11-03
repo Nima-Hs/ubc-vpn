@@ -6,6 +6,7 @@
 import { DEMO_IPC } from "@shared/api";
 import { DEMO_PROFILES_IPC } from "@shared/profiles";
 import type { TunnelMode } from "@shared/protocol/TunnelMode";
+import type { AfterUpdateNotice } from "@shared/updates";
 import type { BrowserWindow } from "electron";
 import type { ProfilesService } from "../channel/profiles";
 import type { SettingsService } from "../channel/settings";
@@ -21,6 +22,11 @@ import { createDemoLogs, DEMO_LOG_SCENARIOS } from "./demo-logs";
 import { createDemoProfiles, DEMO_PROFILES_SCENARIOS } from "./demo-profiles";
 import { createDemoSettings, DEMO_SETTINGS_SCENARIOS } from "./demo-settings";
 
+/** The scenario where the app has something to say after an update. */
+const UPDATE_NOTICE_SCENARIO = "update-did-not-finish";
+/** The same, once a reconnect has brought the connection back. */
+const UPDATE_RECONNECTED_SCENARIO = "update-did-not-finish-reconnected";
+
 /** What the demo needs from the app that is made after it. */
 export interface DemoApp {
     devServerUrl: string | undefined;
@@ -30,6 +36,8 @@ export interface DemoApp {
     tunnelSwitch: () => TunnelSwitch | undefined;
     /** The last request to start at sign-in, which a demo only records. */
     loginItem: () => LoginItem | null;
+    /** Has the updater say these after an update, in place of what it said. */
+    saySomethingAboutAnUpdate: (notices: readonly AfterUpdateNotice[]) => void;
 }
 
 /** The fakes a demo build uses in place of the service and the client. */
@@ -69,9 +77,19 @@ export function createDemo(app: DemoApp): Demo {
             ...DEMO_SETTINGS_SCENARIOS,
             ...DEMO_LOG_SCENARIOS,
             ...DEMO_PROFILES_SCENARIOS,
+            UPDATE_NOTICE_SCENARIO,
+            UPDATE_RECONNECTED_SCENARIO,
         ]);
         handleFromInterface(window, devServerUrl, DEMO_IPC.setScenario, (name) => {
             if (typeof name === "string") {
+                if (name === UPDATE_RECONNECTED_SCENARIO) {
+                    app.saySomethingAboutAnUpdate(["unfinished", "reconnect_busy"]);
+                    demo.setScenario("connected");
+                    return;
+                }
+                app.saySomethingAboutAnUpdate(
+                    name === UPDATE_NOTICE_SCENARIO ? ["unfinished"] : [],
+                );
                 // A login state, or a connection state with no login under way.
                 demoLogin?.setScenario(name);
                 demo.setScenario(name);

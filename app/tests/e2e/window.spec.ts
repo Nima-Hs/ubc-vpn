@@ -149,8 +149,8 @@ test("the window renders, locked down", async () => {
         "switchTo",
         "update",
     ]);
-    // Updates: the interface reads where they stand and asks for a check, nothing more.
-    expect(exposed.updates).toEqual(["checkNow", "get", "onChange"]);
+    // Updates: the interface reads where they stand, asks for a check, to install or to dismiss a notice, nothing more.
+    expect(exposed.updates).toEqual(["checkNow", "dismiss", "get", "install", "onChange"]);
 });
 
 test("the interface's process is confined", async () => {

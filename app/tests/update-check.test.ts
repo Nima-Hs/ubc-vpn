@@ -697,6 +697,112 @@ describe.runIf(process.platform === "win32")("an updates folder on Windows", () 
     });
 });
 
+describe("handing over the installer for restart to update", () => {
+    it("hands over only a ready installer, once, and checks nothing meanwhile", async () => {
+        const nothing = updater();
+        expect(nothing.beginInstall()).toBeNull();
+        github.release("0.2.0", installer);
+        const subject = updater();
+        await subject.check();
+        const ready = subject.beginInstall();
+        expect(ready?.version).toBe("0.2.0");
+        expect(subject.view().status).toEqual({ phase: "installing", version: "0.2.0" });
+        expect(subject.beginInstall()).toBeNull();
+        const before = github.asked.length;
+        await subject.check();
+        expect(github.asked.length).toBe(before);
+    });
+
+    it("says why nothing was installed, and keeps the installer for another try", async () => {
+        github.release("0.2.0", installer);
+        const subject = updater();
+        await subject.check();
+        subject.beginInstall();
+        subject.endInstall("cancelled");
+        expect(subject.view()).toMatchObject({
+            status: { phase: "ready", version: "0.2.0" },
+            notice: "cancelled",
+        });
+        expect(subject.readyInstaller()).not.toBeNull();
+        // A new check clears the notice.
+        await subject.check();
+        expect(subject.view().notice).toBeNull();
+    });
+
+    it("drops an installer that changed on disk, to download it again", async () => {
+        github.release("0.2.0", installer);
+        const subject = updater();
+        await subject.check();
+        subject.beginInstall();
+        subject.endInstall("changed");
+        expect(subject.view()).toMatchObject({
+            status: { phase: "failed", reason: "refused" },
+            notice: "changed",
+        });
+        expect(subject.readyInstaller()).toBeNull();
+        await subject.check();
+        expect(subject.view().status).toEqual({ phase: "ready", version: "0.2.0" });
+    });
+});
+
+describe("telling the user about an update", () => {
+    it("names the folder only in a copy that can update", () => {
+        expect(updater().folder()).toBe(folder);
+        expect(updater({ packaged: false }).folder()).toBeNull();
+        const placeholder = [{ label: "placeholder", publicKey: PLACEHOLDER_KEY }];
+        expect(updater({ keys: placeholder }).folder()).toBeNull();
+    });
+
+    it("keeps what it has to say past a check, once each, until the next install", async () => {
+        github.release("0.2.0", installer);
+        const subject = updater();
+        const seen: unknown[] = [];
+        subject.subscribe((view) => seen.push(view.after));
+        subject.say("unfinished");
+        subject.say("unfinished");
+        subject.say("profile_gone");
+        expect(subject.view().after).toEqual(["unfinished", "profile_gone"]);
+        expect(seen).toEqual([["unfinished"], ["unfinished", "profile_gone"]]);
+        await subject.check();
+        expect(subject.view().after).toEqual(["unfinished", "profile_gone"]);
+        subject.clearSaid();
+        expect(subject.view().after).toEqual([]);
+        subject.say("stale");
+        subject.beginInstall();
+        expect(subject.view().after).toEqual([]);
+    });
+
+    it("keeps saying the update did not finish after a connection is made", () => {
+        const subject = updater();
+        for (const notice of [
+            "unfinished",
+            "stale",
+            "profile_gone",
+            "reconnect_unknown",
+            "reconnect_unavailable",
+            "reconnect_busy",
+        ] as const) {
+            subject.say(notice);
+        }
+        const seen: unknown[] = [];
+        subject.subscribe((view) => seen.push(view.after));
+        subject.connectionMade();
+        expect(subject.view().after).toEqual(["unfinished", "stale"]);
+        expect(seen).toEqual([["unfinished", "stale"]]);
+        subject.connectionMade();
+        expect(seen).toHaveLength(1);
+    });
+
+    it("keeps a note from an update through a download, which empties the folder", async () => {
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        await mkdir(folder, { recursive: true });
+        await writeFile(join(folder, "resume.json"), "note");
+        await writeFile(join(folder, "left-behind"), "x");
+        await prepareFolder(folder);
+        expect(readdirSync(folder)).toEqual(["resume.json"]);
+    });
+});
+
 describe("which runs may update", () => {
     it("needs a release build as well as an installed app", () => {
         expect(mayUpdate({ packaged: true, release: true, demo: false })).toBe(true);
