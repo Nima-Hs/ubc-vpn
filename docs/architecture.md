@@ -255,7 +255,7 @@ These were settled on 2026-10-11, after the first version of this document, to r
 ### Supported systems for v0.1.0
 
 - Windows 10 and 11 on x64.
-- macOS 13 or later on Apple silicon.
+- macOS 14 or later on Apple silicon.
 - Ubuntu 22.04 or later and Debian 12 or later (`.deb`), and current Fedora (`.rpm`), on x64.
 
 Only IPv4 subnets are routed. IPv6 routes the user chooses are refused, and in split mode the system's IPv6 setup is left untouched. The one exception is full mode: the service adds the two halves `::/1` and `8000::/1` on the tunnel, to block IPv6 rather than carry it (see "Full tunnel").
