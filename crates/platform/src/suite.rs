@@ -384,12 +384,17 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Ve
     // in the same letters.
     let others = ["other.example", "example", "notsuite.example"];
     let usual = others.map(resolvers_for);
+    let chosen = ["suite.example", "host.suite.example"];
+    let usual_chosen = chosen.map(resolvers_for);
 
     // A match is exact: the same resolvers and the same domains, no more.
     dns.set_split_dns(tunnel, &first).expect("set");
     // Security rule: only the chosen domain and the names under it change.
-    for chosen in ["suite.example", "host.suite.example"] {
-        assert_eq!(resolvers_for(chosen), first.resolvers, "{chosen}");
+    // What the OS shows can be ahead of what its resolver uses, so a lookup
+    // is given until the setting reaches the resolver.
+    for name in chosen {
+        let looked_up = settled(&first.resolvers, || resolvers_for(name));
+        assert_eq!(looked_up, first.resolvers, "{name}");
     }
     assert_eq!(others.map(resolvers_for), usual, "another name changed");
     assert_in_effect(dns.split_dns_matches(&first), "the setting");
@@ -406,7 +411,15 @@ pub fn check_dns(dns: &dyn Dns, tunnel: &str, resolvers_for: &dyn Fn(&str) -> Ve
     dns.clear_split_dns().expect("clear");
     dns.clear_split_dns().expect("clear twice");
     assert_eq!(dns.split_dns_matches(&second), no);
-    assert_eq!(others.map(resolvers_for), usual);
+    // Security rule: once cleared, no name goes to the resolvers it was set
+    // for. They are looked up rather than read back: reading back says
+    // only what the store holds. The resolver is given until the clear
+    // reaches it, as macOS's takes a moment after `scutil --dns` shows it
+    // (issue #335), and a name that stays is a failure.
+    let left = settled(&usual, || others.map(resolvers_for));
+    assert_eq!(left, usual, "a cleared setting is still used");
+    let left = settled(&usual_chosen, || chosen.map(resolvers_for));
+    assert_eq!(left, usual_chosen, "a cleared setting is still used");
 }
 /// Checks full mode's catch-all DNS beside split DNS. The harness is as for
 /// [`check_dns`]. The catch-all uses the split DNS's resolver, as the
