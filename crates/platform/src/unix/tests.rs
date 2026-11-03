@@ -954,6 +954,29 @@ fn installed_system_paths_ignore_the_environment() {
     assert!(hostile.settings_dir.starts_with("/evil"));
 }
 
+// Security rule: on Linux the app gives the installed client what the system's
+// D-Bus library needs to find the session bus. Those variables are for that
+// library alone: they change nothing the client itself uses, wherever they
+// point, including the folder a dev-mode service would use.
+#[test]
+fn the_session_bus_variables_change_no_installed_path() {
+    const WITH_BUS: &[(&str, &str)] = &[
+        ("HOME", "/home/someone"),
+        ("XDG_RUNTIME_DIR", "/evil/run"),
+        ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/evil/run/bus"),
+    ];
+    let without = os::paths(Mode::Installed, &env(PLAIN)).expect("paths");
+    let with = os::paths(Mode::Installed, &env(WITH_BUS)).expect("paths");
+    assert_eq!(with.policy_dir, without.policy_dir);
+    assert_eq!(with.state_dir, without.state_dir);
+    assert_eq!(with.settings_dir, without.settings_dir);
+    assert_eq!(with.channel_name, without.channel_name);
+    for path in [&with.policy_dir, &with.state_dir, &with.settings_dir] {
+        assert!(!path.starts_with("/evil"), "{}", path.display());
+    }
+    assert!(!with.channel_name.starts_with("/evil"));
+}
+
 #[test]
 fn per_user_folders_cope_with_unset_and_relative_variables() {
     let paths = |pairs| os::paths(Mode::Installed, &env(pairs));

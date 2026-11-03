@@ -700,6 +700,28 @@ describe("how the client is started", () => {
         expect(args).toEqual(["--dev", "settings", "get", "--json"]);
         expect(options.env).toEqual({ XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/someone" });
     });
+
+    it("gives every one-line command the way to the keyring on linux, and only there", async () => {
+        const spawned = vi.mocked(spawn);
+        const runner = new SettingsRunner({
+            command: process.execPath,
+            leadingArgs: [],
+            env: {
+                DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+                XDG_RUNTIME_DIR: "/run/user/1000",
+                SECRET_TOKEN: "made-up-secret",
+            },
+            timeoutMs: 2000,
+        });
+        runners.push(runner);
+        spawned.mockClear();
+        await runner.getSettings();
+        const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
+        const linux = process.platform === "linux";
+        expect(Object.keys(options.env ?? {})).toEqual(
+            linux ? ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] : [],
+        );
+    });
 });
 
 describe("what the interface may send", () => {

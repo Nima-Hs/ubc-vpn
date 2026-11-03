@@ -1118,7 +1118,13 @@ describe("how the client is started", () => {
 
     it("gets the dev-mode variables only in dev mode", async () => {
         const spawned = vi.mocked(spawn);
-        const env = { ...process.env, XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/tmp/someone" };
+        const env = {
+            ...process.env,
+            XDG_RUNTIME_DIR: "/run/user/1000",
+            DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+            TMPDIR: "/tmp/someone",
+        };
+        const linux = process.platform === "linux";
         for (const dev of [false, true]) {
             const cli = mockCli([{ prompt: PASSWORD_PROMPT }, { hang: true }]);
             const runner = new ConnectRunner({
@@ -1135,8 +1141,11 @@ describe("how the client is started", () => {
             runner.start();
             const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
             const names = Object.keys(options.env ?? {});
-            expect(names.includes("XDG_RUNTIME_DIR"), String(dev)).toBe(dev);
             expect(names.includes("TMPDIR"), String(dev)).toBe(dev);
+            // The login is what saves a password: it needs the way to the
+            // keyring as much as anything does.
+            expect(names.includes("XDG_RUNTIME_DIR"), String(dev)).toBe(dev || linux);
+            expect(names.includes("DBUS_SESSION_BUS_ADDRESS"), String(dev)).toBe(linux);
         }
     });
 

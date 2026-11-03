@@ -4,8 +4,11 @@
 # engine's ocserv tests (crates/engine/tests/ocserv/start.sh), and the D-Bus
 # headers and pkg-config that building the command-line client on Linux
 # needs (its keyring links the system's libdbus-1 at run time), the ar, tar
-# and xz that fpm writes the Linux .deb with, and rpm, whose rpmbuild the
-# Linux installer workflow builds the .rpm with.
+# and xz that fpm writes the Linux .deb with, rpm, whose rpmbuild the Linux
+# installer workflow builds the .rpm with, and gnome-keyring, the real Secret
+# Service that workflow tests the installed client against
+# (packaging/linux/tests/keyring-session.sh). It is a test tool only: never
+# shipped, and never linked into anything that ships.
 #
 # Only for a throwaway CI runner on Ubuntu 22.04 or 24.04: it fetches
 # package lists as root and installs packages. Never run it on a machine
@@ -44,6 +47,7 @@ declare -A PINNED_jammy=(
 declare -A PINNED_noble=(
     [pkg-config]=1.8.1-2build1
     [libdbus-1-dev]=1.14.10-4ubuntu4.1
+    [gnome-keyring]=46.1-2ubuntu0.2
 )
 # The packaging tools: the ar (binutils), tar and xz (xz-utils) that fpm
 # writes the Linux .deb with, and the libraries of theirs that do the work

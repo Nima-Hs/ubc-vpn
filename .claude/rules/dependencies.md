@@ -32,6 +32,17 @@ Cargo does not manage native libraries, build and packaging tools, GitHub Action
   - Pinned: ocserv `1.1.3-1` from a dated Ubuntu snapshot, set in `native/linux/test-packages.sh`, which all three install it with. The script stops if apt would download from any other source or install any other version. CI keeps the snapshot's signed package lists and the packages with `actions/cache` (pinned like any action), and on every run the script refuses a cache that holds anything but regular files and folders the runner owns and can read, then checks the release files against their pinned SHA-256 and every list and package against the Ubuntu archive key and the signed lists again, so whatever the restored folder holds can stop a run but cannot change what is installed; a cache entry is trusted no more than the runs that can write it, on this branch or main.
   - It runs only on GitHub-hosted Linux runners, with a made-up account, on loopback addresses or, for the installed service's test, in a network namespace reached over a veth pair. Its packaged service is kept from starting.
   - Not pinned: the base system libraries of the runner image that ocserv links, such as GnuTLS and libc. They change when GitHub updates the image. Nor is the Ubuntu archive keyring the snapshot is checked against, `/usr/share/keyrings/ubuntu-archive-keyring.gpg` from the image's `ubuntu-keyring` package: the image is trusted for it as for everything else it ships.
+- Approved exception: gnome-keyring, a Secret Service under GPL-2.0-or-later, is the real keyring the installed client is tested against in the Linux installer workflow (`packaging/linux/tests/keyring-session.sh`). It is a test tool only: never shipped, and never linked into anything we ship.
+  - It runs only on GitHub-hosted Linux runners, with a made-up password, in a session bus and home folder made for the run.
+  - Pinned: gnome-keyring `46.1-2ubuntu0.2` from the dated Ubuntu snapshot, set in `native/linux/test-packages.sh`. The script stops if apt would download from any other source, or install any other version of it.
+  - It brings in 13 other packages. They come from the same snapshot, whose release files are pinned, and are checked against its signed lists, but are not pinned by name. Each package's main licence, from its Ubuntu copyright file (some also have files under other licences):
+    - `gcr`, `libgck-1-0`, `libgcr-base-3-1`, `libgcr-ui-3-1`, `gcr4`, `libgck-2-2`, `libgcr-4-4`: LGPL-2.1-or-later.
+    - `libgtk-4-1`, `libgtk-4-common`: LGPL-2.1-or-later.
+    - `libcairo-script-interpreter2`: LGPL-2.1 or MPL-1.1.
+    - `libgraphene-1.0-0`: MIT.
+    - `libgles2`: MIT.
+    - `pinentry-gnome3`: GPL-2.0-or-later.
+  - Not pinned: `dbus-daemon`, which runs the session bus (GPL-2.0-or-later or AFL-2.1), and the base system libraries they all link. They come from the runner image and change when GitHub updates it.
 
 ## Licenses
 

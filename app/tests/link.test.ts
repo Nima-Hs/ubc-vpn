@@ -246,7 +246,7 @@ describe("a login given up after the service had taken it", () => {
 describe("the link to the service", () => {
     it("starts the bridge in dev mode when it is told to, and not otherwise", async () => {
         const spawned = vi.mocked(spawn);
-        const env = { ...process.env, XDG_RUNTIME_DIR: "/run/user/1000" };
+        const env = { ...process.env, TMPDIR: "/tmp/someone" };
         for (const dev of [undefined, true]) {
             const bridge = mockBridge({});
             spawned.mockClear();
@@ -259,7 +259,7 @@ describe("the link to the service", () => {
             });
             cleanups.push(() => link.dispose());
             const [, , options] = spawned.mock.calls.at(-1) as [string, string[], SpawnOptions];
-            expect(Object.keys(options.env ?? {}).includes("XDG_RUNTIME_DIR")).toBe(dev === true);
+            expect(Object.keys(options.env ?? {}).includes("TMPDIR")).toBe(dev === true);
         }
     });
 
