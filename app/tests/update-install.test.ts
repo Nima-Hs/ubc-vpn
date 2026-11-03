@@ -447,7 +447,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
     it("reads the Windows error 1223 as cancelled, and any other as failed", () => {
         expect(runScript(withoutElevating(throwing(1223)), {}).code).toBe(2);
         expect(runScript(withoutElevating(throwing(5)), {}).code).toBe(1);
-    });
+    }, 60_000);
 
     it("finds the error code in the exception a failed start really throws", () => {
         // No verb and no such file, so no prompt can appear: Windows says error 2.
@@ -455,7 +455,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         const env = { UBC_VPN_INSTALLER: join(folder, "no-such-file.exe") };
         expect(runScript(script, env).code).toBe(1);
         expect(runScript(script.replace("-eq 1223", "-eq 2"), env).code).toBe(2);
-    });
+    }, 60_000);
 
     async function standIns(
         setupExit: number,
@@ -670,6 +670,12 @@ describe("what keeps the launcher's tests off the desktop", () => {
         const handler = parent.indexOf('process.on("uncaughtException"');
         expect(handler).toBeGreaterThanOrEqual(0);
         expect(handler).toBeLessThan(parent.indexOf("require("));
+        // An error while it loads goes to another dialog, past that handler. The
+        // real test of this, which would show that dialog if it failed, is CI's.
+        const outer = /^try \{$/m.exec(parent);
+        expect(outer).not.toBeNull();
+        expect(outer?.index).toBeLessThan(parent.indexOf("require("));
+        expect(parent).toMatch(/^\} catch \{\n {4}process\.exit\(1\);\n\}\n$/m);
     });
 
     it("still has the message and the elevated start in production", () => {

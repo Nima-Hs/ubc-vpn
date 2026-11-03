@@ -525,30 +525,66 @@ describe("how often a login can start", () => {
         expect(states).toEqual([{ phase: "working" }]);
     });
 
+    /**
+     * Sets what the runner's clock says at each start, so however long a busy
+     * machine takes to get a login to its prompt and back, the gap is as told.
+     */
+    function clockedStart(runner: ConnectRunner) {
+        const realNow = Date.now.bind(Date);
+        const clock = vi.spyOn(Date, "now");
+        cleanups.push(() => clock.mockRestore());
+        return (at: number) => {
+            clock.mockImplementation(() => at);
+            const started = runner.start();
+            clock.mockImplementation(realNow);
+            return started;
+        };
+    }
+    const GAP = 60_000;
+
     it("holds the next one back until the gap has passed", async () => {
         const spawned = vi.mocked(spawn);
         const { runner, phase } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
-            minStartGapMs: 600,
+            minStartGapMs: GAP,
         });
         spawned.mockClear();
-        // Taken before the start: the gap is counted from when the client
-        // is started, which is inside this call.
-        const beforeFirstStart = Date.now();
-        runner.start();
+        const startAt = clockedStart(runner);
+        expect(startAt(1_000_000)).toBe(true);
+        expect(spawned).toHaveBeenCalledTimes(1);
         await until(() => phase() === "prompt", "the first prompt");
         runner.cancel();
         await until(() => phase() === "idle", "the first being given up");
 
+        // Counted from when the client was started, this leaves 150 ms of the gap.
+        const LEFT = 150;
         // The user sees it begin straight away; the client is not started yet.
-        expect(runner.start()).toBe(true);
+        expect(startAt(1_000_000 + GAP - LEFT)).toBe(true);
+        const held = Date.now();
         expect(phase()).toBe("working");
         expect(spawned).toHaveBeenCalledTimes(1);
         // Pressing again while it waits changes nothing.
         expect(runner.start()).toBe(false);
 
         await until(() => spawned.mock.calls.length === 2, "the second start");
-        expect(Date.now() - beforeFirstStart).toBeGreaterThanOrEqual(595);
+        // A timer may fire a little early by this clock, and never much.
+        expect(Date.now() - held).toBeGreaterThanOrEqual(LEFT - 10);
         await until(() => phase() === "prompt", "the second prompt");
+    });
+
+    it("starts the next one at once when the gap has passed", async () => {
+        const spawned = vi.mocked(spawn);
+        const { runner, phase } = login([{ prompt: PASSWORD_PROMPT }, { hang: true }], {
+            minStartGapMs: GAP,
+        });
+        spawned.mockClear();
+        const startAt = clockedStart(runner);
+        startAt(1_000_000);
+        await until(() => phase() === "prompt", "the first prompt");
+        runner.cancel();
+        await until(() => phase() === "idle", "the first being given up");
+
+        expect(startAt(1_000_000 + GAP)).toBe(true);
+        expect(spawned).toHaveBeenCalledTimes(2);
     });
 
     it("cannot be made to start clients in a stream", async () => {
