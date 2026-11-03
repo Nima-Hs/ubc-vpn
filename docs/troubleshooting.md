@@ -11,7 +11,7 @@ There is no UBC VPN service on this computer. Install UBC VPN, then try again.
 UBC VPN is installed, but its service is stopped. Restarting the computer starts it again. To start it without restarting:
 
 - **Windows:** open a command prompt as an administrator and run `sc start ubc-vpn`. You can also start "UBC VPN Service" from the Services window.
-- **macOS:** in Terminal, run `sudo launchctl kickstart -k system/io.github.nima-hs.ubc-vpn`. What stopped it is at the end of `/Library/Application Support/UBC VPN/service.log`.
+- **macOS:** in Terminal, run `sudo launchctl kickstart -k system/io.github.nima-hs.ubc-vpn`. To see what stopped it, run `sudo tail "/Library/Application Support/UBC VPN/service.log"`.
 - **Linux:** in a terminal, run `sudo systemctl start ubc-vpn`.
 
 If it stops again straight away, reinstall UBC VPN.

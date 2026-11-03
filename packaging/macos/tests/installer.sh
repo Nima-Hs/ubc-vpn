@@ -148,8 +148,16 @@ who_can_change() {
 
 mkdir -p "$SETTINGS"
 touch "$SETTINGS/marker"
+# As it arrives from a browser, which marks it as downloaded. `installer` run
+# with sudo does not ask about that; the Installer app does (for the owner to
+# try). What Gatekeeper makes of the unsigned package, for the record.
+xattr -w com.apple.quarantine "0081;00000000;Safari;" "$pkg"
+spctl --assess --type install --verbose "$pkg" 2>&1 || true
 install_pkg
 pkgutil --pkg-info "$LABEL"
+# Nothing it installs carries the mark, or launchd and the app would meet it.
+marked=$(sudo xattr -r -l "$FOLDER" "$APP" 2> /dev/null | grep -F com.apple.quarantine || true)
+[ -z "$marked" ] || fail "the mark reached what was installed: $marked"
 ran "install"
 
 # --- 2. Everything landed as packaged and staged ----------------------------
@@ -253,6 +261,75 @@ install_pkg
 [ "$(sha "$STATE")" = "$state" ] || fail "the owner was lost"
 ran "failed update"
 
+# --- 10b. A new service that cannot start: the old one comes back ---------------
+
+# The package's scripts, with a library cut short, so the folder check and the
+# install's own checks pass and the service fails as it starts.
+broken=$(mktemp -d "$work/broken-XXXXXX")
+rmdir "$broken"
+pkgutil --expand-full "$pkg" "$broken"
+bad_scripts="$broken/$LABEL.pkg/Scripts"
+: > "$bad_scripts/service/libopenconnect.5.dylib"
+running_postinstall() {
+    sudo /usr/bin/env -i "$bad_scripts/postinstall" "$pkg" /Applications /
+}
+before=$(job_setting pid)
+if running_postinstall; then fail "a service that cannot start was installed"; fi
+service_is_right
+[ "$(job_setting pid)" != "$before" ] || fail "the old service was not started again"
+files_are_right
+[ "$(sha "$STATE")" = "$state" ] || fail "the failed update changed state.json"
+[ "$(client status)" = Disconnected ] || fail "the owner lost it"
+[ ! -e "$FOLDER.old" ] && [ ! -e "$FOLDER.next" ] || fail "the failed update left a folder behind"
+ran "failed update, service cannot start"
+
+# --- 10c. The job cannot be written: the old job comes back ----------------------
+
+# The service has been stopped by then, and the job on disk cannot be replaced.
+pkgutil --expand-full "$pkg" "$work/good-expanded"
+sudo chflags uchg "$PLIST"
+before=$(job_setting pid)
+if sudo /usr/bin/env -i "$work/good-expanded/$LABEL.pkg/Scripts/postinstall" "$pkg" /Applications /; then
+    sudo chflags nouchg "$PLIST"
+    fail "an install that could not write its job passed"
+fi
+sudo chflags nouchg "$PLIST"
+service_is_right
+[ "$(job_setting pid)" != "$before" ] || fail "the service was never stopped: this tested nothing"
+[ "$(sha "$STATE")" = "$state" ] || fail "the failed update changed state.json"
+[ "$(client status)" = Disconnected ] || fail "the owner lost it"
+[ ! -e "$FOLDER.old" ] && [ ! -e "$FOLDER.next" ] || fail "the failed update left a folder behind"
+rm -rf "$broken" "$work/good-expanded"
+ran "failed update, job cannot be written"
+
+# --- 10d. The job on disk but not loaded, as a failed `launchctl bootstrap` leaves it ---
+
+# launchctl is at a path only macOS can change, so a real install cannot be made
+# to fail at this step. This is the state it leaves, and what the script does
+# from it: an update's install loads the job again, and a first install's
+# `uninstall --keep-data` removes it.
+sudo launchctl bootout "$JOB"
+gone_now() { [ -z "$(print_job)" ]; }
+for _ in $(seq 225); do
+    if gone_now; then break; fi
+    sleep 0.2
+done
+gone_now || fail "the job did not go"
+[ -e "$PLIST" ] || fail "bootout took the file"
+sudo /usr/bin/env -i "$SERVICE" install --policy "$stage/pkg-scripts/policy.json"
+service_is_right
+[ "$(sha "$STATE")" = "$state" ] || fail "the owner was lost"
+sudo launchctl bootout "$JOB"
+for _ in $(seq 225); do
+    if gone_now; then break; fi
+    sleep 0.2
+done
+sudo /usr/bin/env -i "$SERVICE" uninstall --keep-data
+[ ! -e "$PLIST" ] || fail "the job is left on disk"
+install_pkg
+[ "$(sha "$STATE")" = "$state" ] || fail "the owner was lost"
+ran "job on disk not loaded"
+
 # --- 11. Removing it leaves nothing --------------------------------------------
 
 sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
@@ -267,7 +344,24 @@ if pkgutil --pkgs | grep -F "$LABEL"; then fail "macOS still has a record of the
 [ -f "$SETTINGS/marker" ] || fail "the user's settings were removed"
 ran "removal"
 
-# --- 12. It installs again, as a first install ----------------------------------
+# --- 12. A first install whose service cannot start leaves no job ----------------
+
+fresh_broken=$(mktemp -d "$work/fresh-XXXXXX")
+rmdir "$fresh_broken"
+pkgutil --expand-full "$pkg" "$fresh_broken"
+: > "$fresh_broken/$LABEL.pkg/Scripts/service/libopenconnect.5.dylib"
+if sudo /usr/bin/env -i "$fresh_broken/$LABEL.pkg/Scripts/postinstall" "$pkg" /Applications /; then
+    fail "a service that cannot start was installed"
+fi
+[ ! -e "$PLIST" ] || fail "the job is left, starting a service that cannot start"
+[ -z "$(print_job)" ] || fail "launchd still knows the job"
+[ ! -e "$FOLDER" ] && [ ! -e "$FOLDER.next" ] || fail "the service's folder is left"
+if pgrep -x ubc-vpn-service; then fail "the service still runs"; fi
+sudo rm -rf "$DATA"
+rm -rf "$fresh_broken"
+ran "failed first install"
+
+# --- 13. It installs again, as a first install ----------------------------------
 
 install_pkg
 service_is_right

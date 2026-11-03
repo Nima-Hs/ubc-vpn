@@ -72,9 +72,15 @@ if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.js
     if [ -n "$updating" ]; then
         rm -rf "$FOLDER"
         mv "$OLD" "$FOLDER"
-        # The old service, should the failed install have stopped it. Without
-        # --fresh this keeps the state, and it may fail for the same reason.
-        /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.json" || true
+        # The old service, should the failed install have stopped it: it may
+        # have failed having stopped the service and with no job written, or
+        # having left the job on disk unloaded, or loaded and restarting a
+        # service that cannot start. Without --fresh this keeps the state. It
+        # can fail for the same reason, and then the job on disk is loaded as
+        # it is, which does nothing to a service that was never stopped.
+        if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.json"; then
+            /bin/launchctl bootstrap system "$JOB" > /dev/null 2>&1 || true
+        fi
     else
         # Nothing to go back to: no job may be left starting a missing program.
         /usr/bin/env -i "$FOLDER/ubc-vpn-service" uninstall --keep-data || true

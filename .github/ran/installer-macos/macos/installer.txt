@@ -8,5 +8,9 @@ owner
 update over itself
 scripts twice
 failed update
+failed update, service cannot start
+failed update, job cannot be written
+job on disk not loaded
 removal
+failed first install
 install again

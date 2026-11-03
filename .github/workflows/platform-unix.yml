@@ -338,8 +338,13 @@ jobs:
   # connects. On GitHub's macOS runners, where sudo needs no password; they
   # are thrown away after the job. The job uses no secrets.
   launchd:
-    name: launchd job (macos)
-    runs-on: macos-15
+    name: launchd job (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The image the libraries are built on, and the newest there is.
+        os: [macos-15, macos-26]
     timeout-minutes: 30
     # `actions: read` is for downloading our libopenconnect from the native
     # library workflow's newest good run on main.
