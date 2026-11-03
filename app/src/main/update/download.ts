@@ -1,13 +1,14 @@
 // Where a downloaded installer is kept, and how it gets there: into a
 // folder of the app's own that only the user can write, stopping at the
 // size the signed list gives, and kept only once its size and SHA-256 match
-// the list. This and `security.ts` are the only app code that touches the
-// file system; neither goes near the settings file.
+// the list. These files, `install.ts`, `resume.ts` and `security.ts` are the
+// only app code that touches the file system; none goes near the settings file.
 
 import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join, posix, win32 } from "node:path";
 import { eachChunk } from "./github";
 import { checkInstaller, type UpdateFile, UpdateRefused } from "./list";
+import { RESUME_NOTE } from "./resume";
 
 /**
  * The folder for downloaded installers, in the user's local (not roaming)
@@ -55,7 +56,10 @@ export async function prepareFolder(folder: string): Promise<void> {
         throw new UpdateRefused("the updates folder is not the user's alone");
     }
     for (const name of await readdir(folder)) {
-        await rm(join(folder, name), { recursive: true, force: true });
+        // A note from an update is kept for a later start to act on.
+        if (name !== RESUME_NOTE) {
+            await rm(join(folder, name), { recursive: true, force: true });
+        }
     }
 }
 

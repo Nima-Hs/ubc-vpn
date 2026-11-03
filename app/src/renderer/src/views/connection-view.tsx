@@ -15,9 +15,11 @@ import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { StatusIndicator } from "@/components/ui/status-indicator";
 import { Heading, Text } from "@/components/ui/text";
+import { UpdateNotices } from "@/components/update-notices";
 import { cn } from "@/lib/cn";
 import { useLoginMethod } from "@/lib/profiles";
 import { api, useSnapshot } from "@/lib/store";
+import { useUpdates } from "@/lib/updates";
 import { LoginView } from "./login-view";
 
 const run: Record<ActionKind, () => Promise<void>> = {
@@ -37,6 +39,7 @@ export function ConnectionView() {
     const noticeCopy = notice === null ? null : describeActionError(notice);
     const loggingIn = loginHasScreen(state, login);
     const method = useLoginMethod();
+    const updates = useUpdates();
 
     // When a login ends, the keyboard goes back to the one button, so the
     // next key press does something and focus is never left on nothing.
@@ -121,6 +124,8 @@ export function ConnectionView() {
                     </Panel>
                 )}
             </div>
+
+            <UpdateNotices view={updates} />
 
             {noticeCopy !== null && (
                 <Panel tone="attention" className="shrink-0">
