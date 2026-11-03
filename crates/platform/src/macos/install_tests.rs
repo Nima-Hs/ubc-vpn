@@ -303,6 +303,14 @@ fn launchctl_is_run_by_its_path() {
     assert_eq!(args, ["print", JOB]);
     assert_eq!(command.get_current_dir(), Some(Path::new("/")));
     assert_eq!(command.get_envs().count(), 0, "nothing is set for it");
+
+    // What the program really gets: `get_envs` above does not show whether
+    // the caller's environment is passed on.
+    assert!(std::env::vars_os().next().is_some(), "this test has one");
+    let seen = command_for("/usr/bin/env", &[]).output().expect("run env");
+    assert!(seen.status.success());
+    let seen = String::from_utf8_lossy(&seen.stdout);
+    assert_eq!(seen, "", "the caller's environment reached it");
 }
 
 // launchd's words for a job, and an answer it cannot read is not "not loaded".

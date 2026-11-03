@@ -252,7 +252,12 @@ impl Launchd for Launchctl {
 /// launchctl with `args`. Security rule: by its absolute path, with nothing
 /// of the caller's environment, from `/`, reading nothing.
 pub(crate) fn command(args: &[&str]) -> Command {
-    let mut command = Command::new(LAUNCHCTL);
+    command_for(LAUNCHCTL, args)
+}
+
+/// `program` with `args`, started as [`command`] says.
+fn command_for(program: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
     command
         .env_clear()
         .current_dir("/")
