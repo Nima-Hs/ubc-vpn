@@ -6,8 +6,8 @@ mod harness;
 
 use harness::*;
 use ubc_vpn_core::protocol::{
-    AddLogParams, Diagnostics, KEPT_ADDED_LOG_LINES, LogLevel, LogPage, LogSource,
-    MAX_ADDED_LOG_LINES, MAX_LINE_BYTES, MAX_LOG_TEXT_BYTES, StateKind, WatchLogsParams,
+    AddLogParams, Diagnostics, KEPT_ADDED_LOG_LINES, LogLevel, LogSource, MAX_ADDED_LOG_LINES,
+    MAX_LINE_BYTES, MAX_LOG_TEXT_BYTES, StateKind, WatchLogsParams,
 };
 
 const ACCEPTED: Result<ResponseBody, ErrorCode> = Ok(ResponseBody::Accepted);
@@ -27,6 +27,92 @@ fn page(peer: &mut Peer, after: Option<LogCursor>) -> LogPage {
         Ok(ResponseBody::Logs(page)) => page,
         other => panic!("expected a page of the log, got {other:?}"),
     }
+}
+
+/// A page of one made-up line, whose number is also the cursor it gives.
+fn page_at(run: u64, next: u64) -> LogPage {
+    let line = LogLine {
+        seq: next,
+        at_unix_ms: 1,
+        level: LogLevel::Info,
+        source: LogSource::Service,
+        text: "made up".to_string().try_into().unwrap(),
+    };
+    LogPage {
+        run,
+        lines: vec![line],
+        next,
+        dropped: false,
+    }
+}
+
+/// `pages` as `read_whole_log` reads them, but never more than twice its
+/// limit, so if the limit goes this test fails rather than fills the memory.
+fn read_capped(mut pages: impl FnMut(usize) -> LogPage) -> Vec<LogLine> {
+    let mut asked = 0;
+    read_whole_log(|_| {
+        asked += 1;
+        assert!(asked <= 2 * MOST_LOG_PAGES, "this fake would never end");
+        pages(asked)
+    })
+}
+
+#[test]
+fn reading_the_whole_log_ends_at_an_empty_page() {
+    let lines = read_capped(|asked| match asked {
+        1..=3 => page_at(7, asked as u64),
+        _ => LogPage {
+            lines: Vec::new(),
+            ..page_at(7, 3)
+        },
+    });
+    let seqs: Vec<u64> = lines.iter().map(|line| line.seq).collect();
+    assert_eq!(seqs, [1, 2, 3]);
+}
+
+#[test]
+#[should_panic(expected = "the log's cursor did not move: 5, then 5")]
+fn reading_the_whole_log_fails_when_the_cursor_stays() {
+    read_capped(|_| page_at(7, 5));
+}
+
+#[test]
+#[should_panic(expected = "the log's cursor did not move: 5, then 4")]
+fn reading_the_whole_log_fails_when_the_cursor_goes_back() {
+    read_capped(|asked| page_at(7, 6 - asked as u64));
+}
+
+#[test]
+#[should_panic(expected = "the log's cursor did not move: 0, then 0")]
+fn reading_the_whole_log_fails_when_the_first_page_gives_no_place() {
+    read_capped(|_| page_at(7, 0));
+}
+
+#[test]
+#[should_panic(expected = "the log did not end within 1000 pages")]
+fn reading_the_whole_log_fails_past_the_page_limit() {
+    read_capped(|asked| page_at(7, asked as u64));
+}
+
+/// A place in another run is no place in this one, so a new run may start
+/// low. It is still only so many pages.
+#[test]
+fn reading_the_whole_log_lets_a_new_run_start_again() {
+    let lines = read_capped(|asked| match asked {
+        1 => page_at(7, 50),
+        2 => page_at(8, 1),
+        _ => LogPage {
+            lines: Vec::new(),
+            ..page_at(8, 1)
+        },
+    });
+    assert_eq!(lines.len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "the log did not end within 1000 pages")]
+fn reading_the_whole_log_fails_when_the_run_keeps_changing() {
+    read_capped(|asked| page_at(asked as u64, 1));
 }
 
 fn diagnostics(peer: &mut Peer) -> Diagnostics {
