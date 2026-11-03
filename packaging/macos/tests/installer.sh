@@ -394,3 +394,14 @@ sudo test ! -e "$STATE" || fail "the old state came back"
 [ "$(client status)" = Disconnected ] || fail "status: $(client status)"
 sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
 ran "install again"
+
+# --- 14. A command of someone else's keeps its place ----------------------------
+
+echo "someone else's" | sudo tee "$LINK" > /dev/null
+install_pkg > "$work/kept.txt" 2>&1
+service_is_right
+[ "$(cat "$LINK")" = "someone else's" ] || fail "the install replaced someone else's $LINK"
+sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
+[ "$(cat "$LINK")" = "someone else's" ] || fail "the removal took someone else's $LINK"
+sudo rm -f "$LINK"
+ran "another command kept"

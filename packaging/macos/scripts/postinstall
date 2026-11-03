@@ -91,8 +91,9 @@ fi
 rm -rf "$OLD"
 
 # The command `ubc-vpn` (decision G19), which runs as the user, so it is the
-# app's client. A file of someone else's in its place is left, and said.
-install -d -o root -g wheel -m 755 /usr/local/bin
+# app's client. A file of someone else's in its place is left, and said. The
+# folder is made only when missing: one that is there is not ours to change.
+[ -e /usr/local/bin ] || install -d -o root -g wheel -m 755 /usr/local/bin
 if [ -L "$LINK" ] || [ ! -e "$LINK" ]; then
     ln -sfn "$CLIENT" "$LINK"
 else
