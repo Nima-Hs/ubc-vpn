@@ -234,7 +234,7 @@ export function launcherScript(
         "  $running = $null -ne [System.Diagnostics.Process]::Start($app)",
         "} catch {}",
         // The one thing left that can tell the user: the app is not there to.
-        `if (-not $running) { try { ${options.tell} } catch {} }`,
+        `if (-not $running) { try { ${TELL_USER} } catch {} }`,
         "if ($ended) { try { [System.IO.Directory]::Delete([System.IO.Path]::GetDirectoryName($env:UBC_VPN_INSTALLER), $true) } catch {} }",
         "exit 0",
     ].join("\n");
