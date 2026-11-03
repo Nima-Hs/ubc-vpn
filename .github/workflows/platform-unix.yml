@@ -370,7 +370,8 @@ jobs:
           mkdir native
           tar -xzf "download/$ARTIFACT.tar.gz" -C native
           if [ -d "native/$ARTIFACT" ]; then mv "native/$ARTIFACT" unwrapped && rmdir native && mv unwrapped native; fi
-          commit=$(jq -r '.build.repository_commit // empty' native/manifest.json)
+          # macOS records it as recipe.commit.
+          commit=$(jq -r '.recipe.commit // empty' native/manifest.json)
           [[ $commit =~ ^[0-9a-f]{40}$ ]]
           status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status)
           echo "The library was built from $commit; main is $status of it."
