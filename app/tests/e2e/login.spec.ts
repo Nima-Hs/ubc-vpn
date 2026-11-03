@@ -438,6 +438,25 @@ test("putting the window away gives a login up", async () => {
     await expect(heading()).toHaveText("Not connected");
 });
 
+test("what the app has to say after an update stays above a login", async () => {
+    await scenario("disconnected");
+    await scenario("update-did-not-finish");
+    const notice = page.getByText("The update didn't finish");
+    await expect(notice).toBeVisible();
+    await action().click();
+    await expect(heading()).toHaveText("Your password");
+    await expect(notice).toBeVisible();
+    const noticeBox = await notice.boundingBox();
+    const fieldBox = await passwordField().boundingBox();
+    expect(noticeBox).not.toBeNull();
+    expect(fieldBox).not.toBeNull();
+    if (noticeBox !== null && fieldBox !== null) {
+        expect(noticeBox.y + noticeBox.height).toBeLessThanOrEqual(fieldBox.y);
+    }
+    await scenario("disconnected");
+    await expect(notice).toHaveCount(0);
+});
+
 test("a failed login says why, and can be tried again or closed", async () => {
     await scenario("login-failed-wrong-password");
     await expect(heading()).toHaveText("Login refused");

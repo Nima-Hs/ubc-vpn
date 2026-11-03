@@ -135,6 +135,39 @@ describe.runIf(process.platform === "win32")("the launcher, started as the app s
         90_000,
     );
 
+    // In CI only: a parent with neither guard shows Electron's real error dialog,
+    // which must never reach a developer's desktop. There, nobody answers it, so
+    // the parent never ends, and this test kills it and fails.
+    it.runIf(process.env.GITHUB_ACTIONS === "true")(
+        "from Electron: a parent that cannot load its spec exits, and shows no dialog",
+        async () => {
+            const { ELECTRON_RUN_AS_NODE: _, ...clean } = process.env;
+            const parent = spawn(ELECTRON, [PARENT], {
+                stdio: "ignore",
+                windowsHide: true,
+                env: {
+                    ...clean,
+                    UBC_VPN_TEST_LAUNCH: join(base, "no-such-spec.json"),
+                    APPDATA: join(base, "roaming"),
+                    LOCALAPPDATA: join(base, "local"),
+                },
+            });
+            parents.push(parent);
+            const code = await new Promise<number | null>((done) => {
+                const stuck = setTimeout(() => {
+                    parent.kill();
+                    done(-1);
+                }, 30_000);
+                parent.on("close", (ended) => {
+                    clearTimeout(stuck);
+                    done(ended);
+                });
+            });
+            expect(code).toBe(1);
+        },
+        60_000,
+    );
+
     it("runs in System32, so it holds no folder the setup program must remove", () => {
         const { options } = windowsLaunch("x.exe", {
             systemRoot: "C:\\Windows",
