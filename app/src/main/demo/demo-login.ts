@@ -26,6 +26,7 @@ const SCENARIOS: Record<string, LoginState> = {
     "login-working": { phase: "working" },
     "login-cancelling": { phase: "cancelling" },
     "login-password": { phase: "prompt", prompt: PASSWORD },
+    "login-password-not-saved": { phase: "idle", passwordNotSaved: true },
     "login-password-again": {
         phase: "prompt",
         prompt: { ...PASSWORD, message: "Login failed. Enter your password again." },

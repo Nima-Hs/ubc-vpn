@@ -214,18 +214,19 @@ pub(crate) const NOT_SET_ASIDE: &str = "The saved password was refused, and neit
 /// After a login with a typed `password` succeeded and the service accepted
 /// the connect: saves it for `id`, replacing what was there, if the profile
 /// still saves its password and still has `username`. Says on `err` when it
-/// should have been saved and could not be.
+/// should have been saved and could not be, and returns `false`.
 pub(crate) fn keep(
     dir: &Path,
     id: &ProfileId,
     username: &str,
     password: &Secret,
     err: &mut dyn Write,
-) {
-    let kept = keep_locked(dir, id, username, password);
-    if kept.is_err() {
+) -> bool {
+    let kept = keep_locked(dir, id, username, password).is_ok();
+    if !kept {
         let _ = writeln!(err, "ubc-vpn: {NOT_SAVED}");
     }
+    kept
 }
 
 fn keep_locked(

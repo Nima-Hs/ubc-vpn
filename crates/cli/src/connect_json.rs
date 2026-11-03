@@ -145,6 +145,12 @@ impl Ask for App<'_> {
         None
     }
 
+    // The app discards standard error, so it is told here. An app that
+    // cannot be written to has gone, and there is no one left to tell.
+    fn password_not_saved(&mut self) {
+        let _ = write_line(self.out, &CliMessage::PasswordNotSaved);
+    }
+
     fn ask(&mut self, prompt: &Prompt) -> Option<Secret> {
         if self.cancel.is_cancelled() {
             return None;

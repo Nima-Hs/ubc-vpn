@@ -22,7 +22,7 @@ label: string,
  * Anything the gateway says alongside the question, such as why the
  * last attempt was refused. Left out when there is nothing.
  */
-message?: string, } | { "type": "done" } | { "type": "error", 
+message?: string, } | { "type": "password_not_saved" } | { "type": "done" } | { "type": "error", 
 /**
  * For the app to act on.
  */

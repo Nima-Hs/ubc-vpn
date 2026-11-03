@@ -606,6 +606,33 @@ fn the_app_is_not_asked_for_a_saved_password() {
     assert!(lines.iter().all(|line| !line.contains(PASSWORD)));
 }
 
+// The app discards the client's standard error, so a password that could not
+// be saved must reach it as a line of its own, or it would never know. The
+// connect itself goes ahead.
+#[test]
+fn the_app_is_told_when_a_password_could_not_be_saved() {
+    use ubc_vpn_core::profiles::ProfileId;
+
+    let settings = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
+    let scene = Scene::new(Some(&settings), "");
+    let fake = crate::keys::test::fake();
+    fake.fail_writes_to(ProfileId::first().as_str(), true);
+    let (code, lines, _) = drive(&scene, answering(&[PASSWORD, CODE]));
+    assert_eq!(code, 0, "{lines:?}");
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines[2], r#"{"type":"password_not_saved"}"#);
+    assert_eq!(lines[3], r#"{"type":"done"}"#);
+    assert!(lines.iter().all(|line| !line.contains(PASSWORD)));
+    assert_eq!(scene.rig.run(&["disconnect"]).0, 0);
+
+    // Saved as it should be: no such line.
+    fake.fail_writes_to(ProfileId::first().as_str(), false);
+    let scene = Scene::new(Some(&settings), "");
+    let (code, lines, _) = drive(&scene, answering(&[PASSWORD, CODE]));
+    assert_eq!((code, lines.len()), (0, 3), "{lines:?}");
+    assert!(lines.iter().all(|line| !line.contains("not_saved")));
+}
+
 // The app's connect, the one it starts by itself at sign-in, for
 // auto-connect and after a session ends, sends the method saved in the
 // profile. One that ignored it would send `alice@app` here and be refused.

@@ -221,6 +221,7 @@ export function isCliMessage(value: unknown): value is CliMessage {
                 typeof value.label === "string" &&
                 (value.message === undefined || typeof value.message === "string")
             );
+        case "password_not_saved":
         case "done":
             return true;
         case "error":

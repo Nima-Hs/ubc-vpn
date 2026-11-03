@@ -180,6 +180,8 @@ export class ConnectRunner implements LoginRunner {
     private profile: ProfileId | null = null;
     private lastStartAt = Number.NEGATIVE_INFINITY;
     private startTimer: NodeJS.Timeout | null = null;
+    /** Whether this login's client said the password could not be saved. */
+    private passwordNotSaved = false;
 
     constructor(options: ConnectOptions) {
         this.options = {
@@ -200,6 +202,7 @@ export class ConnectRunner implements LoginRunner {
         // The user sees the login begin at once. The client itself is started
         // no sooner than the gap after the last one.
         this.profile = profile;
+        this.passwordNotSaved = false;
         this.options.onState(WORKING);
         const wait = this.lastStartAt + this.options.minStartGapMs - Date.now();
         if (wait > 0) {
@@ -386,9 +389,16 @@ export class ConnectRunner implements LoginRunner {
                 this.options.onState({ phase: "prompt", prompt });
                 return;
             }
+            case "password_not_saved":
+                this.passwordNotSaved = true;
+                return;
             case "done":
                 // The connection's progress now arrives from the service.
-                this.finish(child, IDLE, true);
+                this.finish(
+                    child,
+                    this.passwordNotSaved ? { phase: "idle", passwordNotSaved: true } : IDLE,
+                    true,
+                );
                 return;
             case "error":
                 this.finish(

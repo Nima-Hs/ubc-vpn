@@ -25,5 +25,9 @@ export function describeActionError(error: ActionError): NoticeCopy {
     }
 }
 
+/** After a login that worked, when the password it was to save could not be saved. */
+export const PASSWORD_NOT_SAVED =
+    "Your password could not be saved in the keyring, so it will be asked for next time.";
+
 /** Shown on every screen while the app talks to a dev-mode service. */
 export const DEVELOPMENT_MODE = "Development mode. This is not the real VPN.";

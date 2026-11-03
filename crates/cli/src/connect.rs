@@ -119,6 +119,10 @@ pub trait Ask {
     /// [`Ask::failure`] says what went wrong.
     fn ask(&mut self, prompt: &Prompt) -> Option<Secret>;
 
+    /// The login worked, but the password could not be saved. A terminal
+    /// has been told on standard error.
+    fn password_not_saved(&mut self) {}
+
     /// Why the last `None` was not the user giving up, if it was not.
     fn failure(&self) -> Option<String> {
         None
@@ -510,8 +514,9 @@ pub(crate) fn start(
     let used = typed.as_ref().map(Secret::expose).or(name);
     if let (Some(password), Some(username)) = (&answers.typed_password, used)
         && keyring.may_save
+        && !passwords::keep(dir, id, username, password, err)
     {
-        passwords::keep(dir, id, username, password, err);
+        ask.password_not_saved();
     }
     Ok(client)
 }
