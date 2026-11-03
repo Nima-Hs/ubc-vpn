@@ -94,8 +94,57 @@ within() {
     done
     fail "$what"
 }
-connected() {
-    client status | grep -q '^Connected (ubcvpn'
+# What ocserv logged, to its standard error and to syslog, with its passwords,
+# its TLS chatter and anything as long as a cookie left out, as in engine.yml,
+# though its account is made up.
+ocserv_log() {
+    { sudo cat "$work/ocserv.log"; sudo journalctl --no-pager -o short-precise -t ocserv; } |
+        grep -viE 'password' | grep -vE 'TLS\[' |
+        sed -E 's/[A-Za-z0-9+\/=_-]{16,}/[hidden]/g' | tail -n 100 || true
+}
+# Everything that could say why a connect the service took did not come up.
+# The service's log is its own, already cleaned of secrets.
+why_not_connected() {
+    local pid task
+    echo "--- why the service did not connect ---"
+    echo "client status:"
+    client status 2>&1 || true
+    echo "client diagnostics:"
+    client diagnostics 2>&1 || true
+    echo "the service's log:"
+    client logs --json 2>&1 || true
+    echo "the service's threads, as state, what each waits in, and its name:"
+    pid=$(main_pid)
+    for task in "/proc/$pid/task/"*; do
+        sudo sh -c "cut -d' ' -f3 '$task/stat'; cat '$task/wchan'; echo; cat '$task/comm'" 2>&1 |
+            paste -s -d' ' || true
+    done
+    echo "the links, routes and connections:"
+    ip -o link show || true
+    ip -4 route show table all || true
+    sudo ss -tnp || true
+    echo "systemd-resolved is $(systemctl is-active systemd-resolved.service || true)"
+    echo "the service's journal:"
+    journalctl -u ubc-vpn.service -o short-precise --no-pager | tail -n 50 || true
+    echo "ocserv's log:"
+    ocserv_log
+    echo "--- end ---"
+}
+# Waits up to a minute for the connect just asked for, saying each state it
+# sees and when, and everything known if it does not come.
+wait_connected() {
+    local seen="" now
+    for _ in $(seq $((60 * 5))); do
+        now=$(client status 2>&1 || true)
+        if [ "$now" != "$seen" ]; then
+            echo "$(date -u +%H:%M:%S.%3N) status: $now"
+            seen=$now
+        fi
+        if printf '%s\n' "$now" | grep -q '^Connected (ubcvpn'; then return 0; fi
+        sleep 0.2
+    done
+    why_not_connected
+    fail "the service did not connect"
 }
 tunnel_links() {
     ip -o link show | grep -o 'ubcvpn[0-9]*' || true
@@ -235,7 +284,7 @@ ran "reinstall keeps state"
 echo '{"subnets":["198.19.0.0/16"],"dns_domains":["dept.example.test"]}' |
     client settings set-routes --json
 connect || fail "the connect was refused"
-within 60 "the service did not connect" connected
+wait_connected
 client status
 link=$(tunnel_links | head -n 1)
 [ -n "$link" ] || fail "no tunnel device"
@@ -292,7 +341,7 @@ ran "planted state emptied"
 # --- 10. Uninstalling while connected leaves nothing ------------------------
 
 connect || fail "the connect was refused"
-within 60 "the service did not connect" connected
+wait_connected
 stops=$(stopped_lines)
 run_service uninstall
 nothing_runs || fail "the service still runs"

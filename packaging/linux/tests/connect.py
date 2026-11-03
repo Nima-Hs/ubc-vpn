@@ -65,6 +65,7 @@ def main() -> int:
             break
     client.stdin.close()
     status = client.wait(timeout=60)
+    print(f"the client ended with status {status}", flush=True)
     return 0 if status == 0 and last.get("type") == "done" else 1
 
 
