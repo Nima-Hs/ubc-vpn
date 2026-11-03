@@ -3,6 +3,7 @@ running
 owner
 stranger refused
 reinstall keeps state
+remade folder keeps the owner
 restarted after a crash
 stop and start again
 disabled job enabled

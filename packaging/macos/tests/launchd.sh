@@ -188,6 +188,17 @@ stranger status > /dev/null 2>&1 || status=$?
 [ "$status" = 5 ] || fail "another user was not refused after the install"
 ran "reinstall keeps state"
 
+# --- 5b. A folder the service remade itself does not stop an install --------
+
+# It has the group of the folder above, and holds an owner, so a fresh install
+# keeps it, and being safe it gets past the check.
+sudo chgrp admin "$DATA"
+install_service --fresh
+[ "$(sha "$STATE")" = "$state" ] || fail "the owner was lost"
+[ "$(owner_and_mode "$DATA")" = "0:0 755" ] || fail "the data folder"
+[ "$(client status)" = Disconnected ] || fail "the owner lost it"
+ran "remade folder keeps the owner"
+
 # --- 6. launchd starts it again after it fails ------------------------------
 
 before=$(pid_now)

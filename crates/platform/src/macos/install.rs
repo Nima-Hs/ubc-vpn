@@ -33,6 +33,7 @@
 
 use std::io;
 use std::os::unix::fs::lchown;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
