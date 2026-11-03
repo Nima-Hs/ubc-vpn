@@ -74,17 +74,21 @@ export function TextField({
             ) : (
                 <div className="relative">
                     {input}
-                    {/* Pinned to the field's middle: the button sits inside the
-                        tooltip's wrapper, so the row's alignment does not reach it. */}
-                    <IconButton
-                        label={reveal.label}
-                        aria-controls={id}
-                        onClick={reveal.onToggle}
-                        tooltipSide="left"
-                        className="absolute inset-y-0 end-1 my-auto"
-                    >
-                        {reveal.shown ? <EyeOff /> : <Eye />}
-                    </IconButton>
+                    {/* Pinned to the field's middle out here, not on the button.
+                        The tooltip is placed by the wrapper it puts around the
+                        button: a button taken out of the page's flow leaves that
+                        wrapper with no size, and the tooltip then covers the
+                        button and takes the click. */}
+                    <div className="absolute inset-y-0 end-1 flex items-center">
+                        <IconButton
+                            label={reveal.label}
+                            aria-controls={id}
+                            onClick={reveal.onToggle}
+                            tooltipSide="left"
+                        >
+                            {reveal.shown ? <EyeOff /> : <Eye />}
+                        </IconButton>
+                    </div>
                 </div>
             )}
             {note !== undefined && (
