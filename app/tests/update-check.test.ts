@@ -558,6 +558,39 @@ describe("one thing at a time", () => {
     });
 });
 
+describe("turning the setting on during a check that fails", () => {
+    it("waits for the next check, however many views of the settings follow", async () => {
+        github.release("0.2.0", installer);
+        let hold = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((done) => {
+            release = done;
+        });
+        const slow: Fetch = async (url, init) => {
+            if (hold && url === LATEST_RELEASE_URL) {
+                await held;
+                throw new TypeError("network down");
+            }
+            return github.fetch(url, init);
+        };
+        const subject = updater({ fetch: slow }, false);
+        await subject.check();
+        expect(subject.view().status.phase).toBe("available");
+        hold = true;
+        const second = subject.check();
+        await expect.poll(() => subject.view().status.phase).toBe("checking");
+        // Busy, so nothing starts, and the update found earlier is still pending.
+        subject.setAutomatic(true);
+        release();
+        await second;
+        expect(subject.view().status).toEqual({ phase: "failed", reason: "offline" });
+        // The next view of the settings, still on: not a change, so no download.
+        subject.setAutomatic(true);
+        await new Promise((done) => setTimeout(done, 30));
+        expect(github.asked).not.toContain(github.installerUrl("0.2.0"));
+    });
+});
+
 describe("one thing at a time, when the setting changes during a check", () => {
     it("does not start a download beside a check under way", async () => {
         github.release("0.2.0", installer);
@@ -650,6 +683,18 @@ describe("limits on what GitHub sends", () => {
             await expect(prepareFolder(folder)).rejects.toThrow(/alone/);
         },
     );
+});
+
+describe.runIf(process.platform === "win32")("an updates folder on Windows", () => {
+    it("is refused when it is a junction, and what it points at is left alone", async () => {
+        const { mkdir, symlink, writeFile } = await import("node:fs/promises");
+        const elsewhere = join(folder, "..", "elsewhere");
+        await mkdir(elsewhere);
+        await writeFile(join(elsewhere, "keep.txt"), "keep");
+        await symlink(elsewhere, folder, "junction");
+        await expect(prepareFolder(folder)).rejects.toThrow(/alone/);
+        expect(readdirSync(elsewhere)).toEqual(["keep.txt"]);
+    });
 });
 
 describe("which runs may update", () => {
