@@ -34,15 +34,15 @@ import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from ".
 import { appImage, createTray, followStateOnTaskbar } from "./tray/tray";
 import { TunnelSwitch } from "./tunnel-switch";
 import {
+    createInstall,
     disconnectAndWait,
-    type Launcher,
-    launchWindows,
-    restartToUpdate,
-    takeResume,
+    launcherFor,
     tunnelDown,
     tunnelUp,
+    whenDown,
 } from "./update/install";
 import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
+import { knownProfile, type ReconnectSteps, reconnectTo, resumeAtStart } from "./update/resume";
 import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
 
@@ -200,59 +200,49 @@ async function start(): Promise<void> {
         app.getVersion(),
         mayUpdate({ packaged: app.isPackaged, release: __RELEASE__, demo: __DEMO__ }),
     );
-    // Only Windows can install yet; elsewhere no update is ever ready.
-    const launch: Launcher =
-        process.platform === "win32"
-            ? launchWindows(process.env.SystemRoot ?? "C:\\Windows")
-            : async () => "failed";
-    registerUpdates(window, devServerUrl, updater, async () => {
-        const folder = updater.folder();
-        if (folder === null) {
-            return;
-        }
-        await restartToUpdate(updater, {
+    // How a connection comes back after an update, or after one that did not
+    // happen. The same for both: the window first, as a login may ask something.
+    const reconnectSteps: ReconnectSteps = {
+        profileIds: async () => {
+            const listed = await profiles?.list();
+            return listed?.ok === true ? listed.value.profiles.map((one) => one.id) : null;
+        },
+        show: () => show(),
+        connect: (profile) => controller.connectTo(profile),
+        say: (notice) => updater.say(notice),
+    };
+    const linkDown = {
+        isDisconnected: () => tunnelDown(link.getState()),
+        subscribe: (listener: () => void) => controller.subscribe(listener),
+    };
+    registerUpdates(
+        window,
+        devServerUrl,
+        updater,
+        createInstall(updater, (folder) => ({
             folder,
             connected: () => tunnelUp(link.getState()),
+            connectedProfile: () =>
+                knownProfile(
+                    controller.connectionProfile(),
+                    latestProfiles?.profiles.map((one) => one.id) ?? null,
+                ),
             disconnect: () =>
-                disconnectAndWait({
-                    disconnect: () => controller.disconnect(),
-                    isDisconnected: () => tunnelDown(link.getState()),
-                    subscribe: (listener) => controller.subscribe(listener),
-                }),
-            launch,
-            // As the tray connects: the window first, as a login may ask something.
-            reconnect: () => connectFromTray(show, () => controller.connect()),
+                disconnectAndWait({ ...linkDown, disconnect: () => link.disconnect() }),
+            whenDownLater: (then) => whenDown(linkDown, then),
+            // Only Windows can install yet; elsewhere no update is ever ready.
+            launch: launcherFor(process.platform, {
+                systemRoot: process.env.SystemRoot ?? "C:\\Windows",
+                app: process.execPath,
+                pid: process.pid,
+                env: process.env,
+            }),
+            reconnect: (profile) => void reconnectTo(profile, reconnectSteps),
             quit,
-        });
-    });
+            now: () => Date.now(),
+        })),
+    );
     updater.start();
-    // Back from an update that was installed while connected: connect again,
-    // once the service has said where it stands.
-    const updatesFolder = updater.folder();
-    if (updatesFolder !== null) {
-        void takeResume(updatesFolder).then((reconnect) => {
-            if (!reconnect) {
-                return;
-            }
-            const once = (): boolean => {
-                if (link.getState().link === "starting") {
-                    return false;
-                }
-                const state = link.getState();
-                if (state.link === "ready" && state.conn.state === "disconnected") {
-                    connectFromTray(show, () => controller.connect());
-                }
-                return true;
-            };
-            if (!once()) {
-                const stop = controller.subscribe(() => {
-                    if (once()) {
-                        stop();
-                    }
-                });
-            }
-        });
-    }
     // The Settings screen and the profiles. Every view of the profiles that a
     // change answers with goes to the window and to the tray menu, so both
     // show them as they are, whichever made the change. Only an installed
@@ -356,7 +346,7 @@ async function start(): Promise<void> {
     // connects if the user asked it to. It connects as the tray does, with
     // the window shown first, because a login may have a question to ask.
     if (__SETTINGS__ && profiles !== undefined) {
-        void profiles.list().then((result) => {
+        void profiles.list().then(async (result) => {
             // macOS waits for the settings to say whether the window belongs in the tray.
             if (
                 inTray &&
@@ -367,13 +357,28 @@ async function start(): Promise<void> {
             if (!result.ok) {
                 // Said where the tunnel is chosen, instead of reading for ever.
                 tunnelSwitch?.readFailed();
+            }
+            // Back from an update: says how it went, and brings back the
+            // connection it took down, which then is the only one started.
+            const updatesFolder = updater.folder();
+            const resumed =
+                updatesFolder !== null &&
+                (await resumeAtStart({
+                    ...reconnectSteps,
+                    folder: updatesFolder,
+                    version: app.getVersion(),
+                    now: () => Date.now(),
+                    state: () => link.getState(),
+                    subscribe: (listener) => controller.subscribe(listener),
+                }));
+            if (!result.ok) {
                 return;
             }
             const global = result.value.global;
             if (app.isPackaged && startupSupported(process.platform)) {
                 loginItems.apply(loginItemFor(global.start, process.platform));
             }
-            if (!global.auto_connect) {
+            if (!global.auto_connect || resumed) {
                 return;
             }
             const once = (state: LinkState): boolean => {

@@ -41,8 +41,25 @@ export type InstallNotice =
     /** The VPN could not be disconnected first. */
     | "not_disconnected";
 
+/** What the app has to say about an update that "Restart to update" started. */
+export type AfterUpdateNotice =
+    /** The app started again on its old version: the update did not take. */
+    | "unfinished"
+    /** A note from an update was over a day old, so nothing was reconnected. */
+    | "stale"
+    /** The profile that was connected no longer exists, so nothing was connected. */
+    | "profile_gone"
+    /** The app does not know which profile was connected, so nothing was connected. */
+    | "reconnect_unknown"
+    /** The service or the profiles could not be reached, so nothing was connected. */
+    | "reconnect_unavailable"
+    /** A login was still ending, so the reconnect did not start. */
+    | "reconnect_busy";
+
 export interface UpdateView {
     status: UpdateStatus;
+    /** Said until the next "Restart to update"; empty otherwise. */
+    after: readonly AfterUpdateNotice[];
     /** Said after a "Restart to update" that did not install; `null` otherwise. */
     notice: InstallNotice | null;
     /** When a check last reached a verdict, in milliseconds since 1970; `null` if none has yet. */

@@ -6,7 +6,7 @@
 
 import type { ProfilesError } from "./profiles";
 import type { StartMode } from "./protocol/StartMode";
-import type { InstallNotice, UpdateStatus } from "./updates";
+import type { AfterUpdateNotice, InstallNotice, UpdateStatus } from "./updates";
 
 export const SETTINGS = {
     title: "Settings",
@@ -61,7 +61,7 @@ export const UPDATES = {
     neverChecked: "Not checked yet.",
     restart: "Restart to update",
     restartHint:
-        "UBC VPN disconnects, installs the update, starts again, and reconnects if it was connected.",
+        "UBC VPN disconnects, installs the update, starts again, and reconnects the profile that was connected.",
 } as const;
 
 /** Where updates stand, in a sentence; `null` when there is nothing to say yet. */
@@ -101,13 +101,31 @@ export function describeUpdate(status: UpdateStatus): string | null {
 export function describeInstallNotice(notice: InstallNotice): string {
     switch (notice) {
         case "cancelled":
-            return "The update wasn't installed because the administrator prompt was cancelled. Nothing was changed, and UBC VPN reconnects if it was connected.";
+            return "The update wasn't installed because the administrator prompt was cancelled. Nothing was changed, and UBC VPN reconnects the profile that was connected.";
         case "failed":
             return "The update couldn't be started, and nothing was changed. Try again, or install it from the releases page on GitHub.";
         case "changed":
             return "The downloaded update changed on disk, so it wasn't installed. UBC VPN downloads it again at the next check.";
         case "not_disconnected":
             return "UBC VPN couldn't disconnect first, so the update wasn't installed. Try again.";
+    }
+}
+
+/** What the app has to say after an update it started. */
+export function describeAfterUpdate(notice: AfterUpdateNotice): string {
+    switch (notice) {
+        case "unfinished":
+            return "The update didn't finish, so UBC VPN is still on the version it had.";
+        case "stale":
+            return "UBC VPN found a note from an update over a day old. It didn't reconnect, and nothing else happened.";
+        case "profile_gone":
+            return "The profile you were connected with no longer exists, so UBC VPN didn't reconnect.";
+        case "reconnect_unknown":
+            return "UBC VPN doesn't know which profile you were connected with, so it didn't reconnect. Choose a profile and connect.";
+        case "reconnect_unavailable":
+            return "UBC VPN couldn't reach what it needs to reconnect, so it didn't. Connect when you're ready.";
+        case "reconnect_busy":
+            return "UBC VPN couldn't reconnect because a login was still ending. Connect again in a moment.";
     }
 }
 

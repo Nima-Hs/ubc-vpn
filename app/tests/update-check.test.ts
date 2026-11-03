@@ -745,6 +745,40 @@ describe("handing over the installer for restart to update", () => {
     });
 });
 
+describe("telling the user about an update", () => {
+    it("names the folder only in a copy that can update", () => {
+        expect(updater().folder()).toBe(folder);
+        expect(updater({ packaged: false }).folder()).toBeNull();
+        const placeholder = [{ label: "placeholder", publicKey: PLACEHOLDER_KEY }];
+        expect(updater({ keys: placeholder }).folder()).toBeNull();
+    });
+
+    it("keeps what it has to say past a check, once each, until the next install", async () => {
+        github.release("0.2.0", installer);
+        const subject = updater();
+        const seen: unknown[] = [];
+        subject.subscribe((view) => seen.push(view.after));
+        subject.say("unfinished");
+        subject.say("unfinished");
+        subject.say("profile_gone");
+        expect(subject.view().after).toEqual(["unfinished", "profile_gone"]);
+        expect(seen).toEqual([["unfinished"], ["unfinished", "profile_gone"]]);
+        await subject.check();
+        expect(subject.view().after).toEqual(["unfinished", "profile_gone"]);
+        subject.beginInstall();
+        expect(subject.view().after).toEqual([]);
+    });
+
+    it("keeps a note from an update through a download, which empties the folder", async () => {
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        await mkdir(folder, { recursive: true });
+        await writeFile(join(folder, "resume.json"), "note");
+        await writeFile(join(folder, "left-behind"), "x");
+        await prepareFolder(folder);
+        expect(readdirSync(folder)).toEqual(["resume.json"]);
+    });
+});
+
 describe("which runs may update", () => {
     it("needs a release build as well as an installed app", () => {
         expect(mayUpdate({ packaged: true, release: true, demo: false })).toBe(true);

@@ -832,6 +832,7 @@ describe("where the app keeps its own profile", () => {
             "main/security.ts",
             "main/update/download.ts",
             "main/update/install.ts",
+            "main/update/resume.ts",
         ]);
         const imports = readFileSync(join(root, "main/security.ts"), "utf8").match(
             /import \{([^}]*)\} from "node:fs[^"]*"/g,
@@ -839,8 +840,13 @@ describe("where the app keeps its own profile", () => {
         expect(imports).toEqual(['import { readFile } from "node:fs/promises"']);
         // The updates folder is the only one they name; they never name the settings.
         const download = readFileSync(join(root, "main/update/download.ts"), "utf8");
-        const install = readFileSync(join(root, "main/update/install.ts"), "utf8");
-        for (const text of [download, install]) {
+        // It names APPDATA once: the variable a new start of the app is passed.
+        const install = readFileSync(join(root, "main/update/install.ts"), "utf8").replace(
+            '"APPDATA",',
+            "",
+        );
+        const resume = readFileSync(join(root, "main/update/resume.ts"), "utf8");
+        for (const text of [download, install, resume]) {
             expect(text).not.toMatch(/settings\.json|userData|profileFolder|[^L]APPDATA/);
         }
         expect(download).toContain('"updates"');
