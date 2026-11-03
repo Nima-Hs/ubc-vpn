@@ -180,17 +180,16 @@ const STARTED_LINE = "started";
  * - **It deletes its copy of the installer** only once the setup program has
  *   ended. Otherwise the copy may be in use, and a later start clears it.
  */
-export function launcherScript(
-    change: {
-        verb?: string;
-        setupArgs?: string;
-        appArgs?: string;
-        limitMs?: number;
-        fallbackMs?: number;
-        appWaitMs?: number;
-        tell?: string;
-    } = {},
-): string {
+export function launcherScript(change: {
+    /** What to do if the app cannot be started. No default: see `productionScript`. */
+    tell: string;
+    verb?: string;
+    setupArgs?: string;
+    appArgs?: string;
+    limitMs?: number;
+    fallbackMs?: number;
+    appWaitMs?: number;
+}): string {
     const options = {
         verb: "runas",
         setupArgs: "/S --updated",
@@ -198,7 +197,6 @@ export function launcherScript(
         limitMs: SETUP_LIMIT_MS,
         fallbackMs: SETUP_FALLBACK_MS,
         appWaitMs: APP_FILE_WAIT_MS,
-        tell: TELL_USER,
         ...change,
     };
     return [
@@ -238,6 +236,11 @@ export function launcherScript(
         "if ($ended) { try { [System.IO.Directory]::Delete([System.IO.Path]::GetDirectoryName($env:UBC_VPN_INSTALLER), $true) } catch {} }",
         "exit 0",
     ].join("\n");
+}
+
+/** The launcher as the app runs it: the only script with the real message. */
+export function productionScript(): string {
+    return launcherScript({ tell: TELL_USER });
 }
 
 /**
@@ -305,7 +308,11 @@ export function firstStage(script: string): string {
 }
 
 /** The command that starts the launcher for the installer at `path`, and how. */
-export function windowsLaunch(path: string, launcher: WindowsLauncher, script = launcherScript()) {
+export function windowsLaunch(
+    path: string,
+    launcher: WindowsLauncher,
+    script = productionScript(),
+) {
     const env: Record<string, string> = {};
     for (const name of KEPT_ENVIRONMENT) {
         const value = launcher.env[name];

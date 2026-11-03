@@ -4,7 +4,7 @@
 // the two programs it starts, which are stand-ins in a temporary folder. Never
 // elevated: the verb is taken out or the start replaced, and that is checked first.
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,11 +17,16 @@ const PARENT = resolve(__dirname, "update-launcher-parent.cjs");
 const ELECTRON = resolve(__dirname, "../node_modules/electron/dist/electron.exe");
 const SYSTEM_ROOT = process.env.SystemRoot ?? "C:\\Windows";
 
+const parents: ChildProcess[] = [];
 let base: string;
 beforeEach(async () => {
     base = await mkdtemp(join(tmpdir(), "upd-launcher-"));
 });
 afterEach(async () => {
+    // Before its folder goes: a parent has nothing to write to after that.
+    for (const parent of parents.splice(0)) {
+        parent.kill();
+    }
     // A launcher that is still running holds its folder for a moment.
     await rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
 });
@@ -54,6 +59,7 @@ async function fromParent(kind: "Node" | "Electron", path: string, script: strin
             LOCALAPPDATA: join(base, "local"),
         },
     });
+    parents.push(parent);
     await new Promise((done) => parent.on("close", done));
     return JSON.parse(readFileSync(out, "utf8"));
 }

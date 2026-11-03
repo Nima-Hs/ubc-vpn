@@ -55,6 +55,18 @@ test("after an update: what the app has to say is on the first screen, until dis
     await expect(said).toHaveCount(0);
 });
 
+test('after an update: a reconnect leaves "did not finish" on the first screen', async () => {
+    await scenario("update-did-not-finish-reconnected");
+    await tab("Connection").click();
+    await expect(heading()).toHaveText("Connected");
+    await expect(page.getByText("The update didn't finish")).toBeVisible();
+    // Why it did not reconnect is out of date, as it now has.
+    await expect(page.getByText("a login was still ending")).toHaveCount(0);
+    await page.getByRole("button", { name: "Dismiss" }).click();
+    await expect(page.getByText("The update didn't finish")).toHaveCount(0);
+    await scenario("settings");
+});
+
 test("settings: starting in the tray registers the app with --hidden", async () => {
     test.skip(process.platform === "linux", "Linux has no start at sign-in yet");
     await scenario("settings");

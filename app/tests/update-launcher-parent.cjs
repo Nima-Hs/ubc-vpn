@@ -3,6 +3,9 @@
 // Node, and by Electron, by the tests in `update-launcher-real.test.ts` and
 // `update-real.test.ts`. The command comes from the app's own `windowsLaunch`.
 
+// Before anything else: in Electron an uncaught error is a real dialog on the desktop.
+process.on("uncaughtException", () => process.exit(1));
+
 const { spawn } = require("node:child_process");
 const { readFileSync, writeFileSync } = require("node:fs");
 
@@ -14,7 +17,11 @@ const { file, args, options, env, out } = JSON.parse(
     readFileSync(process.env.UBC_VPN_TEST_LAUNCH, "utf8"),
 );
 const end = (result) => {
-    writeFileSync(out, JSON.stringify({ ...result, at: Date.now() }));
+    try {
+        writeFileSync(out, JSON.stringify({ ...result, at: Date.now() }));
+    } catch {
+        // The test has ended and its folder has gone.
+    }
     quit(0);
 };
 const child = spawn(file, args, {
@@ -30,4 +37,4 @@ child.stdout.on("data", (chunk) => {
         end({ outcome: "started" });
     }
 });
-setTimeout(() => end({ outcome: "timed out" }), 60_000);
+setTimeout(() => end({ outcome: "timed out" }), 30_000);

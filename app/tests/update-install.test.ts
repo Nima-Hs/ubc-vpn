@@ -22,6 +22,7 @@ import {
     launcherFor,
     launcherScript,
     launchWindows,
+    productionScript,
     restartToUpdate,
     SETUP_FALLBACK_MS,
     SETUP_LIMIT_MS,
@@ -323,7 +324,7 @@ const LAUNCHER = {
 };
 
 describe("how the setup program is started on Windows", () => {
-    const script = launcherScript();
+    const script = productionScript();
 
     it("asks for elevation, silently, with no relaunch left to the setup program", () => {
         expect(script).toContain("$start.Verb = 'runas'");
@@ -508,7 +509,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
     const WAIT = `$setup.WaitForExit(${SETUP_LIMIT_MS})`;
 
     it("waits as long as it should, and no longer, by default", () => {
-        const production = launcherScript();
+        const production = productionScript();
         expect(production).toContain(WAIT);
         expect(production).toContain(`Sleep(${SETUP_FALLBACK_MS})`);
         expect(SETUP_LIMIT_MS).toBe(600_000);
@@ -575,7 +576,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
     }, 60_000);
 
     it("has a message for the user in the production script", () => {
-        expect(launcherScript()).toContain("WScript.Shell).Popup('UBC VPN could not be started");
+        expect(productionScript()).toContain("WScript.Shell).Popup('UBC VPN could not be started");
     });
 
     it("waits for the program file to arrive, if setup has moved it", async () => {
@@ -622,7 +623,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
 
 describe("what keeps the launcher's tests off the desktop", () => {
     it("refuses to run the production script, which can show a dialog and ask for rights", () => {
-        expect(() => checkedScript(launcherScript())).toThrow(/dialog/);
+        expect(() => checkedScript(productionScript())).toThrow(/dialog/);
         expect(() => checkedScript(launcherScript({ tell: NO_MESSAGE }))).toThrow(/administrator/);
     });
 
@@ -633,15 +634,25 @@ describe("what keeps the launcher's tests off the desktop", () => {
             "[System.Windows.MessageBox]::Show('x')",
             "[System.Windows.Forms.Application]::Run()",
             "Read-Host",
+            "[Microsoft.VisualBasic.Interaction]::MsgBox('x')",
+            "mshta vbscript:close()",
+            "msg.exe * hello",
+            "$form.ShowDialog()",
         ]) {
             expect(() => checkedScript(script), script).toThrow(/dialog/);
         }
     });
 
-    it("refuses text that can elevate, and allows it once the start is gone", () => {
-        const elevating = `$start.Verb = 'runas'\n$setup = ${SETUP_START}`;
-        expect(() => checkedScript(elevating)).toThrow(/administrator/);
-        expect(checkedScript("$start.Verb = 'runas'\n$setup = $null")).toContain("runas");
+    it("refuses text that can elevate, however it is written", () => {
+        for (const script of [
+            `$start.Verb = 'runas'\n$setup = ${SETUP_START}`,
+            "$start.Verb = 'RunAs'",
+            '$start.Verb = "runas"',
+            "Start-Process x.exe -Verb RunAs",
+            "$other.Verb = 'RUNAS'",
+        ]) {
+            expect(() => checkedScript(script), script).toThrow(/administrator/);
+        }
         expect(checkedScript(`$start.Verb = ''\n$setup = ${SETUP_START}`)).toContain(SETUP_START);
     });
 
@@ -650,12 +661,19 @@ describe("what keeps the launcher's tests off the desktop", () => {
         expect(plain).not.toMatch(/WScript|Popup/);
         expect(plain).toContain(NO_MESSAGE);
         const replaced = withoutElevating("$null");
-        expect(replaced).toContain("'runas'");
+        expect(replaced).not.toMatch(/runas/i);
         expect(replaced).not.toContain(SETUP_START);
     });
 
+    it("keeps the Electron parent from showing Electron's own error dialog", () => {
+        const parent = readFileSync(join(__dirname, "update-launcher-parent.cjs"), "utf8");
+        const handler = parent.indexOf('process.on("uncaughtException"');
+        expect(handler).toBeGreaterThanOrEqual(0);
+        expect(handler).toBeLessThan(parent.indexOf("require("));
+    });
+
     it("still has the message and the elevated start in production", () => {
-        const production = launcherScript();
+        const production = productionScript();
         expect(production).toContain("WScript.Shell).Popup('UBC VPN could not be started");
         expect(production).toContain("$start.Verb = 'runas'");
     });

@@ -10,8 +10,12 @@
 // away, because a build with the placeholder never reads a note.
 //
 // What it cannot show: the real UAC prompt, which GitHub's runners do not show, so
-// neither approving nor cancelling it, nor waiting on a process across it; a real
-// signed list, or the download, which this test does not go through.
+// neither approving nor cancelling it, nor waiting on a process across it. The runner
+// is already elevated, so `runas` crosses nothing, and that the app starts as the
+// user is not shown. A real signed list, or the download. `installUpdate`,
+// `stageInstaller`, `createInstall`, the IPC and the app quitting: the note and the
+// copy are made here. No connection is brought back: the note names a made-up
+// profile, so only `profile_gone` runs. No notice is looked at.
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

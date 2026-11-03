@@ -202,7 +202,20 @@ export class Updater {
         }
     }
 
-    /** Takes back what `say` said: the user has dismissed it, or connected. */
+    /**
+     * A connection has been made: what was said about not reconnecting is out of
+     * date. What was said about the update itself stays, as a reconnect at start
+     * would otherwise erase it before the user could see it.
+     */
+    connectionMade(): void {
+        const kept = this.after.filter((notice) => notice === "unfinished" || notice === "stale");
+        if (kept.length !== this.after.length) {
+            this.after = kept;
+            this.publish(this.status);
+        }
+    }
+
+    /** Takes back what `say` said: the user has dismissed it. */
     clearSaid(): void {
         if (this.after.length > 0) {
             this.after = [];

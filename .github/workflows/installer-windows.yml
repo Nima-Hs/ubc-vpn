@@ -281,6 +281,8 @@ jobs:
       - name: Add Wintun, the Visual C++ runtime and the licence page
         working-directory: .
         run: packaging/windows/stage-redist.sh
+      # Never in the release workflow: `pnpm check:release` accepts any key that
+      # is not the placeholder, so it would not catch this one being shipped.
       - name: A throwaway update key, on this runner only
         working-directory: .
         run: |

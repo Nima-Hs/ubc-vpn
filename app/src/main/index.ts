@@ -121,8 +121,12 @@ async function start(): Promise<void> {
             devServerUrl,
             profiles: () => profiles,
             tunnelSwitch: () => tunnelSwitch,
-            saySomethingAboutAnUpdate: (say) =>
-                say ? updater.say("unfinished") : updater.clearSaid(),
+            saySomethingAboutAnUpdate: (notices) => {
+                updater.clearSaid();
+                for (const notice of notices) {
+                    updater.say(notice);
+                }
+            },
             loginItem: () => loginItemAsked,
         });
         link = demo.link;
@@ -253,10 +257,10 @@ async function start(): Promise<void> {
             (then) => whenDown(linkDown, then),
         ),
     );
-    // What the app had to say about an update is out of date once connected.
+    // Why the app did not reconnect is out of date once connected.
     controller.subscribe((snapshot) => {
         if (snapshot.state.link === "ready" && snapshot.state.conn.state === "connected") {
-            updater.clearSaid();
+            updater.connectionMade();
         }
     });
     updater.start();

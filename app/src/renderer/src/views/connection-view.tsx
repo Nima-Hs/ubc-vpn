@@ -62,6 +62,7 @@ export function ConnectionView() {
                     mode={copy.mode}
                     className="shrink-0"
                 />
+                <UpdateNotices view={updates} />
                 <LoginView login={login} />
                 {/* Read out, politely, as the login moves on. */}
                 <p role="status" className="sr-only">

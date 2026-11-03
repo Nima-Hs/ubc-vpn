@@ -772,6 +772,27 @@ describe("telling the user about an update", () => {
         expect(subject.view().after).toEqual([]);
     });
 
+    it("keeps saying the update did not finish after a connection is made", () => {
+        const subject = updater();
+        for (const notice of [
+            "unfinished",
+            "stale",
+            "profile_gone",
+            "reconnect_unknown",
+            "reconnect_unavailable",
+            "reconnect_busy",
+        ] as const) {
+            subject.say(notice);
+        }
+        const seen: unknown[] = [];
+        subject.subscribe((view) => seen.push(view.after));
+        subject.connectionMade();
+        expect(subject.view().after).toEqual(["unfinished", "stale"]);
+        expect(seen).toEqual([["unfinished", "stale"]]);
+        subject.connectionMade();
+        expect(seen).toHaveLength(1);
+    });
+
     it("keeps a note from an update through a download, which empties the folder", async () => {
         const { mkdir, writeFile } = await import("node:fs/promises");
         await mkdir(folder, { recursive: true });
