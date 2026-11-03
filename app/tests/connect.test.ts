@@ -557,9 +557,10 @@ describe("how often a login can start", () => {
 
         // Counted from when the client was started, this leaves 150 ms of the gap.
         const LEFT = 150;
+        // Taken before the start, whose timer it must not be later than.
+        const held = Date.now();
         // The user sees it begin straight away; the client is not started yet.
         expect(startAt(1_000_000 + GAP - LEFT)).toBe(true);
-        const held = Date.now();
         expect(phase()).toBe("working");
         expect(spawned).toHaveBeenCalledTimes(1);
         // Pressing again while it waits changes nothing.
