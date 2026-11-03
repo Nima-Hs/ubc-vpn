@@ -6,6 +6,7 @@ import { Switch } from "@/components/ui/switch";
 import { Subheading, Text } from "@/components/ui/text";
 import { api } from "@/lib/store";
 import { useUpdates } from "@/lib/updates";
+import { UpdateNotices } from "./update-notices";
 
 const WHEN = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
@@ -46,6 +47,7 @@ export function UpdateSettings({
                     <Text tone="secondary">{said}</Text>
                 </div>
             )}
+            <UpdateNotices view={view} />
             {view?.notice != null && (
                 <div role="alert">
                     <Panel tone="problem">

@@ -2,7 +2,13 @@
 // Electron import: the fetch, the clock, the timers and the folder are
 // passed in, so the whole flow is tested against fakes.
 
-import type { InstallNotice, UpdateFailure, UpdateStatus, UpdateView } from "@shared/updates";
+import type {
+    AfterUpdateNotice,
+    InstallNotice,
+    UpdateFailure,
+    UpdateStatus,
+    UpdateView,
+} from "@shared/updates";
 import { prepareFolder, saveInstaller } from "./download";
 import {
     type Fetch,
@@ -84,6 +90,7 @@ export class Updater {
     private status: UpdateStatus;
     private lastChecked: number | null = null;
     private notice: InstallNotice | null = null;
+    private after: AfterUpdateNotice[] = [];
     /**
      * Whether downloads are automatic, as the settings say; `null` until
      * they have said, and nothing is downloaded until they say yes.
@@ -129,7 +136,12 @@ export class Updater {
     }
 
     view(): UpdateView {
-        return { status: this.status, lastChecked: this.lastChecked, notice: this.notice };
+        return {
+            status: this.status,
+            after: this.after,
+            lastChecked: this.lastChecked,
+            notice: this.notice,
+        };
     }
 
     /** Where installers are kept, or `null` in a copy that cannot update. */
@@ -154,6 +166,7 @@ export class Updater {
         }
         this.busy = true;
         this.notice = null;
+        this.after = [];
         this.publish({ phase: "installing", version: ready.version });
         return ready;
     }
@@ -179,6 +192,14 @@ export class Updater {
         this.publish(
             ready === null ? { phase: "idle" } : { phase: "ready", version: ready.version },
         );
+    }
+
+    /** Tells the user something about an update, until the next "Restart to update". */
+    say(notice: AfterUpdateNotice): void {
+        if (!this.after.includes(notice)) {
+            this.after = [...this.after, notice];
+            this.publish(this.status);
+        }
     }
 
     subscribe(listener: (view: UpdateView) => void): () => void {
