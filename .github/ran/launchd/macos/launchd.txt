@@ -1,0 +1,12 @@
+install
+running
+owner
+stranger refused
+reinstall keeps state
+restarted after a crash
+stop and start again
+disabled job enabled
+uninstall keeps data when asked
+elsewhere refused
+planted state emptied
+uninstall leaves nothing

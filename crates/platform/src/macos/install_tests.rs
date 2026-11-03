@@ -1,15 +1,20 @@
 //! Tests of installing the service on macOS.
 //!
-//! None of them touches launchd or the real data folder: the folders are made
-//! for each test. The ones that need root, to make files root's and to play a
-//! stranger's, run in a process of their own, so that no other test's switch
-//! of user or umask reaches them, and say `RAN AS ROOT: install <name>` when
-//! they passed. CI requires those lines
-//! (`.github/ran/platform-unix/macos/install.txt`).
+//! None of them touches launchd or the real data folder: launchctl is replaced
+//! by a recorder, and the folders are made for each test. The ones that need
+//! root, to make files root's and to play a stranger's, run in a process of
+//! their own, so that no other test's switch of user or umask reaches them,
+//! and say `RAN AS ROOT: install <name>` when they passed. CI requires those
+//! lines (`.github/ran/platform-unix/macos/install.txt`). The real launchd is
+//! tried by `packaging/macos/tests/launchd.sh`.
 
+use std::cell::{Cell, RefCell};
+use std::ffi::OsStr;
 use std::fs::{self, Permissions};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, lchown, symlink};
+use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,26 +126,500 @@ fn installed(data: &Path) {
     verify_data_folder(data, true).expect("verify");
 }
 
-// Security rule: launchd's calls say they are not built, so `install` stops
-// at `quoted`, before anything is changed.
-#[test]
-fn registering_is_not_built_yet() {
-    let dir = Path::new("/nonexistent/ubc-vpn-test");
-    let registration = Registration {
-        name: "made-up",
-        display_name: "Made Up",
-        description: "made up",
-        command_line: String::new(),
-    };
-    assert_eq!(quoted(dir), Err(Error::Unsupported));
-    let results = [
-        register(&registration),
-        start("made-up"),
-        unregister("made-up"),
-    ];
-    for (n, result) in results.into_iter().enumerate() {
-        assert_eq!(result, Err(Error::Unsupported), "call {n}");
+fn ok() -> Said {
+    Said {
+        code: Some(0),
+        out: String::new(),
+        err: String::new(),
     }
+}
+
+fn code(code: i32) -> Said {
+    Said {
+        code: Some(code),
+        ..ok()
+    }
+}
+
+/// `launchctl print`'s answer for a job in `state`, as the real one looks:
+/// the job's own lines one tab in, and others further in.
+fn printed(state: &str, last_exit: &str) -> Said {
+    Said {
+        out: format!(
+            "system/{LABEL} = {{\n\tactive count = 1\n\tstate = {state}\n\tlast exit code = \
+             {last_exit}\n\tendpoints = {{\n\t\tstate = active\n\t}}\n}}\n"
+        ),
+        ..ok()
+    }
+}
+
+/// What a [`Recorder`] answers each call with.
+type Answer<'a> = Box<dyn Fn(&[&str]) -> Said + 'a>;
+
+/// Stands in for launchctl: records each call, with whether the job's file
+/// was still there when the service was unloaded, and answers with `answer`.
+struct Recorder<'a> {
+    calls: RefCell<Vec<String>>,
+    plist: Option<PathBuf>,
+    answer: Answer<'a>,
+}
+
+impl<'a> Recorder<'a> {
+    fn new(answer: impl Fn(&[&str]) -> Said + 'a) -> Self {
+        Self {
+            calls: RefCell::new(Vec::new()),
+            plist: None,
+            answer: Box::new(answer),
+        }
+    }
+
+    fn watching(daemons: &Path, answer: impl Fn(&[&str]) -> Said + 'a) -> Self {
+        Self {
+            plist: Some(daemons.join(PLIST_NAME)),
+            ..Self::new(answer)
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+}
+
+impl Launchd for Recorder<'_> {
+    fn run(&self, args: &[&str]) -> Result<Said> {
+        let mut call = args.join(" ");
+        if let Some(plist) = &self.plist
+            && args.first() == Some(&"bootout")
+        {
+            let there = fs::symlink_metadata(plist).is_ok();
+            call.push_str(if there {
+                " (file there)"
+            } else {
+                " (file gone)"
+            });
+        }
+        self.calls.borrow_mut().push(call);
+        Ok((self.answer)(args))
+    }
+}
+
+/// A folder for a test that needs no root.
+fn plain_scratch() -> PathBuf {
+    let count = NEXT.fetch_add(1, Ordering::SeqCst);
+    let name = format!("uvt-install-plain-{}-{count}", std::process::id());
+    let dir = std::env::temp_dir().join(name);
+    fs::create_dir(&dir).expect("make the scratch folder");
+    dir
+}
+
+/// A launchd that loads the job at once and reports it as gone once asked to
+/// unload it: `running` until `bootout`, then not loaded.
+fn loaded_until_bootout() -> impl Fn(&[&str]) -> Said {
+    let unloaded = Cell::new(false);
+    move |args: &[&str]| match args {
+        ["print", _] if unloaded.get() => code(NOT_LOADED),
+        ["print", _] => printed("running", "(never exited)"),
+        ["bootout", _] => {
+            unloaded.set(true);
+            ok()
+        }
+        _ => ok(),
+    }
+}
+
+fn registration(command_line: &str) -> Registration<'static> {
+    Registration {
+        name: "ubc-vpn",
+        display_name: "UBC VPN Service",
+        description: "made up",
+        command_line: command_line.to_string(),
+    }
+}
+
+// The job as shipped: what launchd starts, how it stops it, and what reaches
+// it. The real launchd reads it in packaging/macos/tests/launchd.sh.
+#[test]
+fn the_job_starts_the_installed_service_and_gives_it_time_to_stop() {
+    assert!(PLIST.contains(&format!("<string>{LABEL}</string>")));
+    assert!(PLIST.contains(&format!("<string>{INSTALLED_SERVICE}</string>")));
+    assert_eq!(JOB, format!("system/{LABEL}"));
+    assert_eq!(PLIST_NAME, format!("{LABEL}.plist"));
+    assert!(INSTALLED_SERVICE.starts_with("/Library/PrivilegedHelperTools/"));
+    assert!(PLIST.contains("<key>ExitTimeOut</key>\n  <integer>30</integer>"));
+    // launchd kills it after ExitTimeOut, and the wait outlasts that.
+    assert!(STOP_WAIT > Duration::from_secs(30));
+    assert_eq!(
+        PLIST.matches(&format!("<string>{LOG}</string>")).count(),
+        2,
+        "its output goes to the log in the data folder"
+    );
+    assert_eq!(Path::new(LOG).parent().map(Path::as_os_str), {
+        Some(std::ffi::OsStr::new(crate::os::SYSTEM))
+    });
+    // Security rule: nothing from outside the program reaches it, and it
+    // runs as root from the folder `install` checked.
+    for refused in [
+        "EnvironmentVariables",
+        "UserName",
+        "GroupName",
+        "WorkingDirectory",
+        "RootDirectory",
+        "Program</key>",
+        "inetdCompatibility",
+    ] {
+        assert!(!PLIST.contains(refused), "{refused}");
+    }
+    // Every setting has its reason on the line above: a comment's end.
+    let lines: Vec<&str> = PLIST.lines().collect();
+    for (n, line) in lines.iter().enumerate() {
+        // Only the job's own settings, not the ones nested in KeepAlive.
+        if line.starts_with("  <key>") {
+            assert!(lines[n - 1].ends_with("-->"), "{line} has no reason");
+        }
+    }
+}
+
+// Only the path itself is ever given to launchd.
+#[test]
+fn quoted_takes_only_a_plain_path() {
+    assert_eq!(
+        quoted(Path::new(INSTALLED_SERVICE)).unwrap(),
+        INSTALLED_SERVICE
+    );
+    for bad in ["relative/ubc-vpn-service", "/a\nb", "/a\tb"] {
+        assert_eq!(quoted(Path::new(bad)), Err(Error::InvalidInput), "{bad:?}");
+    }
+    let not_utf8 = Path::new(OsStr::from_bytes(b"/a\xffb"));
+    assert_eq!(quoted(not_utf8), Err(Error::InvalidInput));
+}
+
+// Security rule: launchctl is named by its absolute path and runs from `/`.
+#[test]
+fn launchctl_is_run_by_its_path() {
+    let command = command(&["print", JOB]);
+    assert_eq!(command.get_program(), LAUNCHCTL);
+    assert!(Path::new(LAUNCHCTL).is_absolute());
+    let args: Vec<&OsStr> = command.get_args().collect();
+    assert_eq!(args, ["print", JOB]);
+    assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    assert_eq!(command.get_envs().count(), 0, "nothing is set for it");
+}
+
+// launchd's words for a job, and an answer it cannot read is not "not loaded".
+#[test]
+fn what_launchd_says_of_the_job() {
+    let says = |said: fn() -> Said| job(&Recorder::new(move |_| said()));
+    assert_eq!(says(|| code(NOT_LOADED)), Ok(Job::NotLoaded));
+    assert_eq!(
+        says(|| printed("running", "(never exited)")),
+        Ok(Job::Running)
+    );
+    // A job that ran before and now runs again.
+    assert_eq!(says(|| printed("running", "1")), Ok(Job::Running));
+    assert_eq!(says(|| printed("spawn scheduled", "1")), Ok(Job::Failed));
+    assert_eq!(says(|| printed("not running", "78")), Ok(Job::Failed));
+    assert_eq!(says(|| printed("not running", "0")), Ok(Job::Waiting));
+    assert_eq!(
+        says(|| printed("spawn scheduled", "(never exited)")),
+        Ok(Job::Waiting)
+    );
+    // `state` further in is about something else.
+    let nested = || Said {
+        out: "x = {\n\t\tstate = running\n}\n".to_string(),
+        ..ok()
+    };
+    assert_eq!(says(nested), Ok(Job::Waiting));
+    let broken = || Said {
+        code: Some(64),
+        err: "Usage: launchctl\n".to_string(),
+        ..ok()
+    };
+    assert!(matches!(says(broken), Err(Error::Failed(why)) if why.contains("Usage")));
+}
+
+#[test]
+fn a_disabled_job_is_told_from_any_other() {
+    let list = |value: &str| {
+        format!(
+            "disabled services = {{\n\t\"com.example.other\" => disabled\n\t\"{LABEL}\" => \
+             {value}\n}}\nlogin item associations = {{\n}}\n"
+        )
+    };
+    assert!(is_disabled(&list("disabled")));
+    assert!(is_disabled(&list("true")));
+    assert!(!is_disabled(&list("enabled")));
+    assert!(!is_disabled(&list("false")));
+    assert!(!is_disabled(
+        "disabled services = {\n\t\"com.example.other\" => disabled\n}\n"
+    ));
+    let longer = format!("\t\"{LABEL}.other\" => disabled\n");
+    assert!(!is_disabled(&longer), "another job with a longer name");
+}
+
+// Security rule: only the shipped job, for the program at the installed
+// place, is ever registered. Anything else changes nothing.
+#[test]
+fn another_name_or_program_is_refused_before_anything_changes() {
+    let daemons = plain_scratch();
+    let recorder = Recorder::new(|_| ok());
+    let mut other = registration(INSTALLED_SERVICE);
+    other.name = "other";
+    let wait = Duration::ZERO;
+    assert_eq!(
+        register_with(&recorder, &daemons, &other, wait),
+        Err(Error::InvalidInput)
+    );
+    for command_line in ["/usr/local/bin/ubc-vpn-service", "", "ubc-vpn-service"] {
+        let refused = register_with(&recorder, &daemons, &registration(command_line), wait);
+        assert!(
+            matches!(&refused, Err(Error::Failed(why)) if why.contains(INSTALLED_SERVICE)),
+            "{command_line:?}: {refused:?}"
+        );
+    }
+    assert_eq!(recorder.calls(), [""; 0]);
+    assert_eq!(names_in(&daemons).unwrap(), [""; 0]);
+    assert_eq!(start("other"), Err(Error::InvalidInput));
+    assert_eq!(unregister("other"), Err(Error::InvalidInput));
+    fs::remove_dir_all(&daemons).unwrap();
+}
+
+// The service counts as started only once something answers on its socket: a
+// socket file left behind is not enough.
+#[test]
+fn start_waits_until_the_service_listens() {
+    let scratch = plain_scratch();
+    let channel = scratch.join("s");
+    let asked = Cell::new(0);
+    let listener = RefCell::new(None);
+    // A socket file nothing listens on, as a service that was killed leaves.
+    drop(UnixListener::bind(&channel).expect("bind"));
+    assert!(fs::symlink_metadata(&channel).is_ok());
+    let recorder = Recorder::new(|args| match args {
+        ["print", _] => {
+            asked.set(asked.get() + 1);
+            if asked.get() == 3 {
+                fs::remove_file(&channel).expect("the old socket");
+                *listener.borrow_mut() = Some(UnixListener::bind(&channel).expect("bind"));
+            }
+            printed("running", "(never exited)")
+        }
+        _ => ok(),
+    });
+    start_with(&recorder, &scratch, &channel, Duration::from_secs(30)).expect("start");
+    let calls = recorder.calls();
+    let plist = scratch.join(PLIST_NAME);
+    let bootstrap = format!("bootstrap system {}", plist.display());
+    assert_eq!(calls[..2], ["print-disabled system".to_string(), bootstrap]);
+    assert_eq!(calls.len(), 2 + 3, "{calls:?}");
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+// One that fails as it starts is an error, said at once and not after the
+// wait, and so is one launchd refuses or never starts.
+#[test]
+fn a_start_that_fails_says_so() {
+    let scratch = plain_scratch();
+    let none = scratch.join("none.sock");
+    let long = Duration::from_secs(60);
+    let at = Instant::now();
+
+    let failing = Recorder::new(|args| match args {
+        ["print", _] => printed("spawn scheduled", "1"),
+        _ => ok(),
+    });
+    let refused = start_with(&failing, &scratch, &none, long);
+    assert!(
+        matches!(&refused, Err(Error::Failed(why)) if why.contains(LOG)),
+        "{refused:?}"
+    );
+
+    let gone = Recorder::new(|args| match args {
+        ["print", _] => code(NOT_LOADED),
+        _ => ok(),
+    });
+    assert!(matches!(
+        start_with(&gone, &scratch, &none, long),
+        Err(Error::Failed(_))
+    ));
+    assert!(at.elapsed() < Duration::from_secs(5), "it waited");
+
+    let no_load = Recorder::new(|args| match args {
+        ["bootstrap", ..] => Said {
+            code: Some(5),
+            err: "Bootstrap failed: 5: Input/output error\n".to_string(),
+            ..ok()
+        },
+        _ => ok(),
+    });
+    let refused = start_with(&no_load, &scratch, &none, long);
+    assert!(
+        matches!(&refused, Err(Error::Failed(why)) if why.contains("Input/output")),
+        "{refused:?}"
+    );
+    assert_eq!(no_load.calls().len(), 2, "nothing after the failure");
+
+    // Never listens: gives up at the limit.
+    let silent = Recorder::new(|args| match args {
+        ["print", _] => printed("running", "(never exited)"),
+        _ => ok(),
+    });
+    let wait = Duration::from_millis(300);
+    assert_eq!(
+        start_with(&silent, &scratch, &none, wait),
+        Err(Error::TimedOut)
+    );
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+// A job someone disabled is enabled, since installing means wanting it to
+// run; any other is left out of launchd's list, where this leaves a record.
+#[test]
+fn only_a_disabled_job_is_enabled() {
+    let scratch = plain_scratch();
+    let channel = scratch.join("s");
+    let _listener = UnixListener::bind(&channel).expect("bind");
+    let disabled = Recorder::new(|args| match args {
+        ["print-disabled", _] => Said {
+            out: format!("\t\"{LABEL}\" => disabled\n"),
+            ..ok()
+        },
+        ["print", _] => printed("running", "(never exited)"),
+        _ => ok(),
+    });
+    start_with(&disabled, &scratch, &channel, Duration::ZERO).expect("start");
+    let calls = disabled.calls();
+    assert_eq!(calls[1], format!("enable {JOB}"), "{calls:?}");
+    assert!(calls[2].starts_with("bootstrap "), "{calls:?}");
+
+    let enabled = Recorder::new(|args| match args {
+        ["print", _] => printed("running", "(never exited)"),
+        _ => ok(),
+    });
+    start_with(&enabled, &scratch, &channel, Duration::ZERO).expect("start");
+    assert!(
+        !enabled
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("enable")),
+        "{:?}",
+        enabled.calls()
+    );
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+// Security rule: the service has ended, and so has removed its routes and
+// DNS, before its job's file goes. launchd knows the job until then, so a
+// bootout that returns early is waited for, and one that never ends removes
+// nothing.
+#[test]
+fn uninstall_stops_the_service_before_it_removes_the_job() {
+    let daemons = plain_scratch();
+    let plist = daemons.join(PLIST_NAME);
+    fs::write(&plist, PLIST).expect("a job");
+    let wait = Duration::from_secs(30);
+
+    // Still ending for three more questions after it was asked to.
+    let asked = Cell::new(0);
+    let ending = Recorder::watching(&daemons, |args| match args {
+        ["print", _] => {
+            asked.set(asked.get() + 1);
+            match asked.get() {
+                5.. => code(NOT_LOADED),
+                _ => printed("running", "(never exited)"),
+            }
+        }
+        ["bootout", _] => code(STILL_ENDING),
+        _ => ok(),
+    });
+    unregister_with(&ending, &daemons, wait).expect("unregister");
+    let calls = ending.calls();
+    assert_eq!(calls[1], format!("bootout {JOB} (file there)"), "{calls:?}");
+    assert_eq!(calls.len(), 6, "asked until it was gone: {calls:?}");
+    assert!(fs::symlink_metadata(&plist).is_err(), "the file is gone");
+
+    // One launchd does not know: nothing to unload, and no file is fine.
+    let not_loaded = Recorder::new(|_| code(NOT_LOADED));
+    unregister_with(&not_loaded, &daemons, wait).expect("unregister again");
+    assert_eq!(not_loaded.calls(), [format!("print {JOB}")]);
+
+    // A file left with no job loaded is removed, and a link is removed itself.
+    let elsewhere = daemons.join("elsewhere");
+    fs::write(&elsewhere, "kept").unwrap();
+    symlink(&elsewhere, &plist).unwrap();
+    unregister_with(&not_loaded, &daemons, wait).expect("a link");
+    assert!(fs::symlink_metadata(&plist).is_err());
+    assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
+
+    // A stop that fails, or never ends, removes nothing.
+    fs::write(&plist, PLIST).expect("a job again");
+    let stuck = Recorder::watching(&daemons, |args| match args {
+        ["bootout", _] => Said {
+            code: Some(5),
+            err: "Boot-out failed: 5: Input/output error\n".to_string(),
+            ..ok()
+        },
+        _ => printed("running", "(never exited)"),
+    });
+    let refused = unregister_with(&stuck, &daemons, wait);
+    assert!(
+        matches!(&refused, Err(Error::Failed(why)) if why.contains("Boot-out failed")),
+        "{refused:?}"
+    );
+    assert!(plist.exists(), "a service that did not stop keeps its job");
+
+    let never = Recorder::new(|args| match args {
+        ["print", _] => printed("running", "(never exited)"),
+        _ => code(STILL_ENDING),
+    });
+    assert_eq!(
+        unregister_with(&never, &daemons, Duration::from_millis(300)),
+        Err(Error::TimedOut)
+    );
+    assert!(plist.exists(), "a service that never ended keeps its job");
+
+    // An answer launchctl gives that cannot be read stops it too.
+    let broken = Recorder::new(|_| code(64));
+    assert!(unregister_with(&broken, &daemons, wait).is_err());
+    assert!(plist.exists(), "nothing is removed on a guess");
+    fs::remove_dir_all(&daemons).unwrap();
+}
+
+// Security rule: launchd reads the job as root, so it is root's, 0644,
+// whatever the umask, holds the shipped job exactly, and is written after the
+// service has stopped. A link left in its way is not followed.
+#[test]
+fn install_job_as_root() {
+    as_root("job", "install_job_as_root", |scratch| {
+        let daemons = scratch.0.join("daemons");
+        folder(&daemons, 0o755);
+        let plist = daemons.join(PLIST_NAME);
+        let target = scratch.0.join("target");
+        fs::write(&target, "untouched").unwrap();
+        symlink(&target, daemons.join(format!(".{PLIST_NAME}.new"))).unwrap();
+        for mask in [0o777, 0] {
+            umask(mask);
+            let recorder = Recorder::watching(&daemons, loaded_until_bootout());
+            register_with(
+                &recorder,
+                &daemons,
+                &registration(INSTALLED_SERVICE),
+                Duration::from_secs(5),
+            )
+            .expect("register");
+            umask(0);
+            assert_eq!(owner_group_and_mode(&plist), (0, 0, PLIST_MODE));
+            assert_eq!(fs::read_to_string(&plist).unwrap(), PLIST);
+            assert_eq!(names_in(&daemons).unwrap(), [PLIST_NAME]);
+            let unloaded = if mask == 0o777 {
+                "(file gone)"
+            } else {
+                "(file there)"
+            };
+            let calls = recorder.calls();
+            assert_eq!(calls[1], format!("bootout {JOB} {unloaded}"), "{calls:?}");
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+    });
 }
 
 // Security rule: the policy every user's client trusts is root's, 0644, in a

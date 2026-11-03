@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The UBC VPN service on macOS. `ubc-vpn-service install` writes this file,
+     as it is, to /Library/LaunchDaemons (root, 0644), and `uninstall` removes
+     it. Never edit the installed copy: the next install replaces it. Every
+     setting has the reason for it on the line above. -->
+<plist version="1.0">
+<dict>
+  <!-- The name launchd knows it by, and the one in the command the client
+       tells users to run to start it. -->
+  <key>Label</key>
+  <string>io.github.nima-hs.ubc-vpn</string>
+  <!-- Where the package puts the service, which only root can change. Never
+       in the app: /Applications is writable by the admin group. `install`
+       refuses to register a service anywhere else. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/PrivilegedHelperTools/io.github.nima-hs.ubc-vpn/ubc-vpn-service</string>
+  </array>
+  <!-- Started when it is loaded: at install, and with the system. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restarted after it fails, not after an ordinary stop. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- Five seconds between restarts, as on Windows and Linux. -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <!-- A stop sends SIGTERM, and teardown removes the routes and DNS before it
+       closes the tunnel, which may wait on the gateway. Set outright: the
+       default is 20 seconds. The same as on Windows and Linux. -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <!-- 0077: files the service and libopenconnect make are its own. The
+       service sets the modes of the files others need outright. -->
+  <key>Umask</key>
+  <integer>63</integer>
+  <!-- What the service says as it starts and stops, and why it could not
+       start, in the data folder: only root can change that, so nothing can
+       put a link here for launchd to write through. It holds no secret. -->
+  <key>StandardOutPath</key>
+  <string>/Library/Application Support/UBC VPN/service.log</string>
+  <!-- See StandardOutPath. -->
+  <key>StandardErrorPath</key>
+  <string>/Library/Application Support/UBC VPN/service.log</string>
+</dict>
+</plist>
