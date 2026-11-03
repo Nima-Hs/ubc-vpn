@@ -1,6 +1,6 @@
 # libopenconnect for macOS
 
-Builds `libopenconnect` for macOS 13 or later on Apple silicon, from source, as a folder of libraries that can be dropped into the app and run on a Mac with nothing else installed.
+Builds `libopenconnect` for macOS 14 or later on Apple silicon, from source, as a folder of libraries that can be dropped into the app and run on a Mac with nothing else installed.
 
 ## What gets built
 
@@ -19,7 +19,7 @@ The openconnect source is the upstream release archive, `openconnect-9.21.tar.gz
 
 Everything else comes from macOS itself: `libxml2`, `zlib`, `libiconv`, and the Security and CoreFoundation frameworks.
 
-Homebrew's copies of these libraries are not used, because they are built for the macOS version of the machine that made them, not for macOS 13.
+Homebrew's copies of these libraries are not used, because they are built for the macOS version of the machine that made them, not for macOS 14.
 
 ## Building
 
@@ -34,12 +34,12 @@ SOURCE_COMMIT=$(git rev-parse HEAD) native/macos/bundle.sh build libopenconnect-
 
 `bundle.sh` writes the output folder. It refuses to finish unless every library:
 
-- is arm64 and declares macOS 13.0 as its minimum;
-- has no weak imports, which is how a function missing from macOS 13 would show up;
+- is arm64 and declares macOS 14.0 as its minimum;
+- has no weak imports, which is how a function missing from macOS 14 would show up;
 - loads only the other libraries in the folder and the system libraries listed above;
 - contains no path from the build machine, and is signed.
 
-The compiler also treats any use of a function newer than macOS 13 as an error.
+The compiler also treats any use of a function newer than macOS 14 as an error.
 
 ## The output folder
 
@@ -73,7 +73,7 @@ The service runs as root, so:
 
 ## Not covered
 
-- **Nothing has been run on macOS 13 itself.** The workflow builds and runs the probe on macOS 15, the oldest Apple-silicon machine GitHub offers. That the libraries work on macOS 13 rests on the static checks above, which the probe job repeats on the artifact it is handed.
+- **CI does not run on macOS 14 itself.** The workflow builds and runs the probe on macOS 15, the oldest Apple-silicon machine GitHub offers. That the libraries work on macOS 14 rests on the static checks above, which the probe job repeats on the artifact it is handed, and on trying a build by hand on a Mac with macOS 14. macOS 13 is not supported: nothing has run there, and no runner that old exists to try it on.
 - Intel Macs.
 - Signing or notarizing with a real identity.
 - The probe accepts any certificate, so certificate checking against the Keychain is not exercised.

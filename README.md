@@ -36,7 +36,7 @@ This is the design, from [docs/architecture.md](docs/architecture.md). Not all o
 Planned for the first release:
 
 - Windows 10 and 11 on x64.
-- macOS 13 or later on Apple silicon.
+- macOS 14 or later on Apple silicon.
 - Ubuntu 22.04 or later, Debian 12 or later, and current Fedora, on x64.
 
 Only IPv4 subnets are routed. Your IPv6 setup is left untouched.

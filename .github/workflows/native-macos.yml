@@ -72,7 +72,7 @@ jobs:
   # Runs on a different machine than the build, so the build directory does
   # not exist and nothing can be loaded from it. macOS 15 is the oldest
   # Apple-silicon image GitHub offers, the same as the build's, so no
-  # machine here is as old as the macOS 13 we support; the libraries' minimum
+  # machine here is as old as the macOS 14 we support; the libraries' minimum
   # is checked from their headers instead, here and in bundle.sh.
   probe:
     name: Probe the build
