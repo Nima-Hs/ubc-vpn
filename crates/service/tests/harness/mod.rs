@@ -27,7 +27,7 @@ use ubc_vpn_core::protocol::{
     ClientKind, ConnectParams, Event, Hello, HelloReply, Outcome, PROTOCOL_VERSION, Request,
     ServerMessage, decode, encode,
 };
-pub use ubc_vpn_core::protocol::{ErrorInfo, LogCursor, LogLine, LogsParams};
+pub use ubc_vpn_core::protocol::{ErrorInfo, LogCursor, LogLine, LogPage, LogsParams};
 use ubc_vpn_core::redact::Secret;
 use ubc_vpn_core::routes::RouteSet;
 pub use ubc_vpn_engine::fake::{FakeEngine, Script};
@@ -40,6 +40,35 @@ pub const COOKIE: &str = "Zq7-made-up-0123456789";
 pub const GATEWAY: [u8; 4] = [192, 0, 2, 1];
 /// Longer than anything here should take. A regression fails, not hangs.
 pub const WAIT: Duration = Duration::from_secs(10);
+
+/// More pages than the whole log could take: the service keeps 600 lines at
+/// most, and a page that moves on holds at least one.
+pub const MOST_LOG_PAGES: usize = 1_000;
+
+/// Reads a log page by page from the start, using `ask` for the page after a
+/// cursor. Tests have no time limit, so a page that repeats would otherwise
+/// grow this until the machine runs out of memory. It panics instead when the
+/// cursor does not move past where it was, or past [`MOST_LOG_PAGES`].
+pub fn read_whole_log(mut ask: impl FnMut(Option<LogCursor>) -> LogPage) -> Vec<LogLine> {
+    let mut read = Vec::new();
+    let mut after: Option<LogCursor> = None;
+    for _ in 0..MOST_LOG_PAGES {
+        let page = ask(after);
+        if page.lines.is_empty() {
+            return read;
+        }
+        let (run, seq) = (page.run, page.next);
+        let was = after.filter(|place| place.run == run);
+        let was = was.map_or(0, |place| place.seq);
+        assert!(
+            seq > was,
+            "the log's cursor did not move: {was}, then {seq}"
+        );
+        after = Some(LogCursor { run, seq });
+        read.extend(page.lines);
+    }
+    panic!("the log did not end within {MOST_LOG_PAGES} pages");
+}
 
 pub fn pin(letter: char) -> String {
     format!("pin-sha256:{}=", letter.to_string().repeat(43))
@@ -373,20 +402,13 @@ impl Peer {
 
     /// The whole log, read page by page from the start.
     pub fn whole_log(&mut self) -> Vec<LogLine> {
-        let mut read = Vec::new();
-        let mut after = None;
-        loop {
+        read_whole_log(|after| {
             let Ok(ResponseBody::Logs(page)) = self.ask(RequestBody::Logs(LogsParams { after }))
             else {
                 panic!("the owner may read the log");
             };
-            if page.lines.is_empty() {
-                return read;
-            }
-            let (run, seq) = (page.run, page.next);
-            after = Some(LogCursor { run, seq });
-            read.extend(page.lines);
-        }
+            page
+        })
     }
 
     /// Sends a connect request and returns the state it ends in.
