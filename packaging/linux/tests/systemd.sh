@@ -8,7 +8,8 @@
 #
 # Only for a throwaway CI runner, where systemd is PID 1: it installs a root
 # service, adds a network namespace, a veth pair and a line to /etc/hosts,
-# and starts ocserv as root. The workflow sets UBC_VPN_TEST_THROWAWAY_MACHINE
+# may link /etc/resolv.conf to systemd-resolved's stub, and starts ocserv as
+# root. The workflow sets UBC_VPN_TEST_THROWAWAY_MACHINE
 # on GitHub's own Ubuntu 22.04 runners only. Never run it on a machine that
 # is kept, or one with UBC VPN installed.
 #
@@ -123,7 +124,9 @@ why_not_connected() {
     ip -o link show || true
     ip -4 route show table all || true
     sudo ss -tnp || true
-    echo "systemd-resolved is $(systemctl is-active systemd-resolved.service || true)"
+    echo "systemd-resolved is $(systemctl is-active systemd-resolved.service || true)," \
+        "resolv.conf mode $(resolv_conf_mode || true)"
+    ls -l /etc/resolv.conf || true
     echo "the service's journal:"
     journalctl -u ubc-vpn.service -o short-precise --no-pager | tail -n 50 || true
     echo "ocserv's log:"
@@ -141,10 +144,18 @@ wait_connected() {
             seen=$now
         fi
         if printf '%s\n' "$now" | grep -q '^Connected (ubcvpn'; then return 0; fi
+        # A connect that failed stays failed: nothing is retried.
+        case "$now" in Failed:* | "Login needed"*) break ;; esac
         sleep 0.2
     done
     why_not_connected
     fail "the service did not connect"
+}
+# Whether programs ask systemd-resolved, as resolved itself says, such as
+# s "stub".
+resolv_conf_mode() {
+    busctl get-property org.freedesktop.resolve1 /org/freedesktop/resolve1 \
+        org.freedesktop.resolve1.Manager ResolvConfMode
 }
 tunnel_links() {
     ip -o link show | grep -o 'ubcvpn[0-9]*' || true
@@ -160,6 +171,23 @@ stopped_lines() {
 nothing_runs() {
     ! pgrep -x ubc-vpn-service > /dev/null
 }
+
+# --- What programs ask ------------------------------------------------------
+
+# The service refuses split DNS where programs do not ask systemd-resolved.
+# Most of GitHub's runners link resolv.conf to its stub, but some have a plain
+# file, which it counts as foreign, as the platform crate's DNS tests also find.
+# The connect below would rightly fail there, so a runner like that is made like
+# the others. The stub answers the runner's own lookups as before.
+echo "resolv.conf mode: $(resolv_conf_mode)"
+case "$(resolv_conf_mode)" in
+'s "stub"' | 's "static"') ;;
+*)
+    sudo ln -sfn ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    [ "$(resolv_conf_mode)" = 's "stub"' ] || fail "resolv.conf mode: $(resolv_conf_mode)"
+    echo "resolv.conf linked to the stub"
+    ;;
+esac
 
 # --- The gateway ------------------------------------------------------------
 
