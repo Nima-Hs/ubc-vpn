@@ -32,7 +32,7 @@ on:
       # Last, so it wins: a change to Markdown files alone starts nothing.
       - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, feat/macos-pkg]
     paths:
       - app/**
       - packaging/macos/**
