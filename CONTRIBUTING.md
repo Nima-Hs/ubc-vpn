@@ -212,6 +212,21 @@ pnpm check:package:linux   # fuses, licence files, the packages' scripts, depend
 
 `.github/workflows/installer-linux.yml` builds the library and the packages, installs the `.deb` as root on a GitHub runner, checks what landed where, who can change it, that no program has an rpath, and that the service runs and answers a standard user, installs it again over itself, removes it and purges it, and checks nothing is left. It then installs the `.deb` in Ubuntu 22.04 and Debian 12 containers and the `.rpm` in a Fedora one, where systemd does not run, and checks the dependencies resolve, the files land, the service is left out, an `rpm -U` over itself keeps the links and files, and removing the package leaves nothing. Last, it installs the `.rpm` in a Fedora container that systemd runs, starts the service for a standard user, upgrades it over itself with `rpm -U`, which runs the scripts with an update's arguments, checks the links, the files, `state.json` with its owner and the running service are kept, and removes it. Those checks are in `packaging/linux/tests/installer.sh`. They install packages and a root service and add a user, so they run only on the runner; do not run them on your own computer.
 
+## The macOS package
+
+The `.pkg` is built with the same electron-builder, with the settings in `app/electron-builder.mac.yml`. It installs the app in `/Applications`, with the command-line client and its libraries in `Contents/Resources/bin`. The service, the libraries it loads and the policy are in the package's scripts folder, and `packaging/macos/scripts/postinstall` copies them to `/Library/PrivilegedHelperTools/io.github.nima-hs.ubc-vpn`. On a Mac with Apple silicon, with the app's packages installed as in Setup, Rust, and the output of `native/macos/bundle.sh`, from the repository root:
+
+```sh
+packaging/macos/stage.sh <native-folder> <native-build> <sources-archive>   # builds the programs with the real engine and no search path, gathers the libraries, the scripts and the policy
+cd app
+pnpm package:mac         # builds the app, then dist/ubc-vpn-<version>-arm64.pkg
+pnpm check:package:mac   # fuses, licence files, the package's scripts, owners and where it may install, and no updater files
+```
+
+electron-builder writes the package with the `pkgbuild` and `productbuild` that come with macOS, found by name on `PATH`. `packaging/macos/check-tools.sh` stops if they are found anywhere but `/usr/bin`, and prints the macOS version and their SHA-256. Nothing is signed beyond the ad-hoc signatures the linker and `bundle.sh` give.
+
+`.github/workflows/installer-macos.yml` builds the libraries and the package, installs it as root on a GitHub runner with `installer`, checks what landed where, who can change it, that each program keeps its ad-hoc signature and has no search path, that the app starts and that the service answers a standard user, updates it over itself, makes an update and a first install fail in each way it can and checks what is left, removes it, and checks nothing is left. Those checks are in `packaging/macos/tests/installer.sh`. They install a root service and change `/Library`, so they run only on the runner; do not run them on your own computer. What the runner cannot show is the Installer app's admin prompt, Gatekeeper's check of a downloaded package and the background item notice.
+
 ## Workflow
 
 Branch from `main`, commit using Conventional Commits, and open a pull request whose title follows the same format. The full conventions are in [workflow](.claude/rules/workflow.md), [dependencies](.claude/rules/dependencies.md) and [security](.claude/rules/security.md).
