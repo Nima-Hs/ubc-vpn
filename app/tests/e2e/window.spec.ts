@@ -143,6 +143,7 @@ test("the window renders, locked down", async () => {
         "remove",
         "rename",
         "setStartup",
+        "setUpdates",
         "switchTo",
         "update",
     ]);
