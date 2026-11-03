@@ -10,7 +10,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { launcherScript, windowsLaunch } from "../src/main/update/install";
+import { windowsLaunch } from "../src/main/update/install";
+import { checkedScript, testScript, withoutElevating } from "./update-launcher-guard";
 
 const PARENT = resolve(__dirname, "update-launcher-parent.cjs");
 const ELECTRON = resolve(__dirname, "../node_modules/electron/dist/electron.exe");
@@ -38,12 +39,13 @@ async function fromParent(kind: "Node" | "Electron", path: string, script: strin
     const { file, args, options, env } = windowsLaunch(
         path,
         { systemRoot: SYSTEM_ROOT, app: process.execPath, pid: 0, env: process.env },
-        script,
+        checkedScript(script),
     );
     await writeFile(spec, JSON.stringify({ file, args, options, env, out }));
     const { ELECTRON_RUN_AS_NODE: _, ...clean } = process.env;
     const parent = spawn(kind === "Node" ? process.execPath : ELECTRON, [PARENT], {
         stdio: "ignore",
+        windowsHide: true,
         env: {
             ...clean,
             UBC_VPN_TEST_LAUNCH: spec,
@@ -72,12 +74,10 @@ async function standIns() {
         app,
         `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(appMark)}, String(Date.now()));\n`,
     );
-    const script = launcherScript({ verb: "", setupArgs: "", appArgs: `"${app}"` });
-    expect(script).not.toContain("runas");
+    const script = testScript({ verb: "", setupArgs: "", appArgs: `"${app}"` });
     return { script, setup, run, setupMark, appMark };
 }
 
-const START = "[System.Diagnostics.Process]::Start($start)";
 const throwing = (code: number) =>
     `throw ([System.Management.Automation.MethodInvocationException]::new('made up', [System.ComponentModel.Win32Exception]::new(${code})))`;
 
@@ -117,15 +117,14 @@ describe.runIf(process.platform === "win32")("the launcher, started as the app s
             if (kind === "Electron" && !existsSync(ELECTRON)) {
                 return;
             }
-            const production = launcherScript();
-            expect(production).toContain(START);
             const missing = join(base, "no-such-file.exe");
-            expect(
-                await fromParent(kind, missing, production.replace(START, throwing(1223))),
-            ).toMatchObject({ outcome: "closed", code: 2 });
-            expect(
-                await fromParent(kind, missing, production.replace(START, throwing(5))),
-            ).toMatchObject({ outcome: "closed", code: 1 });
+            expect(await fromParent(kind, missing, withoutElevating(throwing(1223)))).toMatchObject(
+                { outcome: "closed", code: 2 },
+            );
+            expect(await fromParent(kind, missing, withoutElevating(throwing(5)))).toMatchObject({
+                outcome: "closed",
+                code: 1,
+            });
         },
         90_000,
     );

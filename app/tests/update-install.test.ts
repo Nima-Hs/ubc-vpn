@@ -34,6 +34,13 @@ import {
 import { readNote } from "../src/main/update/resume";
 import type { ReadyInstaller } from "../src/main/update/updater";
 import { sha256 } from "./update-harness";
+import {
+    checkedScript,
+    NO_MESSAGE,
+    SETUP_START,
+    testScript,
+    withoutElevating,
+} from "./update-launcher-guard";
 
 const PROFILE = "0123456789abcdef0123456789abcdef";
 const NOW = 1_800_000_000_000;
@@ -422,7 +429,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
     function runScript(script: string, env: Record<string, string>) {
         const result = spawnSync(
             POWERSHELL.file,
-            ["-NoProfile", "-NonInteractive", "-Command", script],
+            ["-NoProfile", "-NonInteractive", "-Command", checkedScript(script)],
             {
                 env: { SystemRoot: process.env.SystemRoot ?? "C:\\Windows", ...env },
                 encoding: "utf8",
@@ -432,20 +439,18 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         );
         return { code: result.status, out: result.stdout };
     }
-    const START = "[System.Diagnostics.Process]::Start($start)";
+    const START = SETUP_START;
     const throwing = (code: number) =>
         `throw ([System.Management.Automation.MethodInvocationException]::new('made up', [System.ComponentModel.Win32Exception]::new(${code})))`;
 
     it("reads the Windows error 1223 as cancelled, and any other as failed", () => {
-        const production = launcherScript();
-        expect(production).toContain(START);
-        expect(runScript(production.replace(START, throwing(1223)), {}).code).toBe(2);
-        expect(runScript(production.replace(START, throwing(5)), {}).code).toBe(1);
+        expect(runScript(withoutElevating(throwing(1223)), {}).code).toBe(2);
+        expect(runScript(withoutElevating(throwing(5)), {}).code).toBe(1);
     });
 
     it("finds the error code in the exception a failed start really throws", () => {
         // No verb and no such file, so no prompt can appear: Windows says error 2.
-        const script = launcherScript({ verb: "", setupArgs: "", appArgs: "" });
+        const script = testScript({ verb: "", setupArgs: "", appArgs: "" });
         const env = { UBC_VPN_INSTALLER: join(folder, "no-such-file.exe") };
         expect(runScript(script, env).code).toBe(1);
         expect(runScript(script.replace("-eq 1223", "-eq 2"), env).code).toBe(2);
@@ -476,7 +481,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
             app,
             `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(appMark)}, String(Date.now()));\n`,
         );
-        const script = launcherScript({ verb: "", setupArgs: "", appArgs: `"${app}"`, ...timing });
+        const script = testScript({ verb: "", setupArgs: "", appArgs: `"${app}"`, ...timing });
         const env = {
             UBC_VPN_INSTALLER: setup,
             UBC_VPN_APP: process.execPath,
@@ -579,7 +584,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         const { spawn: start } = await import("node:child_process");
         const running = start(
             POWERSHELL.file,
-            ["-NoProfile", "-NonInteractive", "-Command", script],
+            ["-NoProfile", "-NonInteractive", "-Command", checkedScript(script)],
             {
                 env: {
                     SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
@@ -604,6 +609,7 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         const { spawn: start } = await import("node:child_process");
         const app = start(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], {
             stdio: "ignore",
+            windowsHide: true,
         });
         const gone = new Promise<number>((done) => app.on("close", () => done(Date.now())));
         const { code } = runScript(script, { ...env, UBC_VPN_APP_PID: String(app.pid) });
@@ -612,6 +618,40 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         await expect.poll(() => existsSync(appMark), { timeout: 15_000 }).toBe(true);
         expect(Number(readFileSync(appMark, "utf8"))).toBeGreaterThanOrEqual(quitAt - 500);
     }, 60_000);
+});
+
+describe("what keeps the launcher's tests off the desktop", () => {
+    it("refuses to run the production script, which can show a dialog and ask for rights", () => {
+        expect(() => checkedScript(launcherScript())).toThrow(/dialog/);
+        expect(() => checkedScript(launcherScript({ tell: NO_MESSAGE }))).toThrow(/administrator/);
+    });
+
+    it("refuses anything that shows a dialog, however it is written", () => {
+        for (const script of [
+            "(New-Object -ComObject WScript.Shell)",
+            "$shell.Popup('x')",
+            "[System.Windows.MessageBox]::Show('x')",
+            "[System.Windows.Forms.Application]::Run()",
+            "Read-Host",
+        ]) {
+            expect(() => checkedScript(script), script).toThrow(/dialog/);
+        }
+    });
+
+    it("gives tests a script with no message, and with no elevated start left in it", () => {
+        const plain = testScript({ verb: "" });
+        expect(plain).not.toMatch(/WScript|Popup/);
+        expect(plain).toContain(NO_MESSAGE);
+        const replaced = withoutElevating("$null");
+        expect(replaced).toContain("'runas'");
+        expect(replaced).not.toContain(SETUP_START);
+    });
+
+    it("still has the message and the elevated start in production", () => {
+        const production = launcherScript();
+        expect(production).toContain("WScript.Shell).Popup('UBC VPN could not be started");
+        expect(production).toContain("$start.Verb = 'runas'");
+    });
 });
 
 describe("what counts as a connection to take down", () => {
