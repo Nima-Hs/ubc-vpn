@@ -321,6 +321,7 @@ export function windowsLaunch(path: string, launcher: WindowsLauncher, script = 
             cwd: join(launcher.systemRoot, "System32"),
             stdio: ["ignore", "pipe", "ignore"] as ["ignore", "pipe", "ignore"],
             windowsHide: true,
+            detached: true,
         },
         env: {
             ...env,
