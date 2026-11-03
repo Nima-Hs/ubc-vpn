@@ -71,11 +71,8 @@ mod os;
 mod os;
 
 /// Registering the service and making its data folder. The same calls on
-/// every OS; on macOS each is unsupported until its installer is built.
-#[cfg(any(windows, target_os = "linux"))]
+/// every OS; on macOS registering is unsupported until it is built.
 pub use os::install;
-#[cfg(target_os = "macos")]
-pub use unix::install;
 
 /// Running as a Windows service, started by the service manager.
 #[cfg(windows)]

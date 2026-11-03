@@ -68,10 +68,9 @@
 //! [`Error::NotTheService`]. That fails closed, and packaging has to keep the
 //! clients outside such a sandbox.
 
-#[cfg(target_os = "macos")]
-pub mod install;
 pub(crate) mod interrupt;
 pub mod program;
+pub(crate) mod root_files;
 pub(crate) mod state;
 pub(crate) mod terminal;
 #[cfg(test)]
