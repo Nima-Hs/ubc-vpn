@@ -23,6 +23,8 @@ import {
     launcherScript,
     launchWindows,
     restartToUpdate,
+    SETUP_FALLBACK_MS,
+    SETUP_LIMIT_MS,
     stageInstaller,
     tunnelDown,
     tunnelUp,
@@ -394,19 +396,26 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         expect(runScript(script.replace("-eq 1223", "-eq 2"), env).code).toBe(2);
     });
 
-    async function standIns(setupExit: number) {
+    async function standIns(
+        setupExit: number,
+        change: { limitMs?: number; fallbackMs?: number; setupBody?: string } = {},
+    ) {
+        const { setupBody = "", ...timing } = change;
         const run = join(folder, "run-standin");
         await mkdir(run);
         const setupMark = join(folder, "setup-ran");
         const appMark = join(folder, "app-ran");
         const setup = join(run, "setup.cmd");
-        await writeFile(setup, `@echo off\r\necho ran> "${setupMark}"\r\nexit /b ${setupExit}\r\n`);
+        await writeFile(
+            setup,
+            `@echo off\r\necho ran> "${setupMark}"\r\n${setupBody}exit /b ${setupExit}\r\n`,
+        );
         const app = join(folder, "app.mjs");
         await writeFile(
             app,
             `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(appMark)}, "ran");\n`,
         );
-        const script = launcherScript({ verb: "", setupArgs: "", appArgs: `"${app}"` });
+        const script = launcherScript({ verb: "", setupArgs: "", appArgs: `"${app}"`, ...timing });
         const env = {
             UBC_VPN_INSTALLER: setup,
             UBC_VPN_APP: process.execPath,
@@ -429,6 +438,53 @@ describe.runIf(process.platform === "win32")("the launcher script, run for real"
         },
         60_000,
     );
+
+    const WAIT = `$setup.WaitForExit(${SETUP_LIMIT_MS})`;
+
+    it("waits as long as it should, and no longer, by default", () => {
+        const production = launcherScript();
+        expect(production).toContain(WAIT);
+        expect(production).toContain(`Sleep(${SETUP_FALLBACK_MS})`);
+        expect(SETUP_LIMIT_MS).toBe(600_000);
+        expect(SETUP_FALLBACK_MS).toBe(120_000);
+    });
+
+    it("still starts the app when the setup program cannot be waited for, after the fixed time", async () => {
+        const { script, env, run, appMark } = await standIns(0, { fallbackMs: 3_000 });
+        const broken = script.replace(WAIT, "$setup.NoSuchMethod()");
+        expect(broken).not.toBe(script);
+        const before = Date.now();
+        const { code, out } = runScript(broken, env);
+        expect(code).toBe(0);
+        expect(out).toContain("started");
+        expect(Date.now() - before).toBeGreaterThanOrEqual(3_000);
+        await expect.poll(() => existsSync(appMark), { timeout: 15_000 }).toBe(true);
+        // Setup may still be using its copy.
+        expect(existsSync(run)).toBe(true);
+    }, 60_000);
+
+    it("still starts the app when there is no handle to wait on", async () => {
+        const { script, env, appMark } = await standIns(0, { fallbackMs: 200 });
+        const noHandle = script.replace(START, "$null");
+        expect(noHandle).not.toBe(script);
+        const { code, out } = runScript(noHandle, env);
+        expect(code).toBe(0);
+        expect(out).toContain("started");
+        await expect.poll(() => existsSync(appMark), { timeout: 15_000 }).toBe(true);
+    }, 60_000);
+
+    it("still starts the app when the setup program is running at the limit, and keeps its copy", async () => {
+        const { script, env, run, appMark } = await standIns(0, {
+            limitMs: 200,
+            setupBody: `"%SystemRoot%\\System32\\ping.exe" -n 4 127.0.0.1 >nul\r\n`,
+        });
+        const { code } = runScript(script, env);
+        expect(code).toBe(0);
+        await expect.poll(() => existsSync(appMark), { timeout: 15_000 }).toBe(true);
+        expect(existsSync(run)).toBe(true);
+        // Let the stand-in finish, so its folder can be removed.
+        await new Promise((done) => setTimeout(done, 4_000));
+    }, 60_000);
 
     it("starts nothing when there is no app left to start", async () => {
         const { script, env, appMark } = await standIns(3);
