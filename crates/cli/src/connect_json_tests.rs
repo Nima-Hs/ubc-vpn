@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use ubc_vpn_core::login::{CliMessage, LoginErrorCode};
+use ubc_vpn_core::login::{CliMessage, LoginErrorCode, PromptKind};
 use ubc_vpn_core::policy::Policy;
 use ubc_vpn_core::protocol::{ErrorCode, ErrorInfo, MAX_LINE_BYTES, decode};
 use ubc_vpn_core::redact::Secret;
@@ -561,6 +561,125 @@ fn a_reader_that_panics_cancels_the_login() {
     );
     let line = format!("{}\n", error_line("cancelled", CANCELLED_LINE));
     assert_eq!((code, String::from_utf8(out).unwrap()), (CANCELLED, line));
+}
+
+/// An app that changes the settings when the password is asked, as the "Save
+/// password" choice beside that question does, then answers as [`answering`].
+fn changing_at_the_password(
+    scene: &Scene,
+    settings: String,
+    answers: &'static [&'static str],
+) -> impl FnOnce(FromCli, PipeWriter) -> Vec<String> + Send + 'static + use<> {
+    let file = scene.rig.root.join("settings/settings.json");
+    move |lines, mut to_cli| {
+        let mut answers = answers.iter();
+        let mut seen = Vec::new();
+        for line in lines {
+            let line = line.unwrap();
+            if let Ok(CliMessage::Prompt { id, kind, .. }) = decode(&line) {
+                if kind == PromptKind::Password {
+                    std::fs::write(&file, &settings).unwrap();
+                }
+                answer(&mut to_cli, id, answers.next().unwrap());
+            }
+            seen.push(line);
+        }
+        seen
+    }
+}
+
+const WRONG: &str = "wrong-password-0000";
+
+fn saved_entry() -> Option<(String, String)> {
+    use ubc_vpn_core::profiles::ProfileId;
+
+    let keyring = crate::keys::test::fake().secrets();
+    let saved = keyring.load(ProfileId::first().as_str()).unwrap()?;
+    Some((saved.username, saved.password.expose().to_string()))
+}
+
+// Saving turned on at the password question counts for this login: that is
+// what the words beside the choice say.
+#[test]
+fn a_password_is_saved_when_saving_is_turned_on_at_the_question() {
+    let off = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let on = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
+    let scene = Scene::new(Some(&off), "");
+    let app = changing_at_the_password(&scene, on, &[PASSWORD, CODE]);
+    let (code, lines, _) = drive(&scene, app);
+    assert_eq!(code, 0, "{lines:?}");
+    let expected = ("alice".to_string(), PASSWORD.to_string());
+    assert_eq!(saved_entry(), Some(expected));
+}
+
+// And saving turned off there counts too, whatever it was when the login began.
+#[test]
+fn no_password_is_saved_when_saving_is_turned_off_at_the_question() {
+    let off = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let on = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
+    let scene = Scene::new(Some(&on), "");
+    let app = changing_at_the_password(&scene, off, &[PASSWORD, CODE]);
+    let (code, lines, _) = drive(&scene, app);
+    assert_eq!(code, 0, "{lines:?}");
+    assert_eq!(saved_entry(), None);
+}
+
+// Left off, it stays off.
+#[test]
+fn no_password_is_saved_when_saving_stays_off() {
+    let off = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let scene = Scene::new(Some(&off), "");
+    let (code, lines, err) = drive(&scene, answering(&[PASSWORD, CODE]));
+    assert_eq!(code, 0, "{lines:?}");
+    assert_eq!(saved_entry(), None);
+    // Nothing was asked of the settings lock either, which may be stuck or
+    // missing: nothing is waited for or reported to someone who did not ask.
+    assert_eq!(err, "");
+    let lock = scene.rig.root.join("settings/settings.json.lock");
+    assert!(!lock.exists(), "the settings lock was taken");
+}
+
+// The look without the lock does not settle it: the choice as it stands
+// under the lock does, so a change made while waiting for the lock counts.
+#[test]
+fn saving_turned_off_while_waiting_for_the_lock_saves_nothing() {
+    use ubc_vpn_core::profiles::ProfileId;
+
+    let off = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let on = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
+    let scene = Scene::new(Some(&on), "");
+    let dir = scene.rig.root.join("settings");
+    let held = crate::settings_lock::change_within(&dir, Duration::from_secs(5)).unwrap();
+    let file = dir.join("settings.json");
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::write(&file, off).unwrap();
+        drop(held);
+    });
+    let mut err = Vec::new();
+    let first = ProfileId::first();
+    crate::passwords::keep(&dir, &first, "alice", &Secret::new(PASSWORD), &mut err);
+    holder.join().unwrap();
+    assert_eq!(saved_entry(), None);
+    assert_eq!(String::from_utf8(err).unwrap(), "");
+}
+
+// A password is saved only after it worked, however saving was turned on.
+#[test]
+fn a_refused_password_is_never_saved() {
+    let off = format!(r#"{{"username":"alice",{ROUTES}}}"#);
+    let on = format!(r#"{{"username":"alice","save_password":true,{ROUTES}}}"#);
+    // Turned on at the question.
+    let scene = Scene::new(Some(&off), "");
+    let app = changing_at_the_password(&scene, on.clone(), &[WRONG, CODE]);
+    let (code, lines, _) = drive(&scene, app);
+    assert_eq!(code, LOGIN_REFUSED, "{lines:?}");
+    assert_eq!(saved_entry(), None);
+    // On from the start.
+    let scene = Scene::new(Some(&on), "");
+    let (code, lines, _) = drive(&scene, answering(&[WRONG, CODE]));
+    assert_eq!(code, LOGIN_REFUSED, "{lines:?}");
+    assert_eq!(saved_entry(), None);
 }
 
 // The app's flow remembers the username as the terminal's does: after
