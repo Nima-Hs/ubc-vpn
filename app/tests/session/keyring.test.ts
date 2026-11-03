@@ -147,11 +147,14 @@ describe("what those two variables cannot do", () => {
 
     /** Runs the client once, as the app does, and waits for it to end. */
     const run = (args: string[], env: Record<string, string>) =>
-        new Promise<void>((done) => {
+        new Promise<string>((done) => {
             const child = startClient(client, args, { ...env, HOME: home });
             child.stdin.end();
-            child.stdout.resume();
-            child.once("close", () => done());
+            let said = "";
+            child.stdout.on("data", (chunk: Buffer) => {
+                said += chunk.toString();
+            });
+            child.once("close", (status) => done(`${status}: ${said}`));
         });
 
     it("does not make the client look for the service in the runtime folder", async () => {
@@ -160,7 +163,10 @@ describe("what those two variables cannot do", () => {
             ["profiles", "list", "--json"],
             ["settings", "get", "--json"],
         ]) {
-            await run(args, { XDG_RUNTIME_DIR: planted });
+            // A client that looked there and turned the socket down would never
+            // connect to it, but would still answer differently.
+            const answer = await run(args, { XDG_RUNTIME_DIR: planted });
+            expect(answer, args.join(" ")).toBe(await run(args, {}));
         }
         expect(touched).toEqual([]);
     });

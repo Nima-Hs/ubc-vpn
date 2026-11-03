@@ -96,9 +96,10 @@ export interface BridgeOptions {
 }
 
 /**
- * The only variables the bridge is started with. The app's environment is
- * not passed on: nothing set for the app, by the user or by anything else,
- * reaches the client unless it is named here. (On Windows, Node adds back
+ * The variables every client is started with. The app's environment is not
+ * passed on: nothing set for the app, by the user or by anything else, reaches
+ * the client unless it is named here, in {@link DEV_ENV} for dev mode, or in
+ * {@link SESSION_BUS_ENV} on Linux. (On Windows, Node adds back
  * a fixed handful the OS needs to start any process, such as `PATH` and
  * `USERNAME`; the client is started by absolute path and does not use them.)
  */

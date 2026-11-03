@@ -1023,6 +1023,9 @@ describe("how the bridge is started", () => {
             "systemd:",
             // A list: the library tries each in turn, so the first is no comfort.
             "unix:path=/run/user/1000/bus;unixexec:path=/tmp/evil",
+            "unix:abstract=/tmp/dbus-AbCd;unixexec:path=/tmp/evil",
+            "unix:abstract=/tmp/dbus-AbCd,guid=abc;unixexec:path=/tmp/evil",
+            "unix:abstract=/tmp/dbus-AbCd,runtime=yes",
             "unix:path=/run/user/1000/bus,guid=abc;tcp:host=example.test",
             // Other keys, and other ways of saying where.
             "unix:path=/run/user/1000/bus,runtime=yes",
