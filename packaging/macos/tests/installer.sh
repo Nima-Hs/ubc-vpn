@@ -87,6 +87,8 @@ signed_as_built() { # <folder> <name>...
         if otool -l "$folder/$name" | grep -q LC_RPATH; then
             fail "$folder/$name has a search path: the loader would search a folder no one checked"
         fi
+        minos=$(otool -l "$folder/$name" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
+        [ "$minos" = 14.0 ] || fail "$folder/$name declares macOS $minos, not 14.0"
     done
 }
 files_are_right() {
@@ -143,6 +145,29 @@ who_can_change() {
     [ -z "$open" ] || fail "others can change: $open"
     [ "$(owner_and_mode "$LINK" | cut -d' ' -f1)" = 0:0 ] || fail "$LINK is $(owner_and_mode "$LINK")"
 }
+
+# --- 0. The package's minimum macOS stops an install ------------------------
+
+# It is what keeps UBC VPN off a macOS older than 14: dyld does not refuse a
+# library that declares a newer minimum. No runner is that old, so this is the
+# same package with the same element asking for a macOS newer than this one:
+# `installer` must refuse it, with nothing left behind.
+newer=$(mktemp -d "$work/newer-XXXXXX")
+rmdir "$newer"
+pkgutil --expand "$pkg" "$newer"
+grep -q 'os-version min="14.0"' "$newer/Distribution" || fail "the package does not ask for macOS 14.0"
+sed 's/os-version min="14.0"/os-version min="99.0"/' "$newer/Distribution" > "$work/Distribution"
+cp "$work/Distribution" "$newer/Distribution"
+pkgutil --flatten "$newer" "$work/too-new.pkg"
+sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/sbin/installer -pkg "$work/too-new.pkg" -target / > "$work/too-new.txt" 2>&1 || true
+cat "$work/too-new.txt"
+if grep -q 'The install was successful' "$work/too-new.txt"; then
+    fail "a package asking for a newer macOS installed"
+fi
+[ ! -e "$APP" ] && [ ! -e "$FOLDER" ] && [ ! -e "$DATA" ] && [ ! -e "$PLIST" ] || fail "the refused package left something behind"
+if pkgutil --pkgs | grep -F "$LABEL"; then fail "the refused package left a record"; fi
+rm -rf "$newer" "$work/too-new.pkg" "$work/Distribution"
+ran "minimum stops an install"
 
 # --- 1. Install -------------------------------------------------------------
 

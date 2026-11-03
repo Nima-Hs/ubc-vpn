@@ -47,8 +47,14 @@ mkdir -p "$stage/bin" "$stage/licenses/native" "$scripts/service"
 # its full path beside the program, and a search path would make the loader
 # look in a folder before the service has checked it. RUSTFLAGS is emptied so
 # nothing adds one.
+#
+# They declare the same oldest macOS as the libraries: the toolchain's default
+# is older than anything we run on.
+# shellcheck source=../../native/macos/versions.env
+. "$root/native/macos/versions.env"
 for package in ubc-vpn-service ubc-vpn-cli; do
-  RUSTFLAGS="" UBC_VPN_NATIVE_DIR="$native" cargo build --locked --release -p "$package" --features real-engine
+  MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN" RUSTFLAGS="" UBC_VPN_NATIVE_DIR="$native" \
+    cargo build --locked --release -p "$package" --features real-engine
 done
 cp "$root/target/release/ubc-vpn" "$stage/bin/"
 cp "$root/target/release/ubc-vpn-service" "$scripts/service/"
