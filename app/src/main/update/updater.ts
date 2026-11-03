@@ -13,6 +13,7 @@ import {
     MAX_RELEASE_BYTES,
     parseRelease,
     readLimited,
+    Stalled,
 } from "./github";
 import { releaseKeyProblems, type TrustedKey } from "./keys";
 import {
@@ -33,10 +34,8 @@ export function updatePlatform(platform: NodeJS.Platform, arch: string): string 
     if (platform === "win32" && arch === "x64") {
         return "windows-x64";
     }
-    if (platform === "darwin" && arch === "arm64") {
-        return "macos-arm64";
-    }
-    // Linux's names are chosen with its installer.
+    // macOS (`macos-arm64`) and Linux follow once the app can install their
+    // packages (issue #330); until then they never check, and Settings says so.
     return null;
 }
 
@@ -53,7 +52,20 @@ export interface UpdaterOptions {
     packaged: boolean;
     now: () => number;
     schedule: (run: () => void, firstMs: number, thenMs: number) => () => void;
+    /** Limits on how long GitHub may take; the defaults are `TIMEOUTS`. */
+    timeouts?: Timeouts;
 }
+
+export interface Timeouts {
+    /** A whole check: the release and its list. */
+    checkMs: number;
+    /** A whole download of an installer. */
+    downloadMs: number;
+    /** Any body going quiet. */
+    idleMs: number;
+}
+
+export const TIMEOUTS: Timeouts = { checkMs: 60_000, downloadMs: 30 * 60_000, idleMs: 60_000 };
 
 /** A downloaded installer that passed every check. */
 export interface ReadyInstaller {
@@ -71,7 +83,11 @@ class Failed extends Error {
 export class Updater {
     private status: UpdateStatus;
     private lastChecked: number | null = null;
-    private automatic = true;
+    /**
+     * Whether downloads are automatic, as the settings say; `null` until
+     * they have said, and nothing is downloaded until they say yes.
+     */
+    private automatic: boolean | null = null;
     private busy = false;
     private ready: ReadyInstaller | null = null;
     /** What was found while downloads were off, to fetch if they are turned on. */
@@ -125,10 +141,15 @@ export class Updater {
         return () => this.listeners.delete(listener);
     }
 
-    /** Whether updates are downloaded by themselves, as the settings say. */
+    /**
+     * Whether updates are downloaded by themselves, as the settings say.
+     * Called with every view of the settings; only a change to on starts
+     * the download of an update found while it was off.
+     */
     setAutomatic(automatic: boolean): void {
+        const turnedOn = automatic && this.automatic !== true;
         this.automatic = automatic;
-        if (automatic && this.pending !== null && !this.busy) {
+        if (turnedOn && this.pending !== null && !this.busy) {
             const found = this.pending;
             void this.run(() => this.download(found.version, found.entry, found.url));
         }
@@ -157,14 +178,21 @@ export class Updater {
         return { accept, "user-agent": `ubc-vpn-app/${this.options.version}` };
     }
 
+    private timeouts(): Timeouts {
+        return this.options.timeouts ?? TIMEOUTS;
+    }
+
     private async checkOnce(): Promise<void> {
         const { fetch, version, platform, keys } = this.options;
+        const { checkMs, idleMs } = this.timeouts();
+        const signal = AbortSignal.timeout(checkMs);
         const keep = this.ready;
         this.publish({ phase: "checking" });
         const answer = await getFromGitHub(
             fetch,
             LATEST_RELEASE_URL,
             this.headers("application/vnd.github+json"),
+            signal,
         );
         // No release yet.
         if (answer.status === 404) {
@@ -175,7 +203,7 @@ export class Updater {
             await answer.body?.cancel();
             throw new GitHubError(`GitHub answered ${answer.status}`);
         }
-        const release = parseRelease(await readLimited(answer, MAX_RELEASE_BYTES));
+        const release = parseRelease(await readLimited(answer, MAX_RELEASE_BYTES, idleMs));
         const listAsset = release.assets.get(LIST_ASSET);
         if (listAsset === undefined) {
             throw new UpdateRefused("the release has no update list");
@@ -184,12 +212,13 @@ export class Updater {
             fetch,
             listAsset.url,
             this.headers("application/octet-stream"),
+            signal,
         );
         if (listAnswer.status !== 200) {
             await listAnswer.body?.cancel();
             throw new GitHubError(`GitHub answered ${listAnswer.status}`);
         }
-        const list = verifyUpdateList(await readLimited(listAnswer, MAX_LIST_BYTES), keys);
+        const list = verifyUpdateList(await readLimited(listAnswer, MAX_LIST_BYTES, idleMs), keys);
         // The list must be the release's own, not one carried over from another.
         if (list.version !== release.version) {
             throw new UpdateRefused("the list is for another release");
@@ -206,7 +235,7 @@ export class Updater {
             throw new UpdateRefused("the release does not have the installer the list names");
         }
         this.pending = { version: list.version, entry, url: asset.url };
-        if (!this.automatic) {
+        if (this.automatic !== true) {
             return this.found({ phase: "available", version: list.version });
         }
         this.lastChecked = this.options.now();
@@ -218,12 +247,17 @@ export class Updater {
         if (folder === null) {
             return;
         }
+        // Tried once: a download that fails is tried again only at the next
+        // check, not each time the settings are read.
+        this.pending = null;
         this.publish({ phase: "downloading", version });
         this.ready = null;
+        const { downloadMs, idleMs } = this.timeouts();
         const answer = await getFromGitHub(
             this.options.fetch,
             url,
             this.headers("application/octet-stream"),
+            AbortSignal.timeout(downloadMs),
         );
         if (answer.status !== 200) {
             await answer.body?.cancel();
@@ -232,16 +266,13 @@ export class Updater {
         let path: string;
         try {
             await prepareFolder(folder);
-            path = await saveInstaller(answer, entry, folder);
+            path = await saveInstaller(answer, entry, folder, idleMs);
         } catch (error) {
             await answer.body?.cancel().catch(() => {});
             // A refusal, or the network failing mid-way, is said as such;
             // anything else is the disk's.
-            throw error instanceof UpdateRefused || error instanceof TypeError
-                ? error
-                : new Failed("disk");
+            throw isNetwork(error) || error instanceof UpdateRefused ? error : new Failed("disk");
         }
-        this.pending = null;
         this.ready = { version, entry, path };
         this.publish({ phase: "ready", version });
     }
@@ -261,6 +292,16 @@ export class Updater {
             listener(view);
         }
     }
+}
+
+/** A network failure: `fetch` failing, a body stalling, or a time limit. */
+function isNetwork(error: unknown): boolean {
+    return (
+        error instanceof TypeError ||
+        error instanceof Stalled ||
+        (error instanceof DOMException &&
+            (error.name === "AbortError" || error.name === "TimeoutError"))
+    );
 }
 
 function sameFile(a: UpdateFile, b: UpdateFile): boolean {

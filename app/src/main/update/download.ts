@@ -5,7 +5,7 @@
 // file system; neither goes near the settings file.
 
 import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { eachChunk } from "./github";
 import { checkInstaller, type UpdateFile, UpdateRefused } from "./list";
 
@@ -21,16 +21,17 @@ export function updatesFolder(
     switch (platform) {
         case "win32": {
             const local = env.LOCALAPPDATA;
-            return local !== undefined && isAbsolute(local)
-                ? join(local, "UBC VPN", "updates")
+            return local !== undefined && win32.isAbsolute(local)
+                ? win32.join(local, "UBC VPN", "updates")
                 : null;
         }
         case "darwin":
-            return join(home, "Library", "Caches", "UBC VPN", "updates");
+            return posix.join(home, "Library", "Caches", "UBC VPN", "updates");
         default: {
             const cache = env.XDG_CACHE_HOME;
-            const base = cache !== undefined && isAbsolute(cache) ? cache : join(home, ".cache");
-            return join(base, "ubc-vpn", "updates");
+            const base =
+                cache !== undefined && posix.isAbsolute(cache) ? cache : posix.join(home, ".cache");
+            return posix.join(base, "ubc-vpn", "updates");
         }
     }
 }
@@ -68,6 +69,7 @@ export async function saveInstaller(
     response: Response,
     entry: UpdateFile,
     folder: string,
+    idleMs?: number,
 ): Promise<string> {
     const partial = join(folder, `${entry.name}.part`);
     const done = join(folder, entry.name);
@@ -75,13 +77,17 @@ export async function saveInstaller(
     const file = await open(partial, "wx+", 0o600);
     try {
         let received = 0;
-        await eachChunk(response, async (chunk) => {
-            received += chunk.length;
-            if (received > entry.size) {
-                throw new UpdateRefused("the installer is larger than the list gives");
-            }
-            await file.write(chunk);
-        });
+        await eachChunk(
+            response,
+            async (chunk) => {
+                received += chunk.length;
+                if (received > entry.size) {
+                    throw new UpdateRefused("the installer is larger than the list gives");
+                }
+                await file.write(chunk);
+            },
+            idleMs,
+        );
         await file.sync();
         await checkInstaller(file, entry);
     } catch (error) {

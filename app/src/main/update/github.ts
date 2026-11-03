@@ -33,6 +33,11 @@ export const MAX_RELEASE_BYTES = 1024 * 1024;
 /** How a request is made: `fetch`, or a fake for tests. */
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
+/** A body that stopped arriving for longer than its idle limit. */
+export class Stalled extends Error {
+    override name = "Stalled";
+}
+
 /** Why GitHub's answer could not be used; not a refusal of anything signed. */
 export class GitHubError extends Error {
     override name = "GitHubError";
@@ -66,13 +71,19 @@ export async function getFromGitHub(
     fetch: Fetch,
     url: string,
     headers: Record<string, string>,
+    /** Ends the request, the body included, when it fires. */
+    signal?: AbortSignal,
 ): Promise<Response> {
     let next = githubUrl(url);
     for (let hops = 0; next !== null; hops++) {
         if (hops > MAX_REDIRECTS) {
             throw new UpdateRefused("GitHub redirected too many times");
         }
-        const response = await fetch(next.href, { redirect: "manual", headers });
+        const init: RequestInit = { redirect: "manual", headers };
+        if (signal !== undefined) {
+            init.signal = signal;
+        }
+        const response = await fetch(next.href, init);
         if (response.redirected) {
             throw new UpdateRefused("a redirect was followed without being checked");
         }
@@ -86,24 +97,39 @@ export async function getFromGitHub(
     throw new UpdateRefused("an address is not HTTPS to GitHub");
 }
 
-/** Reads a body whole, refusing it once it passes `limit` bytes. */
-export async function readLimited(response: Response, limit: number): Promise<Buffer> {
+/** Reads a body whole, refusing it as soon as it passes `limit` bytes. */
+export async function readLimited(
+    response: Response,
+    limit: number,
+    idleMs = DEFAULT_IDLE_MS,
+): Promise<Buffer> {
     const chunks: Uint8Array[] = [];
     let total = 0;
-    await eachChunk(response, (chunk) => {
-        total += chunk.length;
-        if (total > limit) {
-            throw new UpdateRefused("GitHub sent more than expected");
-        }
-        chunks.push(chunk);
-    });
+    await eachChunk(
+        response,
+        (chunk) => {
+            total += chunk.length;
+            if (total > limit) {
+                throw new UpdateRefused("GitHub sent more than expected");
+            }
+            chunks.push(chunk);
+        },
+        idleMs,
+    );
     return Buffer.concat(chunks);
 }
 
-/** Hands each chunk of a body to `use`, which may throw to stop. */
+/** The longest a body may go without sending anything. */
+export const DEFAULT_IDLE_MS = 60_000;
+
+/**
+ * Hands each chunk of a body to `use`, which may throw to stop. Gives up
+ * with `Stalled` when no chunk comes for `idleMs`.
+ */
 export async function eachChunk(
     response: Response,
     use: (chunk: Uint8Array) => void | Promise<void>,
+    idleMs = DEFAULT_IDLE_MS,
 ): Promise<void> {
     if (response.body === null) {
         return;
@@ -111,7 +137,13 @@ export async function eachChunk(
     const reader = response.body.getReader();
     try {
         for (;;) {
-            const { done, value } = await reader.read();
+            let timer: NodeJS.Timeout | undefined;
+            const idle = new Promise<never>((_, fail) => {
+                timer = setTimeout(() => fail(new Stalled("the download stalled")), idleMs);
+            });
+            const { done, value } = await Promise.race([reader.read(), idle]).finally(() =>
+                clearTimeout(timer),
+            );
             if (done) {
                 return;
             }

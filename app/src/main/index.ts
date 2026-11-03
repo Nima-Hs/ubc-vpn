@@ -33,7 +33,7 @@ import {
 import { closeHidesWindow, connectFromTray, createStateIcons, trayKind } from "./tray/icon";
 import { appImage, createTray, followStateOnTaskbar } from "./tray/tray";
 import { TunnelSwitch } from "./tunnel-switch";
-import { createUpdater, registerUpdates } from "./update/ipc";
+import { createUpdater, mayUpdate, registerUpdates } from "./update/ipc";
 import { profileFolder } from "./user-data";
 import { createWindow, keepHidden, showWindow } from "./window";
 
@@ -187,7 +187,10 @@ async function start(): Promise<void> {
     registerDemo?.(window);
     // Updates: only an installed app checks, downloads or reaches the
     // network for them; a demo or test run shows that it cannot update.
-    const updater = createUpdater(app.getVersion(), app.isPackaged && !__DEMO__);
+    const updater = createUpdater(
+        app.getVersion(),
+        mayUpdate({ packaged: app.isPackaged, release: __RELEASE__, demo: __DEMO__ }),
+    );
     registerUpdates(window, devServerUrl, updater);
     updater.start();
     // The Settings screen and the profiles. Every view of the profiles that a

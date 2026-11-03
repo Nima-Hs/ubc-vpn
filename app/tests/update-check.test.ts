@@ -18,7 +18,7 @@ import {
     MAX_REDIRECTS,
     MAX_RELEASE_BYTES,
 } from "../src/main/update/github";
-import { takeNothing } from "../src/main/update/ipc";
+import { mayUpdate, takeNothing } from "../src/main/update/ipc";
 import { PLACEHOLDER_KEY } from "../src/main/update/keys";
 import { MAX_LIST_BYTES } from "../src/main/update/list";
 import {
@@ -121,8 +121,9 @@ afterEach(async () => {
     await rm(join(folder, ".."), { recursive: true, force: true });
 });
 
-function updater(change: Partial<UpdaterOptions> = {}): Updater {
-    return new Updater({
+/** An updater against the fake GitHub, told by default that Automatic updates are on. */
+function updater(change: Partial<UpdaterOptions> = {}, automatic: boolean | null = true): Updater {
+    const subject = new Updater({
         fetch: github.fetch,
         version: "0.1.0",
         platform: "windows-x64",
@@ -133,6 +134,10 @@ function updater(change: Partial<UpdaterOptions> = {}): Updater {
         schedule: () => () => {},
         ...change,
     });
+    if (automatic !== null) {
+        subject.setAutomatic(automatic);
+    }
+    return subject;
 }
 
 async function checked(change: Partial<UpdaterOptions> = {}): Promise<[Updater, UpdateStatus]> {
@@ -394,7 +399,8 @@ describe("when the app checks", () => {
 
     it("names this system as update lists do", () => {
         expect(updatePlatform("win32", "x64")).toBe("windows-x64");
-        expect(updatePlatform("darwin", "arm64")).toBe("macos-arm64");
+        // macOS and Linux follow once the app can install their packages (#330).
+        expect(updatePlatform("darwin", "arm64")).toBeNull();
         expect(updatePlatform("win32", "arm64")).toBeNull();
         expect(updatePlatform("linux", "x64")).toBeNull();
     });
@@ -404,17 +410,18 @@ describe("where installers are kept", () => {
     it("is a folder of the app's own in the user's local profile", () => {
         expect(
             updatesFolder("win32", { LOCALAPPDATA: "C:\\Users\\someone\\AppData\\Local" }, ""),
-        ).toBe(join("C:\\Users\\someone\\AppData\\Local", "UBC VPN", "updates"));
+        ).toBe("C:\\Users\\someone\\AppData\\Local\\UBC VPN\\updates");
         expect(updatesFolder("win32", {}, "C:\\Users\\someone")).toBeNull();
         expect(updatesFolder("win32", { LOCALAPPDATA: "relative" }, "")).toBeNull();
+        // Each system's own paths, whichever system the test runs on.
         expect(updatesFolder("darwin", {}, "/Users/someone")).toBe(
-            join("/Users/someone", "Library", "Caches", "UBC VPN", "updates"),
+            "/Users/someone/Library/Caches/UBC VPN/updates",
         );
         expect(updatesFolder("linux", { XDG_CACHE_HOME: "/cache" }, "/home/someone")).toBe(
-            join("/cache", "ubc-vpn", "updates"),
+            "/cache/ubc-vpn/updates",
         );
         expect(updatesFolder("linux", { XDG_CACHE_HOME: "cache" }, "/home/someone")).toBe(
-            join("/home/someone", ".cache", "ubc-vpn", "updates"),
+            "/home/someone/.cache/ubc-vpn/updates",
         );
     });
 
@@ -466,5 +473,206 @@ describe("what the interface may ask, and is told", () => {
             expect(text).not.toContain("!");
         }
         expect(describeUpdate({ phase: "idle" })).toBeNull();
+    });
+});
+
+describe("what the settings allow", () => {
+    it("downloads nothing until the settings say Automatic updates are on", async () => {
+        github.release("0.2.0", installer);
+        // The settings could not be read: off is respected, as is unknown.
+        const subject = updater({}, null);
+        await subject.check();
+        expect(subject.view().status).toEqual({ phase: "available", version: "0.2.0" });
+        expect(github.asked).not.toContain(github.installerUrl("0.2.0"));
+        subject.setAutomatic(true);
+        await expect.poll(() => subject.view().status.phase).toBe("ready");
+    });
+
+    it("tries a failed download once, not again with every view of the settings", async () => {
+        github.release("0.2.0", installer);
+        const swapped = Buffer.from(installer);
+        swapped[0] = (swapped[0] ?? 0) ^ 1;
+        github.answers.set(github.installerUrl("0.2.0"), { body: swapped });
+        const subject = updater({}, false);
+        await subject.check();
+        subject.setAutomatic(true);
+        await expect.poll(() => subject.view().status.phase).toBe("failed");
+        // More views of the settings, all saying on.
+        subject.setAutomatic(true);
+        subject.setAutomatic(true);
+        await new Promise((done) => setTimeout(done, 20));
+        const fetched = () =>
+            github.asked.filter((url) => url === github.installerUrl("0.2.0")).length;
+        expect(fetched()).toBe(1);
+        // Nor when the setting is turned off and on again.
+        subject.setAutomatic(false);
+        subject.setAutomatic(true);
+        await new Promise((done) => setTimeout(done, 20));
+        expect(fetched()).toBe(1);
+        // The next check tries again.
+        await subject.check();
+        expect(fetched()).toBe(2);
+    });
+});
+
+describe("one thing at a time", () => {
+    it("starts no second check or download while one is under way", async () => {
+        github.release("0.2.0", installer);
+        let release: () => void = () => {};
+        const held = new Promise<void>((done) => {
+            release = done;
+        });
+        const slow: Fetch = async (url, init) => {
+            if (url === github.installerUrl("0.2.0")) {
+                await held;
+            }
+            return github.fetch(url, init);
+        };
+        const subject = updater({ fetch: slow }, false);
+        await subject.check();
+        subject.setAutomatic(true);
+        await expect.poll(() => subject.view().status.phase).toBe("downloading");
+        await subject.check();
+        subject.setAutomatic(false);
+        subject.setAutomatic(true);
+        release();
+        await expect.poll(() => subject.view().status.phase).toBe("ready");
+        expect(github.asked.filter((url) => url === LATEST_RELEASE_URL).length).toBe(1);
+        expect(github.asked.filter((url) => url === github.installerUrl("0.2.0")).length).toBe(1);
+    });
+});
+
+describe("one thing at a time, when the setting changes during a check", () => {
+    it("does not start a download beside a check under way", async () => {
+        github.release("0.2.0", installer);
+        let hold = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((done) => {
+            release = done;
+        });
+        const slow: Fetch = async (url, init) => {
+            if (hold && url === LATEST_RELEASE_URL) {
+                await held;
+            }
+            return github.fetch(url, init);
+        };
+        const subject = updater({ fetch: slow }, false);
+        await subject.check();
+        expect(subject.view().status.phase).toBe("available");
+        hold = true;
+        const second = subject.check();
+        await expect.poll(() => subject.view().status.phase).toBe("checking");
+        subject.setAutomatic(true);
+        release();
+        await second;
+        await expect.poll(() => subject.view().status.phase).toBe("ready");
+        expect(github.asked.filter((url) => url === github.installerUrl("0.2.0")).length).toBe(1);
+    });
+});
+
+describe("limits on what GitHub sends", () => {
+    /** A body that never ends, in chunks of `size` bytes, counting what was pulled. */
+    function endless(size: number) {
+        const counted = { served: 0 };
+        const stream = new ReadableStream<Uint8Array>(
+            {
+                pull(controller) {
+                    counted.served += size;
+                    controller.enqueue(new Uint8Array(size).fill(0x20));
+                },
+            },
+            { highWaterMark: 0 },
+        );
+        return { stream, counted };
+    }
+
+    it("stops reading a release description at its limit, while it streams", async () => {
+        const { stream, counted } = endless(64 * 1024);
+        github.answers.set(LATEST_RELEASE_URL, { body: stream });
+        expect((await checked())[1]).toEqual({ phase: "failed", reason: "refused" });
+        expect(counted.served).toBeLessThanOrEqual(MAX_RELEASE_BYTES + 64 * 1024);
+    });
+
+    it("cuts an installer off at one chunk past the size the list gives", async () => {
+        github.release("0.2.0", installer);
+        const { stream, counted } = endless(4);
+        github.answers.set(github.installerUrl("0.2.0"), { body: stream });
+        expect((await checked())[1]).toEqual({ phase: "failed", reason: "refused" });
+        expect(counted.served).toBeLessThanOrEqual(installer.length + 4);
+    });
+
+    it("gives up on a body that goes quiet", async () => {
+        github.release("0.2.0", installer);
+        const quiet = new ReadableStream<Uint8Array>({
+            start(controller) {
+                controller.enqueue(new Uint8Array(1));
+            },
+        });
+        github.answers.set(github.installerUrl("0.2.0"), { body: quiet });
+        const timeouts = { checkMs: 5_000, downloadMs: 5_000, idleMs: 50 };
+        expect((await checked({ timeouts }))[1]).toEqual({ phase: "failed", reason: "offline" });
+        expect(readdirSync(folder)).toEqual([]);
+    });
+
+    it("gives every request a time limit", async () => {
+        github.release("0.2.0", installer);
+        const signals: (AbortSignal | null | undefined)[] = [];
+        const watching: Fetch = (url, init) => {
+            signals.push(init.signal);
+            return github.fetch(url, init);
+        };
+        await checked({ fetch: watching });
+        expect(signals.length).toBeGreaterThanOrEqual(3);
+        expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    });
+
+    it("follows no redirect to GitHub's other content hosts", async () => {
+        for (const host of ["raw.githubusercontent.com", "gist.githubusercontent.com"]) {
+            const location = `https://${host}/made-up/x.exe`;
+            github = new FakeGitHub();
+            github.release("0.2.0", installer);
+            github.answers.set(github.installerUrl("0.2.0"), { status: 302, location });
+            github.answers.set(location, { body: installer });
+            expect((await checked())[1], host).toEqual({ phase: "failed", reason: "refused" });
+            expect(github.asked).not.toContain(location);
+        }
+    });
+
+    it.skipIf(process.platform === "win32")(
+        "refuses an updates folder that is a link to somewhere else",
+        async () => {
+            const { mkdir, symlink } = await import("node:fs/promises");
+            const elsewhere = join(folder, "..", "elsewhere");
+            await mkdir(elsewhere, { mode: 0o700 });
+            await symlink(elsewhere, folder);
+            await expect(prepareFolder(folder)).rejects.toThrow(/alone/);
+        },
+    );
+});
+
+describe("which runs may update", () => {
+    it("needs a release build as well as an installed app", () => {
+        expect(mayUpdate({ packaged: true, release: true, demo: false })).toBe(true);
+        // ELECTRON_FORCE_IS_PACKAGED makes any run claim to be installed.
+        expect(mayUpdate({ packaged: true, release: false, demo: false })).toBe(false);
+        expect(mayUpdate({ packaged: false, release: true, demo: false })).toBe(false);
+        expect(mayUpdate({ packaged: true, release: true, demo: true })).toBe(false);
+    });
+
+    it("is a release build only when built for the installer", () => {
+        const root = join(__dirname, "..");
+        const config = readFileSync(join(root, "electron.vite.config.ts"), "utf8");
+        expect(config).toContain('__RELEASE__: JSON.stringify(mode === "release")');
+        const scripts: Record<string, string> = JSON.parse(
+            readFileSync(join(root, "package.json"), "utf8"),
+        ).scripts;
+        expect(scripts["build:release"]).toBe("electron-vite build --mode release");
+        expect(scripts["package:win"]).toContain("pnpm build:release");
+        // Every other build, the tests' included, is not one.
+        for (const [name, script] of Object.entries(scripts)) {
+            if (name !== "build:release") {
+                expect(script.includes("--mode release"), name).toBe(false);
+            }
+        }
     });
 });

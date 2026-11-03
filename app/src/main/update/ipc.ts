@@ -9,6 +9,15 @@ import { updatesFolder } from "./download";
 import { TRUSTED_KEYS } from "./keys";
 import { Updater, updatePlatform } from "./updater";
 
+/**
+ * Whether this run may update itself: an installed app, from a release
+ * build, not the demo. `packaged` alone is not enough, as an environment
+ * variable can make any run claim it.
+ */
+export function mayUpdate(run: { packaged: boolean; release: boolean; demo: boolean }): boolean {
+    return run.packaged && run.release && !run.demo;
+}
+
 /** The updater for this run. Only an installed app ever reaches the network. */
 export function createUpdater(version: string, packaged: boolean): Updater {
     return new Updater({
