@@ -14,8 +14,8 @@ use ubc_vpn_service::DNS_UNCONFIRMED;
 const ACCEPTED: Result<ResponseBody, ErrorCode> = Ok(ResponseBody::Accepted);
 /// What start-up does, and what each connect does before the tunnel exists.
 const BEFORE_OPEN: [Op; 5] = [
-    Op::RemoveAllRoutes,
     Op::ClearSplitDns,
+    Op::RemoveAllRoutes,
     Op::ClearSplitDns,
     Op::RemoveAllRoutes,
     Op::CapturePhysical,
@@ -34,8 +34,8 @@ const AFTER_OPEN: [Op; 9] = [
     Op::VerifyDns,
 ];
 const TEARDOWN: [Op; 4] = [
-    Op::RemoveTunnelRoutes,
     Op::ClearSplitDns,
+    Op::RemoveTunnelRoutes,
     Op::RemoveGatewayRoute,
     Op::RemoveAllRoutes,
 ];
@@ -281,6 +281,58 @@ fn split_dns_that_is_confirmed_says_nothing_more() {
     let said = alice.whole_log();
     let unconfirmed = |line: &LogLine| line.text.as_str().contains(DNS_UNCONFIRMED);
     assert!(!said.iter().any(unconfirmed), "{said:?}");
+}
+
+// Security rule: split DNS is gone before the tunnel stops carrying the DNS
+// servers' routes, so a lookup for a chosen domain can never leave by the
+// normal route, addressed to the tunnel's DNS server.
+#[test]
+fn split_dns_is_cleared_while_the_dns_servers_are_still_routed() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    assert!(rig.fake.applied().split_dns.is_some());
+    rig.os.hold_at(Op::RemoveTunnelRoutes);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    rig.os.wait_until_held();
+    let routes_going = rig.fake.applied();
+    rig.os.release();
+    assert_eq!(routes_going.split_dns, None);
+    assert!(!routes_going.tunnel_routes.is_empty());
+    assert_eq!(
+        [alice.state(), alice.state()],
+        [ConnState::Disconnecting, ConnState::Disconnected]
+    );
+    assert!(rig.is_clean());
+}
+
+// Security rule: split DNS that cannot be cleared does not keep the tunnel's
+// routes in place, and the teardown says it did not end clean.
+#[test]
+fn routes_go_when_split_dns_cannot_be_cleared() {
+    let rig = rig();
+    let mut alice = rig.owner();
+    connected(&mut alice);
+    rig.fake
+        .set_failure(Op::ClearSplitDns, Some(Error::PermissionDenied));
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::Internal), "{state:?}");
+    assert!(rig.fake.calls().ends_with(&TEARDOWN));
+    let left = rig.fake.applied();
+    assert!(left.split_dns.is_some(), "the failure was not simulated");
+    assert!(left.tunnel_routes.is_empty(), "{left:?}");
+    assert!(left.gateway_routes.is_empty(), "{left:?}");
+    assert!(!rig.engine.tunnel_is_open());
+    // Once the clear works again, a further teardown finishes the job.
+    rig.fake.set_failure(Op::ClearSplitDns, None);
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(
+        [alice.state(), alice.state()],
+        [ConnState::Disconnecting, ConnState::Disconnected]
+    );
+    assert!(rig.is_clean());
 }
 
 // Security rule: teardown runs every step even when earlier steps fail, and
@@ -737,8 +789,8 @@ fn an_old_tunnels_ending_does_not_end_the_next_connection() {
 #[test]
 fn a_panic_inside_teardown_still_logs_off_and_cleans_up() {
     let steps = [
-        Op::RemoveTunnelRoutes,
         Op::ClearSplitDns,
+        Op::RemoveTunnelRoutes,
         Op::RemoveGatewayRoute,
         Op::RemoveAllRoutes,
     ];
@@ -775,7 +827,11 @@ fn a_panic_inside_teardown_still_logs_off_and_cleans_up() {
 // not stop the rest of the cleanup.
 #[test]
 fn a_panic_in_the_teardown_at_shutdown_does_not_stop_the_cleanup() {
-    for step in [Op::RemoveTunnelRoutes, Op::RemoveAllRoutes] {
+    for step in [
+        Op::ClearSplitDns,
+        Op::RemoveTunnelRoutes,
+        Op::RemoveAllRoutes,
+    ] {
         let mut rig = rig();
         connected(&mut rig.owner());
         rig.os.panic_at(step);

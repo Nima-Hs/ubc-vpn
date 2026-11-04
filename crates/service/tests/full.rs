@@ -134,7 +134,8 @@ fn connect_in_full_mode_applies_in_order_and_verifies() {
         Ok(ResponseBody::Status(state))
     );
 
-    // A disconnect removes the halves, then the catch-all, then the rest.
+    // A disconnect removes the halves, then the catch-all, then split DNS,
+    // and only then the routes to the gateway's DNS servers.
     let before = rig.fake.calls().len();
     assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
     assert_eq!(
@@ -144,13 +145,70 @@ fn connect_in_full_mode_applies_in_order_and_verifies() {
     let teardown = [
         Op::RemoveFullTunnel,
         Op::ClearCatchAllDns,
-        Op::RemoveTunnelRoutes,
         Op::ClearSplitDns,
+        Op::RemoveTunnelRoutes,
         Op::RemoveGatewayRoute,
         Op::RemoveAllRoutes,
     ];
     assert_eq!(rig.fake.calls()[before..], teardown);
     assert!(rig.is_clean());
+}
+
+// Security rule: in full mode too, nothing sends a name to the gateway's DNS
+// servers once the tunnel no longer routes them. When the halves go the names
+// still follow the catch-all, through the routes kept for the servers. When
+// those routes go, no DNS rule is left.
+#[test]
+fn full_mode_teardown_keeps_the_dns_servers_routed_until_no_rule_names_them() {
+    // What is applied at the moment teardown reaches `op`.
+    let when_reaching = |op| {
+        let (rig, mut alice) = home_rig();
+        let state = alice.connect_ends(full(&["192.0.2.0/24"], &["dept.example.test"]));
+        assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+        rig.os.hold_at(op);
+        assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+        rig.os.wait_until_held();
+        let applied = rig.fake.applied();
+        rig.os.release();
+        assert_eq!(
+            [alice.state(), alice.state()],
+            [ConnState::Disconnecting, ConnState::Disconnected]
+        );
+        applied
+    };
+    let to_server = ("fake0".to_string(), net("10.255.0.53/32"));
+
+    let halves_going = when_reaching(Op::RemoveFullTunnel);
+    assert_eq!(halves_going.catch_all_dns, Some(vec![DNS_SERVER]));
+    assert!(halves_going.tunnel_routes.contains(&to_server));
+
+    let routes_going = when_reaching(Op::RemoveTunnelRoutes);
+    assert_eq!(routes_going.full_tunnel, None);
+    assert_eq!(routes_going.catch_all_dns, None);
+    assert_eq!(routes_going.split_dns, None);
+    assert!(routes_going.tunnel_routes.contains(&to_server));
+}
+
+// Security rule: DNS that cannot be cleared does not keep the tunnel's routes
+// in place, and the teardown says it did not end clean, in full mode as well.
+#[test]
+fn full_mode_routes_go_when_dns_cannot_be_cleared() {
+    let (rig, mut alice) = home_rig();
+    let state = alice.connect_ends(full(&["192.0.2.0/24"], &["dept.example.test"]));
+    assert_eq!(mode_of(&state), TunnelMode::Full, "{state:?}");
+    for op in [Op::ClearCatchAllDns, Op::ClearSplitDns] {
+        rig.fake.set_failure(op, Some(Error::PermissionDenied));
+    }
+    assert_eq!(alice.ask(RequestBody::Disconnect), ACCEPTED);
+    assert_eq!(alice.state(), ConnState::Disconnecting);
+    let state = alice.state();
+    assert!(failed_with(&state, ErrorCode::Internal), "{state:?}");
+    let left = rig.fake.applied();
+    assert!(left.split_dns.is_some(), "the failure was not simulated");
+    assert_eq!(left.full_tunnel, None);
+    assert!(left.tunnel_routes.is_empty(), "{left:?}");
+    assert!(left.gateway_routes.is_empty(), "{left:?}");
+    assert!(!rig.engine.tunnel_is_open());
 }
 
 // With no DNS domains, full mode still routes the gateway's DNS server

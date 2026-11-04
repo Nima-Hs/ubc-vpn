@@ -211,7 +211,9 @@ impl Service {
             Err(message) => logs.error(message),
         }
         let about = About::new(&policy);
-        let cleaned = [platform.routes.remove_all(), platform.dns.clear_split_dns()];
+        // In the order of a teardown: no rule is left sending a name to a DNS
+        // server whose route has gone.
+        let cleaned = [platform.dns.clear_split_dns(), platform.routes.remove_all()];
         for error in cleaned.into_iter().filter_map(Result::err) {
             logs.error(&format!("start-up cleanup failed: {error}"));
         }
