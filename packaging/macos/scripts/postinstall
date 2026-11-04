@@ -1,0 +1,150 @@
+#!/bin/bash -p
+# Runs as root when the package has put the app in /Applications, on a first
+# install and on an update. It may run more than once for one install, so it
+# is safe to repeat.
+#
+# The service and its libraries come from beside this script, in the folder
+# macOS unpacks the package's scripts to, which only root can change, and never
+# from the app: the admin group can write to /Applications, so whoever could
+# swap a file there before this copied it could have it run as root.
+#
+# The new folder is made in full beside the old one and moved into place, so a
+# running service is never overwritten, and `ubc-vpn-service install` stops it
+# only then, removing its routes and DNS, keeps the state and the owner, and
+# starts the new one. An install that fails puts the old folder and policy back.
+# The app has already landed by then and is not put back: an app and a service
+# of different versions say so to the user and do nothing more.
+#
+# The first line's -p keeps a root shell from reading anything from the
+# environment before this script starts.
+set -euo pipefail
+
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+unset CDPATH
+
+here=$(cd "$(dirname "$0")" && pwd)
+LABEL=io.github.nima-hs.ubc-vpn
+HELPERS=/Library/PrivilegedHelperTools
+FOLDER=$HELPERS/$LABEL
+NEXT=$FOLDER.next
+OLD=$FOLDER.old
+KEPT=$FOLDER.policy
+DATA="/Library/Application Support/UBC VPN"
+JOB=/Library/LaunchDaemons/$LABEL.plist
+LINK=/usr/local/bin/ubc-vpn
+CLIENT="/Applications/UBC VPN.app/Contents/Resources/bin/ubc-vpn"
+
+fail() { echo "ubc-vpn postinstall: $*" >&2; exit 1; }
+
+# Whether $1 is a real folder, root's, and changeable by root alone: no group or
+# other write and no access list entry that allows anything. Anything that can't
+# be told is a no.
+only_root_changes() {
+    local mode list
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    [ "$(stat -f %u "$1")" = 0 ] || return 1
+    mode=$(stat -f %Lp "$1")
+    [ $((0$mode & 022)) = 0 ] || return 1
+    list=$(ls -lde "$1") || return 1
+    ! grep -qE '^ *[0-9]+: .* allow ' <<<"$list"
+}
+
+[ "$(id -u)" = 0 ] || fail "not root"
+# $3 is the volume being installed on. The package allows only the startup disk.
+[ "${3:-/}" = / ] || fail "UBC VPN installs only on the startup disk, not $3"
+
+# Everything below works in this folder and runs the service from it as root, so
+# it is judged before anything is touched. The service's own check comes later.
+only_root_changes / || fail "only root must be able to change /"
+only_root_changes /Library || fail "only root must be able to change /Library"
+if [ -e "$HELPERS" ] || [ -L "$HELPERS" ]; then
+    only_root_changes "$HELPERS" || fail "only root must be able to change $HELPERS"
+fi
+
+# For the record, in /var/log/install.log: the folder this script and the service
+# came from, which the design relies on only root being able to change.
+{
+    ls -ldn "$(dirname "$here")"
+    find "$here" -exec ls -ldn {} +
+} | sed 's/^/ubc-vpn postinstall: scripts folder: /'
+
+# A first install has no job yet. Only root can write to that folder.
+fresh=--fresh
+if [ -e "$JOB" ]; then
+    fresh=
+fi
+
+# Macs have this folder, but nothing says they must.
+[ -e "$HELPERS" ] || install -d -o root -g wheel -m 1755 "$HELPERS"
+
+# Left by a run that was cut short. An old folder with no current one is put
+# back first, so that the update below still has it to go back to.
+if [ -e "$OLD" ] && [ ! -e "$FOLDER" ]; then
+    mv "$OLD" "$FOLDER"
+fi
+rm -rf "$NEXT" "$OLD" "$KEPT"
+
+install -d -o root -g wheel -m 755 "$NEXT"
+for file in "$here"/service/*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || fail "$file is not a file"
+    case $file in
+        *.dylib) mode=644 ;;
+        *) mode=755 ;;
+    esac
+    install -o root -g wheel -m "$mode" "$file" "$NEXT/"
+done
+
+# The policy now in use, to put back if this fails, unless it can't be trusted.
+back_to=$here/policy.json
+if only_root_changes "$DATA" && [ -f "$DATA/policy.json" ] && [ ! -L "$DATA/policy.json" ]; then
+    install -o root -g wheel -m 644 "$DATA/policy.json" "$KEPT"
+    back_to=$KEPT
+fi
+
+updating=
+if [ -e "$FOLDER" ]; then
+    updating=1
+    mv "$FOLDER" "$OLD"
+fi
+mv "$NEXT" "$FOLDER"
+
+# shellcheck disable=SC2086 # $fresh is one word or none.
+if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.json" $fresh; then
+    echo "ubc-vpn postinstall: the install failed; putting back what was there" >&2
+    if [ -n "$updating" ]; then
+        rm -rf "$FOLDER"
+        mv "$OLD" "$FOLDER"
+        # The old service, should the failed install have stopped it: it may
+        # have failed having stopped the service and with no job written, or
+        # having left the job on disk unloaded, or loaded and restarting a
+        # service that cannot start. Without --fresh this keeps the state. It
+        # can fail for the same reason, and then the job on disk is loaded as
+        # it is, which does nothing to a service that was never stopped.
+        if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$back_to"; then
+            /bin/launchctl bootstrap system "$JOB" > /dev/null 2>&1 || true
+        fi
+    else
+        # Nothing to go back to: no job may be left starting a missing program.
+        /usr/bin/env -i "$FOLDER/ubc-vpn-service" uninstall --keep-data || true
+        rm -rf "$FOLDER"
+    fi
+    rm -f "$KEPT"
+    exit 1
+fi
+rm -rf "$OLD" "$KEPT"
+
+# The command `ubc-vpn` (decision G19), which runs as the user, so it is the
+# app's client, and nothing here ever runs it. Nothing is changed in /usr/local
+# but the link itself, and that only if both folders are real, root's and
+# changeable by root alone. Anything else there is left as it is, and said.
+not_linked() {
+    echo "ubc-vpn postinstall: the ubc-vpn command is not linked: $1. Run it as yourself, not with sudo, by its full path: \"$CLIENT\"" >&2
+}
+if ! only_root_changes /usr/local || ! only_root_changes /usr/local/bin; then
+    not_linked "/usr/local/bin is not a folder only root can change"
+elif [ ! -e "$LINK" ] && [ ! -L "$LINK" ]; then
+    # The service is up by now, so this is not a failed install.
+    ln -s "$CLIENT" "$LINK" || not_linked "$LINK could not be made"
+elif [ ! -L "$LINK" ] || [ "$(readlink "$LINK")" != "$CLIENT" ]; then
+    not_linked "$LINK is something else's"
+fi
