@@ -6,6 +6,14 @@
 //!
 //! How the pipe keeps the channel's promises:
 //!
+//! - **A name others cannot create.** The installed pipe's name starts with
+//!   [`PROTECTED_PREFIX`], and Windows refuses to create a pipe there for a
+//!   process that does not hold the Administrators group, so no other user
+//!   can hold the name while the service is stopped. Microsoft does not
+//!   document this prefix. If it ever stopped working, others could again
+//!   keep the service from starting, but no more than that: a client's check
+//!   of the owner, and the service's first-instance flag, are what stop
+//!   anyone from taking its place, and neither relies on the prefix.
 //! - **One listener.** The first instance is created with
 //!   `FILE_FLAG_FIRST_PIPE_INSTANCE`, and the access list lets nobody but the
 //!   service create another. The listener always holds one free instance, so
@@ -80,9 +88,15 @@ use self::pipe::{End, Pipe, Stop};
 use self::security::{Descriptor, Handle, last_error, os_error, wide};
 use crate::{Connection, Error, Listener, Mode, Paths, Platform, Result, Transport, UserId, lock};
 
-/// The installed service's pipe. A dev-mode pipe has the user's SID appended,
-/// so it can never be this one, nor another user's.
-const INSTALLED_PIPE: &str = "ubc-vpn";
+/// Where the installed service's pipe lives. The only channel name that may
+/// hold a backslash or a space starts with this, exactly as written here.
+const PROTECTED_PREFIX: &str = r"ProtectedPrefix\Administrators\UBC VPN\";
+/// The installed service's pipe, after [`PROTECTED_PREFIX`].
+const INSTALLED_PIPE: &str = "service";
+/// The start of a dev-mode pipe's name. It has the user's SID appended, so it
+/// can never be another user's. It is not under [`PROTECTED_PREFIX`], since
+/// dev mode runs unprivileged and could not create it there.
+const DEV_PIPE: &str = "ubc-vpn-dev";
 const FOLDER: &str = "UBC VPN";
 
 /// What every instance is created with, besides the first-instance flag.
@@ -153,7 +167,7 @@ fn paths(mode: Mode, me: &str) -> Result<Paths> {
                 policy_dir: machine.clone(),
                 state_dir: machine,
                 settings_dir: roaming.join(FOLDER),
-                channel_name: INSTALLED_PIPE.to_string(),
+                channel_name: format!("{PROTECTED_PREFIX}{INSTALLED_PIPE}"),
             })
         }
         #[cfg(feature = "dev-mode")]
@@ -164,19 +178,40 @@ fn paths(mode: Mode, me: &str) -> Result<Paths> {
                 policy_dir: root.join("policy"),
                 state_dir: root.join("state"),
                 settings_dir: root.join("settings"),
-                channel_name: format!("{INSTALLED_PIPE}-dev-{me}"),
+                channel_name: format!("{DEV_PIPE}-{me}"),
             })
         }
     }
 }
 
-/// The full pipe path for a channel name, which must be a plain name.
+/// The start of every pipe's full path.
+const PIPE_ROOT: &str = r"\\.\pipe\";
+
+/// The full pipe path for a channel name: a plain name, optionally after
+/// [`PROTECTED_PREFIX`] exactly as written there.
+///
+/// Windows tidies a path before it opens it, removing `.` and `..` parts and
+/// dots at the end of a part. A name that would change that way is refused,
+/// so that the path opened is always the one checked here and can never
+/// climb out of the prefix.
 fn pipe_path(name: &str) -> Result<Vec<u16>> {
-    let plain = |c: char| c.is_ascii_graphic() && c != '\\' && c != '/';
-    if name.is_empty() || name.len() > 200 || !name.chars().all(plain) {
+    let plain = name.strip_prefix(PROTECTED_PREFIX).unwrap_or(name);
+    let allowed = |c: char| c.is_ascii_graphic() && c != '\\' && c != '/';
+    if plain.is_empty()
+        || name.len() > 200
+        || !plain.chars().all(allowed)
+        || plain.starts_with('.')
+        || plain.ends_with('.')
+    {
         return Err(Error::Failed("not a channel name".to_string()));
     }
-    Ok(wide(&format!(r"\\.\pipe\{name}")))
+    Ok(wide(&format!("{PIPE_ROOT}{name}")))
+}
+
+/// Whether Windows only lets an administrator create the pipe at `path`.
+fn is_protected(path: &[u16]) -> bool {
+    let protected = format!("{PIPE_ROOT}{PROTECTED_PREFIX}");
+    path.starts_with(&protected.encode_utf16().collect::<Vec<_>>())
 }
 
 /// Creates one instance of the service's pipe, protected by `sddl`.
@@ -190,6 +225,12 @@ fn create_instance(path: &[u16], sddl: &str, first: bool) -> Result<Pipe> {
         };
     let created = create_pipe(path, &descriptor, open_mode, PIPE_MODE);
     Pipe::new(created.map_err(|code| match code {
+        // Windows refuses a process that may not create under the prefix with
+        // the same code as a name that exists. Waiting for such a name to
+        // come free would never end, so it is told apart here.
+        5 if first && is_protected(path) && !security::holds_administrators() => {
+            Error::PermissionDenied
+        }
         // How Windows refuses a first instance of a name that exists.
         5 if first => Error::AlreadyExists,
         code => os_error(code),

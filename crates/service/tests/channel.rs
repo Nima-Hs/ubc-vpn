@@ -185,8 +185,8 @@ fn the_owner_is_kept_only_in_the_state_folder_the_service_was_given() {
     );
 }
 
-/// The service's channel name, held by another program, as any local user
-/// can while it is free: during an update, say, or a restart.
+/// The service's channel name, held by another program while it is free:
+/// during an update, say, or a restart.
 fn squat(rig: &Rig) -> Box<dyn ubc_vpn_platform::Listener> {
     let name = rig.platform().paths.channel_name;
     rig.fake.listen(&name).expect("the name is free")

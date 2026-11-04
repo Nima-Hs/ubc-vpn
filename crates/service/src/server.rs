@@ -56,9 +56,8 @@ pub struct Timeouts {
     /// client that stops reading delays nobody but itself.
     pub write: Duration,
     /// How long the service waits at start for its channel's name while
-    /// another program holds it. Any local user can create the name while
-    /// it is free, as during an update or a restart; past this the service
-    /// gives up.
+    /// another program holds it, as an administrator's could during an
+    /// update or a restart; past this the service gives up.
     pub claim: Duration,
 }
 
@@ -73,10 +72,10 @@ impl Default for Timeouts {
 }
 
 /// Claims the channel's name for the service's own listener. While another
-/// program holds the name, which any local user can create while it is
-/// free, it tries again with a growing pause, for `limit` at most, and says
-/// once that the name was held. It only ever creates a channel of its own:
-/// creating one is exclusive, so it never uses or connects to another.
+/// program holds the name it tries again with a growing pause, for `limit`
+/// at most, and says once that the name was held. It only ever creates a
+/// channel of its own: creating one is exclusive, so it never uses or
+/// connects to another.
 fn claim(platform: &Platform, limit: Duration, logs: &Logs) -> Result<Box<dyn Listener>, String> {
     let name = &platform.paths.channel_name;
     let until = Instant::now() + limit;

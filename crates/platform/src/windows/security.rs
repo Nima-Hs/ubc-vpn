@@ -11,9 +11,9 @@ use windows_sys::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    CheckTokenMembership, CreateWellKnownSid, DACL_SECURITY_INFORMATION, GetTokenInformation,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SetKernelObjectSecurity,
+    TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{
@@ -124,7 +124,7 @@ impl Descriptor {
 /// descriptor; nobody else has either. Until there is an owner, interactive
 /// users may connect; afterwards only the owner may. A process that is
 /// neither SYSTEM nor an elevated administrator cannot make Administrators
-/// the owner, so it cannot create this pipe at all.
+/// the owner, so it cannot create this pipe at all, at any name.
 ///
 /// Dev: owned by the current user, who has full control; an owner other than
 /// that user may connect once named. Nobody else.
@@ -229,6 +229,29 @@ pub(super) fn process_user() -> Result<String> {
         return Err(os_error(last_error()));
     }
     token_user(&Handle(token))
+}
+
+/// Whether this thread holds the Administrators group, enabled: an elevated
+/// administrator or SYSTEM, and not an administrator's ordinary programs,
+/// whose token has the group for denying only. "Could not tell" is no.
+pub(super) fn holds_administrators() -> bool {
+    // A SID is 68 bytes at most; u64 elements give it the alignment it needs.
+    let mut sid = [0u64; 9];
+    let mut size = size_of_val(&sid) as u32;
+    let mut member = 0;
+    // SAFETY: the buffer is writable for `size` bytes and `size` is a valid
+    // pointer; the domain may be null for this SID. A null token means this
+    // thread's own identity, whichever it is acting as.
+    unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            null_mut(),
+            sid.as_mut_ptr().cast(),
+            &mut size,
+        ) != 0
+            && CheckTokenMembership(null_mut(), sid.as_mut_ptr().cast(), &mut member) != 0
+            && member != 0
+    }
 }
 
 /// Ends impersonation when dropped, on every path including a panic.

@@ -231,6 +231,12 @@ jobs:
           pwsh -NoProfile -File "$CHECK" who-can-change
           pwsh -NoProfile -File "$CHECK" service
           pwsh -NoProfile -File "$CHECK" state-kept "$RUNNER_TEMP/state.sha256"
+      # A standard user's own program, not an impersonating thread, against the
+      # real service and its real pipe name.
+      - name: A standard user cannot take the service's pipe name or keep it from starting
+        run: |
+          pwsh -NoProfile -File "$CHECK" pipe-name-as-user
+          pwsh -NoProfile -File "$CHECK" service
       - name: Uninstall
         run: pwsh -NoProfile -File "$CHECK" uninstall
       - name: Nothing is left but the user's data

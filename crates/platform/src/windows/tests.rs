@@ -18,17 +18,20 @@ use windows_sys::Win32::Security::Authorization::{
     SE_FILE_OBJECT, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, DuplicateTokenEx, ImpersonateLoggedOnUser,
+    CreateRestrictedToken, DACL_SECURITY_INFORMATION, DuplicateTokenEx, ImpersonateLoggedOnUser,
     LABEL_SECURITY_INFORMATION, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LogonUserW,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, RevertToSelf, SetTokenInformation,
-    TOKEN_ALL_ACCESS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, RevertToSelf, SID_AND_ATTRIBUTES,
+    SetTokenInformation, TOKEN_ALL_ACCESS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation,
+    TokenIntegrityLevel,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
 };
 
-use super::security::{CONNECT_RIGHTS, is_the_service, process_user, sddl, token_user};
+use super::security::{
+    CONNECT_RIGHTS, holds_administrators, is_the_service, process_user, sddl, token_user,
+};
 use super::*;
 use crate::suite;
 
@@ -95,11 +98,24 @@ fn pair(transport: &PipeTransport, listener: &PipeListener) -> (Connection, Conn
 impl PipeListener {
     fn name(&self) -> String {
         let path = String::from_utf16_lossy(&self.path);
-        path.trim_end_matches('\0')
-            .rsplit('\\')
-            .next()
-            .unwrap()
-            .to_string()
+        let name = path.trim_end_matches('\0').strip_prefix(PIPE_ROOT);
+        name.unwrap().to_string()
+    }
+}
+
+/// A name of its own under the prefix the installed service's pipe uses.
+fn protected(tag: &str) -> String {
+    format!("{PROTECTED_PREFIX}{}", unique(tag))
+}
+
+impl PipeTransport {
+    /// A name of its own, in the place this mode's real pipe lives.
+    fn unique(&self, tag: &str) -> String {
+        match self.mode {
+            Mode::Installed => protected(tag),
+            #[cfg(feature = "dev-mode")]
+            Mode::Dev => unique(tag),
+        }
     }
 }
 
@@ -228,6 +244,36 @@ impl Stranger {
     }
 }
 
+/// This process's own user with the Administrators group for denying only:
+/// what an administrator's ordinary programs run as, without the admin prompt.
+fn unelevated_administrator() -> Stranger {
+    let (mut own, mut restricted, mut group) = (null_mut(), null_mut(), null_mut());
+    let administrators = wide("S-1-5-32-544");
+    // SAFETY: the pseudo-handle is always valid, the out pointers are valid,
+    // and `administrators` is NUL-terminated.
+    let ok = unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut own) != 0
+            && ConvertStringSidToSidW(administrators.as_ptr(), &mut group) != 0
+    };
+    assert!(ok, "reading the process token failed: {}", last_error());
+    let own = Handle(own);
+    let disable = SID_AND_ATTRIBUTES {
+        Sid: group,
+        Attributes: 0,
+    };
+    // SAFETY: the token is open, `disable` is a list of one valid SID, the
+    // other lists are empty, and the out pointer is valid.
+    let ok = unsafe {
+        CreateRestrictedToken(own.0, 0, 1, &disable, 0, null(), 0, null(), &mut restricted)
+    };
+    assert_ne!(ok, 0, "restricting the token failed: {}", last_error());
+    // SAFETY: the API allocated the SID for the caller to free this way.
+    unsafe { windows_sys::Win32::Foundation::LocalFree(group) };
+    let token = Handle(restricted);
+    let sid = token_user(&token).unwrap();
+    Stranger { token, sid }
+}
+
 /// This process's own user, at low integrity: what a sandboxed program of
 /// that user runs as. Lowering one's own level needs no privilege.
 fn low_integrity() -> Stranger {
@@ -280,8 +326,8 @@ fn low_integrity() -> Stranger {
 #[test]
 fn a_low_integrity_program_cannot_even_read() {
     each(|transport| {
-        let listener = transport.listener(&unique("low")).unwrap();
-        let path = format!(r"\\.\pipe\{}", listener.name());
+        let listener = transport.listener(&transport.unique("low")).unwrap();
+        let path = format!("{PIPE_ROOT}{}", listener.name());
         let low = low_integrity();
         let read_only = 0x0012_0089; // FILE_GENERIC_READ
         for access in [read_only, CONNECT_RIGHTS] {
@@ -310,7 +356,7 @@ fn passes_the_shared_suite_with_a_second_user() {
     };
     within(move || {
         let as_stranger = |name: &str| stranger.run(|| service.connect(name));
-        suite::check_transport(&service, &unique("suite"), &as_stranger);
+        suite::check_transport(&service, &protected("suite"), &as_stranger);
         ran("suite");
     });
 }
@@ -323,7 +369,7 @@ fn each_user_is_reported_by_their_own_sid_and_narrowing_follows_the_owner() {
         return;
     };
     within(move || {
-        let listener = service.listener(&unique("users")).unwrap();
+        let listener = service.listener(&protected("users")).unwrap();
         let name = listener.name();
         let call = || stranger.run(|| service.connect(&name));
         let client = call().expect("the second user connects");
@@ -381,7 +427,7 @@ fn dev_mode_admits_and_trusts_only_the_current_user() {
 #[test]
 fn a_name_has_one_listener_until_it_closes() {
     each(|transport| {
-        let listener = transport.listener(&unique("one")).unwrap();
+        let listener = transport.listener(&transport.unique("one")).unwrap();
         let name = listener.name();
         assert_eq!(transport.listener(&name).err(), Some(Error::AlreadyExists));
         let pairs = [(); 3].map(|()| pair(&transport, &listener));
@@ -400,26 +446,221 @@ fn a_name_has_one_listener_until_it_closes() {
     });
 }
 
-// Security rule: while the service is down any user can create a pipe with
-// its name. The service must not share it, and a client must not talk to it.
+// Security rule: the service must not share a pipe with its name that someone
+// else made, and a client must not talk to it. Under the prefix only an
+// administrator's program can make one, and this holds even so, which is what
+// protects a client if Windows ever stops enforcing the prefix.
 #[test]
 fn a_squatted_name_is_refused_by_listen_and_by_connect() {
     within(|| {
-        let (service, name) = (transport(Mode::Installed), unique("squat"));
-        let path = pipe_path(&name).unwrap();
-        // Owned by this user, who is not SYSTEM, and open to everyone.
-        let squat = format!("O:{}D:P(A;;FA;;;WD)", service.me);
-        let _squatter = [true, false].map(|first| create_instance(&path, &squat, first).unwrap());
-        assert_eq!(service.listener(&name).err(), Some(Error::AlreadyExists));
-        let refused = Some(Error::NotTheService);
-        assert_eq!(service.connect(&name).err(), refused);
-        // The same pipe passes where its owner is the expected one, so it
-        // was the owner check that refused it.
-        #[cfg(feature = "dev-mode")]
-        transport(Mode::Dev)
-            .connect(&name)
-            .expect("dev mode expects this user");
+        let service = transport(Mode::Installed);
+        let mut names = vec![unique("squat")];
+        names.extend(holds_administrators().then(|| protected("squat")));
+        for name in names {
+            let path = pipe_path(&name).unwrap();
+            // Owned by this user, who is not SYSTEM, and open to everyone.
+            let squat = format!("O:{}D:P(A;;FA;;;WD)", service.me);
+            let _squatter =
+                [true, false].map(|first| create_instance(&path, &squat, first).unwrap());
+            assert_eq!(service.listener(&name).err(), Some(Error::AlreadyExists));
+            let refused = Some(Error::NotTheService);
+            assert_eq!(service.connect(&name).err(), refused);
+            // The same pipe passes where its owner is the expected one, so it
+            // was the owner check that refused it.
+            #[cfg(feature = "dev-mode")]
+            transport(Mode::Dev)
+                .connect(&name)
+                .expect("dev mode expects this user");
+        }
     });
+}
+
+// Without the Administrators group, a program cannot serve the installed pipe,
+// and is told so at once: the service must not wait for the name to come free.
+// (On a runner, which is elevated, the next test shows this for other users.)
+#[test]
+fn a_program_that_is_not_elevated_is_refused_at_once() {
+    if holds_administrators() {
+        return;
+    }
+    within(|| {
+        let refused = transport(Mode::Installed).listener(&protected("not-elevated"));
+        assert_eq!(refused.err(), Some(Error::PermissionDenied));
+    });
+}
+
+// Security rule: a real second user, and an administrator's program without
+// the admin prompt, cannot create a pipe under the prefix, whatever they ask
+// for. They can under any other name, so it is the prefix that refuses them.
+#[test]
+fn only_an_elevated_program_can_create_a_protected_pipe() {
+    let Some((service, stranger)) = installed().zip(stranger()) else {
+        return;
+    };
+    within(move || {
+        let open_to_all = "D:P(A;;FA;;;WD)";
+        let name = protected("refused");
+        let path = pipe_path(&name).unwrap();
+        let create = |path: &[u16], open_mode| {
+            let descriptor = Descriptor::parse(open_to_all).unwrap();
+            create_pipe(path, &descriptor, open_mode, PIPE_MODE).err()
+        };
+        let first = OPEN_MODE | FILE_FLAG_FIRST_PIPE_INSTANCE;
+        let unelevated = unelevated_administrator();
+        assert!(service.me == unelevated.sid);
+        for user in [&stranger, &unelevated] {
+            let who = &user.sid;
+            assert_eq!(user.run(|| create(&path, first)), Some(5), "{who}");
+            assert_eq!(user.run(|| create(&path, OPEN_MODE)), Some(5), "{who}");
+            let refused = Some(Error::PermissionDenied);
+            let listened = user.run(|| service.listener(&name).err());
+            assert_eq!(listened, refused, "{who}");
+            // Nothing is there, which a client can tell, as it can for any
+            // service that is stopped.
+            let absent = user.run(|| service.connect(&name).err());
+            assert_eq!(absent, Some(Error::NotFound), "{who}");
+            let plain = pipe_path(&unique("control")).unwrap();
+            assert_eq!(user.run(|| create(&plain, first)), None, "{who}");
+        }
+        ran("protected refused");
+    });
+}
+
+// Security rule: the prefix cannot be got round by spelling it another way.
+// Whichever of these Windows takes, the name the service will ask for stays
+// free, and nothing answers to it.
+#[test]
+fn another_spelling_of_the_prefix_does_not_take_the_name() {
+    let Some((service, stranger)) = installed().zip(stranger()) else {
+        return;
+    };
+    within(move || {
+        let tail = unique("spelled");
+        let plain = PROTECTED_PREFIX.replace('\\', "/");
+        let spellings = [
+            format!(r"\\.\pipe\{}{tail}", PROTECTED_PREFIX.to_lowercase()),
+            format!(r"\\.\pipe\{}{tail}", PROTECTED_PREFIX.to_uppercase()),
+            format!(r"\\.\PIPE\{PROTECTED_PREFIX}{tail}"),
+            format!(r"\\?\pipe\{PROTECTED_PREFIX}{tail}"),
+            format!(r"\\.\pipe\{plain}{tail}"),
+            format!(r"\\.\pipe\\{PROTECTED_PREFIX}{tail}"),
+            format!(r"\\.\pipe\.\{PROTECTED_PREFIX}{tail}"),
+            format!(r"\\.\pipe\x\..\{PROTECTED_PREFIX}{tail}"),
+            format!(r"\\.\pipe\{PROTECTED_PREFIX}{tail}."),
+            format!(r"\\.\pipe\{PROTECTED_PREFIX}{tail} "),
+        ];
+        let open_mode = OPEN_MODE | FILE_FLAG_FIRST_PIPE_INSTANCE;
+        let mut held = Vec::new();
+        for spelling in &spellings {
+            let created = stranger.run(|| {
+                let descriptor = Descriptor::parse("D:P(A;;FA;;;WD)").unwrap();
+                create_pipe(&wide(spelling), &descriptor, open_mode, PIPE_MODE)
+            });
+            println!(
+                "the second user, at {spelling}: {:?}",
+                created.as_ref().err()
+            );
+            held.push(created);
+        }
+        let name = format!("{PROTECTED_PREFIX}{tail}");
+        assert_eq!(service.connect(&name).err(), Some(Error::NotFound));
+        let listener = service.listener(&name).expect("the name is free");
+        pair(&service, &listener);
+        ran("protected spellings");
+    });
+}
+
+// Security rule: a user holding the name the service had before it moved under
+// the prefix does not stop the service. A client that still asks for that name
+// gets the check of the owner, and sends nothing. The real name is used only
+// where a second user is provided, which is on a runner.
+#[test]
+fn the_service_starts_while_another_user_holds_its_old_name() {
+    let Some((service, stranger)) = installed().zip(stranger()) else {
+        return;
+    };
+    within(move || {
+        let old = "ubc-vpn";
+        let open_to_all = "D:P(A;;FA;;;WD)";
+        let path = pipe_path(old).unwrap();
+        let _held = stranger
+            .run(|| create_instance(&path, open_to_all, true))
+            .expect("anyone can create the old name");
+        let name = paths(Mode::Installed, &service.me).unwrap().channel_name;
+        assert_ne!(name, old);
+        let listener = service.listener(&name).expect("the new name is free");
+        let (client, server, caller) = pair(&service, &listener);
+        assert_eq!(caller.to_string(), service.me);
+        client.write_line("a line").unwrap();
+        assert_eq!(server.read_line(), Ok(Some("a line".to_string())));
+        assert_eq!(service.connect(old).err(), Some(Error::NotTheService));
+        ran("old name");
+    });
+}
+
+// Waiting for a free instance works with this name too: `WaitNamedPipeW` is
+// given the whole path, and the name has backslashes and a space in it.
+#[test]
+fn a_caller_waits_for_a_free_instance() {
+    each(|transport| {
+        let listener = transport.listener(&transport.unique("busy")).unwrap();
+        let name = listener.name();
+        let _first = transport.connect(&name).expect("the free instance");
+        thread::scope(|scope| {
+            let second = scope.spawn(|| transport.connect(&name));
+            thread::sleep(SHORT);
+            assert!(!second.is_finished(), "it did not wait");
+            // Accepting the first caller puts a fresh instance in its place.
+            let _accepted = listener.accept().unwrap();
+            second.join().unwrap().expect("the fresh instance");
+        });
+    });
+}
+
+// Security rule: only the exact prefix may bring a backslash or a space into a
+// name, and nothing Windows would tidy away can climb out of it.
+#[test]
+fn a_channel_name_is_plain_or_under_the_exact_prefix() {
+    let path = |name| String::from_utf16_lossy(&pipe_path(name).unwrap());
+    assert_eq!(
+        path("ubc-vpn-dev-S-1-5"),
+        "\\\\.\\pipe\\ubc-vpn-dev-S-1-5\0"
+    );
+    assert_eq!(
+        path(r"ProtectedPrefix\Administrators\UBC VPN\a-name"),
+        "\\\\.\\pipe\\ProtectedPrefix\\Administrators\\UBC VPN\\a-name\0"
+    );
+    let too_long = format!("{PROTECTED_PREFIX}{}", "a".repeat(200));
+    let refused = [
+        "",
+        ".",
+        "..",
+        "...",
+        "a.",
+        ".a",
+        r"a\b",
+        "a/b",
+        "a b",
+        r"..\ubc-vpn",
+        r"UBC VPN\service",
+        r"ProtectedPrefix\Administrators\UBC VPN\",
+        r"ProtectedPrefix\Administrators\UBC VPN\.",
+        r"ProtectedPrefix\Administrators\UBC VPN\..",
+        r"ProtectedPrefix\Administrators\UBC VPN\..\..\ubc-vpn",
+        r"ProtectedPrefix\Administrators\UBC VPN\a\b",
+        r"ProtectedPrefix\Administrators\UBC VPN\a\",
+        r"ProtectedPrefix\Administrators\UBC VPN\a/b",
+        r"ProtectedPrefix\Administrators\UBC VPN\a b",
+        r"ProtectedPrefix\Administrators\UBC VPN\a.",
+        r"ProtectedPrefix\Administrators\a",
+        r"ProtectedPrefix\Everyone\UBC VPN\a",
+        r"protectedprefix\administrators\ubc vpn\a",
+        r".\ProtectedPrefix\Administrators\UBC VPN\a",
+        &too_long,
+    ];
+    for name in refused {
+        assert!(pipe_path(name).is_err(), "{name:?}");
+    }
 }
 
 #[test]
@@ -475,7 +716,7 @@ fn the_descriptors_are_exactly_these() {
 #[test]
 fn the_pipe_carries_its_descriptor_before_and_after_narrowing() {
     each(|transport| {
-        let listener = transport.listener(&unique("descriptor")).unwrap();
+        let listener = transport.listener(&transport.unique("descriptor")).unwrap();
         // Windows marks the label "auto-inherited" (AI) when it stores it,
         // which says nothing about who may do what.
         let actual = || {
@@ -524,7 +765,7 @@ fn a_caller_from_the_network_is_refused() {
     }
     // The listener's own instances: the first, and one created by an accept.
     each(|transport| {
-        let listener = transport.listener(&unique("lan")).unwrap();
+        let listener = transport.listener(&transport.unique("lan")).unwrap();
         let remote = format!(r"\\localhost\pipe\{}", listener.name());
         let reach = || open(&remote, CONNECT_RIGHTS, CLIENT_FLAGS).map(drop);
         assert_eq!(
@@ -543,7 +784,7 @@ fn a_caller_from_the_network_is_refused() {
 #[test]
 fn a_silent_or_deaf_peer_cannot_hold_the_other_end() {
     each(|transport| {
-        let listener = transport.listener(&unique("timeouts")).unwrap();
+        let listener = transport.listener(&transport.unique("timeouts")).unwrap();
         let (_client, server, _) = pair(&transport, &listener);
         server.set_read_timeout(Some(SHORT)).unwrap();
         let started = Instant::now();
@@ -562,7 +803,7 @@ fn a_silent_or_deaf_peer_cannot_hold_the_other_end() {
 #[test]
 fn close_ends_a_blocked_read_write_and_accept() {
     each(|transport| {
-        let listener = transport.listener(&unique("close")).unwrap();
+        let listener = transport.listener(&transport.unique("close")).unwrap();
         let (_client, server, _) = pair(&transport, &listener);
         let line = "a".repeat(MAX_LINE_BYTES - 1);
         thread::scope(|scope| {
@@ -591,7 +832,7 @@ fn close_ends_a_blocked_read_write_and_accept() {
 #[test]
 fn a_blocked_read_does_not_hold_up_a_write() {
     each(|transport| {
-        let listener = transport.listener(&unique("duplex")).unwrap();
+        let listener = transport.listener(&transport.unique("duplex")).unwrap();
         let (client, server, _) = pair(&transport, &listener);
         thread::scope(|scope| {
             let reader = scope.spawn(|| server.read_line());
@@ -621,7 +862,7 @@ fn no_borrowed_identity() -> Option<u32> {
 #[test]
 fn accept_leaves_the_thread_with_its_own_identity() {
     each(|transport| {
-        let listener = transport.listener(&unique("revert")).unwrap();
+        let listener = transport.listener(&transport.unique("revert")).unwrap();
         let _attached = pair(&transport, &listener);
         assert_eq!(no_borrowed_identity(), Some(ERROR_NO_TOKEN));
     });
@@ -632,7 +873,7 @@ fn accept_leaves_the_thread_with_its_own_identity() {
 #[test]
 fn a_server_learns_who_calls_but_cannot_act_as_them() {
     each(|transport| {
-        let name = unique("lend");
+        let name = transport.unique("lend");
         let descriptor = sddl(transport.mode, &transport.me, None).unwrap();
         let server = create_instance(&pipe_path(&name).unwrap(), &descriptor, true).unwrap();
         let _client = transport.connect(&name).unwrap();
@@ -662,8 +903,8 @@ fn a_server_learns_who_calls_but_cannot_act_as_them() {
 #[test]
 fn a_caller_who_hides_is_dropped_and_the_next_is_served() {
     each(|transport| {
-        let listener = transport.listener(&unique("hidden")).unwrap();
-        let path = format!(r"\\.\pipe\{}", listener.name());
+        let listener = transport.listener(&transport.unique("hidden")).unwrap();
+        let path = format!("{PIPE_ROOT}{}", listener.name());
         let anonymous = FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT;
         let _hidden = open(&path, CONNECT_RIGHTS, anonymous).expect("open anonymously");
         thread::scope(|scope| {
@@ -685,7 +926,11 @@ fn a_caller_who_hides_is_dropped_and_the_next_is_served() {
 fn paths_follow_the_table_and_ignore_the_environment() {
     let me = process_user().unwrap();
     let before = paths(Mode::Installed, &me).unwrap();
-    assert_eq!(before.channel_name, "ubc-vpn");
+    // Spelled out: changing it strands a client of the version before.
+    let expected = r"ProtectedPrefix\Administrators\UBC VPN\service";
+    assert_eq!(before.channel_name, expected);
+    let path = String::from_utf16_lossy(&pipe_path(&before.channel_name).unwrap());
+    assert_eq!(path.trim_end_matches('\0'), format!(r"\\.\pipe\{expected}"));
     assert_eq!(before.policy_dir, before.state_dir);
     assert_ne!(before.policy_dir, before.settings_dir);
     for dir in [&before.policy_dir, &before.settings_dir] {
@@ -710,6 +955,10 @@ fn paths_follow_the_table_and_ignore_the_environment() {
         let dev = paths(Mode::Dev, &me).unwrap();
         suite::check_paths(&before, &dev);
         assert!(dev.channel_name.ends_with(&me) && dev.policy_dir.is_absolute());
+        // Dev mode runs unprivileged, and could not create a name under the
+        // prefix.
+        assert!(!dev.channel_name.contains('\\'), "{}", dev.channel_name);
+        pipe_path(&dev.channel_name).unwrap();
         assert!(!dev.policy_dir.starts_with(r"C:\attacker"));
     }
 }
