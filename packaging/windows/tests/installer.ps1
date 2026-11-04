@@ -453,6 +453,9 @@ public static class SetupWindows {
         try {
             $credential = New-Object Management.Automation.PSCredential(".\$user", $secure)
             Stop-Service -Name $ServiceName
+            # No owner, as an administrator can arrange, so that this user's
+            # client gets the service's own answer and not "not the owner".
+            Remove-Item -LiteralPath (Join-Path $DataFolder 'state.json')
             $script = @'
 $ErrorActionPreference = 'Stop'
 function Create([string]$name) { [IO.Pipes.NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'None') }
