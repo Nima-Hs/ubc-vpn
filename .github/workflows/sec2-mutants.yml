@@ -1,0 +1,58 @@
+name: sec2-mutants
+on:
+  push:
+    branches: [test/sec2-spare]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 170
+    env:
+      UBC_VPN_REAL_KEYRING: "1"
+      TEST_USER: ubc-vpn-logons
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Baseline, then mutations
+        shell: pwsh
+        run: |
+          $bytes = [byte[]]::new(24)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = 'Aa1!' + [Convert]::ToBase64String($bytes)
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $env:TEST_USER -Password $secure -AccountNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Users -Member $env:TEST_USER
+          $env:UBC_VPN_TEST_USER = $env:TEST_USER
+          $env:UBC_VPN_TEST_PASSWORD = $password
+          cargo test --locked -p ubc-vpn-platform --features secrets --lib -- secrets:: --nocapture | Tee-Object -FilePath base.log
+          if ($LASTEXITCODE -ne 0) { throw 'The baseline failed.' }
+          $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          & $bash .github/sec2/sec2-mutants.sh
+          if ($LASTEXITCODE -ne 0) { throw 'A mutation was not caught.' }
+  service-tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: The step's grep catches a service with the feature on
+        run: |
+          check() {
+            for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-unknown-linux-gnu; do
+              features=$(cargo tree --locked -p ubc-vpn-service --target "$target" -e normal,build,features)
+              if grep -E 'ubc-vpn-platform feature "secrets"|Win32_Security_Credentials' <<<"$features"; then
+                echo "caught for $target"
+                return 1
+              fi
+            done
+          }
+          check
+          echo "clean tree passes"
+          sed -i 's/^ubc-vpn-platform.workspace = true/ubc-vpn-platform = { workspace = true, features = ["secrets"] }/' crates/service/Cargo.toml
+          git diff --stat
+          if check; then echo "MISSED"; exit 1; fi
+          echo "mutant caught"
