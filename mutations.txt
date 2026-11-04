@@ -1,7 +1,7 @@
-Hand-made mutations for the pull request that clears DNS before the routes.
-=== mutation: routes-before-split-dns
+Hand-made mutations, against the split-mode tests alone.
+=== mutation: split-routes-before-split-dns
 === os: linux
-=== test: -p ubc-vpn-service --features dev-mode --test session --test full --test channel
+=== test: -p ubc-vpn-service --features dev-mode --test session
 diff --git a/crates/service/src/teardown.rs b/crates/service/src/teardown.rs
 index ee5e0b4..b26a2f8 100644
 --- a/crates/service/src/teardown.rs
@@ -20,67 +20,9 @@ index ee5e0b4..b26a2f8 100644
          tunnel.close();
          if let (Some(gateway), Some(physical)) = (applied.gateway_route, &applied.physical) {
              let removed = self.routes.remove_gateway_route(gateway, physical);
-=== mutation: catch-all-after-routes
+=== mutation: split-failed-clear-keeps-the-routes
 === os: linux
-=== test: -p ubc-vpn-service --features dev-mode --test session --test full --test channel
-diff --git a/crates/service/src/teardown.rs b/crates/service/src/teardown.rs
-index ee5e0b4..65590b7 100644
---- a/crates/service/src/teardown.rs
-+++ b/crates/service/src/teardown.rs
-@@ -67,10 +67,6 @@ impl Machine {
-             let removed = self.routes.remove_full_tunnel(interface);
-             step("removing the routes for all traffic", removed);
-         }
--        if applied.catch_all {
--            let cleared = self.dns.clear_catch_all_dns();
--            step("clearing DNS for every name", cleared);
--        }
-         // Security rule: no rule sends a name to the gateway's DNS servers
-         // once the tunnel no longer routes them. In the other order a lookup
-         // would leave by the normal route, and show the name and the DNS
-@@ -82,6 +78,10 @@ impl Machine {
-             let removed = self.routes.remove_tunnel_routes(interface, &applied.routes);
-             step("removing the tunnel routes", removed);
-         }
-+        if applied.catch_all {
-+            let cleared = self.dns.clear_catch_all_dns();
-+            step("clearing DNS for every name", cleared);
-+        }
-         tunnel.close();
-         if let (Some(gateway), Some(physical)) = (applied.gateway_route, &applied.physical) {
-             let removed = self.routes.remove_gateway_route(gateway, physical);
-=== mutation: catch-all-before-halves
-=== os: linux
-=== test: -p ubc-vpn-service --features dev-mode --test session --test full --test channel
-diff --git a/crates/service/src/teardown.rs b/crates/service/src/teardown.rs
-index ee5e0b4..1c98f5c 100644
---- a/crates/service/src/teardown.rs
-+++ b/crates/service/src/teardown.rs
-@@ -60,6 +60,10 @@ impl Machine {
-         // name still goes to the gateway's DNS servers, through the routes
-         // kept for them, while the halves go. Each is removed by name here,
-         // and again by the catch-all steps below.
-+        if applied.catch_all {
-+            let cleared = self.dns.clear_catch_all_dns();
-+            step("clearing DNS for every name", cleared);
-+        }
-         if let Some(tunnel) = &tunnel.0
-             && applied.full
-         {
-@@ -67,10 +71,6 @@ impl Machine {
-             let removed = self.routes.remove_full_tunnel(interface);
-             step("removing the routes for all traffic", removed);
-         }
--        if applied.catch_all {
--            let cleared = self.dns.clear_catch_all_dns();
--            step("clearing DNS for every name", cleared);
--        }
-         // Security rule: no rule sends a name to the gateway's DNS servers
-         // once the tunnel no longer routes them. In the other order a lookup
-         // would leave by the normal route, and show the name and the DNS
-=== mutation: failed-clear-keeps-the-routes
-=== os: linux
-=== test: -p ubc-vpn-service --features dev-mode --test session --test full --test channel
+=== test: -p ubc-vpn-service --features dev-mode --test session
 diff --git a/crates/service/src/teardown.rs b/crates/service/src/teardown.rs
 index ee5e0b4..68afc31 100644
 --- a/crates/service/src/teardown.rs
@@ -95,9 +37,9 @@ index ee5e0b4..68afc31 100644
          if let Some(tunnel) = &tunnel.0 {
              let interface = &tunnel.assigned().interface;
              let removed = self.routes.remove_tunnel_routes(interface, &applied.routes);
-=== mutation: failed-clear-counts-as-clean
+=== mutation: split-failed-clear-counts-as-clean
 === os: linux
-=== test: -p ubc-vpn-service --features dev-mode --test session --test full --test channel
+=== test: -p ubc-vpn-service --features dev-mode --test session
 diff --git a/crates/service/src/teardown.rs b/crates/service/src/teardown.rs
 index ee5e0b4..68489a7 100644
 --- a/crates/service/src/teardown.rs
@@ -112,19 +54,3 @@ index ee5e0b4..68489a7 100644
          // Said only when something had been applied: a teardown before each
          // connect usually finds nothing, and that is not news.
          if had_some && clean {
-=== mutation: start-up-routes-first
-=== os: linux
-=== test: -p ubc-vpn-service --features dev-mode --test session --test full --test channel
-diff --git a/crates/service/src/server.rs b/crates/service/src/server.rs
-index 54c3a1e..0bfb0cc 100644
---- a/crates/service/src/server.rs
-+++ b/crates/service/src/server.rs
-@@ -213,7 +213,7 @@ impl Service {
-         let about = About::new(&policy);
-         // In the order of a teardown: no rule is left sending a name to a DNS
-         // server whose route has gone.
--        let cleaned = [platform.dns.clear_split_dns(), platform.routes.remove_all()];
-+        let cleaned = [platform.routes.remove_all(), platform.dns.clear_split_dns()];
-         for error in cleaned.into_iter().filter_map(Result::err) {
-             logs.error(&format!("start-up cleanup failed: {error}"));
-         }
