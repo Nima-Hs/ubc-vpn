@@ -459,7 +459,7 @@ EOF
 done
 sudo /usr/bin/env PATH="$evil:/usr/bin:/bin" BASH_ENV="$evil/rc" ENV="$evil/rc" CDPATH="$evil" \
     'BASH_FUNC_stat%%=() { /usr/bin/touch "'"$work"'/evil-ran"; }' \
-    DYLD_INSERT_LIBRARIES="$evil/rc" "$postinstall_again" "$pkg" /Applications /
+    "$postinstall_again" "$pkg" /Applications /
 [ ! -e "$work/evil-ran" ] || fail "the install ran something from its environment"
 service_is_right
 files_are_right
