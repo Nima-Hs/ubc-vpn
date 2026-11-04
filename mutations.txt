@@ -1,0 +1,225 @@
+Hand-made mutations for the pull request that moves the pipe under the prefix.
+=== mutation: installed-keeps-the-old-name
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..d4f0f7c 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -168,7 +168,7 @@ fn paths(mode: Mode, me: &str) -> Result<Paths> {
+                 policy_dir: machine.clone(),
+                 state_dir: machine,
+                 settings_dir: roaming.join(FOLDER),
+-                channel_name: format!("{PROTECTED_PREFIX}{INSTALLED_PIPE}"),
++                channel_name: "ubc-vpn".to_string(),
+             })
+         }
+         #[cfg(feature = "dev-mode")]
+=== mutation: dev-under-the-prefix
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..6adf413 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -179,7 +179,7 @@ fn paths(mode: Mode, me: &str) -> Result<Paths> {
+                 policy_dir: root.join("policy"),
+                 state_dir: root.join("state"),
+                 settings_dir: root.join("settings"),
+-                channel_name: format!("{DEV_PIPE}-{me}"),
++                channel_name: format!("{PROTECTED_PREFIX}{DEV_PIPE}-{me}"),
+             })
+         }
+     }
+=== mutation: backslash-anywhere
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..d7bbe8f 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -197,7 +197,7 @@ const PIPE_ROOT: &str = r"\\.\pipe\";
+ /// climb out of the prefix.
+ fn pipe_path(name: &str) -> Result<Vec<u16>> {
+     let plain = name.strip_prefix(PROTECTED_PREFIX).unwrap_or(name);
+-    let allowed = |c: char| c.is_ascii_graphic() && c != '\\' && c != '/';
++    let allowed = |c: char| c.is_ascii_graphic() && c != '/';
+     if plain.is_empty()
+         || name.len() > 200
+         || !plain.chars().all(allowed)
+=== mutation: any-prefix
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..6e545bd 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -196,7 +196,7 @@ const PIPE_ROOT: &str = r"\\.\pipe\";
+ /// so that the path opened is always the one checked here and can never
+ /// climb out of the prefix.
+ fn pipe_path(name: &str) -> Result<Vec<u16>> {
+-    let plain = name.strip_prefix(PROTECTED_PREFIX).unwrap_or(name);
++    let plain = name.rsplit('\\').next().unwrap_or(name);
+     let allowed = |c: char| c.is_ascii_graphic() && c != '\\' && c != '/';
+     if plain.is_empty()
+         || name.len() > 200
+=== mutation: name-may-start-with-a-dot
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..a04fd41 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -201,7 +201,6 @@ fn pipe_path(name: &str) -> Result<Vec<u16>> {
+     if plain.is_empty()
+         || name.len() > 200
+         || !plain.chars().all(allowed)
+-        || plain.starts_with('.')
+         || plain.ends_with('.')
+     {
+         return Err(Error::Failed("not a channel name".to_string()));
+=== mutation: name-may-end-with-a-dot
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..06b6473 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -202,7 +202,6 @@ fn pipe_path(name: &str) -> Result<Vec<u16>> {
+         || name.len() > 200
+         || !plain.chars().all(allowed)
+         || plain.starts_with('.')
+-        || plain.ends_with('.')
+     {
+         return Err(Error::Failed("not a channel name".to_string()));
+     }
+=== mutation: no-length-limit
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..9ca35a6 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -199,7 +199,6 @@ fn pipe_path(name: &str) -> Result<Vec<u16>> {
+     let plain = name.strip_prefix(PROTECTED_PREFIX).unwrap_or(name);
+     let allowed = |c: char| c.is_ascii_graphic() && c != '\\' && c != '/';
+     if plain.is_empty()
+-        || name.len() > 200
+         || !plain.chars().all(allowed)
+         || plain.starts_with('.')
+         || plain.ends_with('.')
+=== mutation: no-first-instance-flag
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..6904a9a 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -220,7 +220,7 @@ fn create_instance(path: &[u16], sddl: &str, first: bool) -> Result<Pipe> {
+     let descriptor = Descriptor::parse(sddl)?;
+     let open_mode = OPEN_MODE
+         | if first {
+-            FILE_FLAG_FIRST_PIPE_INSTANCE
++            0
+         } else {
+             0
+         };
+=== mutation: client-skips-the-owner-check
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..d177b9d 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -336,7 +336,7 @@ impl Transport for PipeTransport {
+             }
+         };
+         let owner = security::owner_of(handle.0)?;
+-        if !security::is_the_service(self.mode, &self.me, &owner) {
++        if false && !security::is_the_service(self.mode, &self.me, &owner) {
+             return Err(Error::NotTheService);
+         }
+         Ok(Connection::new(Box::new(End(Arc::new(Pipe::new(handle)?)))))
+=== mutation: refusal-looks-like-a-held-name
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..0736852 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -229,9 +229,6 @@ fn create_instance(path: &[u16], sddl: &str, first: bool) -> Result<Pipe> {
+         // Windows refuses a process that may not create under the prefix with
+         // the same code as a name that exists. Waiting for such a name to
+         // come free would never end, so it is told apart here.
+-        5 if first && is_protected(path) && !security::holds_administrators() => {
+-            Error::PermissionDenied
+-        }
+         // How Windows refuses a first instance of a name that exists.
+         5 if first => Error::AlreadyExists,
+         code => os_error(code),
+=== mutation: every-held-name-looks-refused
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/security.rs b/crates/platform/src/windows/security.rs
+index e5be659..33e8d16 100644
+--- a/crates/platform/src/windows/security.rs
++++ b/crates/platform/src/windows/security.rs
+@@ -235,6 +235,9 @@ pub(super) fn process_user() -> Result<String> {
+ /// administrator or SYSTEM, and not an administrator's ordinary programs,
+ /// whose token has the group for denying only. "Could not tell" is no.
+ pub(super) fn holds_administrators() -> bool {
++    if true {
++        return false;
++    }
+     // A SID is 68 bytes at most; u64 elements give it the alignment it needs.
+     let mut sid = [0u64; 9];
+     let mut size = size_of_val(&sid) as u32;
+=== mutation: everyone-counts-as-an-administrator
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/security.rs b/crates/platform/src/windows/security.rs
+index e5be659..ce32b4f 100644
+--- a/crates/platform/src/windows/security.rs
++++ b/crates/platform/src/windows/security.rs
+@@ -235,6 +235,9 @@ pub(super) fn process_user() -> Result<String> {
+ /// administrator or SYSTEM, and not an administrator's ordinary programs,
+ /// whose token has the group for denying only. "Could not tell" is no.
+ pub(super) fn holds_administrators() -> bool {
++    if true {
++        return true;
++    }
+     // A SID is 68 bytes at most; u64 elements give it the alignment it needs.
+     let mut sid = [0u64; 9];
+     let mut size = size_of_val(&sid) as u32;
+=== mutation: membership-is-not-read
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/security.rs b/crates/platform/src/windows/security.rs
+index e5be659..ad7dab0 100644
+--- a/crates/platform/src/windows/security.rs
++++ b/crates/platform/src/windows/security.rs
+@@ -250,7 +250,6 @@ pub(super) fn holds_administrators() -> bool {
+             &mut size,
+         ) != 0
+             && CheckTokenMembership(null_mut(), sid.as_mut_ptr().cast(), &mut member) != 0
+-            && member != 0
+     }
+ }
+
+=== mutation: is-protected-is-always-true
+=== os: windows
+=== test: -p ubc-vpn-platform --features dev-mode --lib os::tests::
+diff --git a/crates/platform/src/windows/mod.rs b/crates/platform/src/windows/mod.rs
+index e19ae05..204a872 100644
+--- a/crates/platform/src/windows/mod.rs
++++ b/crates/platform/src/windows/mod.rs
+@@ -212,7 +212,8 @@ fn pipe_path(name: &str) -> Result<Vec<u16>> {
+ /// Whether Windows only lets an administrator create the pipe at `path`.
+ fn is_protected(path: &[u16]) -> bool {
+     let protected = format!("{PIPE_ROOT}{PROTECTED_PREFIX}");
+-    path.starts_with(&protected.encode_utf16().collect::<Vec<_>>())
++    let _ = path.starts_with(&protected.encode_utf16().collect::<Vec<_>>());
++    true
+ }
+
+ /// Creates one instance of the service's pipe, protected by `sddl`.
