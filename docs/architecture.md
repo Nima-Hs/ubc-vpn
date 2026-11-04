@@ -67,7 +67,9 @@ flowchart LR
 - **Logs are filtered.** `libopenconnect` prints the session cookie at debug level, so the service redacts its output before storing it.
 - **The channel is local only.** The OS tells the service which user is calling, and the service refuses anyone but the owner. Once an owner exists, the pipe or socket permissions are narrowed to that user as well, so the OS refuses others before our code runs. The service claims its pipe or socket name exclusively and rejects remote clients.
 
-What a rogue program running as the same user could still do: connect, disconnect, and read status. It could not redirect the tunnel or read the password.
+- **On Windows, a saved password stays on this computer.** It is a Credential Manager entry of type `CRED_PERSIST_LOCAL_MACHINE`, so it does not roam with the user's profile on a domain. The `keyring` crate would hard-code the roaming type, so Windows uses a small store of our own over `CredReadW`, `CredWriteW` and `CredDeleteW`; macOS and Linux keep that crate. An entry an earlier version saved is moved on the first use in each run: it is rewritten in place at the new type, keeping its value, and read back. It is never deleted first, and a move that fails leaves the old entry working and is tried again in the next run. This does not change who on this computer can get at it: programs running as the same user and administrators still can, as with any other Credential Manager entry. It also cannot recall a copy that already roamed to another computer before the move; only that computer's user or the domain's administrators can remove it.
+
+What a rogue program running as the same user could still do: connect, disconnect, and read status. It could not redirect the tunnel or read the password through this product, but it can read a saved password from the system keyring itself, as above.
 
 ## The channel
 
