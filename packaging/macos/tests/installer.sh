@@ -388,7 +388,7 @@ nothing_done() { # <what it is about>: the script and the removal both refuse
     local about=$1 pid listing lines
     pid=$(job_setting pid)
     listing=$(sudo ls -lnT "$HELPERS_REAL" 2>&1 || true)
-    lines=$(sudo wc -l < "$DATA/service.log")
+    lines=$(sudo cat "$DATA/service.log" | wc -l)
     if sudo /usr/bin/env -i "$postinstall_again" "$pkg" /Applications / 2> "$work/refused.txt"; then
         fail "$about: the install went ahead"
     fi
@@ -398,7 +398,7 @@ nothing_done() { # <what it is about>: the script and the removal both refuse
     fi
     grep -qiF "only root must be able to change" "$work/refused.txt" || { cat "$work/refused.txt"; fail "$about: the removal refused for another reason"; }
     [ "$(job_setting pid)" = "$pid" ] || fail "$about: the service was touched"
-    [ "$(sudo wc -l < "$DATA/service.log")" = "$lines" ] || fail "$about: the service logged something"
+    [ "$(sudo cat "$DATA/service.log" | wc -l)" = "$lines" ] || fail "$about: the service logged something"
     [ "$(sudo ls -lnT "$HELPERS_REAL" 2>&1 || true)" = "$listing" ] || fail "$about: the folder changed"
 }
 HELPERS=/Library/PrivilegedHelperTools
