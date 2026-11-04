@@ -170,6 +170,8 @@ cat "$work/too-new.txt"
 if grep -q 'The install was successful' "$work/too-new.txt"; then
     fail "a package asking for a newer macOS installed"
 fi
+# For that reason, not because flattening it again broke it.
+grep -qF 'macOS version 99 or later is required' "$work/too-new.txt" || fail "it was refused for another reason"
 [ ! -e "$APP" ] && [ ! -e "$FOLDER" ] && [ ! -e "$DATA" ] && [ ! -e "$PLIST" ] || fail "the refused package left something behind"
 if pkgutil --pkgs | grep -F "$LABEL"; then fail "the refused package left a record"; fi
 rm -rf "$newer" "$work/too-new.pkg" "$work/Distribution"
@@ -190,6 +192,19 @@ pkgutil --pkg-info "$LABEL"
 marked=$(sudo xattr -r -l "$FOLDER" "$APP" 2> /dev/null | grep -F com.apple.quarantine || true)
 [ -z "$marked" ] || fail "the mark reached what was installed: $marked"
 ran "install"
+
+# --- 1b. Only root can change what the script ran from ------------------------
+
+# What the design rests on, on a real run: the script's own record of the folder
+# macOS unpacked it to, and everything in it.
+sudo grep -F 'ubc-vpn postinstall: scripts folder: ' /var/log/install.log |
+    sed 's/.*scripts folder: //' > "$work/scripts-folder.txt"
+cat "$work/scripts-folder.txt"
+[ "$(wc -l < "$work/scripts-folder.txt")" -ge 10 ] || fail "the log does not hold the script's record"
+awk '$3 != 0 || substr($1, 6, 1) == "w" || substr($1, 9, 1) == "w" { print; bad = 1 } END { exit bad }' \
+    "$work/scripts-folder.txt" || fail "something the script ran from can be changed by others"
+grep -qF "Scripts/$LABEL" "$work/scripts-folder.txt" || fail "that is not macOS's folder for the package's scripts"
+ran "only root can change the scripts"
 
 # --- 2. Everything landed as packaged and staged ----------------------------
 
@@ -301,6 +316,9 @@ rmdir "$broken"
 pkgutil --expand-full "$pkg" "$broken"
 bad_scripts="$broken/$LABEL.pkg/Scripts"
 : > "$bad_scripts/service/libopenconnect.5.dylib"
+# The update brings another policy, which must not stay with the old service.
+sed 's/"gateway": *"[^"]*"/"gateway":"other.example.test"/' "$stage/pkg-scripts/policy.json" > "$bad_scripts/policy.json"
+! cmp -s "$bad_scripts/policy.json" "$stage/pkg-scripts/policy.json" || fail "the new policy is the same"
 running_postinstall() {
     sudo /usr/bin/env -i "$bad_scripts/postinstall" "$pkg" /Applications /
 }
@@ -309,9 +327,10 @@ if running_postinstall; then fail "a service that cannot start was installed"; f
 service_is_right
 [ "$(job_setting pid)" != "$before" ] || fail "the old service was not started again"
 files_are_right
+cmp "$DATA/policy.json" "$stage/pkg-scripts/policy.json"
 [ "$(sha "$STATE")" = "$state" ] || fail "the failed update changed state.json"
 [ "$(client status)" = Disconnected ] || fail "the owner lost it"
-[ ! -e "$FOLDER.old" ] && [ ! -e "$FOLDER.next" ] || fail "the failed update left a folder behind"
+[ ! -e "$FOLDER.old" ] && [ ! -e "$FOLDER.next" ] && [ ! -e "$FOLDER.policy" ] || fail "the failed update left something behind"
 ran "failed update, service cannot start"
 
 # --- 10c. The job cannot be written: the old job comes back ----------------------
@@ -361,10 +380,111 @@ install_pkg
 [ "$(sha "$STATE")" = "$state" ] || fail "the owner was lost"
 ran "job on disk not loaded"
 
+# --- 10e. Folders others could change: nothing is touched, and nothing runs -------
+
+# The scripts as a real run has them, from section 9.
+postinstall_again="$inner/postinstall"
+nothing_done() { # <what it is about>: the script and the removal both refuse
+    local about=$1 pid listing lines
+    pid=$(job_setting pid)
+    listing=$(sudo ls -lnT "$HELPERS_REAL" 2>&1 || true)
+    lines=$(sudo wc -l < "$DATA/service.log")
+    if sudo /usr/bin/env -i "$postinstall_again" "$pkg" /Applications / 2> "$work/refused.txt"; then
+        fail "$about: the install went ahead"
+    fi
+    grep -qF "only root must be able to change" "$work/refused.txt" || { cat "$work/refused.txt"; fail "$about: refused for another reason"; }
+    if sudo /usr/bin/env -i "$UNINSTALL" 2> "$work/refused.txt"; then
+        fail "$about: the removal went ahead"
+    fi
+    grep -qiF "only root must be able to change" "$work/refused.txt" || { cat "$work/refused.txt"; fail "$about: the removal refused for another reason"; }
+    [ "$(job_setting pid)" = "$pid" ] || fail "$about: the service was touched"
+    [ "$(sudo wc -l < "$DATA/service.log")" = "$lines" ] || fail "$about: the service logged something"
+    [ "$(sudo ls -lnT "$HELPERS_REAL" 2>&1 || true)" = "$listing" ] || fail "$about: the folder changed"
+}
+HELPERS=/Library/PrivilegedHelperTools
+HELPERS_REAL=$HELPERS
+UNINSTALL=$FOLDER/uninstall.sh
+
+sudo chmod g+w "$HELPERS"
+nothing_done "$HELPERS open to its group"
+sudo chmod g-w "$HELPERS"
+
+sudo chown 501 "$HELPERS"
+nothing_done "$HELPERS the user's"
+sudo chown 0 "$HELPERS"
+
+sudo chmod +a "everyone allow delete_child" "$HELPERS"
+nothing_done "an access list on $HELPERS"
+sudo chmod -N "$HELPERS"
+
+sudo chmod g+w /Library
+nothing_done "/Library open to its group"
+sudo chmod g-w /Library
+
+# A link in its place, to the real folder.
+sudo mv "$HELPERS" "$HELPERS.aside"
+sudo ln -s "$HELPERS.aside" "$HELPERS"
+HELPERS_REAL=$HELPERS.aside
+nothing_done "$HELPERS a link"
+sudo rm -f "$HELPERS"
+sudo mv "$HELPERS.aside" "$HELPERS"
+HELPERS_REAL=$HELPERS
+service_is_right
+ran "helpers folder others could change"
+
+# --- 10f. The script's other refusals, and its environment ------------------------
+
+before=$(job_setting pid)
+if sudo /usr/bin/env -i "$postinstall_again" "$pkg" /Applications /Volumes/Other 2> "$work/refused.txt"; then
+    fail "the install went ahead on another disk"
+fi
+grep -qF "only on the startup disk" "$work/refused.txt" || fail "it was refused for another reason"
+[ "$(job_setting pid)" = "$before" ] || fail "the refused install touched the service"
+ran "another disk refused"
+
+# Tools of someone else's first on PATH, and files and functions a shell could
+# take from its environment. None of it may run.
+evil=$(mktemp -d "$work/evil-XXXXXX")
+chmod 755 "$evil"
+cat > "$evil/rc" <<EOF
+/usr/bin/touch "$work/evil-ran"
+EOF
+for name in mv rm install ls stat find sed cp ln env; do
+    cat > "$evil/$name" <<EOF
+#!/bin/sh
+/usr/bin/touch "$work/evil-ran"
+exit 0
+EOF
+    chmod 755 "$evil/$name"
+done
+sudo /usr/bin/env PATH="$evil:/usr/bin:/bin" BASH_ENV="$evil/rc" ENV="$evil/rc" CDPATH="$evil" \
+    'BASH_FUNC_stat%%=() { /usr/bin/touch "'"$work"'/evil-ran"; }' \
+    DYLD_INSERT_LIBRARIES="$evil/rc" "$postinstall_again" "$pkg" /Applications /
+[ ! -e "$work/evil-ran" ] || fail "the install ran something from its environment"
+service_is_right
+files_are_right
+[ "$(sha "$STATE")" = "$state" ] || fail "the hostile environment changed state.json"
+ran "hostile environment"
+
+# --- 10g. A run cut short between its moves ----------------------------------------
+
+# The current folder moved aside and the new one not yet in place.
+sudo mv "$FOLDER" "$FOLDER.old"
+sudo /usr/bin/env -i "$postinstall_again" "$pkg" /Applications /
+service_is_right
+files_are_right
+[ ! -e "$FOLDER.old" ] || fail "the old folder is left"
+[ "$(sha "$STATE")" = "$state" ] || fail "the run cut short changed state.json"
+[ "$(client status)" = Disconnected ] || fail "the owner lost it"
+ran "run cut short"
+
 # --- 11. Removing it leaves nothing --------------------------------------------
 
+# With what a run cut short leaves, which the removal takes too.
+sudo mkdir "$FOLDER.old" "$FOLDER.next"
+sudo touch "$FOLDER.policy"
 sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
-for path in "$APP" "$FOLDER" "$FOLDER.old" "$FOLDER.next" "$DATA" "$PLIST" "$LINK"; do
+for path in "$APP" "$FOLDER" "$FOLDER.old" "$FOLDER.next" "$FOLDER.policy" "$DATA" "$PLIST" "$LINK"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || fail "$path is left"
 done
 status=0
@@ -388,14 +508,17 @@ fi
 [ -z "$(print_job)" ] || fail "launchd still knows the job"
 [ ! -e "$FOLDER" ] && [ ! -e "$FOLDER.next" ] || fail "the service's folder is left"
 if pgrep -x ubc-vpn-service; then fail "the service still runs"; fi
-sudo rm -rf "$DATA"
 rm -rf "$fresh_broken"
 ran "failed first install"
 
-# --- 13. It installs again, as a first install ----------------------------------
+# --- 13. It installs over what that left, as a first install -----------------------
 
+# The data folder is still there. It holds the policy and nothing that names an
+# owner, so this is a first install.
+sudo test -d "$DATA" || fail "this tested nothing: the data folder is gone"
 install_pkg
 service_is_right
+files_are_right
 sudo test ! -e "$STATE" || fail "the old state came back"
 [ "$(client status)" = Disconnected ] || fail "status: $(client status)"
 sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
@@ -429,7 +552,8 @@ installed_without_link() { # <what it is about> <paths to compare, as they were>
     cat "$work/place.txt"
     service_is_right
     grep -qF "the ubc-vpn command is not linked" "$work/place.txt" || fail "$about: nothing said so"
-    grep -qF "$BIN/ubc-vpn" "$work/place.txt" || fail "$about: the full path was not given"
+    grep -qF "\"$BIN/ubc-vpn\"" "$work/place.txt" || fail "$about: the full path was not given, quoted"
+    grep -qF "not with sudo" "$work/place.txt" || fail "$about: it did not say not to use sudo"
     after=$(describe "$@")
     [ "$after" = "$before" ] || fail "$about: it changed: $after"
     sudo /usr/bin/env -i "$FOLDER/uninstall.sh"
@@ -473,6 +597,12 @@ sudo chmod +a "everyone allow add_file" /usr/local/bin
 installed_without_link "an access list on /usr/local/bin" /usr/local/bin
 [ ! -e "$LINK" ] || fail "a link was made in a folder others can change"
 sudo chmod -N /usr/local/bin
+
+# The link cannot be made: the service is up by then, so the install still stands.
+sudo chflags uchg /usr/local/bin
+installed_without_link "the link cannot be made" /usr/local/bin
+[ ! -e "$LINK" ] || fail "a link was made in a folder marked unchangeable"
+sudo chflags nouchg /usr/local/bin
 
 # A link in the folder's place, to a folder of the user's.
 sudo mv /usr/local/bin "$work/bin-aside"

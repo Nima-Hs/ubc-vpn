@@ -1,5 +1,6 @@
 minimum stops an install
 install
+only root can change the scripts
 files as packaged
 who can change
 installed app
@@ -12,6 +13,10 @@ failed update
 failed update, service cannot start
 failed update, job cannot be written
 job on disk not loaded
+helpers folder others could change
+another disk refused
+hostile environment
+run cut short
 removal
 failed first install
 install again

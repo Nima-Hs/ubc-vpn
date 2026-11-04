@@ -16,6 +16,14 @@ UBC VPN is installed, but its service is stopped. Restarting the computer starts
 
 If it stops again straight away, reinstall UBC VPN.
 
+## macOS: there is no `ubc-vpn` command
+
+The installer links the command in `/usr/local/bin` only when that folder is one only an administrator can change and nothing else has that name. When it can't, the app works as usual and the command is simply not there. The installer's message about it goes to `/var/log/install.log`, so you may not have seen it. Run the command-line client by its full path, as yourself and not with `sudo`, with the quotes:
+
+```sh
+"/Applications/UBC VPN.app/Contents/Resources/bin/ubc-vpn" status
+```
+
 ## "You are not the owner" (status 5)
 
 Only one user of a computer can control UBC VPN: the first one to use it after it was installed. Ask that user to connect for you.
