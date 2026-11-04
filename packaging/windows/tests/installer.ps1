@@ -449,6 +449,7 @@ public static class SetupWindows {
         $user = 'ubcvpn-squatter'
         $secure = New-ThrowawayUser $user
         $holder = $null
+        $squatterScript = Join-Path $env:ProgramData 'ubcvpn-squatter.ps1'
         try {
             $credential = New-Object Management.Automation.PSCredential(".\$user", $secure)
             Stop-Service -Name $ServiceName
@@ -465,10 +466,12 @@ $held = Create 'ubc-vpn'
 'holding the old name'
 Start-Sleep -Seconds 600
 '@
-            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+            # In a file that user can read: a command line started under other
+            # credentials is limited to 1024 characters.
+            Set-Content -LiteralPath $squatterScript -Value $script -Encoding utf8
             $out = Join-Path $env:RUNNER_TEMP 'squatter-out.txt'
             $err = Join-Path $env:RUNNER_TEMP 'squatter-err.txt'
-            $holder = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+            $holder = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $squatterScript -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
             $deadline = (Get-Date).AddSeconds(90)
             do {
                 Start-Sleep -Seconds 1
@@ -484,6 +487,7 @@ Start-Sleep -Seconds 600
             if ($holder.HasExited) { Fail 'the standard user stopped holding the old name before the end' }
         } finally {
             if ($holder -and -not $holder.HasExited) { Stop-Process -Id $holder.Id -Force }
+            Remove-Item -LiteralPath $squatterScript -Force -ErrorAction SilentlyContinue
             Remove-LocalUser -Name $user
         }
         Write-Output "$user was refused the service's pipe name, and the service answered with the old name held"

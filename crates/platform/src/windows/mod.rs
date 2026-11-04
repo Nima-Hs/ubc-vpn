@@ -96,6 +96,7 @@ const INSTALLED_PIPE: &str = "service";
 /// The start of a dev-mode pipe's name. It has the user's SID appended, so it
 /// can never be another user's. It is not under [`PROTECTED_PREFIX`], since
 /// dev mode runs unprivileged and could not create it there.
+#[cfg(feature = "dev-mode")]
 const DEV_PIPE: &str = "ubc-vpn-dev";
 const FOLDER: &str = "UBC VPN";
 
