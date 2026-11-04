@@ -183,20 +183,45 @@ jobs:
             secrets::tests::the_real_keyring_saves_reads_and_forgets --nocapture | tee keyring.log
           grep -qx "RAN: real keyring" keyring.log
       # Windows' own store over Credential Manager: the entries stay on this
-      # computer, and those the old code left are moved. Each test says RAN,
-      # so one that stops running fails here.
+      # computer, and those the old code left are moved. What a move leaves
+      # shows only at the next logon, so the tests start new logons of a
+      # throwaway user. As in platform-windows.yml, it exists for this one step
+      # and its random password stays in this step's memory, handed to the
+      # tests through their environment and never written to a file, a log or
+      # a command line.
       - name: The real Credential Manager keeps passwords on this computer
         if: matrix.os == 'windows-latest'
-        shell: bash
+        shell: pwsh
         env:
           UBC_VPN_REAL_KEYRING: "1"
+          TEST_USER: ubc-vpn-logons
         run: |
-          cargo test --locked -p ubc-vpn-platform --features secrets --lib -- \
-            secrets::credentials::tests::real_ --nocapture | tee credentials.log
+          $bytes = [byte[]]::new(24)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = 'Aa1!' + [Convert]::ToBase64String($bytes)
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $env:TEST_USER -Password $secure -AccountNeverExpires | Out-Null
+          try {
+            Add-LocalGroupMember -Group Users -Member $env:TEST_USER
+            $env:UBC_VPN_TEST_USER = $env:TEST_USER
+            $env:UBC_VPN_TEST_PASSWORD = $password
+            cargo test --locked -p ubc-vpn-platform --features secrets --lib -- `
+              secrets::credentials::tests::real_ --nocapture | Tee-Object -FilePath credentials.log
+            if ($LASTEXITCODE -ne 0) { throw 'The tests failed.' }
+          } finally {
+            Remove-LocalUser -Name $env:TEST_USER
+          }
+      # A test that is skipped passes. Each says RAN, so one that stops running
+      # fails here.
+      - name: Every real Credential Manager test ran
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
           for line in "a new save" "an old entry moves" "forgetting" "a failed write" \
-            "a refused flag" "a move is confirmed" "a session keeping nothing" \
-            "the session's limit" "what is read is wiped" "what is not text"; do
-            grep -qx "RAN: credential $line" credentials.log
+            "a crash after each step" "each write is read back" "a leftover spare" \
+            "a spare is no account" "a session keeping nothing" "the session's limit" \
+            "what is read is wiped" "what is not text" "across new logons"; do
+            grep -qE "^RAN: credential $line\s*$" credentials.log
           done
       # The service runs as another account and never sees a password, so it
       # must not link the keyring at all. Only the command-line client turns

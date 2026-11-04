@@ -7,11 +7,30 @@
 //! name is `{account}.{service}`, the type `CRED_TYPE_GENERIC`, the username
 //! the account, and the value little-endian UTF-16 with no terminator.
 //!
-//! - **Entries the old code saved are moved** on the first use in each run
-//!   ([`Store::settle`]). The entry is rewritten in place at the new type with
-//!   `CRED_PRESERVE_CREDENTIAL_BLOB`, and read back. It is never deleted
-//!   first: a failure leaves the old entry as it was, to be tried again in the
-//!   next run, and neither loses the password nor gets in the way of a login.
+//! **An entry cannot simply be rewritten at the new type.** Windows keeps a
+//! file for each type, and writing over an entry of the old type leaves the
+//! old file behind. At the next logon that file brings the old entry back, with
+//! the old password, even if the entry has since been replaced or forgotten.
+//! Only deleting the entry while it is still of the old type removes its file.
+//! So [`Credentials::place`] moves an entry in four steps, each confirmed:
+//!
+//! 1. Write a spare copy at the new type, and read it back.
+//! 2. Delete the old entry.
+//! 3. Write the entry at the new type, and read it back.
+//! 4. Delete the spare.
+//!
+//! A saved copy exists at every step, so a failure or a crash at any of them
+//! loses nothing. The first use in each run ([`Store::settle`]) finishes or
+//! undoes what it finds: an entry of the new type wins over a spare, a spare
+//! with no entry becomes the entry, and an entry of the old type moves. Until
+//! then a spare with no entry is read as the entry, so a login is not blocked.
+//!
+//! **The spare cannot be taken for an account.** Its target name is
+//! `{account}.{service}.moving`, which ends with neither the service name nor
+//! any target name an account has, whatever the account is called. It is never
+//! in the index. Forgetting an account deletes its spare first, so a forgotten
+//! password cannot come back from one.
+//!
 //! - **What the OS returns is wiped** before it is given back, and so is
 //!   anything made from a password here.
 //! - **Errors are fixed text.** No OS message or code gets out of this module.
@@ -19,19 +38,19 @@
 //! What this does not change: any program running as the user, and any
 //! administrator, can still get at the entries, as with any other credential
 //! of the user's. A copy that already roamed to another computer cannot be
-//! recalled from here.
+//! recalled from here. It has been tested across new logons of a local account
+//! on CI, not on real interactive or domain sign-ins or with real roaming.
 
 use std::ptr::null_mut;
 
 use ubc_vpn_core::redact::Secret;
 use windows_sys::Win32::Foundation::{
-    ERROR_INVALID_FLAGS, ERROR_INVALID_PARAMETER, ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND,
-    FILETIME, GetLastError,
+    ERROR_NO_SUCH_LOGON_SESSION, ERROR_NOT_FOUND, FILETIME, GetLastError,
 };
 use windows_sys::Win32::Security::Credentials::{
-    CRED_PERSIST_LOCAL_MACHINE, CRED_PERSIST_NONE, CRED_PERSIST_SESSION,
-    CRED_PRESERVE_CREDENTIAL_BLOB, CRED_TYPE_GENERIC, CRED_TYPE_MAXIMUM, CREDENTIALW, CredDeleteW,
-    CredFree, CredGetSessionTypes, CredReadW, CredWriteW,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_PERSIST_NONE, CRED_PERSIST_SESSION, CRED_TYPE_GENERIC,
+    CRED_TYPE_MAXIMUM, CREDENTIALW, CredDeleteW, CredFree, CredGetSessionTypes, CredReadW,
+    CredWriteW,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -41,13 +60,25 @@ use crate::{Error, Result};
 /// What an OS call answers: its result, or the code `GetLastError` gave.
 type Os<T> = std::result::Result<T, u32>;
 
+/// What ends a spare's target name.
+const SPARE: &str = ".moving";
+
 /// Credential Manager, under one service name.
 pub(super) struct Credentials {
     service: String,
     /// `CredWriteW`, or what a test has in its place to make a write fail.
-    write: fn(&CREDENTIALW, u32) -> Os<()>,
+    write: fn(&CREDENTIALW) -> Os<()>,
+    /// `CredDeleteW`, or what a test has in its place.
+    delete: fn(&[u16]) -> Os<()>,
     /// The longest a generic credential may be kept in this logon session.
     limit: fn() -> Os<u32>,
+}
+
+/// The names an account's entry goes by, each with its terminator.
+struct Names {
+    target: Vec<u16>,
+    spare: Vec<u16>,
+    username: Vec<u16>,
 }
 
 impl Credentials {
@@ -55,17 +86,22 @@ impl Credentials {
         Self {
             service: service.to_string(),
             write: write_credential,
+            delete: delete_credential,
             limit: session_limit,
         }
     }
 
-    /// The entry's target name and username, each with its terminator. A nul
-    /// would end the name early, and so name some other entry.
-    fn names(&self, account: &str) -> Result<(Vec<u16>, Vec<u16>)> {
+    /// The names of `account`'s entry. A nul would end a name early, and so
+    /// name some other entry.
+    fn names(&self, account: &str) -> Result<Names> {
         let target = format!("{account}.{}", self.service);
         match target.contains('\0') {
             true => Err(failed()),
-            false => Ok((wide(&target), wide(account))),
+            false => Ok(Names {
+                spare: wide(&format!("{target}{SPARE}")),
+                target: wide(&target),
+                username: wide(account),
+            }),
         }
     }
 
@@ -74,70 +110,80 @@ impl Credentials {
         allowed((self.limit)(), needed)
     }
 
-    /// Moves `account`'s entry to this computer if it is kept any other way.
-    /// `Err` means it did not happen, and the old entry is still there unless
-    /// another process has since changed it.
-    fn migrate(&self, account: &str) -> Result<()> {
-        self.allows(CRED_PERSIST_LOCAL_MACHINE)?;
-        let (target, _) = self.names(account)?;
-        let Some(old) = Found::read(&target)? else {
-            return Ok(());
-        };
-        if old.persist() == CRED_PERSIST_LOCAL_MACHINE {
-            return Ok(());
+    /// Deletes what `target` names. None there is fine.
+    fn gone(&self, target: &[u16]) -> Result<()> {
+        match (self.delete)(target) {
+            Ok(()) | Err(ERROR_NOT_FOUND) => Ok(()),
+            Err(code) => Err(os_error(code)),
         }
-        // The same credential at the new type. Written over the old one, so
-        // there is no moment with neither.
-        let same = CREDENTIALW {
+    }
+
+    /// Writes `credential` under `target` and reads it back: the same value,
+    /// kept on this computer.
+    fn write_confirmed(&self, credential: &CREDENTIALW, target: &[u16]) -> Result<()> {
+        let at_target = CREDENTIALW {
+            TargetName: target.as_ptr().cast_mut(),
             Persist: CRED_PERSIST_LOCAL_MACHINE,
-            ..*old.credential()
+            ..*credential
         };
-        let keeping_value = CREDENTIALW {
-            CredentialBlob: null_mut(),
-            CredentialBlobSize: 0,
-            ..same
-        };
-        match (self.write)(&keeping_value, CRED_PRESERVE_CREDENTIAL_BLOB) {
-            Ok(()) => {}
-            // The flag itself refused: write the value too, from the OS's own
-            // buffer, which is wiped when `old` goes.
-            Err(ERROR_INVALID_FLAGS | ERROR_INVALID_PARAMETER) => {
-                (self.write)(&same, 0).map_err(os_error)?;
-            }
-            Err(code) => return Err(os_error(code)),
-        }
-        let Some(back) = Found::read(&target)? else {
-            return Err(failed());
-        };
-        // The OS said yes and lost the value. It is still in `old`.
-        if back.blob().is_empty() && !old.blob().is_empty() {
-            (self.write)(&same, 0).map_err(os_error)?;
-            return Err(failed());
-        }
-        match back.persist() == CRED_PERSIST_LOCAL_MACHINE && back.blob() == old.blob() {
+        (self.write)(&at_target).map_err(os_error)?;
+        let back = Found::read(target)?.ok_or_else(failed)?;
+        let same = back.blob() == blob_in(credential);
+        match back.persist() == CRED_PERSIST_LOCAL_MACHINE && same {
             true => Ok(()),
             false => Err(failed()),
         }
+    }
+
+    /// Steps 1 to 3 of the move, for an entry of the old type: `credential` is
+    /// what it is to hold afterwards. The caller deletes the spare, step 4.
+    fn place(&self, names: &Names, credential: &CREDENTIALW) -> Result<()> {
+        self.write_confirmed(credential, &names.spare)?;
+        self.gone(&names.target)?;
+        self.write_confirmed(credential, &names.target)
+    }
+
+    /// Brings `account`'s entry to where it belongs: on this computer, with no
+    /// spare. `Err` means it did not get there, and it can still be read.
+    fn migrate(&self, account: &str) -> Result<()> {
+        self.allows(CRED_PERSIST_LOCAL_MACHINE)?;
+        let names = self.names(account)?;
+        match Found::read(&names.target)? {
+            // Moved already. A spare is left from a crash, and this is newer.
+            Some(found) if found.persist() == CRED_PERSIST_LOCAL_MACHINE => {}
+            // The entry is what the user last had, whatever a spare says.
+            Some(old) => self.place(&names, old.credential())?,
+            None => match Found::read(&names.spare)? {
+                Some(spare) => self.write_confirmed(spare.credential(), &names.target)?,
+                None => return Ok(()),
+            },
+        }
+        self.gone(&names.spare)
     }
 }
 
 impl Store for Credentials {
     fn get(&self, account: &str) -> Result<Option<Secret>> {
         self.allows(CRED_PERSIST_SESSION)?;
-        let (target, _) = self.names(account)?;
-        let found = Found::read(&target)?;
+        let names = self.names(account)?;
+        let found = match Found::read(&names.target)? {
+            Some(found) => Some(found),
+            // A move that stopped half way: this is the password until the
+            // next run finishes it.
+            None => Found::read(&names.spare)?,
+        };
         // Not text: not one of this product's.
         Ok(found.and_then(|found| text_of(found.blob())))
     }
 
     fn set(&self, account: &str, value: &str) -> Result<()> {
         self.allows(CRED_PERSIST_LOCAL_MACHINE)?;
-        let (mut target, mut username) = self.names(account)?;
+        let names = self.names(account)?;
         let mut blob = blob_of(value);
         let credential = CREDENTIALW {
             Flags: 0,
             Type: CRED_TYPE_GENERIC,
-            TargetName: target.as_mut_ptr(),
+            TargetName: names.target.as_ptr().cast_mut(),
             Comment: null_mut(),
             LastWritten: FILETIME {
                 dwLowDateTime: 0,
@@ -149,27 +195,32 @@ impl Store for Credentials {
             AttributeCount: 0,
             Attributes: null_mut(),
             TargetAlias: null_mut(),
-            UserName: username.as_mut_ptr(),
+            UserName: names.username.as_ptr().cast_mut(),
         };
-        (self.write)(&credential, 0).map_err(os_error)
+        let old_type = Found::read(&names.target)?
+            .is_some_and(|found| found.persist() != CRED_PERSIST_LOCAL_MACHINE);
+        match old_type {
+            true => self.place(&names, &credential)?,
+            false => self.write_confirmed(&credential, &names.target)?,
+        }
+        // Saved. A spare left behind holds nothing newer, and the next run
+        // deletes it.
+        let _ = self.gone(&names.spare);
+        Ok(())
     }
 
     fn delete(&self, account: &str) -> Result<()> {
         self.allows(CRED_PERSIST_SESSION)?;
-        let (target, _) = self.names(account)?;
-        // SAFETY: `target` ends in a nul and outlives the call, which keeps
-        // nothing it is given.
-        let deleted = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
-        match (deleted, last_error()) {
-            (0, ERROR_NOT_FOUND) => Ok(()),
-            (0, code) => Err(os_error(code)),
-            _ => Ok(()),
-        }
+        let names = self.names(account)?;
+        // The spare first: with it gone, nothing can bring the entry back.
+        self.gone(&names.spare)?;
+        self.gone(&names.target)
     }
 
     fn settle(&self, accounts: &dyn Fn() -> Result<Vec<String>>) {
-        // A failure changes nothing, and the next run tries again. The rest
-        // are still tried: each entry stands alone.
+        // A failure loses nothing, and the next run tries again. The rest are
+        // still tried: each entry stands alone. The index first, since it
+        // names the rest.
         let _ = self.migrate(super::INDEX);
         for account in accounts().unwrap_or_default() {
             let _ = self.migrate(&account);
@@ -206,18 +257,7 @@ impl Found {
     }
 
     fn blob(&self) -> &[u8] {
-        let credential = self.credential();
-        match credential.CredentialBlob.is_null() {
-            true => &[],
-            // SAFETY: the OS says this many bytes are at this address, and
-            // they live as long as the credential does.
-            false => unsafe {
-                std::slice::from_raw_parts(
-                    credential.CredentialBlob,
-                    credential.CredentialBlobSize as usize,
-                )
-            },
-        }
+        blob_in(self.credential())
     }
 }
 
@@ -228,7 +268,7 @@ impl Drop for Found {
             (credential.CredentialBlob, credential.CredentialBlobSize)
         };
         if !blob.is_null() {
-            // SAFETY: as in `blob`, and this is the last use of these bytes.
+            // SAFETY: as in `blob_in`, and this is the last use of these bytes.
             unsafe { std::slice::from_raw_parts_mut(blob, size as usize) }.zeroize();
         }
         #[cfg(test)]
@@ -238,11 +278,36 @@ impl Drop for Found {
     }
 }
 
+/// The value a credential holds.
+fn blob_in(credential: &CREDENTIALW) -> &[u8] {
+    match credential.CredentialBlob.is_null() {
+        true => &[],
+        // SAFETY: whoever filled in the credential, the OS or `set`, says this
+        // many bytes are at this address, for as long as it is borrowed.
+        false => unsafe {
+            std::slice::from_raw_parts(
+                credential.CredentialBlob,
+                credential.CredentialBlobSize as usize,
+            )
+        },
+    }
+}
+
 /// `CredWriteW`.
-fn write_credential(credential: &CREDENTIALW, flags: u32) -> Os<()> {
+fn write_credential(credential: &CREDENTIALW) -> Os<()> {
     // SAFETY: the credential's pointers are each null or valid for the call,
     // which only reads through them and keeps none.
-    match unsafe { CredWriteW(credential, flags) } {
+    match unsafe { CredWriteW(credential, 0) } {
+        0 => Err(last_error()),
+        _ => Ok(()),
+    }
+}
+
+/// `CredDeleteW`.
+fn delete_credential(target: &[u16]) -> Os<()> {
+    // SAFETY: `target` ends in a nul and outlives the call, which keeps nothing
+    // it is given.
+    match unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } {
         0 => Err(last_error()),
         _ => Ok(()),
     }
