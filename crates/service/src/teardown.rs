@@ -57,9 +57,9 @@ impl Machine {
             result.is_ok()
         };
         // Full mode first: its halves, then its catch-all, so that every
-        // name still goes to the gateway's DNS servers while the halves go.
-        // Each is removed by name here, and again by the catch-all steps
-        // below.
+        // name still goes to the gateway's DNS servers, through the routes
+        // kept for them, while the halves go. Each is removed by name here,
+        // and again by the catch-all steps below.
         if let Some(tunnel) = &tunnel.0
             && applied.full
         {
@@ -71,12 +71,17 @@ impl Machine {
             let cleared = self.dns.clear_catch_all_dns();
             step("clearing DNS for every name", cleared);
         }
+        // Security rule: no rule sends a name to the gateway's DNS servers
+        // once the tunnel no longer routes them. In the other order a lookup
+        // would leave by the normal route, and show the name and the DNS
+        // server's address to the local network. A clear that fails does not
+        // stop the routes going; the teardown then reports it is not clean.
+        let dns_clear = step("clearing split DNS", self.dns.clear_split_dns());
         if let Some(tunnel) = &tunnel.0 {
             let interface = &tunnel.assigned().interface;
             let removed = self.routes.remove_tunnel_routes(interface, &applied.routes);
             step("removing the tunnel routes", removed);
         }
-        let dns_clear = step("clearing split DNS", self.dns.clear_split_dns());
         tunnel.close();
         if let (Some(gateway), Some(physical)) = (applied.gateway_route, &applied.physical) {
             let removed = self.routes.remove_gateway_route(gateway, physical);

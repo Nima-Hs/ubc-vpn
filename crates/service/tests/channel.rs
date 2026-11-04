@@ -401,7 +401,7 @@ fn start_up_cleans_up_before_it_listens() {
     rig.fake.set_failure(Op::Listen, broken);
     assert!(rig.start().is_err());
     assert_eq!(rig.fake.applied(), Applied::default());
-    let cleanup = [Op::RemoveAllRoutes, Op::ClearSplitDns];
+    let cleanup = [Op::ClearSplitDns, Op::RemoveAllRoutes];
     assert_eq!(rig.fake.calls()[4..], cleanup);
 }
 
