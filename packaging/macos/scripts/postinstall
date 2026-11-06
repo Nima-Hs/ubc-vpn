@@ -51,7 +51,6 @@ only_root_changes() {
 
 [ "$(id -u)" = 0 ] || fail "not root"
 # $3 is the volume being installed on. The package allows only the startup disk.
-[ "${3:-/}" = / ] || fail "UBC VPN installs only on the startup disk, not $3"
 
 # Everything below works in this folder and runs the service from it as root, so
 # it is judged before anything is touched. The service's own check comes later.
