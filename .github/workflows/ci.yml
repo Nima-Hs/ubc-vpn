@@ -169,9 +169,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --locked -p ubc-vpn-engine --doc
       # Saved passwords in the real OS keyring, under a throwaway service
-      # name: Credential Manager on Windows, the Keychain on macOS. This is
-      # the only place the real keyring is ever used by a test. The Linux
-      # Secret Service test is tracked in #198.
+      # name: Credential Manager on Windows, the Keychain on macOS. This and
+      # the Credential Manager step below are the only places in this workflow
+      # the real keyring is ever used by a test. The Linux Secret Service test
+      # is tracked in #198.
       - name: The real keyring saves, reads and forgets
         if: matrix.os != 'ubuntu-latest'
         shell: bash
@@ -181,16 +182,64 @@ jobs:
           cargo test --locked -p ubc-vpn-platform --features secrets --lib -- --exact \
             secrets::tests::the_real_keyring_saves_reads_and_forgets --nocapture | tee keyring.log
           grep -qx "RAN: real keyring" keyring.log
+      # Windows' own store over Credential Manager: the entries stay on this
+      # computer, and those the old code left are moved. What a move leaves
+      # shows only at the next logon, so the tests start new logons of a
+      # throwaway user. As in platform-windows.yml, it exists for this one step
+      # and its random password stays in this step's memory, handed to the
+      # tests through their environment and never written to a file, a log or
+      # a command line.
+      - name: The real Credential Manager keeps passwords on this computer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          UBC_VPN_REAL_KEYRING: "1"
+          TEST_USER: ubc-vpn-logons
+        run: |
+          $bytes = [byte[]]::new(24)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = 'Aa1!' + [Convert]::ToBase64String($bytes)
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $env:TEST_USER -Password $secure -AccountNeverExpires | Out-Null
+          try {
+            Add-LocalGroupMember -Group Users -Member $env:TEST_USER
+            $env:UBC_VPN_TEST_USER = $env:TEST_USER
+            $env:UBC_VPN_TEST_PASSWORD = $password
+            cargo test --locked -p ubc-vpn-platform --features secrets --lib -- `
+              secrets::credentials::tests::real_ --nocapture | Tee-Object -FilePath credentials.log
+            if ($LASTEXITCODE -ne 0) { throw 'The tests failed.' }
+          } finally {
+            Remove-LocalUser -Name $env:TEST_USER
+          }
+      # A test that is skipped passes. Each says RAN, so one that stops running
+      # fails here.
+      - name: Every real Credential Manager test ran
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          for line in "a new save" "an old entry moves" "forgetting" "a failed write" \
+            "a crash after each step" "each write is read back" "a leftover spare" \
+            "a spare is no account" "a session keeping nothing" "the session's limit" \
+            "what is read is wiped" "what is not text" "across new logons"; do
+            grep -qE "^RAN: credential $line\s*$" credentials.log
+          done
       # The service runs as another account and never sees a password, so it
       # must not link the keyring at all. Only the command-line client turns
-      # on the platform crate's `secrets` feature. Checked for every OS's
-      # target, with the service built by itself as a release builds it.
+      # on the platform crate's `secrets` feature. On Windows the keyring is
+      # this crate's own code, so what shows it is that feature and the
+      # bindings it turns on. Checked for every OS's target, with the service
+      # built by itself as a release builds it.
       - name: The service links no keyring
         if: matrix.os == 'ubuntu-latest'
         run: |
           for target in x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-unknown-linux-gnu; do
             tree=$(cargo tree --locked -p ubc-vpn-service --target "$target" -e normal,build)
             if grep -E 'keyring|zbus|dbus' <<<"$tree"; then
+              echo "The service would link the keyring for $target."
+              exit 1
+            fi
+            features=$(cargo tree --locked -p ubc-vpn-service --target "$target" -e normal,build,features)
+            if grep -E 'ubc-vpn-platform feature "secrets"|Win32_Security_Credentials' <<<"$features"; then
               echo "The service would link the keyring for $target."
               exit 1
             fi

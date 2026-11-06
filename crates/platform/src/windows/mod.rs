@@ -114,7 +114,7 @@ pub(crate) fn native(mode: Mode) -> Result<Platform> {
 ///
 /// With `must_exist` the lookup fails for a folder that is not there. Without
 /// it the path is given all the same, and nothing is created.
-fn known_folder(id: &GUID, must_exist: bool) -> Result<PathBuf> {
+pub(crate) fn known_folder(id: &GUID, must_exist: bool) -> Result<PathBuf> {
     let flags = if must_exist {
         0
     } else {

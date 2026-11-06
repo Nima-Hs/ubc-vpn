@@ -23,17 +23,28 @@
 //! - **Nothing secret leaves this module in an error.** Errors are fixed
 //!   text; neither the password, the username nor the OS's own message is
 //!   in them.
+//! - **On Windows, entries stay on this computer.** They are kept with this
+//!   crate's own store (`windows/credentials.rs`) rather than the `keyring`
+//!   crate, which would have them roam with the user's profile. Entries saved
+//!   before that are moved on the first use in each run.
 //! - **Tests never use the user's keyring.** They use [`FakeSecrets`] in
 //!   memory, or, to share one between processes, [`file_backed`], which
 //!   keeps entries as files in a folder of the test's and exists only in a
-//!   debug build. Only one CI step uses the real keyring, under a
-//!   throwaway service name.
+//!   debug build. Only the CI steps that say so use the real keyring, under
+//!   a throwaway service name.
 
 use std::sync::Arc;
 
 use ubc_vpn_core::redact::Secret;
 
 use crate::{Error, Result};
+
+#[cfg(windows)]
+#[path = "windows/credentials.rs"]
+mod credentials;
+
+#[cfg(windows)]
+use credentials::Credentials as Native;
 
 /// The service name every entry of this product is kept under.
 pub const SERVICE: &str = "io.github.nima-hs.ubc-vpn";
@@ -129,6 +140,13 @@ trait Store: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<Secret>>;
     fn set(&self, account: &str, value: &str) -> Result<()>;
     fn delete(&self, account: &str) -> Result<()>;
+
+    /// Brings entries an older version left up to date. Called once in each
+    /// run, before the first use, with every change held off; `accounts` reads
+    /// the index. It cannot fail: an entry it could not bring up to date still
+    /// works, and the next run tries again. Most stores have nothing to do,
+    /// and read nothing.
+    fn settle(&self, _accounts: &dyn Fn() -> Result<Vec<String>>) {}
 }
 
 /// [`Secrets`] over any [`Store`].
@@ -139,19 +157,30 @@ trait Store: Send + Sync {
 /// changes saved passwords only while it holds the settings lock.
 struct Kept<S> {
     store: S,
-    changing: std::sync::Mutex<()>,
+    /// Held for every change. Says whether [`Store::settle`] has been called.
+    changing: std::sync::Mutex<bool>,
 }
 
 impl<S: Store> Kept<S> {
     fn new(store: S) -> Self {
         Self {
             store,
-            changing: std::sync::Mutex::new(()),
+            changing: std::sync::Mutex::new(false),
         }
     }
 }
 
 impl<S: Store> Kept<S> {
+    /// The lock for a change, with the store settled if this is its first use.
+    fn changing(&self) -> std::sync::MutexGuard<'_, bool> {
+        let mut settled = crate::lock(&self.changing);
+        if !*settled {
+            *settled = true;
+            self.store.settle(&|| self.index());
+        }
+        settled
+    }
+
     fn index(&self) -> Result<Vec<String>> {
         let Some(text) = self.store.get(INDEX)? else {
             return Ok(Vec::new());
@@ -171,6 +200,7 @@ impl<S: Store> Kept<S> {
 
 impl<S: Store> Secrets for Kept<S> {
     fn load(&self, account: &str) -> Result<Option<Saved>> {
+        drop(self.changing());
         let Some(text) = self.store.get(account)? else {
             return Ok(None);
         };
@@ -183,7 +213,7 @@ impl<S: Store> Secrets for Kept<S> {
         if account == INDEX || account.is_empty() || account.contains(['\n', '\r']) {
             return Err(failed());
         }
-        let _changing = crate::lock(&self.changing);
+        let _changing = self.changing();
         // In the index first: an entry is never there without its line.
         let mut accounts = self.index()?;
         if !accounts.iter().any(|a| a == account) {
@@ -194,7 +224,7 @@ impl<S: Store> Secrets for Kept<S> {
     }
 
     fn forget(&self, account: &str) -> Result<()> {
-        let _changing = crate::lock(&self.changing);
+        let _changing = self.changing();
         // The entry first: its line goes only once it is gone.
         self.store.delete(account)?;
         let mut accounts = self.index()?;
@@ -206,7 +236,7 @@ impl<S: Store> Secrets for Kept<S> {
     }
 
     fn forget_all(&self) -> Result<()> {
-        let _changing = crate::lock(&self.changing);
+        let _changing = self.changing();
         for account in self.index()? {
             if account != INDEX {
                 self.store.delete(&account)?;
@@ -216,6 +246,7 @@ impl<S: Store> Secrets for Kept<S> {
     }
 
     fn saved(&self) -> Result<Vec<String>> {
+        drop(self.changing());
         // `save` never takes the index's own account, so it is never named.
         self.index()
     }
@@ -234,7 +265,7 @@ pub fn native() -> Arc<dyn Secrets> {
 /// The user's OS keyring under `service`. Tests on CI use a throwaway name
 /// of their own; nothing else does.
 pub fn under(service: &str) -> Arc<dyn Secrets> {
-    Arc::new(Kept::new(Native(service.to_string())))
+    Arc::new(Kept::new(Native::new(service)))
 }
 
 /// A keyring kept as files in `dir`, one to an entry, for tests that run
@@ -295,9 +326,15 @@ impl Store for Files {
 }
 
 /// The OS keyring, through the `keyring` crate.
+#[cfg(not(windows))]
 struct Native(String);
 
+#[cfg(not(windows))]
 impl Native {
+    fn new(service: &str) -> Self {
+        Self(service.to_string())
+    }
+
     fn entry(&self, account: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(&self.0, account).map_err(unusable)
     }
@@ -306,6 +343,7 @@ impl Native {
 /// A keyring that cannot be used at all is unsupported: passwords are then
 /// asked for each time. Anything else is a failure. Neither keeps the OS's
 /// own message.
+#[cfg(not(windows))]
 fn unusable(error: keyring::Error) -> Error {
     match error {
         keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_) => {
@@ -315,6 +353,7 @@ fn unusable(error: keyring::Error) -> Error {
     }
 }
 
+#[cfg(not(windows))]
 impl Store for Native {
     fn get(&self, account: &str) -> Result<Option<Secret>> {
         match self.entry(account)?.get_password() {

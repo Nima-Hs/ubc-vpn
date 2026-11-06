@@ -56,7 +56,8 @@ fi
 own_features() {
   case $1 in
     ubc-vpn-engine) echo fake,debug-logs ;;
-    ubc-vpn-platform | ubc-vpn-service | ubc-vpn-cli) echo dev-mode ;;
+    ubc-vpn-platform) echo dev-mode,secrets ;;
+    ubc-vpn-service | ubc-vpn-cli) echo dev-mode ;;
     *) echo "" ;;
   esac
 }

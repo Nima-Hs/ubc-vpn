@@ -1,6 +1,7 @@
-//! Saved passwords. The rules are tested on the fake keyring. One test uses
-//! the real OS keyring, under a throwaway service name, and only on CI: no
-//! test ever touches the keyring of the machine it runs on otherwise.
+//! Saved passwords. The rules are tested on the fake keyring. A few tests,
+//! this one and those of `windows/credentials_tests.rs`, use the real OS
+//! keyring, under a throwaway service name, and only on CI: no test ever
+//! touches the keyring of the machine it runs on otherwise.
 
 use super::*;
 
@@ -301,6 +302,7 @@ fn saves_at_once_keep_every_line_of_the_index() {
 
 // Security rule: whatever the keyring says when it fails, what comes out
 // is fixed text, never the OS's own message, which can hold a name.
+#[cfg(not(windows))]
 #[test]
 fn keyring_errors_never_carry_the_os_message() {
     let os = "the os said user.dept@app made-up-secret";
@@ -324,6 +326,66 @@ fn keyring_errors_never_carry_the_os_message() {
             Error::Failed(text) => assert_eq!(text, "the OS keyring could not be used"),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+/// A store that says what was asked of it, in order.
+#[derive(Clone, Default)]
+struct Noting(FakeSecrets, Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Noting {
+    fn note(&self, what: &str) {
+        crate::lock(&self.1).push(what.to_string());
+    }
+}
+
+impl Store for Noting {
+    fn get(&self, account: &str) -> Result<Option<Secret>> {
+        self.note(&format!("get {account}"));
+        self.0.get(account)
+    }
+
+    fn set(&self, account: &str, value: &str) -> Result<()> {
+        self.note(&format!("set {account}"));
+        self.0.set(account, value)
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        self.note(&format!("delete {account}"));
+        self.0.delete(account)
+    }
+
+    fn settle(&self, accounts: &dyn Fn() -> Result<Vec<String>>) {
+        self.note("settle");
+        for account in accounts().unwrap() {
+            self.note(&format!("settle {account}"));
+        }
+    }
+}
+
+// Security rule: entries the old code left are moved before the first use in
+// a run, whatever that use is, with changes held off, and only then.
+#[test]
+fn the_store_is_settled_once_before_its_first_use() {
+    type Use = fn(&Kept<Noting>);
+    let uses: [Use; 5] = [
+        |kept| drop(kept.load(PROFILE)),
+        |kept| drop(kept.save(PROFILE, &saved("user.dept@app", "made-up-pass-0001"))),
+        |kept| drop(kept.forget(PROFILE)),
+        |kept| drop(kept.forget_all()),
+        |kept| drop(kept.saved()),
+    ];
+    for (n, first) in uses.iter().enumerate() {
+        let noting = Noting::default();
+        noting.0.put(INDEX, OTHER);
+        let kept = Kept::new(noting.clone());
+        first(&kept);
+        first(&kept);
+        let notes = crate::lock(&noting.1).clone();
+        let expected = ["settle", "get index", &format!("settle {OTHER}")].map(str::to_string);
+        assert_eq!(notes[..3], expected, "use {n}");
+        let settled = notes.iter().filter(|note| *note == "settle").count();
+        assert_eq!(settled, 1, "use {n}: {notes:?}");
     }
 }
 

@@ -252,13 +252,16 @@ jobs:
       # log or a command line. Every "skipped: needs an elevated process" is
       # a failure. The scripts are bash, which would change who owns what the
       # tests create, so each cargo they start gets this step's token
-      # defaults back first (.github/mutants/token.ps1).
+      # defaults back first (.github/mutants/token.ps1). The saved-password
+      # tests use the runner's real Credential Manager, as in ci.yml, which
+      # is thrown away with the runner.
       - name: Mutation tests, including the elevated ones, with a throwaway second user
         if: runner.os == 'Windows'
         working-directory: pr
         shell: pwsh
         env:
           UBC_VPN_REQUIRE_ELEVATED: "1"
+          UBC_VPN_REAL_KEYRING: "1"
           TEST_USER: ubc-vpn-stranger
         run: |
           $bytes = [byte[]]::new(24)
