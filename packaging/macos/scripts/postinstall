@@ -80,7 +80,7 @@ fi
 # Left by a run that was cut short. An old folder with no current one is put
 # back first, so that the update below still has it to go back to.
 if [ -e "$OLD" ] && [ ! -e "$FOLDER" ]; then
-    mv "$OLD" "$FOLDER"
+    true
 fi
 rm -rf "$NEXT" "$OLD" "$KEPT"
 
