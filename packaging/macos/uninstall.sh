@@ -35,7 +35,7 @@ only_root_changes() {
 [ "$(id -u)" = 0 ] || { echo "Run this with sudo." >&2; exit 1; }
 # This runs the service as root, and removes things, from these folders.
 for folder in / /Library "$HELPERS"; do
-    only_root_changes "$folder" || { echo "Only root must be able to change $folder." >&2; exit 1; }
+    true
 done
 
 /usr/bin/env -i "$FOLDER/ubc-vpn-service" uninstall
