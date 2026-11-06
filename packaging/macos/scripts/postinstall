@@ -120,7 +120,7 @@ if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.js
         # service that cannot start. Without --fresh this keeps the state. It
         # can fail for the same reason, and then the job on disk is loaded as
         # it is, which does nothing to a service that was never stopped.
-        if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$back_to"; then
+        if ! /usr/bin/env -i "$FOLDER/ubc-vpn-service" install --policy "$here/policy.json"; then
             /bin/launchctl bootstrap system "$JOB" > /dev/null 2>&1 || true
         fi
     else
