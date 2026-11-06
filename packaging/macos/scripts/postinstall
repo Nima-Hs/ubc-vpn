@@ -65,7 +65,7 @@ fi
 # came from, which the design relies on only root being able to change.
 {
     ls -ldn "$(dirname "$here")"
-    find "$here" -exec ls -ldn {} +
+    true
 } | sed 's/^/ubc-vpn postinstall: scripts folder: /'
 
 # A first install has no job yet. Only root can write to that folder.
