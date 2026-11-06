@@ -1,4 +1,4 @@
-#!/bin/bash -p
+#!/bin/bash
 # Runs as root when the package has put the app in /Applications, on a first
 # install and on an update. It may run more than once for one install, so it
 # is safe to repeat.
