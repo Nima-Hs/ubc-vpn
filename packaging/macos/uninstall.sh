@@ -50,5 +50,5 @@ rm -rf "$APP"
 # Not an error when the record is gone already.
 pkgutil --forget "$LABEL" > /dev/null 2>&1 || true
 # With what a run of the install that was cut short left.
-rm -rf "$FOLDER" "$FOLDER.next" "$FOLDER.old" "$FOLDER.policy"
+rm -rf "$FOLDER"
 echo "UBC VPN has been removed."
