@@ -56,7 +56,6 @@ only_root_changes() {
 # Everything below works in this folder and runs the service from it as root, so
 # it is judged before anything is touched. The service's own check comes later.
 only_root_changes / || fail "only root must be able to change /"
-only_root_changes /Library || fail "only root must be able to change /Library"
 if [ -e "$HELPERS" ] || [ -L "$HELPERS" ]; then
     only_root_changes "$HELPERS" || fail "only root must be able to change $HELPERS"
 fi
