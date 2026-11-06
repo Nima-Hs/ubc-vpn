@@ -144,7 +144,7 @@ if ! only_root_changes /usr/local || ! only_root_changes /usr/local/bin; then
     not_linked "/usr/local/bin is not a folder only root can change"
 elif [ ! -e "$LINK" ] && [ ! -L "$LINK" ]; then
     # The service is up by now, so this is not a failed install.
-    ln -s "$CLIENT" "$LINK" || not_linked "$LINK could not be made"
+    ln -s "$CLIENT" "$LINK"
 elif [ ! -L "$LINK" ] || [ "$(readlink "$LINK")" != "$CLIENT" ]; then
     not_linked "$LINK is something else's"
 fi
