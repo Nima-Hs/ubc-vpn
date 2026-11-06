@@ -486,6 +486,13 @@ fn a_program_that_is_not_elevated_is_refused_at_once() {
     within(|| {
         let refused = transport(Mode::Installed).listener(&protected("not-elevated"));
         assert_eq!(refused.err(), Some(Error::PermissionDenied));
+        // Under any other name, Windows' refusal still means the name is
+        // taken, and is waited for.
+        let open_to_all = "D:P(A;;FA;;;WD)";
+        let path = pipe_path(&unique("taken")).unwrap();
+        let _held = create_instance(&path, open_to_all, true).unwrap();
+        let again = create_instance(&path, open_to_all, true).err();
+        assert_eq!(again, Some(Error::AlreadyExists));
     });
 }
 
@@ -520,7 +527,12 @@ fn only_an_elevated_program_can_create_a_protected_pipe() {
             let absent = user.run(|| service.connect(&name).err());
             assert_eq!(absent, Some(Error::NotFound), "{who}");
             let plain = pipe_path(&unique("control")).unwrap();
-            assert_eq!(user.run(|| create(&plain, first)), None, "{who}");
+            let _held = user
+                .run(|| create_instance(&plain, open_to_all, true))
+                .expect("any other name");
+            // Elsewhere the same refusal is still a name that is taken.
+            let again = user.run(|| create_instance(&plain, open_to_all, true).err());
+            assert_eq!(again, Some(Error::AlreadyExists), "{who}");
         }
         ran("protected refused");
     });
@@ -630,7 +642,12 @@ fn a_channel_name_is_plain_or_under_the_exact_prefix() {
         path(r"ProtectedPrefix\Administrators\UBC VPN\a-name"),
         "\\\\.\\pipe\\ProtectedPrefix\\Administrators\\UBC VPN\\a-name\0"
     );
-    let too_long = format!("{PROTECTED_PREFIX}{}", "a".repeat(200));
+    // 200 bytes in all is the most a name may have, with the prefix or not.
+    let room = 200 - PROTECTED_PREFIX.len();
+    pipe_path(&"a".repeat(200)).unwrap();
+    pipe_path(&format!("{PROTECTED_PREFIX}{}", "a".repeat(room))).unwrap();
+    let plain_too_long = "a".repeat(201);
+    let too_long = format!("{PROTECTED_PREFIX}{}", "a".repeat(room + 1));
     let refused = [
         "",
         ".",
@@ -656,6 +673,7 @@ fn a_channel_name_is_plain_or_under_the_exact_prefix() {
         r"ProtectedPrefix\Everyone\UBC VPN\a",
         r"protectedprefix\administrators\ubc vpn\a",
         r".\ProtectedPrefix\Administrators\UBC VPN\a",
+        &plain_too_long,
         &too_long,
     ];
     for name in refused {
