@@ -994,8 +994,14 @@ fn second_logon(service: &str, snapshot: &Path) {
     let read = secrets.load("abc.moving").unwrap().unwrap();
     assert_eq!(read.password.expose(), "made-up-pass-0002");
 
-    // Every old entry has gone from the folder that roams.
-    assert_eq!(std::fs::read_to_string(snapshot).unwrap(), roaming_text());
+    // Every old entry this run made has gone from the folder that roams. The
+    // folder may hold files of an earlier run's, which Windows can tidy away
+    // at a logon, so only what is new counts.
+    let before = std::fs::read_to_string(snapshot).unwrap();
+    let before: Vec<&str> = before.lines().collect();
+    let now = roaming_text();
+    let new: Vec<&str> = now.lines().filter(|name| !before.contains(name)).collect();
+    assert!(new.is_empty(), "left in the roaming folder: {new:?}");
 
     plant_undone_by_a_new_logon(service);
 }
