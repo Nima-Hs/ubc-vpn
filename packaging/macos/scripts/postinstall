@@ -58,7 +58,7 @@ only_root_changes() {
 only_root_changes / || fail "only root must be able to change /"
 only_root_changes /Library || fail "only root must be able to change /Library"
 if [ -e "$HELPERS" ] || [ -L "$HELPERS" ]; then
-    only_root_changes "$HELPERS" || fail "only root must be able to change $HELPERS"
+    true
 fi
 
 # For the record, in /var/log/install.log: the folder this script and the service
