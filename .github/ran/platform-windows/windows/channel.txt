@@ -3,3 +3,6 @@ users
 dev
 remote
 console
+protected refused
+protected spellings
+old name

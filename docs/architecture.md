@@ -66,6 +66,11 @@ flowchart LR
 - **No blind retries.** A wrong password or a pin mismatch stops at once. Retrying only wastes MFA pushes.
 - **Logs are filtered.** `libopenconnect` prints the session cookie at debug level, so the service redacts its output before storing it.
 - **The channel is local only.** The OS tells the service which user is calling, and the service refuses anyone but the owner. Once an owner exists, the pipe or socket permissions are narrowed to that user as well, so the OS refuses others before our code runs. The service claims its pipe or socket name exclusively and rejects remote clients.
+- **Other users cannot take the channel's name.** On macOS and Linux the socket lives in a folder only root can change. On Windows the installed service's pipe is `\\.\pipe\ProtectedPrefix\Administrators\UBC VPN\service`, and Windows refuses to create a pipe under `ProtectedPrefix\Administrators` for a process that does not hold the Administrators group: another user, or an administrator's program without the admin prompt. Tailscale's Windows service does the same by default. So nobody but an administrator can hold the name while the service is stopped, and keep it from starting.
+
+  Microsoft does not document this prefix, so a later Windows could change what it does. Nothing but the name relies on it. A client still refuses any pipe not owned by SYSTEM or the Administrators group, and sends it nothing, and the service still creates its first instance exclusively, so it never shares a pipe with anyone. If the prefix stopped working, those checks would still stop anyone taking the service's place, and the cost would be what it was before: another user could hold the name, the client would say so, and the service would stop after waiting a minute for it.
+
+  Dev mode keeps a name of its own, `ubc-vpn-dev-<SID>`, since it runs unprivileged and could not create one under the prefix.
 
 What a rogue program running as the same user could still do: connect, disconnect, and read status. It could not redirect the tunnel or read the password.
 
@@ -75,6 +80,7 @@ What a rogue program running as the same user could still do: connect, disconnec
 - **Messages:** JSON requests and responses, plus events pushed by the service when state changes.
 - **Types:** defined once in Rust. The TypeScript types are generated from them and committed; CI fails if they drift.
 - **Version handshake:** the first message each way states the protocol version, so a mismatched app and service produce a clear "please update" message.
+- **When the name changes:** the handshake cannot help, because the two sides never meet. The installed pipe on Windows was once `\\.\pipe\ubc-vpn`. The app and the service are updated together, so this shows only during an update, or after one that failed part-way. A client that has the old name, facing a service that has the new one, or the other way round, finds no pipe and reports the service as not running. It connects to nothing and sends nothing. If another user holds the old name, an old client refuses it by its owner, and the service is unaffected. A new client never tries the old name, since that would give another user something to offer it.
 
 ### Who opens the channel
 
@@ -82,7 +88,7 @@ Only our Rust code opens the pipe or socket. The command-line client does it, an
 
 The reason is what a safe client has to do, which the platform crate's `connect` does and a general-purpose networking library does not:
 
-- **Check who is listening before sending anything.** While the service is stopped, another local user could create a pipe or socket with its name. The client refuses anything not owned by the system.
+- **Check who is listening before sending anything.** The name is meant to be out of other users' reach (see [Security model](#security-model)), but the client relies on this check and not on that. It refuses anything not owned by the system.
 - **Not hand over its identity.** On Windows a pipe server can act as a client that connects without asking for identification-only access. Node's networking does not ask for it. This was tested with Node 24: a test server opened a file as the connecting user. The experiment is recorded in pull request 20.
 - **Connect with the least access.** The service's pipe grants ordinary users only what a client needs. Node asks for more and is refused.
 

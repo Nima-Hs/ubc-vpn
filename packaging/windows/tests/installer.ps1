@@ -19,6 +19,8 @@
 #   installer.ps1 service                            the service is registered, running, and
 #                                                    its data folder and policy are right
 #   installer.ps1 status-as-user                     `ubc-vpn status` answers a standard user
+#   installer.ps1 pipe-name-as-user                  a standard user is refused the service's pipe
+#                                                    name, and holding the old name stops nothing
 #   installer.ps1 plant-owner                        makes a data folder Users may change,
 #                                                    with a state.json naming an owner
 #   installer.ps1 planted-gone                       the install emptied it
@@ -132,6 +134,28 @@ $GenericChange = 0x10000000 -bor 0x40000000
 # or all of them. Adding something new to C:\ does not change any path.
 $ReplaceRights = [Security.AccessControl.FileSystemRights]'DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership'
 $GenericReplace = 0x10000000
+
+# Makes a standard user with a random password, which stays in this process,
+# and returns that password.
+function New-ThrowawayUser([string]$user) {
+    $bytes = [byte[]]::new(24)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $secure = ConvertTo-SecureString ('Aa1!' + [Convert]::ToBase64String($bytes)) -AsPlainText -Force
+    New-LocalUser -Name $user -Password $secure -AccountNeverExpires | Out-Null
+    Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $user
+    return $secure
+}
+
+# `ubc-vpn status --json`, as that user, through the installed client.
+function Assert-StatusAnswers([Management.Automation.PSCredential]$credential) {
+    $out = Join-Path $env:RUNNER_TEMP 'status-out.txt'
+    $err = Join-Path $env:RUNNER_TEMP 'status-err.txt'
+    $process = Start-Process -FilePath (Join-Path $Bin 'ubc-vpn.exe') -ArgumentList 'status', '--json' -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -RedirectStandardOutput $out -RedirectStandardError $err -Wait -PassThru
+    $said = Get-Content -LiteralPath $out -Raw
+    Write-Host "ubc-vpn status --json, as $($credential.UserName), exited with $($process.ExitCode): $said $(Get-Content -LiteralPath $err -Raw)"
+    if ($process.ExitCode -ne 0) { Fail "ubc-vpn status exited with $($process.ExitCode)" }
+    if ($said -notmatch 'disconnected') { Fail "ubc-vpn status said: $said" }
+}
 
 function Sid([Security.Principal.IdentityReference]$who) {
     $who.Translate([Security.Principal.SecurityIdentifier]).Value
@@ -408,24 +432,68 @@ public static class SetupWindows {
         # this process, asks the installed service for its status through
         # the installed client.
         $user = 'ubcvpn-status'
-        $bytes = [byte[]]::new(24)
-        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-        $secure = ConvertTo-SecureString ('Aa1!' + [Convert]::ToBase64String($bytes)) -AsPlainText -Force
-        New-LocalUser -Name $user -Password $secure -AccountNeverExpires | Out-Null
+        $secure = New-ThrowawayUser $user
         try {
-            Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $user
             $credential = New-Object Management.Automation.PSCredential(".\$user", $secure)
-            $out = Join-Path $env:RUNNER_TEMP 'status-out.txt'
-            $err = Join-Path $env:RUNNER_TEMP 'status-err.txt'
-            $process = Start-Process -FilePath (Join-Path $Bin 'ubc-vpn.exe') -ArgumentList 'status', '--json' -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -RedirectStandardOutput $out -RedirectStandardError $err -Wait -PassThru
-            $said = Get-Content -LiteralPath $out -Raw
-            Write-Host "ubc-vpn status --json, as $user, exited with $($process.ExitCode): $said $(Get-Content -LiteralPath $err -Raw)"
-            if ($process.ExitCode -ne 0) { Fail "ubc-vpn status exited with $($process.ExitCode)" }
-            if ($said -notmatch 'disconnected') { Fail "ubc-vpn status said: $said" }
+            Assert-StatusAnswers $credential
         } finally {
             Remove-LocalUser -Name $user
         }
         Write-Output "the installed service answered $user through the installed client"
+    }
+    'pipe-name-as-user' {
+        # With the service stopped, a program of a throwaway standard user,
+        # started as that user and not impersonated, tries to create the
+        # service's pipe, and holds the name the service had before it moved
+        # under the prefix. The service must still start and answer.
+        $user = 'ubcvpn-squatter'
+        $secure = New-ThrowawayUser $user
+        $holder = $null
+        $squatterScript = Join-Path $env:ProgramData 'ubcvpn-squatter.ps1'
+        try {
+            $credential = New-Object Management.Automation.PSCredential(".\$user", $secure)
+            Stop-Service -Name $ServiceName
+            # No owner, as an administrator can arrange, so that this user's
+            # client gets the service's own answer and not "not the owner".
+            Remove-Item -LiteralPath (Join-Path $DataFolder 'state.json')
+            $script = @'
+$ErrorActionPreference = 'Stop'
+function Create([string]$name) { [IO.Pipes.NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'None') }
+try {
+    $taken = Create 'ProtectedPrefix\Administrators\UBC VPN\service'
+    'created the service''s name'
+} catch [UnauthorizedAccessException] {
+    'refused the service''s name'
+}
+$held = Create 'ubc-vpn'
+'holding the old name'
+Start-Sleep -Seconds 600
+'@
+            # In a file that user can read: a command line started under other
+            # credentials is limited to 1024 characters.
+            Set-Content -LiteralPath $squatterScript -Value $script -Encoding utf8
+            $out = Join-Path $env:RUNNER_TEMP 'squatter-out.txt'
+            $err = Join-Path $env:RUNNER_TEMP 'squatter-err.txt'
+            $holder = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $squatterScript -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+            $deadline = (Get-Date).AddSeconds(90)
+            do {
+                Start-Sleep -Seconds 1
+                $said = if (Test-Path -LiteralPath $out) { Get-Content -LiteralPath $out -Raw } else { '' }
+                if ($holder.HasExited) { Fail "the standard user's program ended: $said $(Get-Content -LiteralPath $err -Raw)" }
+            } until ($said -match 'holding the old name' -or (Get-Date) -gt $deadline)
+            Write-Host "the standard user's program said: $said"
+            if ($said -notmatch 'holding the old name') { Fail "the standard user's program never held the old name: $said" }
+            if ($said -notmatch 'refused the service''s name') { Fail "a standard user could create the service's pipe: $said" }
+            Start-Service -Name $ServiceName
+            if ((Get-Service -Name $ServiceName).Status -ne 'Running') { Fail 'the service did not start' }
+            Assert-StatusAnswers $credential
+            if ($holder.HasExited) { Fail 'the standard user stopped holding the old name before the end' }
+        } finally {
+            if ($holder -and -not $holder.HasExited) { Stop-Process -Id $holder.Id -Force }
+            Remove-Item -LiteralPath $squatterScript -Force -ErrorAction SilentlyContinue
+            Remove-LocalUser -Name $user
+        }
+        Write-Output "$user was refused the service's pipe name, and the service answered with the old name held"
     }
     'remember-state' {
         $state = Join-Path $DataFolder 'state.json'
